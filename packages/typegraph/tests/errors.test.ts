@@ -5,6 +5,9 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type {
   CardinalityErrorDetails,
+  CompositionCycleErrorDetails,
+  CompositionExistenceErrorDetails,
+  ContributionUnavailableErrorDetails,
   DatabaseOperationErrorDetails,
   DisjointErrorDetails,
   EagerMaterializationErrorDetails,
@@ -12,8 +15,12 @@ import type {
   EmbeddingDimensionChangedErrorDetails,
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
+  EndpointPairErrorDetails,
+  FactNotHoldingErrorDetails,
+  FactNotHoldingFailure,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
+  MigrationFailureReason,
   NodeConstraintNotFoundErrorDetails,
   NodeIndexNotFoundErrorDetails,
   NodeNotFoundErrorDetails,
@@ -23,12 +30,16 @@ import type {
   StaleVersionErrorDetails,
   StoreNotInitializedErrorDetails,
   UniquenessErrorDetails,
-  VersionConflictErrorDetails,
 } from "../src/errors";
 import {
   CardinalityError,
   CompilerInvariantError,
+  CompositionConfigurationError,
+  CompositionCycleError,
+  CompositionError,
+  CompositionExistenceError,
   ConfigurationError,
+  ContributionUnavailableError,
   DatabaseOperationError,
   DisjointError,
   EagerMaterializationError,
@@ -36,12 +47,15 @@ import {
   EmbeddingDimensionChangedError,
   EndpointError,
   EndpointNotFoundError,
+  EndpointPairError,
+  FactNotHoldingError,
   getErrorSuggestion,
   isConstraintError,
   isSystemError,
   isTypeGraphError,
   isUserRecoverable,
   KindNotFoundError,
+  MIGRATION_FAILURE_REASONS,
   MigrationError,
   NodeConstraintNotFoundError,
   NodeIndexNotFoundError,
@@ -52,11 +66,11 @@ import {
   StaleVersionError,
   StoreNotInitializedError,
   TransactionClosedError,
+  TransactionConflictError,
   TypeGraphError,
   UniquenessError,
   UnsupportedPredicateError,
   ValidationError,
-  VersionConflictError,
 } from "../src/errors";
 import type { MaterializeIndexesResult } from "../src/store/materialize-indexes";
 
@@ -259,46 +273,6 @@ describe("EndpointNotFoundError", () => {
   });
 });
 
-describe("VersionConflictError", () => {
-  it("formats message with version info", () => {
-    const error = new VersionConflictError({
-      kind: "User",
-      id: "user-123",
-      expectedVersion: 5,
-      actualVersion: 7,
-    });
-    expect(error.message).toContain("User/user-123");
-    expect(error.message).toContain("5");
-    expect(error.message).toContain("7");
-    expect(error.code).toBe("VERSION_CONFLICT");
-    expect(error.name).toBe("VersionConflictError");
-    expect(error.category).toBe("system");
-  });
-
-  it("stores version details", () => {
-    const details = {
-      kind: "Post",
-      id: "post-456",
-      expectedVersion: 1,
-      actualVersion: 2,
-    };
-    const error = new VersionConflictError(details);
-    expect(error.details).toEqual(details);
-  });
-
-  it("exposes details typed as VersionConflictErrorDetails, no cast needed", () => {
-    const error = new VersionConflictError({
-      kind: "Post",
-      id: "post-456",
-      expectedVersion: 1,
-      actualVersion: 2,
-    });
-    expectTypeOf(error.details).toEqualTypeOf<VersionConflictErrorDetails>();
-    expectTypeOf(error.details.expectedVersion).toBeNumber();
-    expectTypeOf(error.details.actualVersion).toBeNumber();
-  });
-});
-
 describe("RestrictedDeleteError", () => {
   it("formats message with edge count", () => {
     const error = new RestrictedDeleteError({
@@ -335,6 +309,229 @@ describe("RestrictedDeleteError", () => {
     expectTypeOf(error.details).toEqualTypeOf<RestrictedDeleteErrorDetails>();
     expectTypeOf(error.details.edgeCount).toBeNumber();
     expectTypeOf(error.details.edgeKinds).toEqualTypeOf<readonly string[]>();
+  });
+});
+
+describe("CompositionCycleError", () => {
+  it("formats message with whole and revisited node", () => {
+    const error = new CompositionCycleError({
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    });
+    expect(error.message).toContain("Section/section-1");
+    expect(error.message).toContain("Section/section-3");
+    expect(error.code).toBe("COMPOSITION_CYCLE_DETECTED");
+    expect(error.name).toBe("CompositionCycleError");
+    expect(error.category).toBe("constraint");
+  });
+
+  it("stores cycle context", () => {
+    const details = {
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    };
+    const error = new CompositionCycleError(details);
+    expect(error.details).toEqual(details);
+  });
+
+  it("exposes details typed as CompositionCycleErrorDetails, no cast needed", () => {
+    const error = new CompositionCycleError({
+      wholeKind: "Section",
+      wholeId: "section-1",
+      revisitedKind: "Section",
+      revisitedId: "section-3",
+    });
+    expectTypeOf(error.details).toEqualTypeOf<CompositionCycleErrorDetails>();
+    expectTypeOf(error.details.wholeKind).toBeString();
+    expectTypeOf(error.details.revisitedId).toBeString();
+  });
+});
+
+function notCurrentFactFailure(id: string): FactNotHoldingFailure {
+  return {
+    fact: { kind: "Fact", id },
+    reason: "not-current",
+    justifications: [],
+  };
+}
+
+describe("FactNotHoldingError", () => {
+  it("carries every failure, on the error and in its details", () => {
+    const failures: readonly FactNotHoldingFailure[] = [
+      notCurrentFactFailure("a"),
+      {
+        fact: { kind: "Fact", id: "b" },
+        reason: "no-firing-justification",
+        justifications: [
+          {
+            justification: { kind: "Justification", id: "j" },
+            premises: [
+              { premise: { kind: "Source", id: "s" }, reason: "retracted" },
+            ],
+          },
+        ],
+      },
+    ];
+    const error = new FactNotHoldingError({ failures });
+
+    expect(error.name).toBe("FactNotHoldingError");
+    expect(error.code).toBe("FACT_NOT_HOLDING");
+    expect(error.category).toBe("constraint");
+    expect(error.failures).toBe(failures);
+    expect(error.details.failures).toBe(failures);
+    expect(error.message).toBe(
+      "2 fact(s) do not hold: Fact/a (not-current), Fact/b (no-firing-justification).",
+    );
+    expect(isConstraintError(error)).toBe(true);
+    expectTypeOf(error.details).toEqualTypeOf<FactNotHoldingErrorDetails>();
+  });
+
+  it("names the first five failing facts in the message and counts the rest", () => {
+    const failures = ["a", "b", "c", "d", "e", "f", "g"].map((id) =>
+      notCurrentFactFailure(id),
+    );
+    const error = new FactNotHoldingError({ failures });
+
+    expect(error.message).toBe(
+      "7 fact(s) do not hold: Fact/a (not-current), Fact/b (not-current), Fact/c (not-current), Fact/d (not-current), Fact/e (not-current) and 2 more.",
+    );
+    expect(error.failures).toHaveLength(failures.length);
+  });
+});
+
+describe("CompositionExistenceError", () => {
+  it("carries a code per situation, each with its own message and way out", () => {
+    const create = new CompositionExistenceError({
+      partKind: "Segment",
+      situation: "create",
+    });
+    expect(create.code).toBe("COMPOSITION_WHOLE_REQUIRED");
+    expect(create.message).toContain("no `partOf` was given");
+
+    const detach = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "detach",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+    });
+    expect(detach.code).toBe("COMPOSITION_DETACH_REFUSED");
+    expect(detach.suggestion).toContain("reparent");
+
+    expect(create.code).not.toBe(detach.code);
+    for (const error of [create, detach]) {
+      expect(error.name).toBe("CompositionExistenceError");
+      expect(error.category).toBe("constraint");
+    }
+  });
+
+  it("puts every composition refusal's code on error.code, whatever its class", () => {
+    // MUTATION CHECK: drop the `code` override from
+    // `CompositionConfigurationError` — its `code` is then the generic
+    // CONFIGURATION_ERROR and a caller routing on `error.code` misses it.
+    const declaration = new CompositionConfigurationError("no pair", {
+      code: "COMPOSITION_WHOLE_NOT_DECLARED",
+      partKind: "A",
+      wholeKind: "B",
+    });
+    expect(declaration).toBeInstanceOf(ConfigurationError);
+    expect(declaration.code).toBe("COMPOSITION_WHOLE_NOT_DECLARED");
+    expect(declaration.details.code).toBe("COMPOSITION_WHOLE_NOT_DECLARED");
+    expect(declaration.name).toBe("CompositionConfigurationError");
+
+    const bounded = new CompositionError({
+      situation: "boundedAttachment",
+      partKind: "Clip",
+      wholeKind: "Show",
+      wholeId: "show-1",
+      edgeKind: "clipOf",
+      validTo: "2024-01-01T00:00:00.000Z",
+    });
+    expect(bounded.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_BOUNDED");
+
+    const overlap = new CompositionError({
+      situation: "windowOverlap",
+      partKind: "Clip",
+      partId: "clip-1",
+      wholeKind: "Show",
+      wholeId: "show-2",
+      edgeKind: "clipOf",
+      edgeId: "edge-2",
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2022-01-01T00:00:00.000Z",
+      incumbentEdgeKind: "clipOf",
+      incumbentEdgeId: "edge-1",
+      incumbentWholeKind: "Show",
+      incumbentWholeId: "show-1",
+      incumbentValidFrom: "2021-01-01T00:00:00.000Z",
+    });
+    expect(overlap.code).toBe("COMPOSITION_WINDOW_OVERLAP");
+    expect(overlap.message).toContain("[2021-01-01T00:00:00.000Z, unbounded)");
+  });
+
+  it("carries a CompositionError code per attachment-request conflict", () => {
+    const existing = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "existing",
+      currentWhole: { kind: "Episode", id: "episode-1" },
+      requestedWhole: { kind: "Episode", id: "episode-2" },
+      requestedVia: "segmentOf",
+    });
+    expect(existing.code).toBe("COMPOSITION_WHOLE_CONFLICT");
+    expect(existing.message).toContain("Episode/episode-2");
+
+    const props = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "props",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      currentProps: { order: 1 },
+      requestedProps: { order: 2 },
+    });
+    expect(props.code).toBe("COMPOSITION_PROPS_CONFLICT");
+    expect(props.suggestion).toContain("store.edges.segmentOf.update");
+
+    const window = new CompositionError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "window",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+      option: "partOf.validFrom",
+      stated: "2024-01-01T00:00:00.000Z",
+      stored: "2023-01-01T00:00:00.000Z",
+    });
+    expect(window.code).toBe("COMPOSITION_ATTACHMENT_WINDOW_CONFLICT");
+    expect(window.message).toContain("partOf.validFrom");
+
+    expect(new Set([existing.code, props.code, window.code]).size).toBe(3);
+    for (const error of [existing, props, window]) {
+      expect(error.name).toBe("CompositionError");
+      expect(error.category).toBe("constraint");
+    }
+  });
+  // MUTATION: return one shared code from any arm of
+  // `describeCompositionRefusal` (src/errors/index.ts) — the distinctness
+  // assertion drops to 2 and that arm's own expectation fails.
+
+  it("keeps situation as the discriminant for the populated details", () => {
+    const error = new CompositionExistenceError({
+      partKind: "Segment",
+      partId: "segment-1",
+      situation: "detach",
+      edgeKind: "segmentOf",
+      edgeId: "edge-1",
+    });
+    expectTypeOf(
+      error.details,
+    ).toEqualTypeOf<CompositionExistenceErrorDetails>();
+    expect(error.details.situation).toBe("detach");
   });
 });
 
@@ -378,6 +575,7 @@ describe("MigrationError", () => {
       graphId: "my-graph",
       fromVersion: 1,
       toVersion: 2,
+      reason: "breaking-change",
     });
     expect(error.message).toBe("Column type mismatch");
     expect(error.code).toBe("MIGRATION_ERROR");
@@ -390,7 +588,8 @@ describe("MigrationError", () => {
       graphId: "test-graph",
       fromVersion: 3,
       toVersion: 5,
-    };
+      reason: "schema-behind",
+    } as const;
     const error = new MigrationError("Migration failed", details);
     expect(error.details).toEqual(details);
   });
@@ -400,9 +599,23 @@ describe("MigrationError", () => {
       graphId: "test-graph",
       fromVersion: 3,
       toVersion: 5,
+      reason: "schema-behind",
     });
     expectTypeOf(error.details).toEqualTypeOf<MigrationErrorDetails>();
     expectTypeOf(error.details.fromVersion).toBeNumber();
+  });
+
+  it("carries a stable reason discriminant, no message matching needed", () => {
+    const error = new MigrationError("wording is free to change", {
+      graphId: "test-graph",
+      fromVersion: 3,
+      toVersion: 4,
+      reason: "schema-behind",
+    });
+    // The whole point: branch on the discriminant, not the sentence.
+    expect(error.details.reason).toBe("schema-behind");
+    expect(MIGRATION_FAILURE_REASONS).toContain(error.details.reason);
+    expectTypeOf(error.details.reason).toEqualTypeOf<MigrationFailureReason>();
   });
 });
 
@@ -654,6 +867,9 @@ describe("CardinalityError", () => {
       edgeKind: "HasProfile",
       fromKind: "User",
       fromId: "user-1",
+      direction: "source",
+      toKind: "HasProfileTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 1,
     });
@@ -665,10 +881,13 @@ describe("CardinalityError", () => {
   });
 
   it("stores cardinality context", () => {
-    const details = {
+    const details: CardinalityErrorDetails = {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     };
@@ -681,11 +900,48 @@ describe("CardinalityError", () => {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     });
     expectTypeOf(error.details).toEqualTypeOf<CardinalityErrorDetails>();
     expectTypeOf(error.details.existingCount).toBeNumber();
+  });
+
+  // The suggestion must name the option the caller
+  // actually set. A `direction: "target"` violation is never fixed by
+  // `cardinality` (already its default, "many"), so the suggestion has to
+  // name `targetCardinality` instead.
+  it("suggests targetCardinality, not cardinality, for a target-direction violation", () => {
+    const error = new CardinalityError({
+      edgeKind: "ownedBy",
+      fromKind: "Item",
+      fromId: "item-1",
+      direction: "target",
+      toKind: "Owner",
+      toId: "owner-1",
+      cardinality: "one",
+      existingCount: 1,
+    });
+    expect(error.suggestion).toContain("targetCardinality");
+    expect(error.suggestion).not.toContain('use cardinality "many"');
+  });
+
+  it("suggests cardinality for a source-direction violation", () => {
+    const error = new CardinalityError({
+      edgeKind: "ownedBy",
+      fromKind: "Item",
+      fromId: "item-1",
+      direction: "source",
+      toKind: "Owner",
+      toId: "owner-1",
+      cardinality: "unique",
+      existingCount: 1,
+    });
+    expect(error.suggestion).toContain('use cardinality "many"');
+    expect(error.suggestion).not.toContain("targetCardinality");
   });
 });
 
@@ -726,6 +982,42 @@ describe("EndpointError", () => {
     expectTypeOf(error.details.expectedKinds).toEqualTypeOf<
       readonly string[]
     >();
+  });
+});
+
+describe("EndpointPairError", () => {
+  it("creates error with endpoint pair details", () => {
+    const error = new EndpointPairError({
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      toKind: "Course",
+      allowedPairs: [
+        { from: "Task", to: "Task" },
+        { from: "Course", to: "Course" },
+      ],
+    });
+    expect(error.message).toContain("dependsOn");
+    expect(error.message).toContain("Task");
+    expect(error.message).toContain("Course");
+    expect(error.code).toBe("ENDPOINT_PAIR_ERROR");
+    expect(error.name).toBe("EndpointPairError");
+    expect(error.category).toBe("constraint");
+    expect(error.details.endpoint).toBe("pair");
+    expect(error.details.fromKind).toBe("Task");
+    expect(error.details.toKind).toBe("Course");
+    expect(error.details.allowedPairs).toHaveLength(2);
+  });
+
+  it("exposes details typed as EndpointPairErrorDetails", () => {
+    const error = new EndpointPairError({
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      toKind: "Course",
+      allowedPairs: [{ from: "Task", to: "Task" }],
+    });
+    expectTypeOf(error.details).toEqualTypeOf<EndpointPairErrorDetails>();
+    expectTypeOf(error.details.fromKind).toBeString();
+    expectTypeOf(error.details.toKind).toBeString();
   });
 });
 
@@ -921,6 +1213,31 @@ describe("StoreNotInitializedError", () => {
   });
 });
 
+describe("ContributionUnavailableError", () => {
+  it("directs orphaned fulltext storage to a rebuild", () => {
+    const cause = new Error("no such table: typegraph_node_fulltext");
+    const error = new ContributionUnavailableError(
+      "lib",
+      "typegraph_node_fulltext",
+      { cause },
+    );
+
+    expect(error.message).toContain("disappeared after initialization");
+    expect(error.message).toContain('rebuildContribution("fulltext")');
+    expect(error.suggestion).toContain('rebuildContribution("fulltext")');
+    expect(error.cause).toBe(cause);
+    expect(error.details).toEqual({
+      graphId: "lib",
+      logicalName: "fulltext",
+      physicalName: "typegraph_node_fulltext",
+      state: "physical-storage-missing",
+    });
+    expectTypeOf(
+      error.details,
+    ).toEqualTypeOf<ContributionUnavailableErrorDetails>();
+  });
+});
+
 describe("TransactionClosedError", () => {
   it("is a user error naming the released connection and the fix", () => {
     const error = new TransactionClosedError();
@@ -993,11 +1310,9 @@ describe("error inheritance chain", () => {
         nodeKind: "N",
         nodeId: "id",
       }),
-      new VersionConflictError({
-        kind: "K",
-        id: "id",
-        expectedVersion: 1,
-        actualVersion: 2,
+      new TransactionConflictError({
+        operation: "transaction",
+        attempts: 3,
       }),
       new RestrictedDeleteError({
         nodeKind: "N",
@@ -1014,6 +1329,7 @@ describe("error inheritance chain", () => {
         graphId: "g",
         fromVersion: 1,
         toVersion: 2,
+        reason: "breaking-change",
       }),
       new UnsupportedPredicateError("test"),
       new DatabaseOperationError("test", {
@@ -1034,6 +1350,9 @@ describe("error inheritance chain", () => {
         edgeKind: "E",
         fromKind: "K",
         fromId: "id",
+        direction: "source",
+        toKind: "ETarget",
+        toId: "target-1",
         cardinality: "one",
         existingCount: 1,
       }),
@@ -1062,6 +1381,7 @@ describe("error inheritance chain", () => {
         incomingHash: "b",
       }),
       new StoreNotInitializedError("g", "missing"),
+      new FactNotHoldingError({ failures: [] }),
     ];
 
     for (const error of errors) {
@@ -1096,11 +1416,9 @@ describe("error utility functions", () => {
     ).toBe(true);
     expect(
       isUserRecoverable(
-        new VersionConflictError({
-          kind: "K",
-          id: "id",
-          expectedVersion: 1,
-          actualVersion: 2,
+        new TransactionConflictError({
+          operation: "transaction",
+          attempts: 3,
         }),
       ),
     ).toBe(false);
@@ -1110,11 +1428,9 @@ describe("error utility functions", () => {
   it("isSystemError identifies system errors", () => {
     expect(
       isSystemError(
-        new VersionConflictError({
-          kind: "K",
-          id: "id",
-          expectedVersion: 1,
-          actualVersion: 2,
+        new TransactionConflictError({
+          operation: "transaction",
+          attempts: 3,
         }),
       ),
     ).toBe(true);

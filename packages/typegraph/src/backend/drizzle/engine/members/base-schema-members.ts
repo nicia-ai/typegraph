@@ -1,0 +1,362 @@
+/**
+ * The base-schema lifecycle members every SQL engine profile exposes:
+ * `adoptBaseSchema`, `assertBaseSchemaCurrent`, `bootstrapTables`, and
+ * `executeDdl`. All four wrap one `BaseSchemaLifecycle` (`../../base-schema`)
+ * built from this dialect's own version-marker access and adoption steps.
+ *
+ * `executeDdl` is not wrapped at all — the `GraphBackend` member IS the
+ * profile's own `EngineProvisioning.executeDdl`, unchanged, so it arrives
+ * here as a dep and is exposed verbatim rather than re-wrapped in a new
+ * closure.
+ *
+ * `bootstrapTables` runs every statement `generateDdl` produces through
+ * `ensureTable` rather than `executeDdl`: cold boot is the single most
+ * contended DDL path there is — two replicas starting at once run exactly
+ * this loop against the same database — so PostgreSQL's `ensureTable` takes
+ * its concurrent-create retry here rather than trusting `IF NOT EXISTS`
+ * (see `EngineProvisioning.ensureTable`'s own doc comment). SQLite's
+ * `ensureTable` has no such retry to take, so this loop is byte-identical
+ * to what it ran inline before this extraction.
+ *
+ * The version-marker access (`readVersion`, `writeVersion`) and the
+ * edge-match-identity adoption step (`ensureEdgeMatchIdentityStorage`) stay
+ * dialect-owned deps rather than shared bodies: both query or migrate
+ * through Drizzle's typed table API or `executionAdapter`/`db` directly
+ * (`PgTable` and `SQLiteTable` share no common supertype, and the two
+ * migrations use unrelated introspection — `pg_attribute`/`pg_constraint`
+ * on PostgreSQL, a `PRAGMA table_info` duplicate-column retry loop on
+ * SQLite). Ensuring the version-marker table itself needs no such dep: it
+ * is one idempotent `CREATE TABLE`, so it is built here from the
+ * `ensureTable` primitive plus the caller's own rendered DDL string, the
+ * same way `graph-template-members.ts` builds `ensureGraphTemplatesTable`.
+ */
+import { ConfigurationError } from "../../../../errors";
+import {
+  type BaseSchemaLifecycle,
+  createBaseSchemaLifecycle,
+} from "../../base-schema";
+
+export type CreateBaseSchemaMembersDeps = Readonly<{
+  /** Idempotent `CREATE TABLE ...` for the base-schema-version marker table, rendered once by the caller from its own dialect's table-DDL generator. */
+  baseSchemaVersionsTableDdl: string;
+  /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
+  ensureTable: (ddl: string) => Promise<void>;
+  /** Runs one DDL statement with no concurrency handling — the profile's own `EngineProvisioning.executeDdl`, exposed here verbatim as the `GraphBackend` member of the same name. */
+  executeDdl: (ddl: string) => Promise<void>;
+  /** The full set of base-schema DDL statements for a fresh bootstrap — the profile's own `EngineProvisioning.generateDdl`. */
+  generateDdl: () => readonly string[];
+  /**
+   * Reads the installed base-schema-version marker, or `undefined` when
+   * none is installed yet. Dialect-owned: it selects through Drizzle's
+   * typed table API directly, and `PgTable`/`SQLiteTable` share no common
+   * supertype.
+   */
+  readVersion: () => Promise<number | undefined>;
+  /**
+   * Monotonically stamps `version` and returns the version observed
+   * afterward. Dialect-owned for the same reason as `readVersion`, and
+   * because the marker row's timestamp column type differs (a `Date` for
+   * PostgreSQL, an ISO-8601 string for SQLite).
+   */
+  writeVersion: (version: number) => Promise<number | undefined>;
+  /** The graph-templates table's own idempotent CREATE, the version-1 adoption step's other half — `graph-template-members.ts`'s `ensureGraphTemplatesTable`. */
+  ensureGraphTemplatesTable: () => Promise<void>;
+  /**
+   * Idempotent `CREATE TABLE ...` for the write-fence rows relation, the
+   * version-2 adoption step — rendered once by the caller from its own
+   * dialect's table-DDL generator, the same way `baseSchemaVersionsTableDdl`
+   * is. A brand-new relation needs no ALTER-shaped migration, so this step's
+   * `bootstrap` is `"covered-by-generated-ddl"`; `adopt()` still ensures it
+   * for the OFFLINE adoption path, which never calls `generateDdl()`.
+   */
+  fencesTableDdl: string;
+  /**
+   * Ensures the edge table's match-identity columns, check constraint, and
+   * unique index exist. Dialect-owned: PostgreSQL introspects
+   * `pg_attribute`/`pg_constraint` and runs an additive migration; SQLite
+   * re-reads `PRAGMA table_info` under a duplicate-column retry loop, since
+   * it has no `ADD COLUMN IF NOT EXISTS`. Neither body goes through
+   * `execution.execAll`/`execGet`/`execRun` or `EngineProvisioning`.
+   */
+  ensureEdgeMatchIdentityStorage: () => Promise<void>;
+  /**
+   * DDL for version-3 adoption: ensure recorded node, edge, and identity-assertion
+   * storage and its structural indexes before creating the changed-since indexes.
+   * Older installations can lack these relations even with a version-1 or
+   * version-2 marker: they originally shipped only in bootstrap DDL.
+   * Dialect factories generate their table and index DDL from the same schema
+   * definitions as bootstrap, then append `sinceIndexAdoptionDdl` for the
+   * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` since indexes.
+   * Fresh bootstrap already creates all of this storage, so the statements
+   * are only exercised by offline `adopt()`.
+   */
+  sinceIndexDdl: readonly string[];
+  /** Idempotent DDL for the version-4 revision-change journal. Older callers may omit it; version-4 adoption then refuses with a clear error. */
+  revisionChangesTableDdl?: string;
+  /** Index DDL for the revision-change journal, installed during version-4 adoption. */
+  revisionChangesIndexDdl?: readonly string[];
+  /**
+   * Version-5 adoption: the byte-ordered `graph_id` index on each relation the
+   * graph id listing seeks. Omit on an engine whose text indexes are already
+   * kept in byte order (SQLite): there is nothing to add, and the step only
+   * advances the marker. An engine that needs the index but omits it still
+   * lists graph ids correctly, because the listing checks the catalog for the
+   * index and reads every anchor row without it.
+   */
+  graphIdOrderIndexDdl?: readonly string[];
+  /** Version-6 candidate-bounded recorded adjacency indexes. */
+  adjacencyIndexDdl?: readonly string[];
+  /** Version-7 retained recorded allocation anchors and their time index. */
+  recordedAnchorsDdl?: readonly string[];
+  /** Version-8 durable ordinary Store operation outcomes. */
+  storeOperationsDdl?: readonly string[];
+  /** Version-9 persisted recorded-allocation retention state. */
+  ensureRecordedAnchorRetentionStorage?: (
+    clockProvisioned: boolean,
+  ) => Promise<void>;
+  /**
+   * Idempotent `CREATE TABLE ...` followed by its `CREATE INDEX ...`
+   * statements for the identity transition log, the version-9 adoption
+   * step — rendered once by the caller from its own dialect's DDL
+   * generators, the same way `fencesTableDdl` is. A brand-new relation
+   * needs no ALTER-shaped migration, so bootstrap's generated DDL already
+   * creates it; `adopt()` still ensures it for the OFFLINE adoption path,
+   * which never calls `generateDdl()`. Scoped to
+   * exactly this relation (not the identity-enablement `ensureIdentityTables`
+   * port) because the transition log, like `fences`, is a DEPLOYMENT-wide
+   * relation: a database that predates this release owes it regardless of
+   * whether any graph in it has Operational Identity enabled. Older callers
+   * may omit it; version-9 adoption then refuses with a clear error.
+   */
+  identityTransitionsTableDdl?: readonly string[];
+  /**
+   * Idempotent `CREATE TABLE ...` for the transition log's per-graph
+   * retention watermark, adopted by the same version-9 step.
+   */
+  identityTransitionRetentionTableDdl?: string;
+}>;
+
+/**
+ * The refusal an adoption step raises when the profile omitted DDL it needs.
+ * A dep added after a profile was written is optional so that profile still
+ * constructs; the step that needs it is where its absence is an error.
+ */
+function missingAdoptionDeps(
+  adoptionVersion: number,
+  deps: Readonly<Record<string, unknown>>,
+): ConfigurationError {
+  const missingDependencies = Object.entries(deps)
+    .filter(([, value]) => value === undefined)
+    .map(([name]) => name);
+  return new ConfigurationError(
+    `Base-schema version ${adoptionVersion} adoption requires ${missingDependencies.join(" and ")}.`,
+    { missingDependencies, adoptionVersion },
+  );
+}
+
+export type BaseSchemaMembers = Readonly<{
+  adoptBaseSchema: () => Promise<void>;
+  assertBaseSchemaCurrent: () => Promise<void>;
+  bootstrapTables: () => Promise<void>;
+  executeDdl: (ddl: string) => Promise<void>;
+}>;
+
+/**
+ * Builds the base-schema member group. Moved out of the two dialect files
+ * unchanged: version 1 (the graph-templates table plus edge-match-identity
+ * adoption, run before bootstrap's generated DDL), version 2 (the fence
+ * rows table), version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes), version 4 (the
+ * revision-changes relation), version 5 (the byte-ordered `graph_id`
+ * indexes), version 6 (the recorded adjacency indexes), version 7 (the
+ * recorded-anchor log), version 8 (durable Store outcomes) and version 9 (the
+ * recorded-allocation retention column plus the identity transition log and
+ * its retention watermark) all follow the same
+ * prepare/adopt-before/adopt-after bootstrap sequencing.
+ */
+export function createBaseSchemaMembers(
+  deps: CreateBaseSchemaMembersDeps,
+): BaseSchemaMembers {
+  const {
+    baseSchemaVersionsTableDdl,
+    ensureTable,
+    executeDdl,
+    generateDdl,
+    readVersion,
+    writeVersion,
+    ensureGraphTemplatesTable,
+    ensureEdgeMatchIdentityStorage,
+    fencesTableDdl,
+    sinceIndexDdl,
+    revisionChangesTableDdl,
+    revisionChangesIndexDdl,
+    graphIdOrderIndexDdl = [],
+    adjacencyIndexDdl,
+    recordedAnchorsDdl,
+    storeOperationsDdl,
+    ensureRecordedAnchorRetentionStorage,
+    identityTransitionsTableDdl,
+    identityTransitionRetentionTableDdl,
+  } = deps;
+
+  /**
+   * Version 9 adds the recorded clock's retention column and the identity
+   * transition log. Every dependency is checked before either half runs, so
+   * a profile missing one creates nothing and stamps nothing.
+   */
+  function requireVersion9Deps() {
+    if (
+      ensureRecordedAnchorRetentionStorage === undefined ||
+      identityTransitionsTableDdl === undefined ||
+      identityTransitionRetentionTableDdl === undefined
+    ) {
+      throw missingAdoptionDeps(9, {
+        ensureRecordedAnchorRetentionStorage,
+        identityTransitionsTableDdl,
+        identityTransitionRetentionTableDdl,
+      });
+    }
+    return {
+      ensureRecordedAnchorRetentionStorage,
+      identityTransitionsTableDdl,
+      identityTransitionRetentionTableDdl,
+    };
+  }
+
+  const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
+    readVersion,
+    async ensureVersionTable(): Promise<void> {
+      await ensureTable(baseSchemaVersionsTableDdl);
+    },
+    writeVersion,
+    steps: [
+      {
+        version: 1,
+        async adopt(): Promise<void> {
+          await ensureGraphTemplatesTable();
+          await ensureEdgeMatchIdentityStorage();
+        },
+        bootstrap: {
+          phase: "before",
+          adopt: ensureEdgeMatchIdentityStorage,
+        },
+      },
+      {
+        version: 2,
+        async adopt(): Promise<void> {
+          await ensureTable(fencesTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 3,
+        async adopt(): Promise<void> {
+          for (const ddl of sinceIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 4,
+        async adopt(): Promise<void> {
+          if (
+            revisionChangesTableDdl === undefined ||
+            revisionChangesIndexDdl === undefined
+          ) {
+            throw missingAdoptionDeps(4, {
+              revisionChangesTableDdl,
+              revisionChangesIndexDdl,
+            });
+          }
+          await ensureTable(revisionChangesTableDdl);
+          for (const ddl of revisionChangesIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 5,
+        async adopt(): Promise<void> {
+          for (const ddl of graphIdOrderIndexDdl) {
+            await ensureTable(ddl);
+          }
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 6,
+        async adopt(): Promise<void> {
+          if (adjacencyIndexDdl === undefined) {
+            throw missingAdoptionDeps(6, { adjacencyIndexDdl });
+          }
+          for (const ddl of adjacencyIndexDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 7,
+        async adopt(): Promise<void> {
+          if (recordedAnchorsDdl === undefined) {
+            throw missingAdoptionDeps(7, { recordedAnchorsDdl });
+          }
+          for (const ddl of recordedAnchorsDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 8,
+        async adopt(): Promise<void> {
+          if (storeOperationsDdl === undefined) {
+            throw missingAdoptionDeps(8, { storeOperationsDdl });
+          }
+          for (const ddl of storeOperationsDdl) await ensureTable(ddl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
+      },
+      {
+        version: 9,
+        async adopt(): Promise<void> {
+          const version9 = requireVersion9Deps();
+          for (const ddl of version9.identityTransitionsTableDdl) {
+            await ensureTable(ddl);
+          }
+          await ensureTable(version9.identityTransitionRetentionTableDdl);
+          await version9.ensureRecordedAnchorRetentionStorage(false);
+        },
+        // Generated DDL already carries the transition-log relations; an
+        // existing clock still needs its retention column.
+        bootstrap: {
+          phase: "after",
+          async adopt(): Promise<void> {
+            if (ensureRecordedAnchorRetentionStorage === undefined) {
+              throw missingAdoptionDeps(9, {
+                ensureRecordedAnchorRetentionStorage,
+              });
+            }
+            await ensureRecordedAnchorRetentionStorage(true);
+          },
+        },
+      },
+    ],
+  });
+
+  return {
+    adoptBaseSchema: baseSchemaLifecycle.adopt,
+    assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
+
+    async bootstrapTables(): Promise<void> {
+      const startingBaseSchemaVersion =
+        await baseSchemaLifecycle.prepareBootstrap();
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
+      const statements = generateDdl();
+      for (const statement of statements) {
+        await ensureTable(statement);
+      }
+      await baseSchemaLifecycle.adoptAfterBootstrap(startingBaseSchemaVersion);
+    },
+
+    executeDdl,
+  };
+}

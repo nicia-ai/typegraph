@@ -1,0 +1,1976 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { PGlite } from "@electric-sql/pglite";
+import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
+import { createClient } from "@libsql/client";
+import Database from "better-sqlite3";
+import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+
+import type { GraphBackend } from "../src";
+import {
+  createStore,
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../src";
+import type { CompiledRowsSql } from "../src/backend";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../src/backend/drizzle/base-schema";
+import {
+  edgeMatchIdentityPairCheckName,
+  edgeMatchIdentityUniqueIndexName,
+  generatePostgresDDL,
+  generatePostgresMigrationSQL,
+  generateSqliteMigrationSQL,
+} from "../src/backend/drizzle/ddl";
+import {
+  createPostgresBackend,
+  createPostgresTables,
+} from "../src/backend/postgres";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
+import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
+import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
+import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { BaseSchemaMigrationError } from "../src/errors-entry";
+import { defineGraphExtension } from "../src/graph-extension";
+import { systemIndexName } from "../src/indexes/system";
+import type { ReconciledSchema } from "../src/schema";
+import {
+  createVerifiedStore,
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../src/schema";
+import { requireDefined } from "../src/utils/presence";
+import { isSqliteMissingEdgeMatchIdentityColumnError } from "../src/utils/sql-errors";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const knows = defineEdge("knows", {
+  schema: z.object({ label: z.string() }),
+});
+
+const graph = defineGraph({
+  id: "base_schema_adoption",
+  nodes: { Person: { type: Person } },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "knows-label", fields: ["label"] },
+    },
+  },
+});
+
+type SqliteClient = Database.Database;
+
+type ProvisionedInstallation = Readonly<{
+  backend: GraphBackend;
+  close(): Promise<void>;
+}>;
+
+const LEGACY_EDGE_TABLE_SQL = `CREATE TABLE "typegraph_edges" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  PRIMARY KEY ("graph_id", "id")
+);`;
+
+function sqliteClient(db: unknown): SqliteClient {
+  return (db as { $client: SqliteClient }).$client;
+}
+
+function dropLegacySqliteBaseShape(
+  client: SqliteClient,
+  tableNames: Readonly<{
+    edges: string;
+    graphTemplates: string;
+    baseSchemaVersions: string;
+  }>,
+): void {
+  const edgeTable = tableNames.edges;
+  client.exec(`DROP TABLE "${tableNames.graphTemplates}"`);
+  client.exec(
+    `DROP INDEX IF EXISTS "${edgeMatchIdentityUniqueIndexName(edgeTable)}"`,
+  );
+  client.exec(`DROP TABLE "${edgeTable}"`);
+  client.exec(
+    `CREATE TABLE "${edgeTable}" ("graph_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "from_kind" TEXT NOT NULL, "from_id" TEXT NOT NULL, "to_kind" TEXT NOT NULL, "to_id" TEXT NOT NULL, "props" TEXT NOT NULL, "valid_from" TEXT, "valid_to" TEXT, "created_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL, "deleted_at" TEXT, PRIMARY KEY ("graph_id", "id"))`,
+  );
+  client.exec(`DROP TABLE "${tableNames.baseSchemaVersions}"`);
+}
+
+function markerVersion(
+  client: SqliteClient,
+  tableName: string,
+): number | undefined {
+  const rows = client
+    .prepare(
+      `SELECT "version" AS version FROM "${tableName}" WHERE "installation" = 1`,
+    )
+    .all() as readonly Readonly<{ version: number }>[];
+  return rows[0]?.version;
+}
+
+async function assertTemplatesWork<G extends typeof graph>(
+  backend: GraphBackend,
+  store: Readonly<{
+    reconciledSchema: ReconciledSchema<G>;
+  }>,
+): Promise<void> {
+  const template = await registerGraphTemplate(backend, {
+    templateId: "people-v1",
+    reconciled: store.reconciledSchema,
+  });
+  const instantiated = await instantiateGraphTemplate(backend, {
+    template,
+    graphId: "base_schema_adoption_target",
+  });
+  expect(instantiated.status).toBe("ready");
+}
+
+async function assertMatchIdentityWrite(backend: GraphBackend): Promise<void> {
+  // createStoreWithSchema is privileged, but a current marker makes adoption
+  // return before DDL. A false-stamped installation therefore reaches this
+  // real edge write unchanged and still fails on its missing physical storage.
+  const [store] = await createStoreWithSchema(graph, backend);
+  const source = await store.nodes.Person.create({ name: "source" });
+  const target = await store.nodes.Person.create({ name: "target" });
+  await store.edges.knows.create(source, target, { label: "provisioned" });
+}
+
+function reconciledSurface(
+  store: unknown,
+): Readonly<{ reconciledSchema: ReconciledSchema<typeof graph> }> {
+  return store as Readonly<{
+    reconciledSchema: ReconciledSchema<typeof graph>;
+  }>;
+}
+
+function provisionGeneratedSqlite(): Promise<ProvisionedInstallation> {
+  const tables = createSqliteTables({
+    baseSchemaVersions: "generated_base_schema_versions",
+  });
+  const client = new Database(":memory:");
+  client.exec(generateSqliteMigrationSQL(tables));
+  const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+    executionProfile: { isSync: true },
+    tables,
+  });
+  return Promise.resolve({
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      client.close();
+    },
+  });
+}
+
+async function provisionGeneratedPostgres(): Promise<ProvisionedInstallation> {
+  const tables = createPostgresTables({
+    baseSchemaVersions: "generated_base_schema_versions",
+  });
+  const client = await PGlite.create({
+    extensions: { vector: pgvectorExtension },
+  });
+  await client.exec(generatePostgresMigrationSQL(tables));
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    tables,
+    vector: false,
+  });
+  return {
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      await client.close();
+    },
+  };
+}
+
+async function provisionVectorlessPglite(): Promise<ProvisionedInstallation> {
+  const { backend } = await createLocalPgliteBackend({ vector: false });
+  return { backend, close: async () => backend.close() };
+}
+
+function provisionLocalSqlite(): Promise<ProvisionedInstallation> {
+  const { backend } = createLocalSqliteBackend();
+  return Promise.resolve({ backend, close: () => backend.close() });
+}
+
+async function provisionLibsql(): Promise<ProvisionedInstallation> {
+  const client = createClient({ url: ":memory:" });
+  const { backend } = await createLibsqlBackend(client);
+  return {
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      client.close();
+    },
+  };
+}
+
+function provisionLegacyLocalSqlite(): Promise<ProvisionedInstallation> {
+  const directory = mkdtempSync(path.join(tmpdir(), "typegraph-base-schema-"));
+  const databasePath = path.join(directory, "legacy.sqlite");
+  const legacy = new Database(databasePath);
+  legacy.exec(LEGACY_EDGE_TABLE_SQL);
+  legacy.close();
+  try {
+    const { backend } = createLocalSqliteBackend({ path: databasePath });
+    return Promise.resolve({
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        rmSync(directory, { force: true, recursive: true });
+      },
+    });
+  } catch (error) {
+    rmSync(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+async function provisionLegacyLibsql(): Promise<ProvisionedInstallation> {
+  const client = createClient({ url: ":memory:" });
+  await client.executeMultiple(LEGACY_EDGE_TABLE_SQL);
+  try {
+    const { backend } = await createLibsqlBackend(client);
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        client.close();
+      },
+    };
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+}
+
+async function provisionLegacySqliteBootstrap(): Promise<ProvisionedInstallation> {
+  const client = new Database(":memory:");
+  client.exec(LEGACY_EDGE_TABLE_SQL);
+  const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+    executionProfile: { isSync: true },
+  });
+  try {
+    await requireDefined(backend.bootstrapTables)();
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        client.close();
+      },
+    };
+  } catch (error) {
+    await backend.close();
+    client.close();
+    throw error;
+  }
+}
+
+async function provisionLegacyPostgresBootstrap(): Promise<ProvisionedInstallation> {
+  const client = await PGlite.create();
+  await client.exec(LEGACY_EDGE_TABLE_SQL);
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    vector: false,
+  });
+  try {
+    await requireDefined(backend.bootstrapTables)();
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        await client.close();
+      },
+    };
+  } catch (error) {
+    await backend.close();
+    await client.close();
+    throw error;
+  }
+}
+
+/** Covered complete-installation entry points; bring-your-own factories omit DDL. */
+const PROVISIONING_PATHS = [
+  {
+    id: "generated-postgres-installation",
+    provision: provisionGeneratedPostgres,
+  },
+  { id: "generated-sqlite-installation", provision: provisionGeneratedSqlite },
+  { id: "libsql-managed-installation", provision: provisionLibsql },
+  {
+    id: "local-pglite-vectorless-installation",
+    provision: provisionVectorlessPglite,
+  },
+  { id: "local-sqlite-managed-installation", provision: provisionLocalSqlite },
+] as const;
+
+const LEGACY_FACTORY_ADOPTION_PATHS = [
+  { id: "libsql-managed-upgrade", provision: provisionLegacyLibsql },
+  {
+    id: "local-sqlite-managed-upgrade",
+    provision: provisionLegacyLocalSqlite,
+  },
+  {
+    id: "postgres-backend-bootstrap-upgrade",
+    provision: provisionLegacyPostgresBootstrap,
+  },
+  {
+    id: "sqlite-backend-bootstrap-upgrade",
+    provision: provisionLegacySqliteBootstrap,
+  },
+] as const;
+
+/** Opens, verifies, materializes and reads and writes a store on `backend`. */
+async function expectStoreWorks(backend: GraphBackend): Promise<void> {
+  const [store, result] = await createStoreWithSchema(graph, backend);
+  expect(result.status).toBe("unchanged");
+  const materialized = await store.materializeSystemIndexes();
+  expect(
+    materialized.results.filter((entry) => entry.status === "failed"),
+  ).toEqual([]);
+  expect(await store.verifyContributions()).toEqual([]);
+  await expect(createVerifiedStore(graph, backend)).resolves.toBeDefined();
+  const alice = await store.nodes.Person.create({ name: "Alice" });
+  const bob = await store.nodes.Person.create({ name: "Bob" });
+  await store.edges.knows.create(alice, bob, { label: "friend" });
+  const people = await store.nodes.Person.find({ limit: 10 });
+  expect(people.map((person) => person.name).toSorted()).toEqual([
+    "Alice",
+    "Bob",
+  ]);
+  expect(await store.edges.knows.find({ limit: 10 })).toHaveLength(1);
+}
+
+describe("deployment-wide base-schema adoption", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(PROVISIONING_PATHS)(
+    "$id satisfies the base-schema gate",
+    async ({ provision }) => {
+      const installation = await provision();
+      try {
+        await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
+      } finally {
+        await installation.close();
+      }
+    },
+  );
+
+  it.each(LEGACY_FACTORY_ADOPTION_PATHS)(
+    "$id repairs v0.51 edge storage before completing installation",
+    async ({ provision }) => {
+      const installation = await provision();
+      try {
+        await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
+      } finally {
+        await installation.close();
+      }
+    },
+  );
+
+  it("refuses to false-stamp a legacy SQLite database through fresh-installation SQL", () => {
+    const client = new Database(":memory:");
+    try {
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      let installationError: unknown;
+      try {
+        client.exec(generateSqliteMigrationSQL());
+      } catch (error) {
+        installationError = error;
+      }
+      expect(
+        isSqliteMissingEdgeMatchIdentityColumnError(installationError),
+      ).toBe(true);
+      const markerTable = client
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'typegraph_base_schema_versions'",
+        )
+        .get();
+      const marker =
+        markerTable === undefined ? undefined : (
+          client
+            .prepare(
+              'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+            )
+            .get()
+        );
+      expect(marker).toBeUndefined();
+    } finally {
+      client.close();
+    }
+  });
+
+  it("refuses to false-stamp a legacy PostgreSQL database through fresh-installation SQL", async () => {
+    const client = await PGlite.create({
+      extensions: { vector: pgvectorExtension },
+    });
+    try {
+      await client.exec(LEGACY_EDGE_TABLE_SQL);
+      await expect(
+        client.exec(generatePostgresMigrationSQL()),
+      ).rejects.toMatchObject({ code: "42703" });
+      const markerRelation = await client.query<{ exists: boolean }>(
+        "SELECT to_regclass('typegraph_base_schema_versions') IS NOT NULL AS exists",
+      );
+      const markerResult =
+        markerRelation.rows[0]?.exists === true ?
+          await client.query<{ version: number }>(
+            'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+          )
+        : { rows: [] };
+      const markerRows = markerResult.rows;
+      expect(markerRows).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("re-plans both local SQLite column races before publishing the marker", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "typegraph-base-race-"));
+    const databasePath = path.join(directory, "legacy.sqlite");
+    const legacy = new Database(databasePath);
+    legacy.exec(LEGACY_EDGE_TABLE_SQL);
+    legacy.close();
+    const competitor = new Database(databasePath);
+    // The unbound method is intentional: the spy must invoke the native method
+    // against both the factory-owned connection and the competitor connection.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalExec = Database.prototype.exec;
+    const racedColumns = new Set<string>();
+    const execSpy = vi
+      .spyOn(Database.prototype, "exec")
+      .mockImplementation(function (
+        this: Database.Database,
+        source,
+      ): Database.Database {
+        for (const column of ["match_identity_name", "match_identity_key"]) {
+          if (
+            racedColumns.has(column) ||
+            !source.includes(`ADD COLUMN "${column}"`)
+          ) {
+            continue;
+          }
+          const statement = source
+            .split(";")
+            .find((part) => part.includes(`ADD COLUMN "${column}"`));
+          if (statement !== undefined) {
+            originalExec.call(competitor, statement);
+            racedColumns.add(column);
+          }
+          break;
+        }
+        return originalExec.call(this, source);
+      });
+    try {
+      const { backend } = createLocalSqliteBackend({ path: databasePath });
+      await backend.close();
+      expect([...racedColumns]).toEqual([
+        "match_identity_name",
+        "match_identity_key",
+      ]);
+      const marker = competitor
+        .prepare(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        )
+        .get();
+      expect(marker).toEqual({ version: CURRENT_BASE_SCHEMA_VERSION });
+    } finally {
+      execSpy.mockRestore();
+      competitor.close();
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("adopts a legacy SQLite installation and registers templates", async () => {
+    const tableNames = {
+      baseSchemaVersions: "tg_base_schema_versions",
+      edges: "tg_edges",
+      graphTemplates: "tg_graph_templates",
+    } as const;
+    const tables = createSqliteTables(tableNames);
+    const { backend, db } = createLocalSqliteBackend({ tables });
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+
+      dropLegacySqliteBaseShape(client, tableNames);
+      const prepareSpy = vi.spyOn(client, "prepare");
+      // `prepare` is the driver's DDL boundary; only inspect statements for
+      // the relations this adoption owns, so unrelated warm-open probes do
+      // not make this test a brittle total-call-count assertion.
+      const [reopened] = await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(`PRAGMA table_info("${tableNames.edges}")`)
+          .all()
+          .map((row) => (row as { name: string }).name),
+      ).toEqual(
+        expect.arrayContaining(["match_identity_name", "match_identity_key"]),
+      );
+      await assertTemplatesWork(backend, reconciledSurface(reopened));
+      const adoptionDdl = prepareSpy.mock.calls
+        .map(([source]) => source)
+        .filter(
+          (source) =>
+            source.includes(tableNames.baseSchemaVersions) ||
+            source.includes(tableNames.graphTemplates) ||
+            source.includes("match_identity"),
+        );
+      expect(
+        adoptionDdl.some((statement) => statement.includes("CREATE TABLE")),
+      ).toBe(true);
+
+      prepareSpy.mockClear();
+      await createStoreWithSchema(graph, backend);
+      expect(
+        prepareSpy.mock.calls.some(([source]) => {
+          const statement = source;
+          return (
+            (statement.includes(tableNames.baseSchemaVersions) ||
+              statement.includes(tableNames.graphTemplates) ||
+              statement.includes("match_identity")) &&
+            (statement.includes("CREATE TABLE") ||
+              statement.includes("ALTER TABLE") ||
+              statement.includes("CREATE UNIQUE INDEX"))
+          );
+        }),
+      ).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-1 SQLite database up to version 2, gaining the fences relation", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      // Reach version 2 the normal way, then roll the installed shape back
+      // to what a real version-1 deployment left behind: no fences table,
+      // marker at 1. `adopt()` (via `createStoreWithSchema`'s privileged
+      // open) is the only path that ever revisits an already-provisioned
+      // database this way — bootstrap's generated DDL only ever runs against
+      // a brand-new relation set, never a reopened one.
+      await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      client.exec("DROP TABLE typegraph_fences");
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 1 WHERE installation = 1",
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'typegraph_fences'",
+          )
+          .get(),
+      ).toEqual({ name: "typegraph_fences" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  describe.each([undefined, 1, 2])(
+    "legacy recorded storage at base version %s",
+    (version) => {
+      it.each(
+        [false, true].flatMap((customNames) =>
+          [false, true].flatMap((openStore) =>
+            [false, true].map((missingHistory) => ({
+              customNames,
+              openStore,
+              missingHistory,
+            })),
+          ),
+        ),
+      )(
+        "adopts missing SQLite recorded storage ($customNames custom names, $openStore store open, $missingHistory history absent)",
+        async ({ customNames, openStore, missingHistory }) => {
+          const tableName =
+            customNames ?
+              "legacy_identity_assertions"
+            : "typegraph_recorded_identity_assertions";
+          const tableNames = {
+            recordedIdentityAssertions: tableName,
+            recordedNodes:
+              customNames ?
+                "legacy_recorded_nodes"
+              : "typegraph_recorded_nodes",
+            recordedEdges:
+              customNames ?
+                "legacy_recorded_edges"
+              : "typegraph_recorded_edges",
+          };
+          const missingTables =
+            missingHistory ? Object.values(tableNames) : [tableName];
+          const tables = createSqliteTables(tableNames);
+          const { backend, db } = createLocalSqliteBackend({ tables });
+          const client = sqliteClient(db);
+          try {
+            const [store] = await createStoreWithSchema(graph, backend);
+            const person = await store.nodes.Person.create({
+              name: "Preserved",
+            });
+            const expectedIndexes = missingTables.flatMap((name) =>
+              client
+                .prepare(
+                  "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?",
+                )
+                .all(name),
+            );
+            for (const name of missingTables)
+              client.exec(`DROP TABLE "${name}"`);
+            if (version === undefined) {
+              client.exec("DROP TABLE typegraph_base_schema_versions");
+            } else {
+              client
+                .prepare(
+                  "UPDATE typegraph_base_schema_versions SET version = ? WHERE installation = 1",
+                )
+                .run(version);
+            }
+
+            const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
+            if (openStore) await createStoreWithSchema(graph, backend);
+            else await requireDefined(backend.adoptBaseSchema)();
+            await requireDefined(backend.adoptBaseSchema)();
+
+            expect(
+              markerVersion(client, "typegraph_base_schema_versions"),
+            ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+            expect(
+              missingTables.flatMap((name) =>
+                client
+                  .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?",
+                  )
+                  .all(name),
+              ),
+            ).toEqual(expect.arrayContaining(expectedIndexes));
+            for (const name of missingTables) {
+              expect(client.prepare(`SELECT * FROM "${name}"`).all()).toEqual(
+                [],
+              );
+            }
+            const [reopened] = await createStoreWithSchema(graph, backend);
+            expect(await reopened.nodes.Person.getById(person.id)).toEqual(
+              person,
+            );
+            expect(bootstrapSpy).not.toHaveBeenCalled();
+          } finally {
+            await backend.close();
+          }
+        },
+      );
+
+      it.each(
+        [false, true].flatMap((customNames) =>
+          [false, true].flatMap((openStore) =>
+            [false, true].map((missingHistory) => ({
+              customNames,
+              openStore,
+              missingHistory,
+            })),
+          ),
+        ),
+      )(
+        "adopts missing PostgreSQL recorded storage ($customNames custom names, $openStore store open, $missingHistory history absent)",
+        async ({ customNames, openStore, missingHistory }) => {
+          const tableName =
+            customNames ?
+              "legacy_identity_assertions"
+            : "typegraph_recorded_identity_assertions";
+          const tableNames = {
+            recordedIdentityAssertions: tableName,
+            recordedNodes:
+              customNames ?
+                "legacy_recorded_nodes"
+              : "typegraph_recorded_nodes",
+            recordedEdges:
+              customNames ?
+                "legacy_recorded_edges"
+              : "typegraph_recorded_edges",
+          };
+          const missingTables =
+            missingHistory ? Object.values(tableNames) : [tableName];
+          const tables = createPostgresTables(tableNames);
+          const { backend, client } = await createLocalPgliteBackend({
+            tables,
+            vector: false,
+          });
+          try {
+            const [store] = await createStoreWithSchema(graph, backend);
+            const person = await store.nodes.Person.create({
+              name: "Preserved",
+            });
+            const expectedIndexes = await client.query<{ indexname: string }>(
+              "SELECT indexname FROM pg_indexes WHERE tablename = ANY($1::text[])",
+              [missingTables],
+            );
+            for (const name of missingTables)
+              await client.exec(`DROP TABLE "${name}"`);
+            if (version === undefined) {
+              await client.exec("DROP TABLE typegraph_base_schema_versions");
+            } else {
+              await client.query(
+                "UPDATE typegraph_base_schema_versions SET version = $1 WHERE installation = 1",
+                [version],
+              );
+            }
+
+            const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
+            if (openStore) await createStoreWithSchema(graph, backend);
+            else await requireDefined(backend.adoptBaseSchema)();
+            await requireDefined(backend.adoptBaseSchema)();
+
+            const marker = await client.query<{ version: number }>(
+              "SELECT version FROM typegraph_base_schema_versions WHERE installation = 1",
+            );
+            expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+            const indexes = await client.query<{ indexname: string }>(
+              "SELECT indexname FROM pg_indexes WHERE tablename = ANY($1::text[])",
+              [missingTables],
+            );
+            expect(indexes.rows).toEqual(
+              expect.arrayContaining(expectedIndexes.rows),
+            );
+            for (const name of missingTables) {
+              const recordedRows = await client.query(
+                `SELECT * FROM "${name}"`,
+              );
+              expect(recordedRows.rows).toEqual([]);
+            }
+            const [reopened] = await createStoreWithSchema(graph, backend);
+            expect(await reopened.nodes.Person.getById(person.id)).toEqual(
+              person,
+            );
+            expect(bootstrapSpy).not.toHaveBeenCalled();
+          } finally {
+            await backend.close();
+          }
+        },
+      );
+    },
+  );
+
+  it("catches an installed version-2 SQLite database up to version 3, gaining the since_idx indexes", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      // Same shape as the version-1-to-2 case above: reach current the
+      // normal way, then roll the installed shape back to what a real
+      // version-2 deployment left behind — every `since_idx` index absent,
+      // marker at 2.
+      await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      for (const indexName of sinceIndexNames) {
+        client.exec(`DROP INDEX "${indexName}"`);
+      }
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 2 WHERE installation = 1",
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      for (const indexName of sinceIndexNames) {
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .get(indexName),
+        ).toEqual({ name: indexName });
+      }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("accepts two concurrent version-2-to-3 adopters without either failing", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      for (const indexName of sinceIndexNames) {
+        client.exec(`DROP INDEX "${indexName}"`);
+      }
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 2 WHERE installation = 1",
+      );
+
+      // Both calls race the same monotonic upsert (`writeBaseSchemaVersion`'s
+      // `setWhere: lte(marker.version, version)`); whichever publishes second
+      // observes a version its own step already reached and stops, per
+      // `runSteps`'s short-circuit — neither call is allowed to throw.
+      await expect(
+        Promise.all([
+          requireDefined(backend.adoptBaseSchema)(),
+          requireDefined(backend.adoptBaseSchema)(),
+        ]),
+      ).resolves.toEqual([undefined, undefined]);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      // This is the SQLite test exercising the OFFLINE `adoptBaseSchema()`
+      // path for version 3 directly, rather than through
+      // `createStoreWithSchema`'s bootstrap as the reopen-based test above
+      // does. Both now catch a gutted version-3 step: the boot path's
+      // system-index materializer only recreates the two
+      // `materializeIndexes`-managed `since_idx` indexes (`recordedNodes`,
+      // `recordedEdges`) — the identity-assertions relation's `since_idx` is
+      // hand-declared, not a `SystemIndexTable`, so nothing but the step
+      // body itself ever creates it, and the reopen-based test's own
+      // assertion on that index fails too.
+      for (const indexName of sinceIndexNames) {
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            )
+            .get(indexName),
+        ).toEqual({ name: indexName });
+      }
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-2 PGlite database up to version 3, gaining the since_idx indexes", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      const initialMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(initialMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+
+      await client.exec(
+        [
+          ...sinceIndexNames.map((indexName) => `DROP INDEX "${indexName}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 2 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const indexes = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${sinceIndexNames.map((indexName) => `'${indexName}'`).join(", ")})`,
+      );
+      expect(indexes.rows.map((row) => row.indexname).toSorted()).toEqual(
+        sinceIndexNames.toSorted(),
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-2 PGlite database up to version 3 through adoptBaseSchema() directly, gaining the since_idx indexes", async () => {
+    // The reopen-based case above routes through `createStoreWithSchema`,
+    // whose bootstrap DDL / boot system-index materializer recreates only
+    // the two `materializeIndexes`-managed `since_idx` indexes
+    // (`recordedNodes`, `recordedEdges`); the identity-assertions relation's
+    // `since_idx` is hand-declared, not a `SystemIndexTable`, so nothing but
+    // the version-3 step body itself ever creates it, and the reopen-based
+    // case now also catches a gutted step through that index. This case
+    // calls `backend.adoptBaseSchema()` directly (the offline path, which
+    // never calls `generateDdl()`) so a broken step body is what pins ALL
+    // THREE indexes at once, mirroring the SQLite concurrent-adopters
+    // case's own rationale above.
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    const sinceIndexNames = [
+      systemIndexName("typegraph_recorded_nodes", "since_idx"),
+      systemIndexName("typegraph_recorded_edges", "since_idx"),
+      systemIndexName("typegraph_recorded_identity_assertions", "since_idx"),
+    ];
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          ...sinceIndexNames.map((indexName) => `DROP INDEX "${indexName}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 2 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const indexes = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${sinceIndexNames.map((indexName) => `'${indexName}'`).join(", ")})`,
+      );
+      expect(indexes.rows.map((row) => row.indexname).toSorted()).toEqual(
+        sinceIndexNames.toSorted(),
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-3 SQLite database up to version 4, gaining revision changes", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec('DROP TABLE "typegraph_revision_changes"');
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 3 WHERE installation = 1",
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_revision_changes"),
+      ).toEqual({ name: "typegraph_revision_changes" });
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+          )
+          .get("typegraph_revision_changes_graph_revision_idx"),
+      ).toEqual({ name: "typegraph_revision_changes_graph_revision_idx" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-3 PGlite database up to version 4, gaining revision changes", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          'DROP TABLE "typegraph_revision_changes"',
+          'UPDATE "typegraph_base_schema_versions" SET version = 3 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const journal = await client.query<{ table_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes')::text AS table_name",
+      );
+      expect(journal.rows[0]?.table_name).toBe("typegraph_revision_changes");
+      const journalIndex = await client.query<{ index_name: string | null }>(
+        "SELECT to_regclass('typegraph_revision_changes_graph_revision_idx')::text AS index_name",
+      );
+      expect(journalIndex.rows[0]?.index_name).toBe(
+        "typegraph_revision_changes_graph_revision_idx",
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  // Base schema v9 changed two system-index families without an adoption
+  // step, so each leaves an upgraded store and a fresh store in different,
+  // permanent shapes, and both shapes must open, verify, materialize system
+  // indexes and read and write:
+  // - it stopped creating `typegraph_nodes_kind_idx` and
+  //   `typegraph_edges_kind_idx` (each is a prefix of an index v9 keeps). No
+  //   step drops them, so a store upgraded from v8 keeps both and a fresh
+  //   store never has them;
+  // - it added the PostgreSQL-only partial `live_created_idx` pair. A fresh
+  //   PostgreSQL store creates it in bootstrap DDL and a store upgraded from
+  //   v8 gains it from the boot-time `materializeSystemIndexes` run. SQLite
+  //   never has it.
+  describe("system-index shapes after base schema v9", () => {
+    const kindIndexNames = [
+      "typegraph_edges_kind_idx",
+      "typegraph_nodes_kind_idx",
+    ] as const;
+    const liveCreatedIndexNames = [
+      "typegraph_edges_live_created_idx",
+      "typegraph_nodes_live_created_idx",
+    ] as const;
+    const v9IndexNames = [...kindIndexNames, ...liveCreatedIndexNames];
+    const v8KindIndexDdl = [
+      'CREATE INDEX "typegraph_nodes_kind_idx" ON "typegraph_nodes" ("graph_id", "kind")',
+      'CREATE INDEX "typegraph_edges_kind_idx" ON "typegraph_edges" ("graph_id", "kind")',
+    ];
+    const v8LiveCreatedDrops = [
+      'DROP INDEX "typegraph_nodes_live_created_idx"',
+      'DROP INDEX "typegraph_edges_live_created_idx"',
+    ];
+    const v9RelationDrops = [
+      'DROP TABLE "typegraph_identity_transitions"',
+      'DROP TABLE "typegraph_identity_transition_retention"',
+      'UPDATE "typegraph_base_schema_versions" SET version = 8 WHERE installation = 1',
+    ];
+
+    function presentSqliteIndexes(client: SqliteClient): readonly string[] {
+      const rows = client
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('${v9IndexNames.join("', '")}') ORDER BY name`,
+        )
+        .all() as readonly Readonly<{ name: string }>[];
+      return rows.map((row) => row.name);
+    }
+
+    it("SQLite: a fresh store has neither the kind indexes nor the live listing indexes", async () => {
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(presentSqliteIndexes(client)).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("SQLite: a store upgraded from v8 keeps both kind indexes, gains no live listing index, and works", async () => {
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        client.exec([...v8KindIndexDdl, ...v9RelationDrops].join(";\n"));
+
+        const [, adoption] = await createStoreWithSchema(graph, backend);
+        expect(adoption.status).toBe("unchanged");
+        expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        await expectStoreWorks(backend);
+
+        expect(presentSqliteIndexes(client)).toEqual([...kindIndexNames]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    async function presentPostgresIndexes(
+      client: PGlite,
+    ): Promise<readonly string[]> {
+      const rows = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN ('${v9IndexNames.join("', '")}') ORDER BY indexname`,
+      );
+      return rows.rows.map((row) => row.indexname);
+    }
+
+    it("PGlite: a fresh store has the live listing indexes and no kind index", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(await presentPostgresIndexes(client)).toEqual([
+          ...liveCreatedIndexNames,
+        ]);
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("PGlite: a store upgraded from v8 keeps both kind indexes, gains the live listing indexes on open, and works", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        await client.exec(
+          [...v8KindIndexDdl, ...v8LiveCreatedDrops, ...v9RelationDrops].join(
+            ";\n",
+          ),
+        );
+        expect(await presentPostgresIndexes(client)).toEqual([
+          ...kindIndexNames,
+        ]);
+
+        const [, adoption] = await createStoreWithSchema(graph, backend);
+        expect(adoption.status).toBe("unchanged");
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentPostgresIndexes(client)).toEqual(
+          v9IndexNames.toSorted(),
+        );
+        const definitions = await client.query<{ indexdef: string }>(
+          `SELECT indexdef FROM pg_indexes WHERE indexname IN ('${liveCreatedIndexNames.join("', '")}') ORDER BY indexname`,
+        );
+        expect(definitions.rows.map((row) => row.indexdef)).toEqual([
+          "CREATE INDEX typegraph_edges_live_created_idx ON public.typegraph_edges USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+          "CREATE INDEX typegraph_nodes_live_created_idx ON public.typegraph_nodes USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+        ]);
+
+        await expectStoreWorks(backend);
+      } finally {
+        await backend.close();
+      }
+    });
+  });
+
+  describe("version 5: byte-ordered graph_id indexes", () => {
+    const byteOrderIndexNames = [
+      "typegraph_nodes_graph_id_bytes_idx",
+      "typegraph_edges_graph_id_bytes_idx",
+      "typegraph_schema_versions_graph_id_bytes_idx",
+    ] as const;
+
+    async function presentByteOrderIndexes(
+      client: PGlite,
+    ): Promise<readonly string[]> {
+      const rows = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE indexname IN (${byteOrderIndexNames.map((name) => `'${name}'`).join(", ")}) ORDER BY indexname`,
+      );
+      return rows.rows.map((row) => row.indexname);
+    }
+
+    async function downgradeToVersion4(client: PGlite): Promise<void> {
+      await client.exec(
+        [
+          ...byteOrderIndexNames.map((name) => `DROP INDEX "${name}"`),
+          'UPDATE "typegraph_base_schema_versions" SET version = 4 WHERE installation = 1',
+        ].join(";\n"),
+      );
+    }
+
+    it("catches an installed version-4 PGlite database up to version 5 through adoptBaseSchema() directly, gaining the indexes", async () => {
+      // The offline path never calls `generateDdl()`, so only the version-5
+      // step body can create the indexes here: gutting it fails this case.
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+        await downgradeToVersion4(client);
+        expect(await presentByteOrderIndexes(client)).toEqual([]);
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("catches an installed version-4 PGlite database up to version 5 when a store reopens it", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      try {
+        await createStoreWithSchema(graph, backend);
+        await downgradeToVersion4(client);
+
+        await createStoreWithSchema(graph, backend);
+
+        const marker = await client.query<{ version: number }>(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        );
+        expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(await presentByteOrderIndexes(client)).toEqual(
+          byteOrderIndexNames.toSorted(),
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
+    it("advances an installed version-4 SQLite database to version 5 without adding an index", async () => {
+      // SQLite keeps text indexes in byte order already, so the step only
+      // moves the marker.
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        client.exec(
+          "UPDATE typegraph_base_schema_versions SET version = 4 WHERE installation = 1",
+        );
+
+        await requireDefined(backend.adoptBaseSchema)();
+
+        expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+          CURRENT_BASE_SCHEMA_VERSION,
+        );
+        expect(
+          client
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%graph_id_bytes_idx'",
+            )
+            .all(),
+        ).toEqual([]);
+      } finally {
+        await backend.close();
+      }
+    });
+  });
+
+  it("accepts pre-provisioned SQLite identity columns without a pair CHECK", async () => {
+    const tableNames = {
+      baseSchemaVersions: "tg_base_schema_versions",
+      edges: "tg_edges",
+      graphTemplates: "tg_graph_templates",
+    } as const;
+    const tables = createSqliteTables(tableNames);
+    const { backend, db } = createLocalSqliteBackend({ tables });
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(`DROP TABLE "${tableNames.edges}"`);
+      client.exec(
+        `CREATE TABLE "${tableNames.edges}" ("graph_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "from_kind" TEXT NOT NULL, "from_id" TEXT NOT NULL, "to_kind" TEXT NOT NULL, "to_id" TEXT NOT NULL, "props" TEXT NOT NULL, "match_identity_name" TEXT, "match_identity_key" TEXT, "valid_from" TEXT, "valid_to" TEXT, "created_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL, "deleted_at" TEXT, PRIMARY KEY ("graph_id", "id"))`,
+      );
+      client.exec(`DROP TABLE "${tableNames.baseSchemaVersions}"`);
+
+      const [reopened] = await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      const indexes = client
+        .prepare(`PRAGMA index_list("${tableNames.edges}")`)
+        .all() as readonly Readonly<{ name: string }>[];
+      expect(indexes.map((index) => index.name)).toContain(
+        edgeMatchIdentityUniqueIndexName(tableNames.edges),
+      );
+
+      const from = await reopened.nodes.Person.create({ name: "From" });
+      const to = await reopened.nodes.Person.create({ name: "To" });
+      await expect(
+        reopened.edges.knows.create(from, to, { label: "works" }),
+      ).resolves.toMatchObject({ label: "works" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("adopts a legacy PostgreSQL/PGlite installation and registers templates", async () => {
+    const tableNames = {
+      baseSchemaVersions: "tg_base_schema_versions",
+      edges: "tg_edges",
+      graphTemplates: "tg_graph_templates",
+    } as const;
+    const tables = createPostgresTables(tableNames);
+    const client = await PGlite.create();
+    await client.exec(generatePostgresDDL(tables).join("\n\n"));
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      tables,
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          `DROP TABLE "${tableNames.graphTemplates}"`,
+          `DROP INDEX "${edgeMatchIdentityUniqueIndexName(tableNames.edges)}"`,
+          `ALTER TABLE "${tableNames.edges}" DROP CONSTRAINT "${edgeMatchIdentityPairCheckName(tableNames.edges)}"`,
+          `ALTER TABLE "${tableNames.edges}" DROP COLUMN "match_identity_key"`,
+          `ALTER TABLE "${tableNames.edges}" DROP COLUMN "match_identity_name"`,
+          `DROP TABLE "${tableNames.baseSchemaVersions}"`,
+        ].join(";\n"),
+      );
+
+      const [reopened] = await createStoreWithSchema(graph, backend);
+      const marker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(marker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const columns = await client.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = '${tableNames.edges}'`,
+      );
+      expect(columns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining(["match_identity_name", "match_identity_key"]),
+      );
+      await assertTemplatesWork(backend, reconciledSurface(reopened));
+
+      await client.exec(
+        `UPDATE "${tableNames.baseSchemaVersions}" SET version = 0 WHERE installation = 1`,
+      );
+      await createStoreWithSchema(graph, backend);
+      const advancedMarker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+
+      const querySpy = vi.spyOn(client, "query");
+      await createStoreWithSchema(graph, backend);
+      expect(
+        querySpy.mock.calls.some(([query]) => {
+          const statement = query;
+          const namesAdoptionStorage =
+            statement.includes(tableNames.baseSchemaVersions) ||
+            statement.includes(tableNames.graphTemplates) ||
+            statement.includes("match_identity");
+          return (
+            namesAdoptionStorage &&
+            /(?:ALTER TABLE|CREATE (?:UNIQUE )?(?:INDEX|TABLE))/i.test(
+              statement,
+            )
+          );
+        }),
+      ).toBe(false);
+    } finally {
+      await backend.close();
+      await client.close();
+    }
+  });
+
+  it("catches an installed version-8 PGlite database up to the current version through adoptBaseSchema() directly, gaining the identity transition log", async () => {
+    // `adoptBaseSchema()` is the offline path, which never calls
+    // `generateDdl()`, so only the version-9 step body itself can recreate
+    // the relations a real version-8 deployment lacks — including the
+    // transition log's `restored_at` column, which ships with the table.
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      await createStoreWithSchema(graph, backend);
+      await client.exec(
+        [
+          'DROP TABLE "typegraph_identity_transitions"',
+          'DROP TABLE "typegraph_identity_transition_retention"',
+          'UPDATE "typegraph_base_schema_versions" SET version = 8 WHERE installation = 1',
+        ].join(";\n"),
+      );
+
+      await requireDefined(backend.adoptBaseSchema)();
+
+      const advancedMarker = await client.query<{ version: number }>(
+        'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      const columns = await client.query<{ column_name: string }>(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'typegraph_identity_transitions'",
+      );
+      expect(columns.rows.map((row) => row.column_name)).toContain(
+        "restored_at",
+      );
+      const retention = await client.query<{ table_name: string }>(
+        "SELECT table_name FROM information_schema.tables WHERE table_name = 'typegraph_identity_transition_retention'",
+      );
+      expect(retention.rows).toHaveLength(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["stale", 0],
+    ["newer", CURRENT_BASE_SCHEMA_VERSION + 1],
+  ] as const)(
+    "createVerifiedStore refuses a %s base marker without DDL",
+    async (reason, version) => {
+      const { backend, db } = createLocalSqliteBackend();
+      const client = sqliteClient(db);
+      try {
+        await createStoreWithSchema(graph, backend);
+        if (version === undefined) {
+          client.exec("DROP TABLE typegraph_base_schema_versions");
+        } else {
+          client.exec(
+            `UPDATE typegraph_base_schema_versions SET version = ${String(version)} WHERE installation = 1`,
+          );
+        }
+        const prepareSpy = vi.spyOn(client, "prepare");
+        const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
+        await expect(createVerifiedStore(graph, backend)).rejects.toSatisfy(
+          (error: unknown) =>
+            error instanceof BaseSchemaMigrationError &&
+            error.code === "BASE_SCHEMA_MIGRATION_REQUIRED" &&
+            error.details.reason === reason,
+        );
+        expect(bootstrapSpy).not.toHaveBeenCalled();
+        expect(
+          prepareSpy.mock.calls.some(([source]) => {
+            const statement = source.trimStart().toUpperCase();
+            return (
+              statement.startsWith("CREATE ") ||
+              statement.startsWith("ALTER ") ||
+              statement.startsWith("DROP ")
+            );
+          }),
+        ).toBe(false);
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+
+  it("stamps the current base version on fresh bootstrap", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    try {
+      await createStoreWithSchema(graph, backend);
+      const rows = (
+        db as unknown as {
+          $client: Database.Database;
+        }
+      ).$client
+        .prepare(
+          `SELECT version FROM typegraph_base_schema_versions WHERE installation = 1`,
+        )
+        .all() as readonly Readonly<{ version: number }>[];
+      expect(rows).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("catches an installed version-8 SQLite database up to the current version, gaining the identity transition log", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(
+        [
+          "DROP TABLE typegraph_identity_transitions",
+          "DROP TABLE typegraph_identity_transition_retention",
+          "UPDATE typegraph_base_schema_versions SET version = 8 WHERE installation = 1",
+        ].join(";\n"),
+      );
+
+      await createStoreWithSchema(graph, backend);
+
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      const columns = client
+        .prepare(`PRAGMA table_info("typegraph_identity_transitions")`)
+        .all() as readonly Readonly<{ name: string }>[];
+      expect(columns.map((column) => column.name)).toContain("restored_at");
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_identity_transition_retention"),
+      ).toEqual({ name: "typegraph_identity_transition_retention" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  // Load-bearing: `Store.evolve` checks identity storage ahead of its schema
+  // commit, as opening a store with its schema does, and that check reads a
+  // missing identity relation on an enabled graph as lost data. Revert check:
+  // have `evolve` call `ensureIdentitySchemaStorage` without adopting base
+  // storage first and this rejects with ConfigurationError
+  // IDENTITY_STORAGE_MISSING naming the two relations the upgrade adds.
+  it("evolves an identity graph attached to a version-8 SQLite database without a privileged open", async () => {
+    const identityGraph = defineGraph({
+      id: "base_schema_adoption_evolve",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      const [installed] = await createStoreWithSchema(identityGraph, backend, {
+        history: true,
+      });
+      await installed.nodes.Person.create({ name: "Ada" });
+      client.exec(
+        [
+          "DROP TABLE typegraph_identity_transitions",
+          "DROP TABLE typegraph_identity_transition_retention",
+          "UPDATE typegraph_base_schema_versions SET version = 8 WHERE installation = 1",
+        ].join(";\n"),
+      );
+
+      const attached = createStore(identityGraph, backend, { history: true });
+      const evolved = await attached.evolve(
+        defineGraphExtension({
+          nodes: { Tag: { properties: { label: { type: "string" } } } },
+        }),
+      );
+
+      expect(evolved.registry.hasNodeType("Tag")).toBe(true);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        CURRENT_BASE_SCHEMA_VERSION,
+      );
+      expect(
+        client
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get("typegraph_identity_transitions"),
+      ).toEqual({ name: "typegraph_identity_transitions" });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses to downgrade a newer base marker during bootstrap", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      const newerVersion = CURRENT_BASE_SCHEMA_VERSION + 1;
+      client.exec(
+        `UPDATE typegraph_base_schema_versions SET version = ${String(newerVersion)} WHERE installation = 1`,
+      );
+
+      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof BaseSchemaMigrationError &&
+          error.details.reason === "newer",
+      );
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        newerVersion,
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("keeps and refuses a concurrently published newer marker during bootstrap", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(
+        "DELETE FROM typegraph_base_schema_versions WHERE installation = 1",
+      );
+
+      const prepare = client.prepare.bind(client);
+      const newerVersion = CURRENT_BASE_SCHEMA_VERSION + 1;
+      let publishedNewerMarker = false;
+      vi.spyOn(client, "prepare").mockImplementation((source) => {
+        if (!publishedNewerMarker && source.includes("CREATE TABLE")) {
+          publishedNewerMarker = true;
+          prepare(
+            `INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, ${String(newerVersion)}, CURRENT_TIMESTAMP)`,
+          ).run();
+        }
+        return prepare(source);
+      });
+
+      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof BaseSchemaMigrationError &&
+          error.details.reason === "newer",
+      );
+      expect(publishedNewerMarker).toBe(true);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(
+        newerVersion,
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+describe("version 6: recorded adjacency indexes", () => {
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts missing endpoint paging indexes from version 5 on %s",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        await createStoreWithSchema(graph, backend);
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        for (const suffix of ["from", "to"])
+          await executeDdl(
+            `DROP INDEX "typegraph_recorded_edges_adjacency_${suffix}_idx"`,
+          );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version = 5 WHERE installation = 1",
+        );
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
+        // A second adoption must remain idempotent.
+        await createStoreWithSchema(graph, backend, { systemIndexes: "skip" });
+        const indexes =
+          lane === "sqlite" ?
+            await executeRaw<{ name: string; definition: string }>(
+              "SELECT name, sql AS definition FROM sqlite_master WHERE type = 'index' AND name LIKE '%adjacency_%_idx'",
+              [],
+            )
+          : await executeRaw<{ name: string; definition: string }>(
+              "SELECT indexname AS name, indexdef AS definition FROM pg_indexes WHERE indexname LIKE '%adjacency_%_idx' AND schemaname = current_schema()",
+              [],
+            );
+        expect(indexes.map((index) => index.name).toSorted()).toEqual([
+          "typegraph_recorded_edges_adjacency_from_idx",
+          "typegraph_recorded_edges_adjacency_to_idx",
+        ]);
+        expect(
+          indexes.map(
+            (index) => index.definition.match(/COLLATE "C"/g)?.length ?? 0,
+          ),
+        ).toEqual(lane === "pglite" ? [3, 3] : [0, 0]);
+        const marker = await executeRaw<{ version: number }>(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation = 1",
+          [],
+        );
+        expect(marker[0]?.version).toBe(CURRENT_BASE_SCHEMA_VERSION);
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+});
+
+describe("version 9: recorded allocation retention watermark", () => {
+  it.each([false, true])(
+    "upgrades marker-less managed libSQL history before stamping v9 (legacy edges: %s)",
+    async (legacyEdges) => {
+      const client = createClient({ url: ":memory:" });
+      const opened: GraphBackend[] = [];
+      try {
+        const original = await createLibsqlBackend(client);
+        opened.push(original.backend);
+        const [store] = await createStoreWithSchema(graph, original.backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        await store.nodes.Person.update(person.id, { name: "latest" });
+        const anchor = requireDefined(await store.recordedNow());
+        await client.execute("DROP TABLE typegraph_base_schema_versions");
+        await client.execute(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        if (legacyEdges) {
+          await client.execute("DROP TABLE typegraph_edges");
+          await client.executeMultiple(LEGACY_EDGE_TABLE_SQL);
+        }
+        const reopened = await createLibsqlBackend(client);
+        opened.push(reopened.backend);
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        const marker = await client.execute(
+          "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+        );
+        expect(marker.rows.map((row) => Number(row["version"]))).toEqual([
+          CURRENT_BASE_SCHEMA_VERSION,
+        ]);
+        expect(await attached.recordedNow()).toBe(anchor);
+        expect(await attached.nodes.Person.getById(person.id)).toMatchObject({
+          name: "latest",
+        });
+        expect(
+          await attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).toEqual({
+          deletedCount: 1,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        for (const backend of opened) await backend.close();
+        client.close();
+      }
+    },
+  );
+
+  it.each(["sqlite", "pglite"] as const)(
+    "adopts a populated version 8 clock on %s without inventing pruning",
+    async (lane) => {
+      const handle =
+        lane === "sqlite" ?
+          createLocalSqliteBackend()
+        : await createLocalPgliteBackend({ vector: false });
+      const { backend } = handle;
+      try {
+        const [store] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        const person = await store.nodes.Person.create({ name: "preserved" });
+        const anchor = requireDefined(await store.recordedNow());
+        const owner = await store.allocationOwner();
+        const executeDdl = requireDefined(backend.executeDdl);
+        const executeRaw = requireDefined(backend.executeRaw);
+        await executeDdl(
+          "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+        );
+        await executeDdl(
+          "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+        );
+        const statements: CompiledRowsSql[] = [];
+        const assertStorage = vi.fn(
+          requireDefined(backend.assertBaseSchemaCurrent),
+        );
+        const existing = createStore(
+          graph,
+          deriveBackend(backend, {
+            assertBaseSchemaCurrent: assertStorage,
+            execute<T>(query: CompiledRowsSql) {
+              statements.push(query);
+              return backend.execute<T>(query);
+            },
+          }),
+          { history: true },
+        );
+        expect(
+          await existing.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(statements).toHaveLength(1);
+        expect(assertStorage).not.toHaveBeenCalled();
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          name: "BaseSchemaMigrationError",
+          details: {
+            installedVersion: 8,
+            requiredVersion: CURRENT_BASE_SCHEMA_VERSION,
+            reason: "stale",
+          },
+        });
+        // Error shape and server language cannot change lifecycle refusal.
+        for (const driverError of [
+          Object.assign(new Error("SQLITE_ERROR"), { code: "SQLITE_ERROR" }),
+          Object.assign(new Error("colonne inexistante"), { code: "42703" }),
+          new Error("custom backend reshaped the driver error"),
+        ]) {
+          const execute = vi.fn(() => Promise.reject(driverError));
+          const attached = createStore(
+            graph,
+            deriveBackend(backend, { execute }),
+            { history: true },
+          );
+          await expect(
+            attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+          ).rejects.toMatchObject({
+            name: "BaseSchemaMigrationError",
+            details: { installedVersion: 8, reason: "stale" },
+          });
+          expect(execute).not.toHaveBeenCalled();
+        }
+        await requireDefined(backend.adoptBaseSchema)();
+        await requireDefined(backend.adoptBaseSchema)();
+        expect(
+          await executeRaw(
+            "SELECT CASE WHEN anchor_retention IS NULL THEN 1 ELSE 0 END AS unpruned FROM typegraph_recorded_clock",
+            [],
+          ),
+        ).toEqual([{ unpruned: 1 }]);
+        expect(
+          await executeRaw(
+            "SELECT version FROM typegraph_base_schema_versions WHERE installation=1",
+            [],
+          ),
+        ).toEqual([{ version: CURRENT_BASE_SCHEMA_VERSION }]);
+        const [reopened] = await createStoreWithSchema(graph, backend, {
+          history: true,
+        });
+        expect(await reopened.nodes.Person.getById(person.id)).toEqual(person);
+        expect(await reopened.recordedNow()).toBe(anchor);
+        expect(await reopened.allocationOwner()).toEqual(owner);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+      } finally {
+        await backend.close();
+      }
+    },
+  );
+
+  it("upgrades marker-less SQLite history before stamping the current version", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-unstamped-retention-"),
+    );
+    const filename = path.join(directory, "legacy.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "preserved legacy history" });
+      const anchor = await store.recordedNow();
+      const client = sqliteClient(original.db);
+      client.exec("DROP TABLE typegraph_base_schema_versions");
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec("DROP TABLE typegraph_edges");
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      await original.backend.close();
+      const reopened = createLocalSqliteBackend({ path: filename });
+      try {
+        const attached = createStore(graph, reopened.backend, {
+          history: true,
+        });
+        expect(
+          markerVersion(
+            sqliteClient(reopened.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await attached.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        await expect(
+          attached.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).resolves.toEqual({
+          deletedCount: 0,
+          retainedBoundary: anchor,
+          hasMore: false,
+        });
+        await requireDefined(reopened.backend.adoptBaseSchema)();
+      } finally {
+        await reopened.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps synchronous local SQLite lookups working before privileged v9 adoption", async () => {
+    const directory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-retention-upgrade-"),
+    );
+    const filename = path.join(directory, "graph.db");
+    try {
+      const original = createLocalSqliteBackend({ path: filename });
+      const [store] = await createStoreWithSchema(graph, original.backend, {
+        history: true,
+      });
+      await store.nodes.Person.create({ name: "existing" });
+      const anchor = requireDefined(await store.recordedNow());
+      const client = sqliteClient(original.db);
+      client.exec(
+        "ALTER TABLE typegraph_recorded_clock DROP COLUMN anchor_retention",
+      );
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version=8 WHERE installation=1",
+      );
+      await original.backend.close();
+      const upgraded = createLocalSqliteBackend({ path: filename });
+      try {
+        const reopened = createStore(graph, upgraded.backend, {
+          history: true,
+        });
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(anchor);
+        expect(
+          await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+        expect(
+          sqliteClient(upgraded.db)
+            .prepare("PRAGMA table_info(typegraph_recorded_clock)")
+            .all(),
+        ).not.toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: "anchor_retention" }),
+          ]),
+        );
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(8);
+        await expect(
+          reopened.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({ details: { installedVersion: 8 } });
+        await reopened.nodes.Person.create({ name: "written after upgrade" });
+        const advanced = await reopened.recordedNow();
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
+        await requireDefined(upgraded.backend.adoptBaseSchema)();
+        expect(
+          markerVersion(
+            sqliteClient(upgraded.db),
+            "typegraph_base_schema_versions",
+          ),
+        ).toBe(CURRENT_BASE_SCHEMA_VERSION);
+        expect(
+          await reopened.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(advanced);
+      } finally {
+        await upgraded.backend.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

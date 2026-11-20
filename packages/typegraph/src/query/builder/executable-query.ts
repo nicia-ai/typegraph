@@ -1,19 +1,27 @@
 /**
  * ExecutableQuery - A query that can be executed, paginated, or streamed.
  */
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
 import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
-import { UnsupportedPredicateError, ValidationError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../../errors";
 import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
+  type FieldRef,
   mergeEdgeKinds,
+  type NodePredicate,
   type OrderSpec,
+  type PredicateExpression,
   type QueryAst,
   type SelectiveField,
   type SortDirection,
@@ -21,19 +29,25 @@ import {
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import {
   buildCursorFromRow,
+  buildCursorFromValues,
   type CursorData,
   decodeCursor,
+  requireCursorField,
   validateCursorColumns,
 } from "../cursor";
 import { type SqlDialect } from "../dialect/types";
 import {
-  buildCursorPredicate,
+  adjustOrderByForDirection,
+  applyCursorFilters,
   buildPaginatedResult,
+  buildPaginatedResultFromRows,
   buildSelectContext,
   buildSelectiveFields,
+  containsSelectableAliasObject,
   createStreamIterable,
   createTrackingContext,
   decodeSelectedValue,
+  executeSchemaCheckedRead,
   FieldAccessTracker,
   getStreamBatchSize,
   mapResults,
@@ -42,21 +56,35 @@ import {
   nullToUndefined,
   transformPathColumns,
 } from "../execution";
-import { jsonPointer, parseJsonPointer } from "../json-pointer";
-import { fieldRef } from "../predicates";
-import { type FieldTypeInfo } from "../schema-introspector";
+import { parseJsonPointer } from "../json-pointer";
+import { resolveNullOrdering } from "../order";
 import { type CompiledSelectSql } from "../sql-intent";
-import { buildQueryAst } from "./ast-builder";
+import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { getQueryBuilderInternalContext } from "./internal-context";
+import { oneStatementBatchOrderColumn } from "./one-statement-batch";
+import {
+  assertCompatibleSetOperationProvenance,
+  type OneStatementReadProvenance,
+} from "./one-statement-provenance";
+import {
+  resolveAliasOrderSpec,
+  systemColumnSelectedPath,
+} from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   buildQueryTemplate,
   type CompiledTemplate,
   fillTemplateParams,
 } from "./read-instant-template";
+import { executeQueryTerminal } from "./terminal-query";
 import {
   type AliasMap,
+  type AliasOrderField,
+  type CompiledOneStatementRead,
   type EdgeAliasMap,
+  type NodeCandidateSelection,
+  type OneStatementBatchableQuery,
   type PaginatedResult,
   type PaginateOptions,
   type QueryBuilderConfig,
@@ -66,6 +94,12 @@ import {
   type StreamOptions,
 } from "./types";
 import { type UnionableQuery } from "./unionable-query";
+import {
+  refuseRecursivePagination,
+  validatePaginationOptions,
+  validateQueryRange,
+  validateSortDirection,
+} from "./validation";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
 
@@ -145,7 +179,7 @@ export class ExecutableQuery<
    * Builds the query AST (memoized — the instance is immutable).
    */
   toAst(): QueryAst {
-    return (this.#cachedAst ??= buildQueryAst(this.#config, this.#state));
+    return (this.#cachedAst ??= buildRowQueryAst(this.#config, this.#state));
   }
 
   /** Whether this query uses `param()` refs (memoized). */
@@ -160,57 +194,30 @@ export class ExecutableQuery<
    */
   orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
-    field: string,
+    field: AliasOrderField<Aliases, EdgeAliases, A>,
     direction: SortDirection = "asc",
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateSortDirection(direction);
     const edgeTraversal = this.#state.traversals.find(
       (traversal) => traversal.edgeAlias === alias,
     );
-    const isEdge = edgeTraversal !== undefined;
-    const isSystem =
-      field === "id" ||
-      field === "kind" ||
-      (isEdge && (field === "from_id" || field === "to_id"));
-
-    let typeInfo: FieldTypeInfo | undefined;
-    if (!isSystem) {
-      if (isEdge) {
-        const edgeKindNames = mergeEdgeKinds(edgeTraversal);
-        typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          edgeKindNames,
-          field,
-        );
-      } else {
-        const kindNames =
-          alias === this.#state.startAlias ?
-            this.#state.startKinds
-          : this.#state.traversals.find(
-              (traversal) => traversal.nodeAlias === alias,
-            )?.nodeKinds;
-        typeInfo =
-          kindNames ?
-            this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              kindNames,
-              field,
-            )
-          : undefined;
-      }
-    }
-
-    const orderSpec: OrderSpec =
-      isSystem ?
-        {
-          field: fieldRef(alias, [field], { valueType: "string" }),
-          direction,
-        }
-      : {
-          field: fieldRef(alias, ["props"], {
-            jsonPointer: jsonPointer([field]),
-            valueType: typeInfo?.valueType,
-            elementType: typeInfo?.elementType,
-          }),
-          direction,
-        };
+    const nodeKindNames =
+      alias === this.#state.startAlias ?
+        this.#state.startKinds
+      : this.#state.traversals.find(
+          (traversal) => traversal.nodeAlias === alias,
+        )?.nodeKinds;
+    const orderSpec = resolveAliasOrderSpec(
+      this.#config.schemaIntrospector,
+      alias,
+      edgeTraversal === undefined ?
+        nodeKindNames === undefined ?
+          undefined
+        : { isEdge: false, nodeKindNames }
+      : { isEdge: true, edgeKindNames: mergeEdgeKinds(edgeTraversal) },
+      field,
+      direction,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -226,6 +233,7 @@ export class ExecutableQuery<
   limit(
     n: number,
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateQueryRange(n, "limit");
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, limit: n },
@@ -239,6 +247,7 @@ export class ExecutableQuery<
   offset(
     n: number,
   ): ExecutableQuery<G, Aliases, EdgeAliases, RecursiveAliases, R> {
+    validateQueryRange(n, "offset");
     return new ExecutableQuery(
       this.#config,
       { ...this.#state, offset: n },
@@ -254,7 +263,7 @@ export class ExecutableQuery<
    *
    * @example
    * ```typescript
-   * const paginated = (q) => q.orderBy("u", "createdAt", "desc").limit(10);
+   * const paginated = (q) => q.orderBy("u", "meta.createdAt", "desc").limit(10);
    *
    * const results = await query()
    *   .from("User", "u")
@@ -279,6 +288,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   union(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "union",
@@ -296,6 +306,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   unionAll(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "unionAll",
@@ -313,6 +324,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   intersect(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "intersect",
@@ -330,6 +342,7 @@ export class ExecutableQuery<
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Allow any alias map for set operations
   except(other: ExecutableQuery<G, any, any, any, R>): UnionableQuery<G, R> {
+    this.#assertCompatibleSetOperand(other);
     return new UnionableQueryClass(this.#config, {
       left: this.toAst(),
       operator: "except",
@@ -373,12 +386,53 @@ export class ExecutableQuery<
   }
 
   /**
+   * Compiles only the root node identity for use by a set-based mutation.
+   * This deliberately ignores the JavaScript selector supplied to
+   * `.select(...)`: candidate identity is always the root id, so changing a
+   * result projection cannot make the mutation reference a missing column.
+   */
+  compileNodeCandidateIds(readInstant?: string): CompiledSelectSql {
+    const ast = this.toAst();
+    const idColumn = `${ast.start.alias}_id`;
+    return compileQuery(
+      {
+        ...ast,
+        ...(readInstant === undefined ?
+          {}
+        : {
+            temporalMode: {
+              mode: "asOf",
+              asOf: readInstant,
+            },
+          }),
+        projection: {
+          fields: [
+            {
+              outputName: idColumn,
+              source: {
+                __type: "field_ref",
+                alias: ast.start.alias,
+                path: ["id"],
+                valueType: "string",
+              },
+            },
+          ],
+        },
+      },
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+  }
+
+  /**
    * Creates a prepared (pre-validated) query that can be executed multiple
    * times with different parameter bindings. Builds and structurally
    * validates the AST once (a malformed query fails fast, here, instead of on
    * first use); the prepared query then compiles once into a reusable template
    * and fills a fresh read instant per execute() — see PreparedQuery's class
-   * doc comment.
+   * doc comment, which also covers the two cases that recompile per call
+   * instead (no `executeRaw`, or a statement whose semantics ride on the SQL
+   * object rather than its text).
    *
    * Use `param("name")` in predicates to create parameterized slots,
    * then pass values via `prepared.execute({ name: "value" })`.
@@ -400,6 +454,15 @@ export class ExecutableQuery<
    * @throws Error if no backend is configured
    */
   prepare(): PreparedQuery<R> {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Prepared queries are unavailable inside withCheckedReads().",
+        { operation: "withCheckedReads.prepare" },
+      );
+    }
     if (!this.#config.backend) {
       throw new Error(
         "Cannot prepare query: no backend configured. " +
@@ -561,6 +624,11 @@ export class ExecutableQuery<
       );
     }
 
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) return this.executeChecked(checked.value);
+
     // Phase 1: Try optimized execution
     const optimizedResult = await this.#tryOptimizedExecution();
     if (optimizedResult !== undefined) {
@@ -580,12 +648,96 @@ export class ExecutableQuery<
     );
   }
 
+  /** Returns the first mapped row, preserving an existing zero limit. */
+  async first(): Promise<R | undefined> {
+    const query = this.limit(Math.min(this.#state.limit ?? 1, 1));
+    if (query.#hasParameterReferences())
+      throw new ConfigurationError(
+        "first() requires bound values, not param() references.",
+        { operation: "first" },
+      );
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) {
+      const rows = await query.executeChecked(checked.value);
+      return rows[0];
+    }
+    const rows = await query.#fetchRows(
+      query.#requireBackend(),
+      query.toAst(),
+      "full",
+      "recorded-query-first",
+    );
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+      rows,
+      this.#state.startAlias,
+      this.#state.traversals,
+      this.#selectFn,
+    )[0];
+  }
+
+  /** Counts SQL match rows after grouping, offset, and limit, without running the selector. */
+  count(): Promise<number> {
+    return executeQueryTerminal(this.#config, this.#state, "count");
+  }
+
+  /** Tests whether the bounded SQL relation has a row, without running the selector. */
+  async exists(): Promise<boolean> {
+    return (
+      (await executeQueryTerminal(this.#config, this.#state, "exists")) > 0
+    );
+  }
+
+  /**
+   * Reads rows and the active schema version in one statement snapshot.
+   * Throws SchemaChangedError before invoking the selector on stale rows,
+   * including when the query has no matches. Reload the schema and rebuild
+   * the query before retrying. This does not pin subsequent request reads.
+   * Uses a full projection; relevance and recursive queries are refused.
+   */
+  async executeChecked(
+    expectedSchemaVersion: number | undefined,
+  ): Promise<readonly R[]> {
+    if (this.#hasParameterReferences()) {
+      throw new Error(
+        "Checked reads require bound values, not param() references.",
+      );
+    }
+    const ast = this.toAst();
+    const backend = this.#requireBackend();
+    const rows = await this.#executeOnBackend(
+      backend,
+      executeSchemaCheckedRead({
+        backend,
+        ast,
+        graphId: this.#config.graphId,
+        expectedVersion: expectedSchemaVersion,
+        compile: () =>
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+      }),
+      "recorded-checked-query",
+    );
+    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+      rows,
+      this.#state.startAlias,
+      this.#state.traversals,
+      this.#selectFn,
+    );
+  }
+
   /**
    * Executes the query against a provided backend.
    *
-   * Used by `store.batch()` to run multiple queries over a single connection
-   * (e.g., within a transaction). The full compile → execute → transform
-   * pipeline runs identically to `execute()`, but against the given backend.
+   * Used by `store.batch()` to run several queries in sequence against one
+   * target — a transaction on backends that have them, the backend itself
+   * otherwise. The full compile → execute → transform pipeline runs
+   * identically to `execute()`, but against the given backend.
+   *
+   * Costs one statement, or two when the selective-field path runs and its
+   * mapping then falls back: `#tryOptimizedExecutionOn` detects that only
+   * after its statement has executed, and the caller re-runs the full fetch.
+   * The fallback clears the fast path for this instance.
    */
   async executeOn(
     backend: GraphBackend | TransactionBackend,
@@ -595,6 +747,26 @@ export class ExecutableQuery<
     if (this.#hasParameterReferences()) {
       throw new Error(
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
+      );
+    }
+
+    const checked = getQueryBuilderInternalContext(
+      this.#config,
+    ).expectedSchemaVersion;
+    if (checked !== undefined) {
+      const rows = await executeSchemaCheckedRead({
+        backend,
+        ast,
+        graphId: this.#config.graphId,
+        expectedVersion: checked.value,
+        compile: () =>
+          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+      });
+      return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals,
+        this.#selectFn,
       );
     }
 
@@ -619,6 +791,204 @@ export class ExecutableQuery<
       this.#state.traversals,
       this.#selectFn,
     );
+  }
+
+  /** @internal Set-operation and batch provenance validation. */
+  oneStatementBatchProvenance(): Readonly<{
+    graphId: string;
+    executionTarget: object | undefined;
+  }> {
+    return {
+      graphId: this.#config.graphId,
+      executionTarget:
+        this.#config.backend === undefined ?
+          undefined
+        : backendDerivationRoot(this.#config.backend),
+    };
+  }
+
+  /**
+   * Describes this query as a candidate source for a set-based node update.
+   * Candidate updates use the root node identity, so one concrete root kind is
+   * required even when the query traverses other kinds.
+   */
+  toNodeCandidateSelection(): NodeCandidateSelection {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Queries from withCheckedReads() cannot be used as updateWhere() candidates.",
+        {
+          code: "SET_UPDATE_CANDIDATE_CHECKED_READS_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    const ast = this.toAst();
+    if (hasParameterReferences(ast)) {
+      throw new ConfigurationError(
+        "Set-update candidate queries cannot contain param() references; use concrete predicate values.",
+        {
+          code: "SET_UPDATE_CANDIDATE_PARAMETERS_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    if (ast.groupBy !== undefined || ast.having !== undefined) {
+      throw new ConfigurationError(
+        "Set-update candidate queries cannot use groupBy() or having(); select node rows directly.",
+        {
+          code: "SET_UPDATE_CANDIDATE_GROUPING_UNSUPPORTED",
+          operation: "updateWhere",
+        },
+      );
+    }
+    if (ast.start.kinds.length !== 1) {
+      throw new ConfigurationError(
+        "A set-update candidate query must select one concrete node kind.",
+        {
+          code: "SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED",
+          operation: "updateWhere",
+          candidateKinds: ast.start.kinds,
+          expansion: ast.start.expansion,
+        },
+        {
+          suggestion:
+            this.#state.startRequestedKinds.length === 1 ?
+              'The candidate kind has subclasses or equivalent kinds; pass { expansion: "exact" } to from() to select only the named kind.'
+            : "Run one updateWhere() per node kind, each with a single-kind candidate query.",
+        },
+      );
+    }
+    const kind = ast.start.kinds[0];
+    if (kind === undefined) {
+      throw new ConfigurationError(
+        "A set-update candidate query must have a node source.",
+        { operation: "updateWhere" },
+      );
+    }
+    return {
+      graphId: this.#config.graphId,
+      executionTarget:
+        this.#config.backend === undefined ?
+          undefined
+        : backendDerivationRoot(this.#config.backend),
+      kind,
+      idColumn: `${ast.start.alias}_id`,
+      temporalMode: ast.temporalMode.mode,
+      recordedAsOf: ast.recordedAsOf,
+    };
+  }
+
+  #assertCompatibleSetOperand(
+    other: Readonly<{
+      oneStatementBatchProvenance: () => OneStatementReadProvenance;
+    }>,
+  ): void {
+    const own = this.oneStatementBatchProvenance();
+    const candidate = other.oneStatementBatchProvenance();
+    assertCompatibleSetOperationProvenance(own, candidate);
+  }
+
+  /** @internal Embedding contract consumed by `store.batchOnce()`. */
+  compileOneStatementBatchItem?(): Readonly<{
+    query: CompiledSelectSql;
+    provenance: Readonly<{ graphId: string; executionTarget: object }>;
+    outputNames: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+  }> {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      throw new ConfigurationError(
+        "Queries from withCheckedReads() cannot be embedded in batchOnce().",
+        { operation: "withCheckedReads.batchOnce" },
+      );
+    }
+    if (this.#hasParameterReferences()) {
+      throw new Error(
+        "Query contains param() references. Bind prepared queries before batching.",
+      );
+    }
+    const ast = this.toAst();
+    const batchOrderBy = (ast.orderBy ?? []).map((order, index) => ({
+      column: oneStatementBatchOrderColumn(index),
+      direction: order.direction,
+      nulls: resolveNullOrdering(order),
+    }));
+    const batchAst: QueryAst =
+      batchOrderBy.length === 0 ?
+        ast
+      : {
+          ...ast,
+          projection: {
+            fields: [
+              ...ast.projection.fields,
+              ...(ast.orderBy ?? []).map((order, index) => {
+                // An edge alias's columns live in its traversal's node CTE,
+                // as they do for an edge field a select() projects.
+                const edgeTraversal =
+                  order.field.__type === "field_ref" ?
+                    ast.traversals.find(
+                      (traversal) =>
+                        traversal.edgeAlias ===
+                        requireCursorField(order.field).alias,
+                    )
+                  : undefined;
+                return {
+                  outputName: oneStatementBatchOrderColumn(index),
+                  source: order.field,
+                  ...(edgeTraversal === undefined ?
+                    {}
+                  : { cteAlias: `cte_${edgeTraversal.nodeAlias}` }),
+                };
+              }),
+            ],
+          },
+        };
+    const recursiveOutputNames = batchAst.traversals.flatMap((traversal) => {
+      const variableLength = traversal.variableLength;
+      return variableLength === undefined ?
+          []
+        : [variableLength.depthAlias, variableLength.pathAlias].filter(
+            (name): name is string => name !== undefined,
+          );
+    });
+    return {
+      query: compileQuery(
+        batchAst,
+        this.#config.graphId,
+        this.#compileOptions(),
+      ),
+      provenance: {
+        graphId: this.#config.graphId,
+        executionTarget: backendDerivationRoot(
+          requireDefined(this.#config.backend),
+        ),
+      },
+      outputNames: [
+        ...ast.projection.fields.map((field) => field.outputName),
+        ...recursiveOutputNames.filter(
+          (name) =>
+            !ast.projection.fields.some((field) => field.outputName === name),
+        ),
+      ],
+      orderBy: batchOrderBy,
+      mapRows: (rows) =>
+        mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+          transformPathColumns(rows, this.#state, this.#dialect()),
+          this.#state.startAlias,
+          this.#state.traversals,
+          this.#selectFn,
+        ),
+    };
   }
 
   /**
@@ -719,32 +1089,18 @@ export class ExecutableQuery<
       (traversal) => traversal.optional,
     );
 
+    const presentTrackingRuns = [
+      { mode: "truthy", optionalTraversalAliases: "present" },
+      { mode: "max", optionalTraversalAliases: "present" },
+      { mode: "falsy", optionalTraversalAliases: "present" },
+    ] as const;
     const trackingRuns =
       hasOptionalTraversal ?
-        ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "absent" as const,
-          },
-        ] as const)
-      : ([
-          {
-            mode: "truthy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-          {
-            mode: "falsy" as const,
-            optionalTraversalAliases: "present" as const,
-          },
-        ] as const);
+        [
+          ...presentTrackingRuns,
+          { mode: "falsy", optionalTraversalAliases: "absent" } as const,
+        ]
+      : presentTrackingRuns;
 
     for (const run of trackingRuns) {
       const trackingContext = createTrackingContext(this.#state, tracker, {
@@ -755,14 +1111,15 @@ export class ExecutableQuery<
 
       try {
         // Execute the select callback against a lightweight tracking context.
-        // We intentionally ignore the return value: we only need accessed fields.
-        void this.#selectFn(
+        const selected = this.#selectFn(
           trackingContext as SelectContext<
             Aliases,
             EdgeAliases,
             RecursiveAliases
           >,
         );
+        if (containsSelectableAliasObject(selected))
+          tracker.requiresFullRow = true;
       } catch {
         // Best-effort tracking: any runtime errors in the callback (e.g. calling
         // a method on an undefined optional field) should simply disable or
@@ -784,7 +1141,7 @@ export class ExecutableQuery<
     this.#trackSelectFunctionAccesses(tracker);
 
     const accessed = tracker.getAccessedFields();
-    if (accessed.length === 0) {
+    if (tracker.requiresFullRow || accessed.length === 0) {
       this.#cachedSelectiveFieldsForExecute = undefined;
       return undefined;
     }
@@ -810,7 +1167,10 @@ export class ExecutableQuery<
 
     const tracker = new FieldAccessTracker();
     this.#trackSelectFunctionAccesses(tracker);
-    if (!this.#recordOrderByFieldsForPagination(tracker)) {
+    if (
+      tracker.requiresFullRow ||
+      !this.#recordOrderByFieldsForPagination(tracker)
+    ) {
       this.#cachedSelectiveFieldsForPagination = undefined;
       return undefined;
     }
@@ -851,7 +1211,7 @@ export class ExecutableQuery<
     for (const traversal of this.#state.traversals) {
       if (!traversal.optional) continue;
       add(traversal.nodeAlias);
-      add(traversal.edgeAlias);
+      if (traversal.variableLength === undefined) add(traversal.edgeAlias);
     }
 
     return result.toSorted((a, b) => {
@@ -918,44 +1278,31 @@ export class ExecutableQuery<
       throw error;
     }
 
-    let nextCursor: string | undefined;
-    let previousCursor: string | undefined;
-
-    if (orderedRows.length > 0) {
-      try {
-        previousCursor = this.#buildCursorFromSelectiveRow(
-          requireDefined(orderedRows[0]),
-          selectiveFields,
-          "b",
-        );
-        nextCursor = this.#buildCursorFromSelectiveRow(
-          requireDefined(orderedRows.at(-1)),
-          selectiveFields,
-          "f",
-        );
-      } catch (error) {
-        if (error instanceof MissingSelectiveFieldError) {
-          this.#cachedSelectiveFieldsForPagination = undefined;
-          return undefined;
-        }
-        if (error instanceof UnsupportedPredicateError) {
-          this.#cachedSelectiveFieldsForPagination = undefined;
-          return undefined;
-        }
-        throw error;
+    try {
+      return buildPaginatedResultFromRows(
+        data,
+        orderedRows,
+        hasMore,
+        isBackward,
+        cursor,
+        (row, cursorDirection) =>
+          this.#buildCursorFromSelectiveRow(
+            row,
+            selectiveFields,
+            cursorDirection,
+          ),
+      );
+    } catch (error) {
+      if (error instanceof MissingSelectiveFieldError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
       }
+      if (error instanceof UnsupportedPredicateError) {
+        this.#cachedSelectiveFieldsForPagination = undefined;
+        return undefined;
+      }
+      throw error;
     }
-
-    return {
-      data,
-      nextCursor: hasMore || isBackward ? nextCursor : undefined,
-      prevCursor:
-        cursor !== undefined || (isBackward && hasMore) ?
-          previousCursor
-        : undefined,
-      hasNextPage: isBackward ? cursor !== undefined : hasMore,
-      hasPrevPage: isBackward ? hasMore : cursor !== undefined,
-    };
   }
 
   #recordOrderByFieldsForPagination(tracker: FieldAccessTracker): boolean {
@@ -1023,7 +1370,13 @@ export class ExecutableQuery<
       }
     }
 
-    const cursorContext: Record<string, unknown> = {};
+    // Null-prototype: aliases and JSON-pointer segments are caller data, and a
+    // "__proto__" key on an ordinary object would WRITE INTO Object.prototype
+    // (global pollution) instead of creating an entry. See
+    // store/transaction-receipt.ts createCountBucket for the same rule.
+    const cursorContext: Record<string, unknown> = Object.create(
+      null,
+    ) as Record<string, unknown>;
 
     for (const spec of this.#paginationOrderBy()) {
       const alias = spec.field.alias;
@@ -1042,8 +1395,23 @@ export class ExecutableQuery<
           throw new MissingSelectiveFieldError(alias, fieldName);
         }
 
-        const aliasObject = this.#getOrCreateAliasObject(cursorContext, alias);
-        aliasObject[fieldName] = nullToUndefined(row[outputName]);
+        // Placed where a selectable node or edge holds the column, the one
+        // shape `extractCursorValue` reads for both selections.
+        const location = systemColumnSelectedPath(fieldName) ?? [fieldName];
+        let container = this.#getOrCreateAliasObject(cursorContext, alias);
+        for (const segment of location.slice(0, -1)) {
+          const nested = container[segment];
+          if (typeof nested === "object" && nested !== null) {
+            container = nested as Record<string, unknown>;
+          } else {
+            const created = Object.create(null) as Record<string, unknown>;
+            container[segment] = created;
+            container = created;
+          }
+        }
+        container[requireDefined(location.at(-1))] = nullToUndefined(
+          row[outputName],
+        );
         continue;
       }
 
@@ -1096,7 +1464,9 @@ export class ExecutableQuery<
         if (typeof existing_ === "object" && existing_ !== null) {
           current = existing_ as Record<string, unknown>;
         } else {
-          const created: Record<string, unknown> = {};
+          const created: Record<string, unknown> = Object.create(
+            null,
+          ) as Record<string, unknown>;
           current[segment] = created;
           current = created;
         }
@@ -1115,7 +1485,10 @@ export class ExecutableQuery<
     if (typeof existing === "object" && existing !== null) {
       return existing as Record<string, unknown>;
     }
-    const created: Record<string, unknown> = {};
+    const created: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
     cursorContext[alias] = created;
     return created;
   }
@@ -1128,34 +1501,96 @@ export class ExecutableQuery<
   }
 
   /**
+   * Whether this query's keyset identifies, and is positioned against, the
+   * completed MATCH ROW rather than the start node alone: it has a traversal.
+   * Pagination refuses a recursive traversal (`refuseRecursivePagination`), so
+   * every traversal that reaches here matches one edge per row.
+   *
+   * The one decision both halves of the keyset read: the tiebreaker
+   * ({@link #paginationOrderBy}) and the cursor's placement
+   * ({@link #cursorFilters}).
+   */
+  #keysetIdentifiesMatchRows(): boolean {
+    return this.#state.traversals.length > 0;
+  }
+
+  /**
    * The ORDER BY used for keyset pagination: the caller's ORDER BY plus a final
-   * unique tiebreaker on the start alias's `id`. Without a unique final key, a
+   * tiebreaker that identifies the RESULT ROW. Without a unique final key, a
    * non-unique sort (e.g. `orderBy("p", "age")` with many equal ages) makes the
    * keyset predicate `age > lastAge` skip every not-yet-returned equal-age row,
-   * silently losing data across pages. The start node's `id` is unique and
-   * always projected, so appending it gives a total order that page boundaries
-   * can split cleanly. Skipped when the caller already orders by the start
-   * alias's `id` (the sort is already total). Every pagination read of ORDER BY
-   * — the emitted sort, the cursor predicate, cursor encoding, and cursor
-   * validation — routes through here so the extra column stays consistent across
-   * the standard and selective-field-optimized paths.
+   * silently losing data across pages.
+   *
+   * A row is one start node together with one match per traversal, so its
+   * identity is the start node's plus, per traversal, the matched edge's id —
+   * an edge id is unique in the graph and determines the node it leads to, and
+   * two parallel edges between one pair of nodes are two rows. The start
+   * node's identity is `(kind, id)` when the start alias spans more than one
+   * kind and `id` alone otherwise. Each component the caller's order does not
+   * already name is appended after it, in traversal order. A query with no
+   * traversal keeps the start node's identity alone.
+   *
+   * The emitted sort, cursor predicate, cursor encoding, and cursor validation
+   * all use this order, including the selective-field-optimized path.
    */
-  #paginationOrderBy(): readonly OrderSpec[] {
-    const orderBy = this.#state.orderBy;
-    const startAlias = this.#state.startAlias;
-    const alreadyTotal = orderBy.some(
-      (spec) =>
-        spec.field.alias === startAlias &&
-        spec.field.path.length === 1 &&
-        spec.field.path[0] === "id" &&
-        spec.field.jsonPointer === undefined,
-    );
-    if (alreadyTotal) return orderBy;
-    const tiebreaker: OrderSpec = {
-      field: { __type: "field_ref", alias: startAlias, path: ["id"] },
-      direction: "asc",
-    };
-    return [...orderBy, tiebreaker];
+  #paginationOrderBy(): readonly (Omit<OrderSpec, "field"> & {
+    field: FieldRef;
+  })[] {
+    const orderBy = this.#state.orderBy.map((order) => ({
+      ...order,
+      field: requireCursorField(order.field),
+    }));
+    function missingIdentityKey(
+      alias: string,
+      fieldName: "kind" | "id",
+      nullable: boolean,
+    ): readonly (OrderSpec & { field: FieldRef })[] {
+      const named = orderBy.some(
+        (spec) =>
+          spec.field.alias === alias &&
+          spec.field.path.length === 1 &&
+          spec.field.path[0] === fieldName &&
+          spec.field.jsonPointer === undefined,
+      );
+      if (named) return [];
+      return [
+        {
+          field: {
+            __type: "field_ref",
+            alias,
+            nullable,
+            path: [fieldName],
+            valueType: "string",
+          },
+          direction: "asc",
+        },
+      ];
+    }
+    function missingNodeIdentity(
+      alias: string,
+      kinds: readonly string[],
+      nullable: boolean,
+    ): readonly (OrderSpec & { field: FieldRef })[] {
+      return [
+        ...(kinds.length > 1 ?
+          missingIdentityKey(alias, "kind", nullable)
+        : []),
+        ...missingIdentityKey(alias, "id", nullable),
+      ];
+    }
+    const tiebreaker = [
+      ...missingNodeIdentity(
+        this.#state.startAlias,
+        this.#state.startKinds,
+        false,
+      ),
+      ...(this.#keysetIdentifiesMatchRows() ?
+        this.#state.traversals.flatMap((traversal) =>
+          missingIdentityKey(traversal.edgeAlias, "id", traversal.optional),
+        )
+      : []),
+    ];
+    return tiebreaker.length === 0 ? orderBy : [...orderBy, ...tiebreaker];
   }
 
   /**
@@ -1169,6 +1604,13 @@ export class ExecutableQuery<
    * @throws ValidationError if cursor columns don't match query ORDER BY columns
    */
   async paginate(options: PaginateOptions): Promise<PaginatedResult<R>> {
+    this.#refuseCheckedReadSurface("paginate");
+    validatePaginationOptions(this.#state, options, "paginate");
+    if (this.#hasParameterReferences())
+      throw new ConfigurationError(
+        "Cursor pagination requires bound values, not param() references.",
+        { operation: "paginate" },
+      );
     if (!this.#config.backend) {
       throw new Error(
         "Cannot execute query: no backend configured. " +
@@ -1264,6 +1706,110 @@ export class ExecutableQuery<
   }
 
   /**
+   * Builds a cold cursor-page read that can execute independently or as one
+   * member of `store.batchOnce()`.
+   */
+  page(
+    options: PaginateOptions,
+  ): CompiledOneStatementRead<PaginatedResult<R>> &
+    Required<Pick<OneStatementBatchableQuery<PaginatedResult<R>>, "execute">> {
+    this.#refuseCheckedReadSurface("page");
+    const pageOptions = { ...options };
+    validatePaginationOptions(this.#state, pageOptions, "page");
+    if (this.#hasParameterReferences())
+      throw new ConfigurationError(
+        "Cursor pagination requires bound values, not param() references.",
+        { operation: "page" },
+      );
+    if (!this.#config.backend) {
+      throw new Error(
+        "Cannot build page read: no backend configured. " +
+          "Use store.query() or pass a backend to createQueryBuilder().",
+      );
+    }
+    if (this.#state.orderBy.length === 0) {
+      throw new ValidationError(
+        "Cursor pagination requires ORDER BY. Add .orderBy() before .page()",
+        {
+          issues: [
+            {
+              path: "orderBy",
+              message: "ORDER BY is required for cursor pagination",
+            },
+          ],
+        },
+        {
+          suggestion: `Add .orderBy(alias, field) before .page() to specify sort order.`,
+        },
+      );
+    }
+
+    const isBackward =
+      pageOptions.last !== undefined || pageOptions.before !== undefined;
+    const pageLimit =
+      pageOptions.first ?? pageOptions.last ?? DEFAULT_PAGINATION_LIMIT;
+    const cursor = pageOptions.after ?? pageOptions.before;
+    const paginationOrderBy = this.#paginationOrderBy();
+    const cursorData = cursor === undefined ? undefined : decodeCursor(cursor);
+    if (cursorData !== undefined)
+      validateCursorColumns(cursorData, paginationOrderBy);
+    const direction = isBackward ? "backward" : "forward";
+    const orderBy = adjustOrderByForDirection(paginationOrderBy, direction);
+    const pagedQuery = new ExecutableQuery(
+      this.#config,
+      {
+        ...this.#state,
+        ...this.#cursorFilters(cursorData, paginationOrderBy, direction),
+        orderBy,
+        limit: pageLimit + 1,
+        offset: undefined,
+      },
+      this.#selectFn,
+    );
+
+    return {
+      execute: () => this.paginate(pageOptions),
+      compileOneStatementBatchItem: () => {
+        const item = requireDefined(
+          pagedQuery.compileOneStatementBatchItem?.(),
+        );
+        const cursorOutputNames = orderBy.map((_spec, index) =>
+          oneStatementBatchOrderColumn(index),
+        );
+        function cursorFromRow(
+          row: Record<string, unknown>,
+          cursorDirection: "f" | "b",
+        ): string {
+          return buildCursorFromValues(
+            cursorOutputNames.map((outputName) => row[outputName]),
+            paginationOrderBy,
+            cursorDirection,
+          );
+        }
+        return {
+          ...item,
+          hiddenOutputNames: cursorOutputNames,
+          mapRows: (rows: readonly Record<string, unknown>[]) => {
+            const hasMore = rows.length > pageLimit;
+            const fetchedRows = hasMore ? rows.slice(0, pageLimit) : rows;
+            const orderedRows =
+              isBackward ? fetchedRows.toReversed() : fetchedRows;
+            const data = item.mapRows(orderedRows);
+            return buildPaginatedResultFromRows(
+              data,
+              orderedRows,
+              hasMore,
+              isBackward,
+              cursor,
+              (row, cursorDirection) => cursorFromRow(row, cursorDirection),
+            );
+          },
+        };
+      },
+    };
+  }
+
+  /**
    * Returns an async iterator that streams results in batches.
    *
    * Uses cursor pagination internally for efficient memory usage.
@@ -1273,6 +1819,8 @@ export class ExecutableQuery<
    * @throws ValidationError if ORDER BY is not specified
    */
   stream(options?: StreamOptions): AsyncIterable<R> {
+    this.#refuseCheckedReadSurface("stream");
+    refuseRecursivePagination(this.#state, "stream");
     // Validate ORDER BY is present
     if (this.#state.orderBy.length === 0) {
       throw new ValidationError(
@@ -1294,6 +1842,53 @@ export class ExecutableQuery<
     );
   }
 
+  #refuseCheckedReadSurface(surface: "page" | "paginate" | "stream"): void {
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
+      undefined
+    ) {
+      return;
+    }
+    throw new ConfigurationError(
+      `${surface === "stream" ? "Streaming" : "Pagination"} is unavailable inside withCheckedReads().`,
+      { operation: `withCheckedReads.${surface}` },
+    );
+  }
+
+  /**
+   * This query's filters for one page: unchanged for the first page, with the
+   * cursor applied (`applyCursorFilters`) for every later one. Spread over
+   * the state by `page()` and over the AST by `#executeWithCursor`, so the
+   * two page builders place the cursor identically.
+   */
+  #cursorFilters(
+    cursorData: CursorData | undefined,
+    paginationOrderBy: readonly OrderSpec[],
+    direction: "forward" | "backward",
+  ): Readonly<{
+    predicates: readonly NodePredicate[];
+    resultPredicate?: PredicateExpression;
+  }> {
+    const { predicates, resultPredicate } =
+      cursorData === undefined ?
+        this.#state
+      : applyCursorFilters(
+          {
+            startAlias: this.#state.startAlias,
+            positionsCompletedMatch: this.#keysetIdentifiesMatchRows(),
+            predicates: this.#state.predicates,
+            resultPredicate: this.#state.resultPredicate,
+          },
+          cursorData,
+          paginationOrderBy,
+          direction,
+        );
+    return {
+      predicates,
+      ...(resultPredicate === undefined ? {} : { resultPredicate }),
+    };
+  }
+
   /**
    * Executes a query with cursor conditions applied.
    */
@@ -1305,33 +1900,16 @@ export class ExecutableQuery<
   ): Promise<readonly Record<string, unknown>[]> {
     const ast = this.toAst();
 
-    // Adjust ORDER BY for backward pagination (reverse all directions)
-    let orderBy = this.#paginationOrderBy();
-    if (direction === "backward") {
-      orderBy = orderBy.map((spec) => ({
-        ...spec,
-        direction:
-          spec.direction === "asc" ? ("desc" as const) : ("asc" as const),
-      }));
-    }
+    const orderBy = adjustOrderByForDirection(
+      this.#paginationOrderBy(),
+      direction,
+    );
 
-    // Build cursor predicates if we have cursor data
-    let predicates = [...this.#state.predicates];
-    if (cursorData) {
-      const cursorPredicate = buildCursorPredicate(
-        cursorData,
-        this.#paginationOrderBy(),
-        direction,
-        this.#state.startAlias,
-      );
-      predicates = [...predicates, cursorPredicate];
-    }
-
-    // Apply modified ORDER BY, predicates, and limit to AST (discard offset)
+    // Apply modified ORDER BY, cursor filters, and limit to AST (discard offset)
     const { offset: _discarded, ...astWithoutOffset } = ast;
     const modifiedAst = {
       ...astWithoutOffset,
-      predicates,
+      ...this.#cursorFilters(cursorData, this.#paginationOrderBy(), direction),
       orderBy,
       limit,
       ...(options?.selectiveFields !== undefined && {

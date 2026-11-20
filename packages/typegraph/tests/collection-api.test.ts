@@ -14,8 +14,17 @@ import {
   type EdgeId,
   type NodeId,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  NodeRowLock,
+  TransactionBackend,
+} from "../src/backend/types";
 import { ValidationError } from "../src/errors";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
@@ -62,6 +71,41 @@ const testGraph = defineGraph({
     },
   },
 });
+
+function observeNodeSetPlans(
+  baseBackend: GraphBackend,
+  plans: string[],
+): GraphBackend {
+  function wrapTarget<T extends GraphBackend | TransactionBackend>(
+    target: T,
+  ): T {
+    return deriveBackend<T, Partial<T>>(target, {
+      updateNodeSet(params) {
+        plans.push(
+          params.candidateIds.chunks
+            .filter((chunk) => chunk.kind === "text")
+            .map((chunk) => chunk.value)
+            .join(""),
+        );
+        return requireDefined(target.updateNodeSet)(params);
+      },
+    } as ExactBackendOverlay<T, Partial<T>>);
+  }
+
+  return deriveBackend(baseBackend, {
+    updateNodeSet(params) {
+      plans.push(
+        params.candidateIds.chunks
+          .filter((chunk) => chunk.kind === "text")
+          .map((chunk) => chunk.value)
+          .join(""),
+      );
+      return requireDefined(baseBackend.updateNodeSet)(params);
+    },
+    transaction: (fn, options) =>
+      baseBackend.transaction((target) => fn(wrapTarget(target)), options),
+  } satisfies ExactBackendOverlay<GraphBackend, Partial<GraphBackend>>);
+}
 
 // ============================================================
 // Node Collection Tests (SQLite)
@@ -172,8 +216,9 @@ describe("Node Collections (SQLite)", () => {
     });
 
     it("falls back to individual getNode when backend lacks getNodes", async () => {
-      const { getNodes: _getNodes, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getNodes",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create(
@@ -208,6 +253,289 @@ describe("Node Collections (SQLite)", () => {
     });
   });
 
+  describe("store.nodes.*.compareAndSet()", () => {
+    it("updates only while the id and exact current-value predicate match", async () => {
+      const person = await store.nodes.Person.create({
+        name: "Alice",
+        age: 30,
+      });
+
+      const updated = await store.nodes.Person.compareAndSet(person.id, {
+        expected: { name: "Alice", age: 30 },
+        patch: { age: 31 },
+      });
+      const staleRetry = await store.nodes.Person.compareAndSet(person.id, {
+        expected: { age: 30 },
+        patch: { age: 32 },
+      });
+
+      expect(updated).toBe(true);
+      expect(staleRetry).toBe(false);
+      expect(await store.nodes.Person.getById(person.id)).toMatchObject({
+        name: "Alice",
+        age: 31,
+        meta: { version: 2 },
+      });
+    });
+
+    it("refuses a backend without the dedicated guarded-write port", async () => {
+      const unsupported = createStore(
+        testGraph,
+        projectBackendWithout(backend, ["compareAndSetNode"]),
+      );
+      const person = await unsupported.nodes.Person.create({ name: "Alice" });
+
+      await expect(
+        unsupported.nodes.Person.compareAndSet(person.id, {
+          expected: { name: "Alice" },
+          patch: { age: 31 },
+        }),
+      ).rejects.toMatchObject({
+        details: { code: "COMPARE_AND_SET_UNSUPPORTED" },
+      });
+      expect(await unsupported.nodes.Person.getById(person.id)).toMatchObject({
+        name: "Alice",
+        meta: { version: 1 },
+      });
+    });
+  });
+
+  describe("store.nodes.*.updateWhere()", () => {
+    it("uses candidates directly when no additional base predicate is given", async () => {
+      const plans: string[] = [];
+      const plannedStore = createStore(
+        testGraph,
+        observeNodeSetPlans(backend, plans),
+      );
+      const alice = await plannedStore.nodes.Person.create({
+        name: "Alice",
+        age: 35,
+      });
+      const bob = await plannedStore.nodes.Person.create({
+        name: "Bob",
+        age: 35,
+      });
+      const candidates = plannedStore
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.name.eq("Alice"))
+        .select((query) => query.person.id);
+
+      await expect(
+        plannedStore.nodes.Person.updateWhere({
+          candidates,
+          patch: { age: 36 },
+        }),
+      ).resolves.toEqual({ affectedCount: 1 });
+
+      expect(plans).toHaveLength(1);
+      expect(plans[0]).not.toContain("INTERSECT");
+      await expect(
+        plannedStore.nodes.Person.getById(alice.id),
+      ).resolves.toMatchObject({
+        age: 36,
+      });
+      await expect(
+        plannedStore.nodes.Person.getById(bob.id),
+      ).resolves.toMatchObject({
+        age: 35,
+      });
+    });
+
+    it("ANDs property filters with independent relationship predicates", async () => {
+      const acme = await store.nodes.Company.create({
+        name: "Acme",
+        industry: "technology",
+      });
+      const bank = await store.nodes.Company.create({
+        name: "Bank",
+        industry: "finance",
+      });
+      const alice = await store.nodes.Person.create({ name: "Alice", age: 35 });
+      const bob = await store.nodes.Person.create({ name: "Bob", age: 35 });
+      await store.edges.worksAt.create(alice, acme, { role: "engineer" });
+      await store.edges.worksAt.create(alice, bank, { role: "analyst" });
+      await store.edges.worksAt.create(bob, bank, { role: "engineer" });
+
+      const result = await store.nodes.Person.updateWhere({
+        patch: { age: 36 },
+        where: (person) => person.age.gte(30),
+        exists: [
+          {
+            edgeKind: "worksAt",
+            direction: "out",
+            relatedKind: "Company",
+            whereRelated: (company) =>
+              company.field("industry").string().eq("technology"),
+          },
+          {
+            edgeKind: "worksAt",
+            direction: "out",
+            relatedKind: "Company",
+            whereEdge: (edge) => edge.field("role").string().eq("analyst"),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).age,
+      ).toBe(36);
+      expect(requireDefined(await store.nodes.Person.getById(bob.id)).age).toBe(
+        35,
+      );
+    });
+
+    it("supports a schema property named field in the typed predicate", async () => {
+      const Entry = defineNode("Entry", {
+        schema: z.object({ field: z.string(), selected: z.boolean() }),
+      });
+      const fieldGraph = defineGraph({
+        id: "update_where_field_property",
+        nodes: { Entry: { type: Entry } },
+        edges: {},
+      });
+      const fieldStore = createStore(fieldGraph, createTestBackend());
+      const matching = await fieldStore.nodes.Entry.create({
+        field: "match",
+        selected: false,
+      });
+      const other = await fieldStore.nodes.Entry.create({
+        field: "other",
+        selected: false,
+      });
+
+      const result = await fieldStore.nodes.Entry.updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field.eq("match"),
+      });
+
+      expect(result).toEqual({ affectedCount: 1 });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(matching.id))
+          .selected,
+      ).toBe(true);
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(false);
+
+      await fieldStore.getNodeCollectionOrThrow("Entry").updateWhere({
+        patch: { selected: true },
+        where: (entry) => entry.field("field").string().eq("other"),
+      });
+      expect(
+        requireDefined(await fieldStore.nodes.Entry.getById(other.id)).selected,
+      ).toBe(true);
+    });
+
+    it("requires explicit all and removes optional properties with undefined", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice", age: 35 });
+      await expect(
+        store.nodes.Person.updateWhere({ patch: { age: 36 } }),
+      ).rejects.toThrow("explicit all: true");
+
+      await store.nodes.Person.updateWhere({
+        patch: { age: undefined },
+        all: true,
+      });
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).age,
+      ).toBeUndefined();
+    });
+
+    it("rolls back every row when a complete after-image fails validation", async () => {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store
+          .getNodeCollectionOrThrow("Person")
+          .updateWhere({ patch: { name: undefined }, all: true }),
+      ).rejects.toThrow(ValidationError);
+
+      expect(
+        requireDefined(await store.nodes.Person.getById(alice.id)).name,
+      ).toBe("Alice");
+      expect(
+        requireDefined(await store.nodes.Person.getById(bob.id)).name,
+      ).toBe("Bob");
+    });
+
+    it("replaces uniqueness sidecars without leaking the old key", async () => {
+      const Account = defineNode("Account", {
+        schema: z.object({ email: z.email(), active: z.boolean() }),
+      });
+      const uniqueGraph = defineGraph({
+        id: "update_where_unique",
+        nodes: {
+          Account: {
+            type: Account,
+            unique: [
+              {
+                name: "account_email",
+                fields: ["email"],
+                scope: "kind",
+                collation: "binary",
+              },
+            ],
+          },
+        },
+        edges: {},
+      });
+      const uniqueStore = createStore(uniqueGraph, createTestBackend());
+      await uniqueStore.nodes.Account.create({
+        email: "old@example.com",
+        active: true,
+      });
+
+      await uniqueStore.nodes.Account.updateWhere({
+        patch: { email: "new@example.com" },
+        where: (account) => account.active.eq(true),
+      });
+
+      await expect(
+        uniqueStore.nodes.Account.create({
+          email: "old@example.com",
+          active: false,
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        uniqueStore.nodes.Account.create({
+          email: "new@example.com",
+          active: false,
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("fires one dedicated bulk hook with the affected row count", async () => {
+      const starts: string[] = [];
+      const counts: number[] = [];
+      const hooked = createStore(testGraph, backend, {
+        hooks: {
+          onBulkOperationStart: (context) => starts.push(context.operation),
+          onBulkOperationEnd: (_context, result) =>
+            counts.push(result.affectedCount),
+        },
+      });
+      await hooked.nodes.Person.create({ name: "Alice" });
+      await hooked.nodes.Person.create({ name: "Bob" });
+
+      await hooked.nodes.Person.updateWhere({ patch: { age: 30 }, all: true });
+      const alice = requireDefined(
+        await hooked.nodes.Person.find({
+          where: (person) => person.name.eq("Alice"),
+        }),
+      )[0];
+      await hooked.nodes.Person.compareAndSet(requireDefined(alice).id, {
+        expected: { age: 30 },
+        patch: { age: 31 },
+      });
+
+      expect(starts).toEqual(["updateWhere", "compareAndSet"]);
+      expect(counts).toEqual([2, 1]);
+    });
+  });
+
   describe("store.nodes.*.delete()", () => {
     it("soft-deletes a node", async () => {
       const person = await store.nodes.Person.create({ name: "Alice" });
@@ -221,8 +549,7 @@ describe("Node Collections (SQLite)", () => {
     it("does not open an empty top-level transaction for absent non-history deletes", async () => {
       const baseBackend = backend;
       let transactionCount = 0;
-      const observedBackend: GraphBackend = {
-        ...baseBackend,
+      const observedBackend: GraphBackend = deriveBackend(baseBackend, {
         async transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: Parameters<GraphBackend["transaction"]>[1],
@@ -230,7 +557,7 @@ describe("Node Collections (SQLite)", () => {
           transactionCount++;
           return baseBackend.transaction(fn, options);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
       const missingId = "missing-person" as NodeId<typeof Person>;
 
@@ -272,8 +599,7 @@ describe("Node Collections (SQLite)", () => {
       // Reads may run through backend.execute (Drizzle path) or the cached
       // template's executeRaw fast path; count both so "ran on the tx backend"
       // holds regardless of which path a where-filtered find() takes.
-      const observedBackend: GraphBackend = {
-        ...baseBackend,
+      const observedBackend: GraphBackend = deriveBackend(baseBackend, {
         async execute<T>(
           query: Parameters<GraphBackend["execute"]>[0],
         ): Promise<readonly T[]> {
@@ -289,23 +615,31 @@ describe("Node Collections (SQLite)", () => {
           options?: Parameters<GraphBackend["transaction"]>[1],
         ): Promise<T> {
           return baseBackend.transaction(async (txBackend) => {
-            const observedTxBackend: TransactionBackend = {
-              ...txBackend,
-              async execute<T>(
-                query: Parameters<GraphBackend["execute"]>[0],
-              ): Promise<readonly T[]> {
-                txExecuteCount++;
-                return txBackend.execute<T>(query);
+            const observedTxBackend: TransactionBackend = deriveBackend(
+              txBackend,
+              {
+                async execute<T>(
+                  query: Parameters<GraphBackend["execute"]>[0],
+                ): Promise<readonly T[]> {
+                  txExecuteCount++;
+                  return txBackend.execute<T>(query);
+                },
+                async executeRaw<T>(
+                  sqlText: string,
+                  params: readonly unknown[],
+                ) {
+                  txExecuteCount++;
+                  return requireDefined(txBackend.executeRaw)<T>(
+                    sqlText,
+                    params,
+                  );
+                },
               },
-              async executeRaw<T>(sqlText: string, params: readonly unknown[]) {
-                txExecuteCount++;
-                return requireDefined(txBackend.executeRaw)<T>(sqlText, params);
-              },
-            };
+            );
             return fn(observedTxBackend);
           }, options);
         },
-      };
+      });
 
       const observedStore = createStore(testGraph, observedBackend);
 
@@ -438,8 +772,9 @@ describe("Edge Collections (SQLite)", () => {
     });
 
     it("falls back to individual getEdge when backend lacks getEdges", async () => {
-      const { getEdges: _getEdges, ...rest } = backend;
-      const backendWithoutBatch = rest as GraphBackend;
+      const backendWithoutBatch: GraphBackend = projectBackendWithout(backend, [
+        "getEdges",
+      ]);
       const localStore = createStore(testGraph, backendWithoutBatch);
 
       const alice = await localStore.nodes.Person.create({ name: "Alice" });
@@ -764,6 +1099,45 @@ describe("Bulk Operations (SQLite)", () => {
       expect(resurrected.meta.deletedAt).toBeUndefined();
     });
 
+    it("stores no lower bound for a lone past validTo on a resurrecting upsert", async () => {
+      // A resurrection RESETS the window, so with no `validFrom` accompanying a
+      // historical `validTo` there is no bound to invert against: the write
+      // stamps none, and the row means "ended at T, start unknown" — the same
+      // stored shape a create reaches for the same stated window.
+      //
+      // This case used to REFUSE, on the reasoning that the reset bound was the
+      // write instant. The write no longer chooses an instant that would leave
+      // the row readable at no coordinate, so there is nothing left to refuse.
+      const person = await store.nodes.Person.createFromRecord(
+        { name: "Windowed" },
+        { id: "person-window" },
+      );
+      await store.nodes.Person.delete(person.id);
+
+      const reborn = await store.nodes.Person.upsertByIdFromRecord(
+        "person-window",
+        { name: "Windowed Reborn" },
+        { validTo: "2021-01-01T00:00:00.000Z" },
+      );
+      expect(reborn.meta.validFrom).toBeUndefined();
+      expect(reborn.meta.validTo).toBe("2021-01-01T00:00:00.000Z");
+
+      // Naming the full historical window still stores it verbatim. Tombstoned
+      // again first: the accepted upsert above left the row LIVE, and a live
+      // row's lower bound is history — only a resurrection writes one.
+      await store.nodes.Person.delete(person.id);
+      const resurrected = await store.nodes.Person.upsertByIdFromRecord(
+        "person-window",
+        { name: "Windowed Reborn" },
+        {
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+      );
+      expect(resurrected.id).toBe("person-window");
+      expect(resurrected.meta.validFrom).toBe("2020-01-01T00:00:00.000Z");
+    });
+
     it("rejects invalid data at runtime via Zod validation", async () => {
       const data: Record<string, unknown> = { wrongField: true };
       await expect(
@@ -836,8 +1210,7 @@ describe("Bulk Operations (SQLite)", () => {
         }
       }
 
-      const backendWithCounters: GraphBackend = {
-        ...baseBackend,
+      const backendWithCounters: GraphBackend = deriveBackend(baseBackend, {
         async insertNodeNoReturn(params) {
           nodeNoReturnCalls += 1;
           await insertNodeNoReturnWithFallback(baseBackend, params);
@@ -862,7 +1235,7 @@ describe("Bulk Operations (SQLite)", () => {
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithCounters);
       await localStore.nodes.Person.bulkInsert([
@@ -1033,8 +1406,7 @@ describe("Bulk Operations (SQLite)", () => {
         }
       }
 
-      const backendWithCounters: GraphBackend = {
-        ...baseBackend,
+      const backendWithCounters: GraphBackend = deriveBackend(baseBackend, {
         async insertEdgeNoReturn(params) {
           edgeNoReturnCalls += 1;
           await insertEdgeNoReturnWithFallback(baseBackend, params);
@@ -1059,7 +1431,7 @@ describe("Bulk Operations (SQLite)", () => {
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithCounters);
       const alice = await localStore.nodes.Person.create({ name: "Alice" });
@@ -1101,46 +1473,50 @@ describe("Bulk Operations (SQLite)", () => {
     it("batch-prefetches endpoint existence checks for bulkInsert edge batches", async () => {
       const baseBackend = createSqliteBackend(createTestDatabase());
       let getNodeCalls = 0;
-      let getNodesCalls = 0;
+      let lockNodesCalls = 0;
 
-      const backendWithNodeCounter: GraphBackend = {
-        ...baseBackend,
+      const backendWithNodeCounter: GraphBackend = deriveBackend(baseBackend, {
         async getNode(graphId, kind, id) {
           getNodeCalls += 1;
           return baseBackend.getNode(graphId, kind, id);
         },
-        async getNodes(graphId, kind, ids) {
-          getNodesCalls += 1;
-          return requireDefined(baseBackend.getNodes)(graphId, kind, ids);
+        async lockNodes(graphId, kind, ids, lock) {
+          lockNodesCalls += 1;
+          return requireDefined(baseBackend.lockNodes)(
+            graphId,
+            kind,
+            ids,
+            lock,
+          );
         },
         async transaction(fn, options) {
           return baseBackend.transaction(async (tx) => {
-            const wrappedTx = {
-              ...tx,
+            const wrappedTx = deriveBackend(tx, {
               async getNode(graphId: string, kind: string, id: string) {
                 getNodeCalls += 1;
                 return tx.getNode(graphId, kind, id);
               },
-              async getNodes(
+              async lockNodes(
                 graphId: string,
                 kind: string,
                 ids: readonly string[],
+                lock: NodeRowLock,
               ) {
-                getNodesCalls += 1;
-                return requireDefined(tx.getNodes)(graphId, kind, ids);
+                lockNodesCalls += 1;
+                return tx.lockNodes(graphId, kind, ids, lock);
               },
-            };
+            });
             return fn(wrappedTx);
           }, options);
         },
-      };
+      });
 
       const localStore = createStore(testGraph, backendWithNodeCounter);
       const alice = await localStore.nodes.Person.create({ name: "Alice" });
       const acme = await localStore.nodes.Company.create({ name: "Acme Inc" });
 
       getNodeCalls = 0;
-      getNodesCalls = 0;
+      lockNodesCalls = 0;
       await localStore.edges.worksAt.bulkInsert([
         {
           id: "edge-cache-1",
@@ -1162,12 +1538,12 @@ describe("Bulk Operations (SQLite)", () => {
         },
       ]);
 
-      // The batch is prefetched with one getNodes() call per distinct
+      // The batch is prefetched with one endpoint-locked read per distinct
       // endpoint kind (Person for `from`, Company for `to`) instead of a
       // getNode() probe per edge — zero individual endpoint lookups even
       // though the batch references two distinct nodes across three edges.
       expect(getNodeCalls).toBe(0);
-      expect(getNodesCalls).toBe(2);
+      expect(lockNodesCalls).toBe(2);
     });
   });
 

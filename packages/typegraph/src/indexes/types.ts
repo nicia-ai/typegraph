@@ -190,35 +190,72 @@ export type IndexFieldInput<T> =
   | NonEmptyJsonPointerSegmentsFor<T>
   | JsonPointer;
 
+/** Node system columns accepted by {@link NodeIndexKeyInput}. */
+export const NODE_SYSTEM_COLUMN_NAMES = [
+  "graph_id",
+  "kind",
+  "id",
+  "deleted_at",
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "version",
+] as const;
+
+export const NODE_INDEX_KEY_DIRECTIONS = ["asc", "desc"] as const;
+
+export type NodeSystemColumnName = (typeof NODE_SYSTEM_COLUMN_NAMES)[number];
+
+export type NodeIndexKeyInput<T> =
+  | Readonly<{
+      field: IndexFieldInput<T>;
+      system?: never;
+      direction: "asc" | "desc";
+    }>
+  | Readonly<{
+      field?: never;
+      system: NodeSystemColumnName;
+      direction: "asc" | "desc";
+    }>;
+
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
-  /**
-   * Prop-based key fields. May be empty (or omitted) only if
-   * `coveringFields` or `keySystemColumns` supplies at least one key
-   * column instead — an index needs at least one of `fields`,
-   * `coveringFields`, or `keySystemColumns` to be non-empty.
-   */
-  fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
   coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
-  /**
-   * System columns (e.g. `"id"`) to include in the index key, positioned
-   * after the `scope` prefix and before `fields`/`coveringFields`.
-   *
-   * Needed when an index must serve a join predicate on a system column
-   * TypeGraph's compiled queries filter on directly — e.g. `n.id =
-   * e.from_id` — so the index can be used for an index-only scan instead
-   * of falling back to a heap fetch per candidate row. Must not repeat a
-   * column already implied by `scope`, and must only reference node
-   * system columns (`"from_kind"` / `"from_id"` / `"to_kind"` / `"to_id"`
-   * are edge-only and are rejected).
-   */
-  keySystemColumns?: readonly SystemColumnName[] | undefined;
-  unique?: boolean | undefined;
   name?: string | undefined;
   scope?: IndexScope | undefined;
   where?: IndexWhereInput<NodeIndexWhereBuilder<N>> | undefined;
-  /** Index access method. Default: `"btree"`. See {@link RelationalIndexMethod}. */
-  method?: RelationalIndexMethod | undefined;
-}>;
+}> &
+  (
+    | Readonly<{
+        /** Ordered B-tree keys. */
+        keys: readonly [
+          NodeIndexKeyInput<z.infer<N["schema"]>>,
+          ...NodeIndexKeyInput<z.infer<N["schema"]>>[],
+        ];
+        fields?: never;
+        keySystemColumns?: never;
+        unique?: false | undefined;
+        method?: "btree" | undefined;
+      }>
+    | Readonly<{
+        keys?: never;
+        /**
+         * Prop-based key fields. May be empty (or omitted) only if
+         * `coveringFields` or `keySystemColumns` supplies at least one key
+         * column instead.
+         */
+        fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
+        /**
+         * System columns to include after the scope prefix and before
+         * `fields`/`coveringFields`. Node indexes reject edge-only endpoint
+         * columns and columns already implied by `scope`.
+         */
+        keySystemColumns?: readonly SystemColumnName[] | undefined;
+        unique?: boolean | undefined;
+        /** Index access method. Default: `"btree"`. */
+        method?: RelationalIndexMethod | undefined;
+      }>
+  );
 
 export type EdgeIndexDirection = "out" | "in" | "none";
 
@@ -312,7 +349,32 @@ export type NodeIndexDeclaration = IndexDeclarationBase &
      * that don't use this stay byte-identical to before it existed.
      */
     keySystemColumns?: readonly SystemColumnName[];
+    /** Ordered B-tree keys; absent for legacy field-key declarations. */
+    keys?: readonly (
+      | Readonly<{
+          type: "field";
+          pointer: JsonPointer;
+          valueType: ValueType | undefined;
+          direction: "asc" | "desc";
+        }>
+      | Readonly<{
+          type: "system";
+          column:
+            | "graph_id"
+            | "kind"
+            | "id"
+            | "deleted_at"
+            | "valid_from"
+            | "valid_to"
+            | "created_at"
+            | "updated_at"
+            | "version";
+          direction: "asc" | "desc";
+        }>
+    )[];
   }>;
+
+export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
 
 export type EdgeIndexDeclaration = IndexDeclarationBase &
   Readonly<{

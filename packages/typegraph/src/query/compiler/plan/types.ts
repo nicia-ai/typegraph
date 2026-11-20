@@ -11,10 +11,12 @@ import type {
   VectorSimilarityPredicate,
 } from "../../ast";
 import type { SqlDialect } from "../../dialect";
+import type { DatabaseExpression } from "../../expressions";
 
 export type LogicalPlanNode =
   | ScanPlanNode
   | FilterPlanNode
+  | ResultFilterPlanNode
   | JoinPlanNode
   | AggregatePlanNode
   | SortPlanNode
@@ -51,6 +53,14 @@ export type FilterPlanNode = Readonly<{
   predicates: readonly PredicateExpression[];
 }>;
 
+/** A predicate on complete matches, distinct from alias-local match constraints. */
+export type ResultFilterPlanNode = Readonly<{
+  id: string;
+  input: LogicalPlanNode;
+  op: "result_filter";
+  predicate: PredicateExpression;
+}>;
+
 export type JoinPlanNode = Readonly<{
   direction: TraversalDirection;
   edgeAlias: string;
@@ -67,7 +77,7 @@ export type JoinPlanNode = Readonly<{
 
 export type AggregatePlanNode = Readonly<{
   aggregates: readonly AggregateExpr[];
-  groupBy: readonly FieldRef[];
+  groupBy: readonly (DatabaseExpression | FieldRef)[];
   having?: PredicateExpression;
   id: string;
   input: LogicalPlanNode;

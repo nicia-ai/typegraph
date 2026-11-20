@@ -5,9 +5,17 @@
  * Handles comparisons, string operations, null checks, array/object predicates,
  * and subqueries.
  */
-import { UnsupportedPredicateError } from "../../errors";
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../../backend/capabilities/recursive-traversal";
+import {
+  CompilerInvariantError,
+  UnsupportedPredicateError,
+} from "../../errors";
 import { requireDefined } from "../../utils/presence";
 import {
+  type AggregateExpr,
   type ArrayPredicate,
   type ExistsSubquery,
   type FieldRef,
@@ -23,10 +31,11 @@ import {
 } from "../ast";
 import {
   LIKE_ESCAPE_CHARACTER,
-  likeEscapeClause,
+  nullIfTrailingLikeEscape,
 } from "../dialect/like-escape";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import type { DatabaseExpression } from "../expressions";
 import {
   joinJsonPointers,
   type JsonPointer,
@@ -40,7 +49,17 @@ import {
   isInSubqueryTypeCompatible,
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
-import { type SqlSchema, type VectorSlotMap } from "./schema";
+import { validateAggregateOperand } from "./aggregate-validation";
+import {
+  compileDatabaseExpression,
+  compileLegacyAggregateExpression,
+  type DatabaseExpressionCompilerContext,
+} from "./database-expressions";
+import {
+  type RecordedReadBinding,
+  type SqlSchema,
+  type VectorSlotMap,
+} from "./schema";
 import { type ReadInstantMode } from "./temporal";
 
 const COMPARISON_OP_SQL: Record<string, string> = {
@@ -141,6 +160,24 @@ function normalizeValueType(
 }
 
 /**
+ * The value type a `param()` in a comparison binds as: the parameter's own
+ * declared type when it has one, else the field's.
+ *
+ * Shared so the two things that must agree about it cannot drift — the
+ * compiler picks the `jsonExtract*` variant (and, for a list parameter, the
+ * matching element cast) from this, and `PreparedQuery` validates the caller's
+ * bindings against the same answer.
+ */
+export function resolveParameterValueType(
+  left: FieldRef,
+  right: ParameterRef,
+): ValueType | undefined {
+  return (
+    normalizeValueType(right.valueType) ?? normalizeValueType(left.valueType)
+  );
+}
+
+/**
  * Compiles a field reference to SQL with appropriate type extraction.
  */
 export function compileFieldValue(
@@ -151,8 +188,25 @@ export function compileFieldValue(
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
 ): SqlFragment {
-  const resolved = normalizeValueType(valueType);
   const column = compileFieldColumn(field, cteAlias, cteColumnPrefix);
+  return compileFieldValueFromColumn(
+    field,
+    dialect,
+    valueType,
+    column,
+    pointerOverride,
+  );
+}
+
+/** Applies a field's JSON/value decoding to an already-resolved column token. */
+export function compileFieldValueFromColumn(
+  field: FieldRef,
+  dialect: DialectAdapter,
+  valueType: ValueType | undefined,
+  column: SqlFragment,
+  pointerOverride?: JsonPointer,
+): SqlFragment {
+  const resolved = normalizeValueType(valueType);
 
   if (!isJsonField(field)) {
     return column;
@@ -268,12 +322,23 @@ function resolveLiteralValueTypes(
  */
 function resolveComparisonValueType(
   field: FieldRef,
-  right: LiteralValue | readonly LiteralValue[] | ParameterRef,
+  right: FieldRef | LiteralValue | readonly LiteralValue[] | ParameterRef,
 ): ValueType | undefined {
   if (isParameterRef(right)) {
     return (
       normalizeValueType(right.valueType) ?? normalizeValueType(field.valueType)
     );
+  }
+  if (isFieldReference(right)) {
+    const fieldType = normalizeValueType(field.valueType);
+    const rightType = normalizeValueType(right.valueType);
+    if (fieldType && rightType && fieldType !== rightType) {
+      throw new UnsupportedPredicateError(
+        `Cannot compare ${fieldType} and ${rightType} fields`,
+        { leftValueType: fieldType, rightValueType: rightType },
+      );
+    }
+    return fieldType ?? rightType;
   }
   const literals = Array.isArray(right) ? right : [right];
   const literalType = resolveLiteralValueTypes(literals);
@@ -289,6 +354,14 @@ function resolveComparisonValueType(
   }
 
   return fieldType;
+}
+
+function isFieldReference(value: unknown): value is FieldRef {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Readonly<{ __type?: unknown }>).__type === "field_ref"
+  );
 }
 
 /**
@@ -390,7 +463,7 @@ function compileParameterizedStringPattern(
     }
     case "like":
     case "ilike": {
-      return parameter;
+      return nullIfTrailingLikeEscape(parameter);
     }
     default: {
       return escapeLikePatternParameter(parameter);
@@ -415,6 +488,11 @@ export type PredicateCompilerContext = Readonly<{
   dialect: DialectAdapter;
   schema: SqlSchema;
   compileQuery: (ast: QueryAst, graphId: string) => SqlFragment;
+  compileExpressionSubquery?: (ast: QueryAst) => SqlFragment;
+  compileExpressionOuterReference?: (
+    expression: DatabaseExpression,
+    outerScopeIdentity: symbol,
+  ) => SqlFragment;
   cteColumnPrefix?: string;
   /**
    * Active vector strategy for `field.similarTo(...)` compilation. When
@@ -429,6 +507,7 @@ export type PredicateCompilerContext = Readonly<{
    * `ROW_NUMBER()`.
    */
   windowFunctions: boolean;
+  orderedAggregates?: boolean;
   /**
    * Declared embedding slots `(kind, fieldPath) -> {dimensions, metric,
    * indexType}`. The embeddings CTE consults it to know which kinds in
@@ -451,7 +530,85 @@ export type PredicateCompilerContext = Readonly<{
    * builder's template cache. Absent means `"literal"`.
    */
   readInstant?: ReadInstantMode;
+  /**
+   * Recorded read binding whose `source`/`predicate` seam the temporal
+   * filter pass consults when the query carries a recorded pin. Threaded
+   * from `CompileQueryOptions.recordedReadBinding`.
+   */
+  recordedReadBinding?: RecordedReadBinding;
+  /** Equal-id behavior for historical identity traversal reconstruction. */
+  identitySameIdAcrossKinds?: "fold" | "ignore";
+  /** Registered node kinds allowed to conduct historical identity. */
+  identityRegisteredKinds?: readonly string[];
+  compileFieldExpression?: DatabaseExpressionCompilerContext["compileFieldExpression"];
+  /**
+   * Whether the active backend can compute a bounded transitive closure in
+   * one round trip. Optional per Contract E: a required member here would
+   * churn every predicate-context literal across the compiler's tests for
+   * no added protection, since the only site that reads it today
+   * (`compileVariableLengthQuery`) already asserts its presence.
+   */
+  recursiveTraversal?: RecursiveTraversalVerdict;
+  databaseExpressionAggregates?: boolean;
+  /**
+   * Resolves completed-match fields to the CTE carrying their columns. Read
+   * by database expressions and by the comparison, tuple-comparison and
+   * null-check predicates a keyset cursor is built from; the other predicate
+   * forms are never placed in a completed-match filter.
+   */
+  resolveFieldCteAlias?: FieldCteAliasResolver;
+  /** Final recursive CTE qualifier used by completed-result expressions. */
+  recursiveResultAlias?: string;
 }>;
+
+/**
+ * Returns the compiler context's {@link RecursiveTraversalVerdict}, or
+ * refuses because the plumbing was bypassed: every path that reaches this
+ * function threads the verdict through `CompileQueryOptions` /
+ * `propagateOptions`, so a missing verdict means a caller skipped that
+ * threading, which is a compiler invariant violation, not a capability
+ * refusal.
+ *
+ * @throws {CompilerInvariantError} when `ctx.recursiveTraversal` is undefined.
+ */
+export function requireRecursiveTraversalVerdict(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): RecursiveTraversalVerdict {
+  const verdict = ctx.recursiveTraversal;
+  if (verdict === undefined) {
+    throw new CompilerInvariantError(
+      "recursive traversal verdict missing from compiler context",
+      { operation },
+    );
+  }
+  return verdict;
+}
+
+/**
+ * Refuses a variable-length traversal when the compiler context carries no
+ * {@link RecursiveTraversalVerdict}, or when the verdict says the backend
+ * cannot recurse.
+ *
+ * A missing verdict is never silently treated as supported: every path that
+ * reaches this function threads the verdict through `CompileQueryOptions` /
+ * `propagateOptions`, so its absence means a caller bypassed that plumbing,
+ * which is a compiler invariant violation, not a capability refusal.
+ *
+ * @throws {CompilerInvariantError} when `ctx.recursiveTraversal` is undefined.
+ * @throws {ConfigurationError} when the verdict declares no support.
+ */
+export function assertRecursiveTraversalSupported(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): void {
+  assertRecursiveTraversal(
+    requireRecursiveTraversalVerdict(ctx, operation),
+    operation,
+  );
+}
+
+type FieldCteAliasResolver = (field: FieldRef) => string | undefined;
 
 /**
  * Compiles a predicate expression to SQL.
@@ -466,7 +623,21 @@ export function compilePredicateExpression(
 
   switch (expr.__type) {
     case "comparison": {
-      return compileComparisonPredicate(expr, dialect, cteColumnPrefix);
+      return compileComparisonPredicate(
+        expr,
+        dialect,
+        cteColumnPrefix,
+        ctx.resolveFieldCteAlias,
+      );
+    }
+
+    case "tuple_comparison": {
+      return compileTupleComparisonPredicate(
+        expr,
+        dialect,
+        cteColumnPrefix,
+        ctx.resolveFieldCteAlias,
+      );
     }
 
     case "string_op": {
@@ -489,13 +660,13 @@ export function compilePredicateExpression(
         ) {
           return dialect.ilike(field, pattern);
         }
-        return sql`${field} LIKE ${pattern} ${likeEscapeClause}`;
+        return dialect.like(field, pattern);
       }
 
-      const pattern = compileStringPattern(expr.op, expr.pattern);
-      // Use case-insensitive matching for contains, startsWith, endsWith, and ilike
-      // This ensures consistent behavior across PostgreSQL (case-sensitive LIKE)
-      // and SQLite (case-insensitive LIKE for ASCII)
+      const pattern = sql`${compileStringPattern(expr.op, expr.pattern)}`;
+      // contains, startsWith, endsWith and ilike are case-insensitive; like is
+      // case-sensitive. Both go through the dialect, because SQLite's own LIKE
+      // ignores ASCII case and PostgreSQL's does not.
       if (
         expr.op === "ilike" ||
         expr.op === "contains" ||
@@ -504,18 +675,14 @@ export function compilePredicateExpression(
       ) {
         return dialect.ilike(field, pattern);
       }
-      // Use case-sensitive LIKE only for explicit 'like' operator. The ESCAPE
-      // clause must match the parameterized path (above) and dialect.ilike so a
-      // raw '\%' / '\_' in a user pattern is a literal on SQLite too, not just
-      // on Postgres (whose default LIKE escape is already backslash).
-      return sql`${field} LIKE ${pattern} ${likeEscapeClause}`;
+      return dialect.like(field, pattern);
     }
 
     case "null_check": {
       const field = compileFieldTextValue(
         expr.field,
         dialect,
-        undefined,
+        ctx.resolveFieldCteAlias?.(expr.field),
         undefined,
         cteColumnPrefix,
       );
@@ -581,6 +748,33 @@ export function compilePredicateExpression(
       return sql`NOT (${inner})`;
     }
 
+    case "database_expression_predicate": {
+      return compileDatabaseExpression(expr.expression, {
+        allowAggregates: ctx.databaseExpressionAggregates ?? false,
+        aggregateClause: "predicate",
+        ...(ctx.cteColumnPrefix === undefined ?
+          {}
+        : { cteColumnPrefix: ctx.cteColumnPrefix }),
+        dialect,
+        ...(ctx.compileExpressionSubquery === undefined ?
+          {}
+        : { compileSubquery: ctx.compileExpressionSubquery }),
+        ...(ctx.compileExpressionOuterReference === undefined ?
+          {}
+        : { compileOuterReference: ctx.compileExpressionOuterReference }),
+        ...(ctx.compileFieldExpression === undefined ?
+          {}
+        : { compileFieldExpression: ctx.compileFieldExpression }),
+        resolveFieldCteAlias(field) {
+          if (ctx.resolveFieldCteAlias !== undefined)
+            return ctx.resolveFieldCteAlias(field);
+          return ctx.cteColumnPrefix === undefined ?
+              `cte_${field.alias}`
+            : undefined;
+        },
+      });
+    }
+
     case "array_op": {
       return compileArrayPredicate(expr, dialect, cteColumnPrefix);
     }
@@ -621,24 +815,32 @@ function compileComparisonPredicate(
     __type: "comparison";
     op: string;
     left: FieldRef;
-    right: LiteralValue | readonly LiteralValue[] | ParameterRef;
+    right: FieldRef | LiteralValue | readonly LiteralValue[] | ParameterRef;
   },
   dialect: DialectAdapter,
   cteColumnPrefix?: string,
+  resolveFieldCteAlias?: FieldCteAliasResolver,
 ): SqlFragment {
   // Handle ParameterRef on the right side
   if (isParameterRef(expr.right)) {
-    const parameterValueType =
-      normalizeValueType(expr.right.valueType) ??
-      normalizeValueType(expr.left.valueType);
+    const parameterValueType = resolveParameterValueType(expr.left, expr.right);
     const left = compileFieldValue(
       expr.left,
       dialect,
       parameterValueType,
-      undefined,
+      resolveFieldCteAlias?.(expr.left),
       undefined,
       cteColumnPrefix,
     );
+    if (expr.op === "in" || expr.op === "notIn") {
+      return compileListParameterPredicate(
+        left,
+        expr.right.name,
+        parameterValueType,
+        expr.op === "notIn",
+        dialect,
+      );
+    }
     const opSql = COMPARISON_OP_SQL[expr.op];
     if (!opSql) {
       throw new UnsupportedPredicateError(
@@ -660,12 +862,17 @@ function compileComparisonPredicate(
     expr.left,
     dialect,
     valueType,
-    undefined,
+    resolveFieldCteAlias?.(expr.left),
     undefined,
     cteColumnPrefix,
   );
 
   if (expr.op === "in" || expr.op === "notIn") {
+    if (isFieldReference(expr.right)) {
+      throw new UnsupportedPredicateError(
+        `${expr.op}() does not support a field-reference operand`,
+      );
+    }
     const values: readonly LiteralValue[] =
       Array.isArray(expr.right) ? expr.right : [expr.right as LiteralValue];
     if (values.length === 0) {
@@ -679,6 +886,23 @@ function compileComparisonPredicate(
 
   // For single-value comparisons, extract the literal value
   const right = expr.right;
+  if (isFieldReference(right)) {
+    const rightValue = compileFieldValue(
+      right,
+      dialect,
+      valueType,
+      resolveFieldCteAlias?.(right),
+      undefined,
+      cteColumnPrefix,
+    );
+    const opSql = COMPARISON_OP_SQL[expr.op];
+    if (!opSql) {
+      throw new UnsupportedPredicateError(
+        `Comparison operation "${expr.op}" is not supported`,
+      );
+    }
+    return sql`${left} ${sql.raw(opSql)} ${rightValue}`;
+  }
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- Type narrowing with Array.isArray
   const rightValue: LiteralValue =
     Array.isArray(right) ? requireDefined(right[0]) : right;
@@ -691,6 +915,98 @@ function compileComparisonPredicate(
     );
   }
   return sql`${left} ${sql.raw(opSql)} ${convertedRight}`;
+}
+
+function compileTupleComparisonPredicate(
+  expr: Extract<PredicateExpression, { __type: "tuple_comparison" }>,
+  dialect: DialectAdapter,
+  cteColumnPrefix?: string,
+  resolveFieldCteAlias?: FieldCteAliasResolver,
+): SqlFragment {
+  if (expr.fields.length !== expr.values.length)
+    throw new UnsupportedPredicateError(
+      "Tuple comparisons require equally sized field and value tuples",
+    );
+  const fields = expr.fields.map((field, index) =>
+    compileFieldValue(
+      field,
+      dialect,
+      resolveComparisonValueType(field, requireDefined(expr.values[index])),
+      resolveFieldCteAlias?.(field),
+      undefined,
+      cteColumnPrefix,
+    ),
+  );
+  const values = expr.values.map(
+    (value) => sql`${convertValueForSql(value.value, dialect)}`,
+  );
+  if (dialect.rowValueComparison === undefined)
+    return compileTupleComparisonFallback(expr.op, fields, values);
+  return dialect.rowValueComparison(
+    expr.op === "gt" ? ">" : "<",
+    fields,
+    values,
+  );
+}
+
+/** Preserves lexicographic cursor semantics for adapters without row values. */
+function compileTupleComparisonFallback(
+  operator: "gt" | "lt",
+  fields: readonly SqlFragment[],
+  values: readonly SqlFragment[],
+): SqlFragment {
+  const comparison = sql.raw(operator === "gt" ? ">" : "<");
+  const terms = fields.map((field, index) => {
+    const prefix = fields
+      .slice(0, index)
+      .map(
+        (prefixField, prefixIndex) =>
+          sql`${prefixField} = ${requireDefined(values[prefixIndex])}`,
+      );
+    const currentValue = requireDefined(values[index]);
+    const current = sql`${field} ${comparison} ${currentValue}`;
+    return prefix.length === 0 ?
+        current
+      : sql`(${sql.join([...prefix, current], sql` AND `)})`;
+  });
+  return sql`(${sql.join(terms, sql` OR `)})`;
+}
+
+/**
+ * Compiles `field.in(param("ids"))` / `field.notIn(param("ids"))`.
+ *
+ * The whole list rides on ONE placeholder — the dialect unpacks it — so the
+ * emitted SQL text is independent of how many elements the caller eventually
+ * binds. That is what lets a prepared query compile once and serve every
+ * arity from the same cached template, including the empty list (which yields
+ * an empty relation, hence `IN` false / `NOT IN` true, matching the literal
+ * form's short circuit).
+ */
+function compileListParameterPredicate(
+  left: SqlFragment,
+  parameterName: string,
+  elementType: ValueType | undefined,
+  negated: boolean,
+  dialect: DialectAdapter,
+): SqlFragment {
+  if (
+    elementType === "array" ||
+    elementType === "object" ||
+    elementType === "embedding"
+  ) {
+    throw new UnsupportedPredicateError(
+      `IN/NOT IN is not supported for ${elementType} values`,
+      { valueType: elementType },
+      {
+        suggestion:
+          "Use scalar fields (string/number/boolean/date) in IN/NOT IN predicates.",
+      },
+    );
+  }
+  return dialect.inListParameter(left, sql.placeholder(parameterName), {
+    negated,
+    elementType,
+  });
 }
 
 /**
@@ -824,7 +1140,7 @@ function compileObjectPredicate(
  */
 type AggregateExprInput = Readonly<{
   __type: "aggregate";
-  function: string;
+  function: AggregateExpr["function"];
   field: FieldRef;
 }>;
 
@@ -860,39 +1176,13 @@ function compileAggregateExpr(
   expr: AggregateExprInput,
   dialect: DialectAdapter,
 ): SqlFragment {
-  const cteAlias = `cte_${expr.field.alias}`;
-  const field = compileFieldValue(
-    expr.field,
+  validateAggregateOperand(expr);
+  return compileLegacyAggregateExpression(expr, {
     dialect,
-    expr.field.valueType,
-    cteAlias,
-  );
-
-  switch (expr.function) {
-    case "count": {
-      return sql`COUNT(${field})`;
-    }
-    case "countDistinct": {
-      return sql`COUNT(DISTINCT ${field})`;
-    }
-    case "sum": {
-      return sql`SUM(${field})`;
-    }
-    case "avg": {
-      return sql`AVG(${field})`;
-    }
-    case "min": {
-      return sql`MIN(${field})`;
-    }
-    case "max": {
-      return sql`MAX(${field})`;
-    }
-    default: {
-      throw new UnsupportedPredicateError(
-        `Unknown aggregate function: ${expr.function}`,
-      );
-    }
-  }
+    resolveFieldCteAlias() {
+      return `cte_${expr.field.alias}`;
+    },
+  });
 }
 
 /**
@@ -1020,6 +1310,7 @@ function extractStructuralPredicates<T extends PredicateExpression>(
         return;
       }
       case "comparison":
+      case "tuple_comparison":
       case "string_op":
       case "null_check":
       case "between":
@@ -1030,6 +1321,9 @@ function extractStructuralPredicates<T extends PredicateExpression>(
       case "in_subquery":
       case "vector_similarity":
       case "fulltext_match": {
+        return;
+      }
+      case "database_expression_predicate": {
         return;
       }
     }

@@ -1,6 +1,7 @@
 import { type SQL as DrizzleSql, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
+import { CompilerInvariantError, ConfigurationError } from "../../../errors";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import {
   D1_MAX_BIND_PARAMETERS,
@@ -8,6 +9,7 @@ import {
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
+import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
@@ -19,6 +21,9 @@ import {
 } from "./types";
 
 const DEFAULT_PREPARED_STATEMENT_CACHE_MAX = 256;
+
+export const ORDERED_AGGREGATE_PROBE_SQL =
+  "SELECT json_group_array(value ORDER BY value) FROM (SELECT 1 AS value)";
 
 type PreparedAllStatement = Readonly<{
   all: (...params: readonly unknown[]) => readonly unknown[];
@@ -41,6 +46,17 @@ type SqliteClientWithPrepare = Readonly<{
 }>;
 
 type SqliteClientCarrier = Readonly<{ $client?: unknown }>;
+
+type D1PreparedStatement = Readonly<{
+  bind: (...params: readonly unknown[]) => D1PreparedStatement;
+}>;
+
+type D1Client = Readonly<{
+  prepare: (sqlText: string) => D1PreparedStatement;
+  batch: (
+    statements: readonly D1PreparedStatement[],
+  ) => Promise<readonly unknown[]>;
+}>;
 
 type DurableObjectSqlApi = Readonly<{
   exec: (...args: readonly unknown[]) => unknown;
@@ -121,6 +137,8 @@ export type SqliteExecutionProfile = Readonly<{
    * 999 floor when the limit cannot be probed (async/remote drivers).
    */
   maxBindParameters: number;
+  /** Whether this connection accepts ORDER BY within aggregate calls. */
+  orderedAggregates: boolean;
   supportsCompiledExecution: boolean;
   transactionMode: SqliteTransactionMode;
 }>;
@@ -143,6 +161,67 @@ export type SqliteExecutionAdapter = Readonly<
     ) => Promise<void>;
   }
 >;
+
+function isD1Client(client: unknown): client is D1Client {
+  if (typeof client !== "object" || client === null) return false;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return (
+    typeof candidate["prepare"] === "function" &&
+    typeof candidate["batch"] === "function"
+  );
+}
+
+function rowsFromBatchResult(result: unknown): readonly unknown[] {
+  if (typeof result !== "object" || result === null) {
+    throw new CompilerInvariantError(
+      "SQLite atomic batch returned a malformed result slot.",
+      { resultType: typeof result },
+    );
+  }
+  const candidate = result as Readonly<Record<string, unknown>>;
+  if (Array.isArray(candidate["results"])) return candidate["results"];
+  if (Array.isArray(candidate["rows"])) return candidate["rows"];
+  throw new CompilerInvariantError(
+    "SQLite atomic batch returned a result slot without rows.",
+    { keys: Object.keys(candidate) },
+  );
+}
+
+function assertBatchStatementWithinBindLimit(
+  statement: CompiledSqlQuery,
+  maxBindParameters: number,
+): void {
+  if (statement.params.length <= maxBindParameters) return;
+  throw new ConfigurationError(
+    `SQLite statement uses ${statement.params.length} bound parameters, exceeding ` +
+      `this backend's limit of ${maxBindParameters}.`,
+    {
+      capability: "maxBindParameters",
+      maxBindParameters,
+      parameterCount: statement.params.length,
+    },
+    {
+      suggestion:
+        "Split the operation into smaller batches or lower the batch size before retrying.",
+    },
+  );
+}
+
+type SqliteAtomicBatchClient =
+  | Readonly<{ kind: "d1"; client: D1Client }>
+  | Readonly<{ kind: "libsql"; client: LibsqlClient }>;
+
+function resolveAtomicBatchClient(
+  db: AnySqliteDatabase,
+  hostedPlatform: SqliteHostedPlatform | undefined,
+): SqliteAtomicBatchClient | undefined {
+  const client = (db as SqliteClientCarrier).$client;
+  if (hostedPlatform === "d1" && isD1Client(client)) {
+    return { kind: "d1", client };
+  }
+  if (isLibsqlClient(client)) return { kind: "libsql", client };
+  return undefined;
+}
 
 function getSessionName(db: AnySqliteDatabase): string | undefined {
   const databaseWithSession = db as DatabaseWithSession;
@@ -343,13 +422,106 @@ function detectMaxBindParameters(
   }
 }
 
+/**
+ * The single spelling of "this object prepares statements": returns it as a
+ * property bag when it does, `undefined` otherwise. Every driver predicate
+ * below and {@link resolveSqliteClient} read it, so "prepare-capable" cannot
+ * drift between the execution path and the serialized-resource marking.
+ */
+function preparingClient(
+  client: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (typeof client !== "object" || client === null) return undefined;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return typeof candidate["prepare"] === "function" ? candidate : undefined;
+}
+
+/** Whether every named member of `client` is a function. */
+function hasMethods(
+  client: Readonly<Record<string, unknown>>,
+  methods: readonly string[],
+): boolean {
+  return methods.every((method) => typeof client[method] === "function");
+}
+
+/**
+ * Whether a driver client is better-sqlite3's `Database`.
+ *
+ * `pragma` is the discriminator: better-sqlite3 exposes it as a method, and
+ * none of the other prepare-capable SQLite clients (bun:sqlite, sql.js,
+ * node:sqlite) has any counterpart. Duck-typed rather than `instanceof`, so
+ * the native addon is never imported by this bundler-friendly module.
+ */
+export function isBetterSqlite3Client(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return candidate !== undefined && hasMethods(candidate, ["pragma"]);
+}
+
+/**
+ * Whether a driver client is a `bun:sqlite` `Database` — what
+ * `drizzle-orm/bun-sqlite` exposes as `$client`.
+ *
+ * ONE synchronous connection: every statement from every wrapper over it runs
+ * on it, in order, exactly like better-sqlite3.
+ *
+ * Structural, never the session's constructor name (which bundlers rename):
+ * verified against `bun-types` 1.3.x `bun:sqlite`, a `Database` carries
+ * `query` (the cached-statement factory better-sqlite3 does not have),
+ * `prepare`, `run`/`exec`, `serialize`, and a `filename` string — where
+ * better-sqlite3 names that property `name` and sql.js has neither. The
+ * combination is not satisfied by any other client this package can meet.
+ */
+export function isBunSqliteClient(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return (
+    candidate !== undefined &&
+    hasMethods(candidate, ["query", "run", "exec", "serialize"]) &&
+    typeof candidate["filename"] === "string"
+  );
+}
+
+/**
+ * Whether a driver client is a `sql.js` `Database` — what
+ * `drizzle-orm/sql-js` takes as its client.
+ *
+ * ONE in-WASM database handle, executed synchronously in-process, so two
+ * wrappers over it serialize exactly as two wrappers over one better-sqlite3
+ * handle do.
+ *
+ * Structural evidence (verified against `@types/sql.js` 1.4.x): `export`
+ * (dump the database to bytes) and `getRowsModified` are sql.js's own API and
+ * exist on no other SQLite client — better-sqlite3 and bun:sqlite spell the
+ * dump `serialize` and have no rows-modified method at all — alongside the
+ * `prepare`/`exec`/`run` trio every driver has.
+ */
+export function isSqlJsClient(client: unknown): boolean {
+  const candidate = preparingClient(client);
+  return (
+    candidate !== undefined &&
+    hasMethods(candidate, ["exec", "run", "export", "getRowsModified"])
+  );
+}
+
+/**
+ * Returns the driver client a Drizzle SQLite database prepares statements on
+ * for TypeGraph's COMPILED execution path, or `undefined` when it has none it
+ * can drive.
+ *
+ * sql.js is excluded deliberately: its `prepare` returns a sql.js `Statement`
+ * (`bind`/`step`/`getAsObject`/`free`) with no `all()`, so the compiled path's
+ * `prepared.all(...params)` would throw on the first statement. Drizzle's own
+ * sql-js session drives that statement shape correctly, so an excluded client
+ * falls back to the Drizzle path and works instead of failing — the abstention
+ * is what makes the advertised sql.js support real. Every other
+ * prepare-capable client returns statements with `all()` (better-sqlite3,
+ * bun:sqlite).
+ */
 function resolveSqliteClient(
   db: AnySqliteDatabase,
 ): SqliteClientWithPrepare | undefined {
   const sqliteClient = (db as SqliteClientCarrier).$client;
-  if (typeof sqliteClient !== "object" || sqliteClient === null) return;
-  const candidate = sqliteClient as Record<string, unknown>;
-  if (typeof candidate["prepare"] !== "function") return;
+  if (preparingClient(sqliteClient) === undefined) return;
+  if (isSqlJsClient(sqliteClient)) return;
   return sqliteClient as SqliteClientWithPrepare;
 }
 
@@ -362,6 +534,18 @@ function getOrCreatePreparedStatement(
   return getOrCreateLru(cache, sqlText, cacheMax, () =>
     sqliteClient.prepare(sqlText),
   );
+}
+
+function detectOrderedAggregates(
+  sqliteClient: SqliteClientWithPrepare | undefined,
+): boolean {
+  if (sqliteClient === undefined) return false;
+  try {
+    sqliteClient.prepare(ORDERED_AGGREGATE_PROBE_SQL);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Uses unconditional `await` because Drizzle returns SQLiteRaw thenables
@@ -421,18 +605,52 @@ export function createSqliteExecutionAdapter(
     sqliteClient,
     hardMaxBindParameters,
   );
+  const orderedAggregates = detectOrderedAggregates(sqliteClient);
+  const atomicBatchClient = resolveAtomicBatchClient(db, hostedPlatform);
 
   const profile: SqliteExecutionProfile = {
     ...(hostedPlatform === undefined ? {} : { hostedPlatform }),
     ...(hardMaxBindParameters === undefined ? {} : { hardMaxBindParameters }),
     isSync,
     maxBindParameters,
+    orderedAggregates,
     supportsCompiledExecution: sqliteClient !== undefined,
     transactionMode,
   };
 
   const compile = (query: ExecutableSql): CompiledSqlQuery =>
     compileQueryWithDialect(db, query, "SQLite");
+
+  const executeAtomicBatch =
+    atomicBatchClient === undefined ? undefined : (
+      async function executeSqliteAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertBatchStatementWithinBindLimit(statement, maxBindParameters);
+        }
+        if (statements.length === 0) return [];
+
+        const results =
+          atomicBatchClient.kind === "d1" ?
+            await atomicBatchClient.client.batch(
+              statements.map((statement) =>
+                atomicBatchClient.client
+                  .prepare(statement.sql)
+                  .bind(...statement.params),
+              ),
+            )
+          : await atomicBatchClient.client.batch(
+              statements.map((statement) => ({
+                sql: statement.sql,
+                args: [...statement.params],
+              })),
+            );
+        return results.map(
+          (result) => rowsFromBatchResult(result) as readonly TRow[],
+        );
+      }
+    );
 
   if (sqliteClient !== undefined) {
     const client = sqliteClient;
@@ -508,6 +726,7 @@ export function createSqliteExecutionAdapter(
       executeCompiled,
       executeCompiledRun,
       executePreparedRunBatch,
+      ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
       prepare(sqlText: string): PreparedSqlStatement {
         return createPreparedStatementExecutor(
           client,
@@ -531,6 +750,7 @@ export function createSqliteExecutionAdapter(
         isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
       );
     },
+    ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     profile,
   };
 }

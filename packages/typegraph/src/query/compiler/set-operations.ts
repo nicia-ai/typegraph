@@ -27,6 +27,7 @@ import type { SetOperationType } from "../ast";
 import {
   type ComposableQuery,
   type FieldRef,
+  type OrderSpec,
   type ProjectedField,
   type Projection,
   type QueryAst,
@@ -35,8 +36,10 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
+import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { emitSetOperationQuerySql } from "./emitter";
+import { compileLimitOffsetClauses } from "./limit-offset";
 import { runCompilerPass } from "./passes";
 import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 
@@ -57,6 +60,13 @@ const OPERATOR_MAP: Record<SetOperationType, string> = {
   intersect: "INTERSECT",
   except: "EXCEPT",
 };
+
+/** One closed operator vocabulary for graph and projected relation composition. */
+export function setOperationKeyword(operator: SetOperationType): string {
+  if (!Object.hasOwn(OPERATOR_MAP, operator))
+    throw new UnsupportedPredicateError("Unsupported set-operation operator");
+  return OPERATOR_MAP[operator];
+}
 
 type SetOperationPassState = Readonly<{
   dialect: DialectAdapter;
@@ -204,7 +214,7 @@ function compileSetOperationCore(
     dialect,
   );
 
-  const opSql = sql.raw(OPERATOR_MAP[op.operator]);
+  const opSql = sql.raw(setOperationKeyword(op.operator));
 
   return sql`${dialect.wrapSetOperationOperand(left)} ${opSql} ${dialect.wrapSetOperationOperand(right)}`;
 }
@@ -299,9 +309,12 @@ function normalizeFieldRefKey(field: FieldRef): string {
  * Uses normalized keys to handle equivalent field representations.
  */
 function matchFieldToProjection(
-  field: FieldRef,
+  field: OrderSpec["field"],
   projection: Projection,
 ): ProjectedField | undefined {
+  if (field.__type === "database_expression") {
+    return projection.fields.find((projected) => projected.source === field);
+  }
   const targetKey = normalizeFieldRefKey(field);
 
   for (const projected of projection.fields) {
@@ -324,7 +337,7 @@ function matchFieldToProjection(
  * For set operations, ORDER BY must reference output column names from
  * the compound result, not internal CTE columns. This function:
  * 1. Maps each ORDER BY field to its output name from the leftmost projection
- * 2. Uses IS NULL emulation for consistent NULLS FIRST/LAST across dialects
+ * 2. Applies the requested NULLS FIRST/LAST placement
  * 3. Throws a descriptive error if an ORDER BY field isn't in the projection
  */
 function buildSetOperationSuffixClauses(
@@ -354,7 +367,9 @@ function buildSetOperationSuffixClauses(
       if (!projected) {
         // Build a descriptive error message
         const fieldDesc =
-          orderSpec.field.jsonPointer ?
+          orderSpec.field.__type === "database_expression" ?
+            "database expression"
+          : orderSpec.field.jsonPointer ?
             `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
           : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
         const availableFields = projection.fields
@@ -369,33 +384,15 @@ function buildSetOperationSuffixClauses(
 
       // Use output column name with proper quoting
       const columnRef = sql.raw(dialect.quoteIdentifier(projected.outputName));
-      const dir = sql.raw(orderSpec.direction.toUpperCase());
-
-      // Handle nulls with IS NULL emulation for cross-dialect consistency
       // Default: ASC → NULLS LAST, DESC → NULLS FIRST
-      const nulls =
-        orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-      const nullsDir = sql.raw(nulls === "first" ? "DESC" : "ASC");
-
-      // Emulate NULLS FIRST/LAST: (col IS NULL) ASC/DESC, col DIR
-      orderParts.push(
-        sql`(${columnRef} IS NULL) ${nullsDir}`,
-        sql`${columnRef} ${dir}`,
-      );
+      const nulls = resolveNullOrdering(orderSpec);
+      orderParts.push(compileOrderTerm(columnRef, orderSpec.direction, nulls));
     }
 
     clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
   }
 
-  // Handle LIMIT
-  if (op.limit !== undefined) {
-    clauses.push(sql`LIMIT ${op.limit}`);
-  }
-
-  // Handle OFFSET
-  if (op.offset !== undefined) {
-    clauses.push(sql`OFFSET ${op.offset}`);
-  }
+  clauses.push(...compileLimitOffsetClauses(op.limit, op.offset, dialect));
 
   return clauses;
 }

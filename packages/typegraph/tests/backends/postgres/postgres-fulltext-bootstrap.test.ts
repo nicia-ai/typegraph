@@ -35,21 +35,21 @@ import {
   defineNode,
   searchable,
   StoreNotInitializedError,
-  tsvectorStrategy,
 } from "../../../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../../../src/backend";
 import {
   generatePostgresDDL,
   generatePostgresMigrationSQL,
 } from "../../../src/backend/drizzle/ddl";
+import { tsvectorStrategy } from "../../../src/backend/postgres";
 import {
   createPostgresBackend,
   tables as defaultTables,
 } from "../../../src/backend/postgres";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let pool: Pool | undefined;
 let postgresAvailable = false;
@@ -144,10 +144,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
       if (!postgresAvailable || !pool) return;
       await dropFulltextTable(pool);
       // Each test starts genuinely uninitialized: drop the durable
-      // marker a prior test's createStoreWithSchema may have written.
+      // physical attestation and graph activation a prior test's
+      // createStoreWithSchema may have written.
       await pool.query(
-        `DELETE FROM ${CONTRIB_MAT_TABLE} ` + `WHERE graph_id = $1`,
-        [FtGraph.id],
+        `DELETE FROM ${CONTRIB_MAT_TABLE} ` + `WHERE graph_id IN ($1, $2)`,
+        [FtGraph.id, DEPLOYMENT_CONTRIBUTION_GRAPH_ID],
       );
     });
 

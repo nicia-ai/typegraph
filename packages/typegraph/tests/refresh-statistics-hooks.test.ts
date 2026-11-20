@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
   type LocalSqliteBackendResult,
@@ -119,10 +120,9 @@ describe("importGraph statistics refresh", () => {
       // Swallow the expected warning — asserted via the spy below.
     });
     try {
-      const failing: GraphBackend = {
-        ...target.backend,
+      const failing: GraphBackend = deriveBackend(target.backend, {
         refreshStatistics: () => Promise.reject(new Error("stats refused")),
-      };
+      });
       const store = createStore(buildGraph(), failing);
       const data = await buildExportedData();
 

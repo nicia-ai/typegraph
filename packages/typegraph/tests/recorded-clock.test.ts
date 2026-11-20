@@ -1,35 +1,40 @@
 /**
  * Recorded commit-clock allocator tests.
  *
- * The clock is a logical, per-graph monotonic instant — deliberately NOT raw
- * wall time — so two commits in the same wall-clock millisecond still get
- * distinct, both-observable recorded instants (otherwise the second would open
- * its row at the same timestamp the first closed, a zero-width version the
- * half-open read excludes forever). These tests pin the wall clock to force the
- * collision the guard exists for; with real timers the commits separate
- * naturally and would pass even if the guard were removed.
+ * The clock combines a logical per-graph revision with a non-decreasing
+ * physical wall-time high-water mark. Two commits in the same wall-clock
+ * millisecond get distinct, both-observable anchors without manufacturing
+ * timestamp increments.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  ConfigurationError,
-  createStoreWithSchema,
-  defineGraph,
-  defineNode,
-  type RecordedInstant,
-  renderPostgres,
-  sql,
-} from "../src";
+import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import { renderPostgres, sql } from "../src/backend";
 import { type GraphBackend } from "../src/backend/types";
-import { createSqlSchema } from "../src/query/compiler/schema";
-import { asCompiledRowsSql } from "../src/query/sql-intent";
 import {
+  compareRecordedInstants,
+  type RecordedInstant,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "../src/core";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+} from "../src/core/temporal";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../src/query/sql-intent";
+import { recordedAnchorOwner } from "../src/store/recorded-anchor-origin";
+import {
+  advanceRevisionClock,
+  readRecordedClock,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalIso,
 } from "../src/store/recorded-capture";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
 const Item = defineNode("Item", {
   schema: z.object({ label: z.string() }),
@@ -55,7 +60,7 @@ function requireRecordedInstant(
 async function readOpenFrom(
   backend: GraphBackend,
   id: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(backend.tableNames);
   const rows = await backend.execute<FromRow>(
     asCompiledRowsSql(sql`
@@ -66,7 +71,7 @@ async function readOpenFrom(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded row for ${id}`);
-  return toCanonicalIso(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 describe("recorded commit clock", () => {
@@ -106,6 +111,25 @@ describe("recorded commit clock", () => {
     expect(graphWriteParams[0]).not.toBe(recordedClockParams[0]);
   });
 
+  it("treats the internal revision-zero lock seed as no recorded commit", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(clockGraph, backend, {
+      history: true,
+    });
+    if (backend.executeStatement === undefined) {
+      throw new Error("test backend must execute statements");
+    }
+    const schema = createSqlSchema(backend.tableNames);
+    await backend.executeStatement(
+      asCompiledStatementSql(sql`
+        INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+        VALUES (${clockGraph.id}, ${0}, ${"1970-01-01T00:00:00.000Z"})
+      `),
+    );
+
+    await expect(store.recordedNow()).resolves.toBeUndefined();
+  });
+
   it("allocates distinct, both-observable instants for same-millisecond commits", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(clockGraph, backend, {
@@ -134,13 +158,37 @@ describe("recorded commit clock", () => {
       "expected second recorded clock commit",
     );
 
-    expect(firstCommit).toBe("2026-06-01T12:00:00.000Z");
-    // The collision guard advances the second commit by one logical millisecond
-    // rather than colliding with the first.
-    expect(secondCommit).toBe("2026-06-01T12:00:00.001Z");
-    // The clock now runs ahead of the (still-pinned) wall clock — expected for a
-    // logical commit clock under bursty same-ms writes.
-    expect(secondCommit > new Date().toISOString()).toBe(true);
+    await store.transaction(async (tx) => {
+      await tx.nodes.Item.create({ label: "third" }, { id: "c" });
+    });
+    const thirdCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected third recorded clock commit",
+    );
+
+    const owner = await recordedAnchorOwner(
+      store.revisionSchema,
+      await store.allocationOwner().then((owner) => owner.origin),
+    );
+    expect(firstCommit).toBe(
+      createRecordedInstant(1, "2026-06-01T12:00:00.000Z", owner),
+    );
+    expect(secondCommit).toBe(
+      createRecordedInstant(2, "2026-06-01T12:00:00.000Z", owner),
+    );
+    expect(thirdCommit).toBe(
+      createRecordedInstant(3, "2026-06-01T12:00:00.000Z", owner),
+    );
+    expect(parseRecordedInstant(secondCommit).revision).toBe(2);
+    expect(recordedInstantRevision(thirdCommit)).toBe(3);
+    expect(compareRecordedInstants(firstCommit, secondCommit)).toBe(-1);
+    expect(compareRecordedInstants(secondCommit, secondCommit)).toBe(0);
+    expect(compareRecordedInstants(thirdCommit, secondCommit)).toBe(1);
+    expect(recordedInstantWallTime(firstCommit)).toBe(new Date().toISOString());
+    expect(recordedInstantWallTime(secondCommit)).toBe(
+      new Date().toISOString(),
+    );
+    expect(recordedInstantWallTime(thirdCommit)).toBe(new Date().toISOString());
 
     // Both instants are observable and isolate their own commit.
     const atFirst = store.asOfRecorded(firstCommit);
@@ -155,50 +203,58 @@ describe("recorded commit clock", () => {
     const bAtSecond = await atSecond.nodes.Item.getById("b" as never);
     expect(aAtSecond?.label).toBe("first");
     expect(bAtSecond?.label).toBe("second");
+    expect(await atSecond.nodes.Item.getById("c" as never)).toBeUndefined();
+
+    const atThird = store.asOfRecorded(thirdCommit);
+    const aAtThird = await atThird.nodes.Item.getById("a" as never);
+    const bAtThird = await atThird.nodes.Item.getById("b" as never);
+    const cAtThird = await atThird.nodes.Item.getById("c" as never);
+    expect(aAtThird?.label).toBe("first");
+    expect(bAtThird?.label).toBe("second");
+    expect(cAtThird?.label).toBe("third");
   });
 
-  it("canonicalizes a recorded-clock value, failing typed on an invalid instant", () => {
-    const iso = "2026-06-01T12:00:00.001Z";
-    // Valid Date and valid string canonicalize identically.
-    expect(toCanonicalIso(new Date(iso))).toBe(iso);
-    expect(toCanonicalIso(iso)).toBe(iso);
-    // An invalid Date must raise the typed ConfigurationError, not the bare
-    // RangeError that `new Date("bad").toISOString()` throws.
-    expect(() => toCanonicalIso(new Date("not a real date"))).toThrow(
-      ConfigurationError,
-    );
-    expect(() => toCanonicalIso("not a real date")).toThrow(ConfigurationError);
-    expect(() => toCanonicalIso(42)).toThrow(ConfigurationError);
-  });
+  it("clamps physical time when the wall clock moves backward", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(clockGraph, backend, {
+      history: true,
+    });
 
-  it("interprets a zoneless timestamp string as UTC, not host-local time", () => {
-    // A driver that yields a naive timestamp (no Z / offset) for the recorded
-    // columns must be read as UTC — otherwise recordedNow() drifts by the
-    // server's offset (and across DST). Both the space- and T-separated shapes
-    // canonicalize to the same UTC instant regardless of the host timezone.
-    expect(toCanonicalIso("2026-06-25 12:00:00")).toBe(
-      "2026-06-25T12:00:00.000Z",
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+    await store.nodes.Item.create({ label: "first" }, { id: "a" });
+    const firstCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected first recorded clock commit",
     );
-    expect(toCanonicalIso("2026-06-25T12:30")).toBe("2026-06-25T12:30:00.000Z");
-    expect(toCanonicalIso("2026-06-25T12:00:00.123")).toBe(
-      "2026-06-25T12:00:00.123Z",
+
+    vi.setSystemTime(new Date("2026-06-01T11:00:00.000Z"));
+    await store.nodes.Item.create({ label: "second" }, { id: "b" });
+    const secondCommit = requireRecordedInstant(
+      await store.recordedNow(),
+      "expected second recorded clock commit",
     );
-    // An explicit zone is still honored as written.
-    expect(toCanonicalIso("2026-06-25T12:00:00+02:00")).toBe(
-      "2026-06-25T10:00:00.000Z",
-    );
-    // PostgreSQL text renderings can be space-separated and use a colon-less
-    // offset. Normalize them instead of relying on implementation-defined
-    // Date.parse behavior for non-ISO shapes.
-    expect(toCanonicalIso("2026-06-25 12:00:00+00")).toBe(
-      "2026-06-25T12:00:00.000Z",
-    );
-    expect(toCanonicalIso("2026-06-25 12:00:00+0000")).toBe(
-      "2026-06-25T12:00:00.000Z",
-    );
-    expect(toCanonicalIso("2026-06-25 12:00:00-0230")).toBe(
-      "2026-06-25T14:30:00.000Z",
-    );
+
+    expect(secondCommit > firstCommit).toBe(true);
+    expect(parseRecordedInstant(secondCommit)).toEqual({
+      kind: "typegraph",
+      ...(await recordedAnchorOwner(
+        store.revisionSchema,
+        await store.allocationOwner().then((owner) => owner.origin),
+      )),
+      revision: 2,
+      recordedAt: "2026-06-01T12:00:00.000Z",
+    });
+
+    const atFirst = store.asOfRecorded(firstCommit);
+    expect(await atFirst.nodes.Item.getById("a" as never)).toBeDefined();
+    expect(await atFirst.nodes.Item.getById("b" as never)).toBeUndefined();
+
+    // The later diagonal checkpoint remains cumulative even though its write
+    // happened after the application clock stepped backward.
+    const atSecond = store.asOfRecorded(secondCommit);
+    expect(await atSecond.nodes.Item.getById("a" as never)).toBeDefined();
+    expect(await atSecond.nodes.Item.getById("b" as never)).toBeDefined();
   });
 
   it("shares one recorded instant across every entity touched in a transaction", async () => {
@@ -217,8 +273,78 @@ describe("recorded commit clock", () => {
 
     // One transaction → one recorded commit instant shared by both nodes, even
     // though their inserts are distinct statements.
-    expect(await readOpenFrom(backend, "x")).toBe(
-      await readOpenFrom(backend, "y"),
+    const sharedRevision = recordedInstantRevision(
+      requireRecordedInstant(
+        await store.recordedNow(),
+        "expected shared recorded commit",
+      ),
     );
+    expect(await readOpenFrom(backend, "x")).toBe(sharedRevision);
+    expect(await readOpenFrom(backend, "y")).toBe(sharedRevision);
+  });
+
+  it("refuses a stale caller-supplied revision instead of moving the clock backward", async () => {
+    // #440: `previousRevision` lets a caller state the clock's previous value
+    // instead of reading it here. The ROW is the fence — only a strictly
+    // advancing revision is taken — and an allocation the row declined is
+    // refused rather than returned as if it had committed. Nothing today can
+    // supply a stale value (the sole caller holds the graph write lock and
+    // deletes the row first), so the guard is asserted at the seam that would
+    // let a future one.
+    const backend = createTestBackend();
+    await createStoreWithSchema(clockGraph, backend, {
+      revisionTracking: true,
+    });
+    const schema = createSqlSchema(backend.tableNames);
+    const wallTime = "2026-06-03T00:00:00.000Z";
+
+    // Seed the clock at revision 5 by allocating the successor of revision 4.
+    const seeded = await advanceRevisionClock(
+      backend,
+      schema,
+      clockGraph.id,
+      false,
+      createRecordedInstant(4, wallTime),
+    );
+    expect(parseRecordedInstant(seeded).revision).toBe(5);
+
+    // A caller whose value predates the live clock allocates revision 3. The
+    // UPSERT declines it, so the clock still reads 5 — and the caller is told
+    // rather than handed an instant the clock never reached.
+    await expect(
+      advanceRevisionClock(
+        backend,
+        schema,
+        clockGraph.id,
+        false,
+        createRecordedInstant(2, wallTime),
+      ),
+    ).rejects.toThrow(/moved the graph's revision clock backward/u);
+    expect(
+      recordedInstantRevision(
+        requireRecordedInstant(
+          await readRecordedClock(backend, schema, clockGraph.id),
+          "expected the fenced clock to survive the stale write",
+        ),
+      ),
+    ).toBe(5);
+
+    // A forward value still advances: the fence blocks regression, not motion.
+    const advanced = await advanceRevisionClock(
+      backend,
+      schema,
+      clockGraph.id,
+      false,
+      createRecordedInstant(6, wallTime),
+    );
+    expect(parseRecordedInstant(advanced).revision).toBe(7);
+    expect(
+      recordedInstantRevision(
+        requireRecordedInstant(
+          await readRecordedClock(backend, schema, clockGraph.id),
+          "expected the forward write to land",
+        ),
+      ),
+    ).toBe(7);
   });
 });

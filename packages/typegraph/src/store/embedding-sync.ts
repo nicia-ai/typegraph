@@ -7,11 +7,17 @@
  */
 import { type z } from "zod";
 
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import type { AtomicNodeProjection } from "../backend/capabilities/atomic-mutation-program";
+import {
+  type GraphBackend,
+  type NodeInsertProjection,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   type ResolvedEmbeddingField,
   resolveEmbeddingFields,
 } from "../core/embedding";
+import { readOwnProperty } from "../utils/object";
 
 // ============================================================
 // Types
@@ -36,6 +42,21 @@ export type EmbeddingSyncContext = Readonly<{
   nodeId: string;
   backend: GraphBackend | TransactionBackend;
 }>;
+
+type EmbeddingProjectionDecision =
+  | Readonly<{ kind: "upsert"; embedding: readonly number[] }>
+  | Readonly<{ kind: "delete" }>
+  | Readonly<{ kind: "ignore" }>;
+
+/** The single owner for how stored embedding values affect projection state. */
+function resolveEmbeddingProjectionDecision(
+  value: unknown,
+): EmbeddingProjectionDecision {
+  if (isValidEmbeddingValue(value)) {
+    return { kind: "upsert", embedding: value };
+  }
+  return value === undefined ? { kind: "delete" } : { kind: "ignore" };
+}
 
 // ============================================================
 // Schema Introspection
@@ -73,6 +94,73 @@ export function getEmbeddingFields(
 // ============================================================
 
 /**
+ * Resolves the present embedding sidecar for a fresh generated-id node.
+ * Missing optional values are intentionally omitted because no row can exist
+ * for a generated id before this insert. Caller-supplied ids use the regular
+ * sync path, which retains its delete semantics for missing values.
+ */
+export function resolveNodeEmbeddingProjections(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+): readonly NodeInsertProjection[] {
+  return getEmbeddingFields(schema).flatMap(
+    (field): readonly NodeInsertProjection[] => {
+      const value = readOwnProperty(props, field.fieldPath);
+      const decision = resolveEmbeddingProjectionDecision(value);
+      return decision.kind === "upsert" ?
+          [
+            {
+              kind: "embedding",
+              fieldPath: field.fieldPath,
+              embedding: decision.embedding,
+              dimensions: field.dimensions,
+              metric: field.metric,
+              indexType: field.indexType,
+            },
+          ]
+        : [];
+    },
+  );
+}
+
+/**
+ * Resolves every embedding transition owed by a replacement postimage.
+ * Unlike fresh generated-id insertion, an absent value is an explicit delete:
+ * caller-id resurrection and updates may be replacing an older projection.
+ */
+export function resolveNodeEmbeddingProjectionTransitions(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  options?: Readonly<{ omitDeletes?: boolean }>,
+): readonly AtomicNodeProjection[] {
+  return getEmbeddingFields(schema).flatMap(
+    (field): readonly AtomicNodeProjection[] => {
+      const value = readOwnProperty(props, field.fieldPath);
+      const common = {
+        kind: "embedding" as const,
+        fieldPath: field.fieldPath,
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
+      };
+      const decision = resolveEmbeddingProjectionDecision(value);
+      if (decision.kind === "upsert") {
+        return [
+          {
+            ...common,
+            action: "upsert" as const,
+            embedding: decision.embedding,
+          },
+        ];
+      }
+      return decision.kind === "delete" && options?.omitDeletes !== true ?
+          [{ ...common, action: "delete" as const }]
+        : [];
+    },
+  );
+}
+
+/**
  * Syncs embeddings after a node create or update operation.
  *
  * For each embedding field in the schema:
@@ -97,21 +185,22 @@ export async function syncEmbeddings(
   }
 
   for (const field of embeddingFields) {
-    const value = props[field.fieldPath];
+    const value = readOwnProperty(props, field.fieldPath);
 
-    if (isValidEmbeddingValue(value)) {
+    const decision = resolveEmbeddingProjectionDecision(value);
+    if (decision.kind === "upsert") {
       // Upsert the embedding
       await backend.upsertEmbedding({
         graphId: ctx.graphId,
         nodeKind: ctx.nodeKind,
         nodeId: ctx.nodeId,
         fieldPath: field.fieldPath,
-        embedding: value,
+        embedding: decision.embedding,
         dimensions: field.dimensions,
         metric: field.metric,
         indexType: field.indexType,
       });
-    } else if (value === undefined) {
+    } else if (decision.kind === "delete") {
       // Delete any existing embedding for this field
       await backend.deleteEmbedding({
         graphId: ctx.graphId,
@@ -160,10 +249,11 @@ export async function syncEmbeddingsBatchForKind(
     const rows: { nodeId: string; embedding: readonly number[] }[] = [];
     const deletionIds: string[] = [];
     for (const item of items) {
-      const value = item.props[field.fieldPath];
-      if (isValidEmbeddingValue(value)) {
-        rows.push({ nodeId: item.nodeId, embedding: value });
-      } else if (value === undefined) {
+      const value = readOwnProperty(item.props, field.fieldPath);
+      const decision = resolveEmbeddingProjectionDecision(value);
+      if (decision.kind === "upsert") {
+        rows.push({ nodeId: item.nodeId, embedding: decision.embedding });
+      } else if (decision.kind === "delete") {
         deletionIds.push(item.nodeId);
       }
     }
@@ -195,18 +285,40 @@ export async function syncEmbeddingsBatchForKind(
       }
     }
 
-    for (const nodeId of deletionIds) {
-      await backend.deleteEmbedding({
-        graphId,
-        nodeKind,
-        nodeId,
-        fieldPath: field.fieldPath,
-        dimensions: field.dimensions,
-        metric: field.metric,
-        indexType: field.indexType,
-      });
-    }
+    await deleteFieldEmbeddings(backend, graphId, nodeKind, field, deletionIds);
   }
+}
+
+/**
+ * Deletes one embedding field's rows for a set of one kind's nodes: one
+ * `deleteEmbeddingBatch` (which chunks on the bind budget) when the backend
+ * has it, else one `deleteEmbedding` per node. The one owner of that choice
+ * for the batch sync above and the batch hard delete below.
+ */
+async function deleteFieldEmbeddings(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  nodeKind: string,
+  field: ReturnType<typeof getEmbeddingFields>[number],
+  nodeIds: readonly string[],
+): Promise<void> {
+  const slot = {
+    graphId,
+    nodeKind,
+    fieldPath: field.fieldPath,
+    dimensions: field.dimensions,
+    metric: field.metric,
+    indexType: field.indexType,
+  };
+  const deleteOne = backend.deleteEmbedding;
+  // The same gate `deleteNodeEmbeddings` applies: no embedding support, no
+  // embedding rows to delete.
+  if (deleteOne === undefined || nodeIds.length === 0) return;
+  if (backend.deleteEmbeddingBatch !== undefined) {
+    await backend.deleteEmbeddingBatch({ ...slot, nodeIds });
+    return;
+  }
+  for (const nodeId of nodeIds) await deleteOne({ ...slot, nodeId });
 }
 
 /**
@@ -244,6 +356,33 @@ export async function deleteNodeEmbeddings(
       metric: field.metric,
       indexType: field.indexType,
     });
+  }
+}
+
+/**
+ * {@link deleteNodeEmbeddings} for many nodes of one kind: one
+ * `deleteEmbeddingBatch` per embedding field (which chunks on the bind budget)
+ * instead of one `deleteEmbedding` per node and field, falling back to the
+ * per-node member when the backend has no batch member. Same gate and same
+ * field set as the single form.
+ */
+export async function deleteNodeEmbeddingsBatch(
+  ctx: Readonly<{
+    graphId: string;
+    nodeKind: string;
+    backend: GraphBackend | TransactionBackend;
+  }>,
+  schema: z.ZodType,
+  nodeIds: readonly string[],
+): Promise<void> {
+  for (const field of getEmbeddingFields(schema)) {
+    await deleteFieldEmbeddings(
+      ctx.backend,
+      ctx.graphId,
+      ctx.nodeKind,
+      field,
+      nodeIds,
+    );
   }
 }
 

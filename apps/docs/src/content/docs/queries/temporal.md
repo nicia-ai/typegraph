@@ -8,14 +8,20 @@ at a point in time, audit changes, or access historical data.
 
 ## Temporal Modes
 
-The `temporal()` method controls which versions of data are returned:
+The `temporal()` method controls which rows are returned, by their validity window
+(`validFrom` / `validTo`) and soft-delete state:
 
 | Mode | Description |
 |------|-------------|
-| `"current"` | Only currently valid data (default behavior) |
-| `"asOf"` | Data as it existed at a specific timestamp |
-| `"includeEnded"` | All versions, including historical |
-| `"includeTombstones"` | All versions, including soft-deleted |
+| `"current"` | Rows valid now and not soft-deleted (default behavior) |
+| `"asOf"` | Rows valid at a specific timestamp and not soft-deleted |
+| `"includeEnded"` | Every row that is not soft-deleted, whatever its validity window |
+| `"includeTombstones"` | Every row, including soft-deleted ones |
+
+Each mode filters the one stored row of each node and edge. An update rewrites that row in place and
+raises `meta.version`; it does not keep the earlier version as a row, so no mode returns an earlier
+version of an id or its earlier property values. To read earlier versions, enable
+[recorded time](#recorded-time-bitemporal) with `history: true` and read at a recorded instant.
 
 ## Current State (Default)
 
@@ -52,26 +58,27 @@ const pastState = await store
   .execute();
 ```
 
-This returns nodes and edges that were valid at the specified timestamp, even if they've since been updated or deleted.
+This returns the nodes and edges whose validity window contains the timestamp and that are not
+soft-deleted. It filters on the window; it does not reconstruct earlier property values. A row updated
+since that instant is returned with its current properties, and a soft-deleted row is not returned at
+any instant. To see what a row looked like before an update or a delete, read it at a
+[recorded instant](#reading-at-a-recorded-instant) on a `history: true` store.
 
 ### Use Cases for asOf
 
-- **Auditing**: See what data looked like at a specific time
-- **Debugging**: Reproduce issues by querying historical state
-- **Compliance**: Generate point-in-time reports
-- **Recovery**: Find old values before an erroneous update
+- **Effective dating**: Find which contracts, prices, or memberships were in effect at an instant
+- **Compliance**: Generate point-in-time reports over validity windows
+- **Traversals at an instant**: Follow only the edges that were valid then (see
+  [Temporal Traversals](#temporal-traversals))
 
 ```typescript
-// What did the user's profile look like last week?
-const lastWeek = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-const historicalProfile = await store
+// Which subscriptions were in effect at the end of last quarter?
+const inEffect = await store
   .query()
-  .from("User", "u")
-  .temporal("asOf", lastWeek)
-  .whereNode("u", (u) => u.id.eq(userId))
-  .select((ctx) => ctx.u)
-  .first();
+  .from("Subscription", "s")
+  .temporal("asOf", "2024-03-31T23:59:59.999Z")
+  .select((ctx) => ctx.s)
+  .execute();
 ```
 
 ## Shared-Coordinate Views (store.asOf)
@@ -88,7 +95,7 @@ const past = store.asOf("2024-01-01T00:00:00.000Z");
 const alice = await past.nodes.Person.getById(aliceId);
 const jobs = await past.edges.worksAt.findFrom(alice);
 const peers = await past.reachable(aliceId, { edges: ["knows"] });
-const team = await past.subgraph(aliceId, { edges: ["reportsTo"] });
+const team = await past.subgraph({ kind: "Person", id: aliceId }, { edges: ["reportsTo"] });
 
 const names = await past
   .query()
@@ -105,16 +112,19 @@ algorithms (`reachable`, `canReach`, `shortestPath`, `neighbors`, `degree`).
 For the other modes, use `store.view({ mode, asOf })`:
 
 ```typescript
-// A view over every version, including soft-deleted ones.
+// A view over every row, including soft-deleted ones.
 const audit = store.view({ mode: "includeTombstones" });
-const everyVersion = await audit.nodes.Document.find();
+const everyDocument = await audit.nodes.Document.find();
 ```
 
 A view is **read-only**: writes stay on the live `store`, and a view collection
 rejects `create` / `update` / `delete` with a `ConfigurationError`. `search` is
 refused on a non-`"current"` view (the fulltext / vector index reflects current
-state only). `asOf` must be a canonical UTC ISO-8601 timestamp
-(`YYYY-MM-DDTHH:mm:ss.sssZ`).
+state only). A view's coordinate is sealed: a view read that states its own
+`temporalMode`, `asOf` or `recordedAsOf` (reachable only from untyped code)
+rejects with `ConfigurationError` `STORE_VIEW_SEALED_COORDINATE`. Read at
+another coordinate through the live store or a second `store.view(...)`. `asOf`
+must be a canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
 
 See the [`store.asOf` / `store.view`
 reference](/schemas-stores#temporal-views-storeasof-and-storeview) for the full
@@ -149,7 +159,7 @@ Advanced hosts can bind an already-populated recorded relation for reads without
 using TypeGraph's writer wrapper:
 
 ```typescript
-import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph";
+import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph/query";
 
 const recordedRead = recordedRelation({
   schema: createSqlSchema({
@@ -171,15 +181,20 @@ descriptors at runtime and rejects combining them with `history: true`.
 ### Reading at a recorded instant
 
 `store.asOfRecorded(T)` reconstructs the graph as TypeGraph recorded it at
-instant `T`. `T` is a `RecordedInstant` — a branded canonical timestamp that
-originates from `store.recordedNow()` (below) or, for an event time you already
-hold, from `asRecordedInstant(...)`:
+instant `T`. `T` is a `RecordedInstant`: a branded, versioned string containing
+both a per-graph logical revision and a physical wall-time high-water mark. It
+originates from `store.recordedNow()` (below), or from
+`asRecordedInstant(...)` when an anchor previously returned by TypeGraph has
+round-tripped through untyped storage:
 
 ```typescript
-import { asRecordedInstant } from "@nicia-ai/typegraph";
+import {
+  asRecordedInstant,
+  recordedInstantWallTime,
+} from "@nicia-ai/typegraph/core";
 
 const recorded = store.asOfRecorded(
-  asRecordedInstant("2024-06-01T12:00:00.000Z"),
+  asRecordedInstant(savedCheckpointString),
 );
 
 const doc = await recorded.nodes.Document.getById(docId);
@@ -209,18 +224,68 @@ temporal coordinates. Passing a cursor to another collection or recorded-time
 view throws a `ValidationError` instead of silently skipping data. Iterate each
 declared node and edge kind to reconstruct a complete historical graph snapshot.
 
+For resumable one-hop adjacency, use `recorded.adjacency(root, options)`:
+
+```typescript
+let after: string | undefined;
+do {
+  const page = await recorded.adjacency(
+    { kind: "Document", id: docId },
+    { direction: "out", edgeKinds: ["cites"], candidateLimit: 100, ...(after === undefined ? {} : { after }) },
+  );
+  for (const { edge, neighbor } of page.data) {
+    console.log(edge.id, neighbor.kind, neighbor.id);
+  }
+  after = page.nextCursor;
+} while (after !== undefined);
+```
+
+Each entry contains an incident edge and the opposite kind-qualified node reference. Parallel edges remain
+separate. A self-loop appears once with `direction: "both"` (the default). Ordering is outgoing before
+incoming, then edge kind, recorded revision, edge id, and historical row id ascending. Existing `neighbors()`
+continues to return its materialized, deduplicated k-hop result.
+
+`candidateLimit` bounds **historical candidates examined** from the selected edge kinds, including superseded
+versions and deleted edges; it defaults to 100 and accepts integers from 1 through 1,000. A page can be empty and
+still have `nextCursor`: always follow the cursor until it is absent. An empty `edgeKinds` filter returns an empty
+page without a continuation. Each page checks the root's visible version once; an invisible root returns an empty
+page without a continuation. Each page issues at most one indexed edge-window query per selected kind per
+direction, returning at most `candidateLimit + 1` candidates in total, plus constant-size origin checks. The
+recorded anchor already identifies the durable origin. Each candidate performs at most one indexed
+neighbor-version probe, limited
+to one row. Visibility is checked after
+those bounds at the pinned valid and recorded coordinates. Growth in excluded kinds or unrelated endpoints does not
+increase that row or statement budget. Index seeks still have the database's normal index lookup cost.
+
+Adjacency cursors bind the durable graph origin, root kind/id, normalized edge-kind filter, direction, valid-time
+mode/instant, and recorded anchor through a SHA-256 scope digest. Changing these dimensions or reusing a cursor
+after `clear()` refuses the retired recorded anchor; changing `candidateLimit` is allowed. A retired or foreign
+origin raises `GraphAllocationMismatchError` with `code: "GRAPH_ALLOCATION_OWNER_MISMATCH"`, including an origin
+change during a page. Within one graph origin, the candidate range ends at the recorded anchor, so later live
+writes cannot change the visible answer, page boundaries, or the remaining number of pages. `clear()` retires
+anchors, preconstructed views, and cursors, including views that have not issued a page yet.
+
+This API currently requires TypeGraph-managed capture (`history: true`) on SQLite or PostgreSQL. Engine-native and
+externally populated recorded sources refuse with `details.code: "RECORDED_ADJACENCY_UNSUPPORTED_SOURCE"`, because
+their cursor-origin and indexed candidate contracts are not declared. Base-schema version 6 installs the two
+endpoint paging indexes on fresh and adopted databases. Adoption builds them inline even with `systemIndexes:
+"skip"`; that option only defers lazy index materialization. For large PostgreSQL histories, prebuild the indexes
+concurrently before upgrading. See [version 6 upgrade
+guidance](/backend-setup#base-schema-version-6-recorded-adjacency-indexes).
+
 A raw wall-clock string — `store.asOfRecorded(new Date().toISOString())` — does
-**not** type-check, by design. Recorded instants are monotonic and can briefly
-run ahead of wall-clock time under bursty writes, so a wall-clock value may sort
-*before* the most recent commits and silently omit them. The brand turns that
-footgun into a compile error: to pin "as things stand right now"
-deterministically, use `store.recordedNow()` (the recorded high-water mark),
-then guard the `undefined` case before passing it to `store.asOfRecorded()`.
+**not** type-check, by design. Wall time does not identify which commit to read
+when several commits share a millisecond. The anchor's logical revision provides
+that order; its ISO component records a non-decreasing physical wall-time
+high-water mark. To pin "as things stand right now" deterministically, use
+`store.recordedNow()` (the recorded high-water mark), then guard the `undefined`
+case before passing it to `store.asOfRecorded()`.
 
 ```typescript
 await store.nodes.Document.update(docId, { title: "Revised" });
 const checkpoint = await store.recordedNow(); // a stable anchor for this state
 if (checkpoint === undefined) throw new Error("expected a recorded checkpoint");
+console.log(recordedInstantWallTime(checkpoint)); // canonical UTC wall time
 // ...later, however much the graph has changed:
 const asOfCheckpoint = store.asOfRecorded(checkpoint);
 ```
@@ -236,20 +301,181 @@ confirm a specific write committed, observe the write itself (e.g. its return
 value, or run it inside `store.transaction(...)` and act on success), not the
 global clock.
 
-Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it reads the
-recorded relation as of `T` *and* uses the same `T` for the valid-time axis. To
-pin the two axes independently — *what was valid at one instant, as TypeGraph
-captured it at another* — chain from a valid-time view:
+#### Logical revision and physical time
+
+### Resolve a wall-clock instant
+
+```typescript
+const anchor = await store.resolveRecordedInstant("2026-06-01T12:00:00.000Z");
+if (anchor !== undefined) {
+  const pinned = store.asOfRecorded(anchor);
+  // Compose point reads, scans, and adjacency pages against this same cut.
+}
+```
+
+This is one indexed lookup of retained **allocation timestamps**, sampled inside
+the transaction. It does not establish the later instant at which COMMIT became
+visible to other connections. Equal timestamps select the highest revision;
+backward clock changes retain the existing non-decreasing timestamp. A future
+request returns the latest retained cut. `undefined` means no retained allocation
+at or before the request, including an empty graph or a request before the first known allocation.
+Unlogged history is a coverage gap: the resolver throws `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` instead
+of claiming that the graph was empty.
+The SQL lookup observes one database snapshot; a later commit does not change its
+returned anchor, and a subsequent graph reset makes that anchor refuse reads.
+
+Base-schema version 7 installs the log and time index. Coverage begins with
+captured transactions after installation; earlier allocations are not guessed
+from entity rows or timestamps. The log is retained until `clear()` unless explicitly pruned as described below.
+Direct editing of TypeGraph history storage is unsupported. A backend
+without `recordedAnchorLookup`, a store without TypeGraph capture, and an
+engine-native history refuse with `UnsupportedBackendCapabilityError`.
+
+### Retain and prune allocation metadata
+
+Long-running captured graphs accumulate allocation-log rows. Use a canonical UTC
+ISO timestamp and a bounded batch size to retire old wall-clock lookup coverage:
+
+```typescript
+const before = "2026-06-01T00:00:00.000Z";
+let progress;
+do {
+  progress = await store.pruneRecordedInstants(before, { limit: 1000 });
+  console.log(progress.deletedCount, progress.retainedBoundary);
+} while (progress.hasMore);
+```
+
+Each call deletes at most `limit` rows in one transaction (default 1,000;
+maximum 10,000). It keeps the highest revision allocated at or before `before`
+and every later allocation. Equal timestamps select the highest revision,
+using exactly the same candidate selection as `resolveRecordedInstant`.
+The result reports the actual deleted count, the owned `RecordedInstant` at
+the retained boundary, and whether physical cleanup has more work.
+
+The first successful batch atomically persists a coverage watermark and retires
+all wall-clock lookup coverage below that boundary, even if some old rows remain
+for later batches. `hasMore` describes pending physical cleanup, not continued
+lookup availability. A retention job can resume with the same cutoff after an
+interruption; older cutoffs cannot move the watermark backward and can finish
+previously retired cleanup. Pruning before the first allocation does nothing
+when no coverage was previously retired. A future cutoff keeps the latest allocation.
+
+The watermark preserves the first allocation time when known, so a request before
+that time returns `undefined`; requests within explicitly retired coverage raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`. Naturally gapped logs are valid and do not imply
+pruning. If logging began after revision one, earlier unlogged times still raise
+`RECORDED_LOOKUP_HISTORY_NOT_LOGGED`, while explicitly retired logged times raise
+`RECORDED_LOOKUP_HISTORY_PRUNED`.
+
+Each batch uses the same graph write fence as captured writers and owner rotation.
+Serialization conflicts retry the complete bounded transaction. Concurrent
+writers keep their newer revisions, and competing prunes advance coverage
+monotonically. Resuming a drain at the same boundary skips the watermark rewrite.
+Each independent batch still checks schema compatibility. Lookup reads the watermark
+and candidate in one database snapshot.
+The existing time and revision indexes serve candidate selection and bounded deletion
+on SQLite and PostgreSQL, including custom table namespaces.
+
+Among recorded-time APIs, only `pruneRecordedInstants` requires base-schema version 9.
+As with every base-schema bump, verified-schema loading, graph-template entry points,
+and working-copy cloning require adoption to the current version. Version 9 adds the nullable
+`anchor_retention` column to the recorded clock. Pruning checks the installation
+marker through the backend lifecycle assertion and raises `BaseSchemaMigrationError`
+with the actual installed version if adoption is required.
+`resolveRecordedInstant` remains usable on pre-v9 allocations: it reads the clock
+row, candidate, and optional watermark in one statement, without checking the marker.
+PostgreSQL executes this schema-sensitive projection unnamed so a warm connection
+can read before and after column adoption without a stale prepared result type.
+An absent watermark means no recorded pruning on that storage. This supports
+synchronous local SQLite upgrades. A previously allocated durable PostgreSQL working copy
+is adopted when it is reopened: the reopen brings its missing base-schema steps
+to the current version in place before any read or write, so it never reaches a lookup unadopted.
+For an existing versioned local SQLite file, run `await backend.adoptBaseSchema()`
+or `createStoreWithSchema()` with DDL privileges before pruning; synchronous opening
+preserves its marker. The managed libSQL factory is asynchronous and adopts on open.
+Adoption preserves existing rows and does not infer earlier pruning. Upgrade all
+applications sharing the database before enabling a retention job, so every reader
+honors the persisted watermark.
+
+Pruning affects only wall-clock-to-anchor lookup metadata. It does not rotate
+the allocation owner, advance the graph clock, remove captured node or edge
+history, or invalidate saved `RecordedInstant` strings. Save exact anchors
+before pruning when checkpoints, cursors, branch bases, or downstream consumers
+must revisit old states. TypeGraph does not register or pin those consumers:
+coordinate allocation-log retention with backups, replication, external history
+retention, and any independent entity-history cleanup. A saved anchor needs its
+underlying entity history as well as its original owner and recording namespace.
+Pruning does not manage durable operation outcome evidence or schedule itself.
+It requires TypeGraph capture and `recordedAnchorLookup`, plus the additional
+`recordedAnchorPruning` capability and `assertBaseSchemaCurrent`.
+Like `resolveRecordedInstant`, it refuses live-only and engine-native stores.
+
+### Anchor ownership and checkpoint upgrades
+
+A TypeGraph `r2:` anchor carries its durable origin and a separate digest of the recording namespace. A
+physical copy into a different recording-table namespace receives distinct anchors even when it preserves the
+revision-origin row. A backup restored with the same origin and table namespace retains its anchors;
+independently diverging copies must use distinct namespaces or origins. Persist the exact string, use
+`recordedInstantOwner(anchor)` when you need its complete allocation owner, and compare anchors
+with `compareRecordedInstants`, which refuses different origins. Engine `e1:`
+anchors keep their existing ownership contract.
+
+Legacy `r1:` strings still parse, but reads refuse them with
+`RECORDED_ANCHOR_UNBOUND`. `migrateRecordedAnchor({ backend, graphId, anchor,
+origin })` requires independently retained evidence that the old checkpoint
+belongs to that origin and checks that it is still current. Never attach the
+current origin to an arbitrary old checkpoint. If ownership cannot be proven,
+discard that checkpoint and resynchronize. See the [offline preview migration](/schema-management#migrating-preview-recorded-time).
+
+The canonical encoding is
+`r2:<durable graph origin>:<namespace digest>:<16-digit revision>:<canonical UTC timestamp>`. Revisions are strict and
+monotonic within one graph. The physical component is sampled from the
+application clock and clamped to the previous anchor only when that clock moves
+backward. It may repeat, but never decreases. TypeGraph does not add one
+millisecond per commit, so throughput cannot push recorded wall time beyond the
+greatest wall time the graph has actually observed. After a backward clock
+correction, the component remains at its prior high-water mark until wall time
+catches up.
+
+This non-decreasing physical component preserves cumulative diagonal replay for
+default validity timestamps: a later recorded anchor cannot pin valid time
+before an earlier commit's default `valid_from`.
+
+The fixed-width revision prefix makes anchors lexicographically sortable within
+a graph and gives each captured transaction a distinct addressable state. Use
+`compareRecordedInstants(a, b)` rather than manually comparing strings, and
+only compare anchors from the same graph. Recorded relations store the revision
+as an integer, so their open interval ceiling is independent of the `r2` API
+encoding and PostgreSQL range scans do not depend on text collation. Recorded
+clocks remain per graph, and TypeGraph does not provide one cross-graph recorded
+anchor.
+
+Batch related writes in `store.transaction(...)`: one transaction allocates one
+recorded instant. For event logs, align transactions with durable replay or
+checkpoint boundaries, and cap transaction size separately so an initial sync
+does not hold a write lock or capture buffer without bound.
+
+Direct `store.asOfRecorded(T)` is **diagonal** bitemporal sugar: it uses the
+anchor's logical revision for the recorded-time axis and its physical wall-time
+component for the valid-time axis. To pin the two axes independently — *what was
+valid at one instant, as TypeGraph captured it at another* — chain from a
+valid-time view:
 
 ```typescript
 // The state valid on Jan 1, as TypeGraph recorded it on Jun 1
 // (e.g. after a correction was entered later).
 const corrected = store
   .asOf("2024-01-01T00:00:00.000Z")
-  .asOfRecorded(asRecordedInstant("2024-06-01T12:00:00.000Z"));
+  .asOfRecorded(
+    asRecordedInstant(savedCheckpointString),
+  );
 
 const asKnownThen = await corrected.nodes.Invoice.getById(invoiceId);
 ```
+
+Use `recordedInstantRevision(T)` for diagnostics and
+`recordedInstantWallTime(T)` for display or logging. Do not split the versioned
+anchor string manually.
 
 `store.view({ mode }).asOfRecorded(T)` composes recorded time with any
 valid-time mode — e.g. `includeTombstones` to reconstruct soft-deleted rows at a
@@ -268,8 +494,92 @@ reads that can be faithfully rebuilt from the recorded relations:
 Broad collection reads (`find` / `count` / `findFrom` / …), `search`, and
 fulltext / vector predicates are **refused** with a `ConfigurationError` /
 `UnsupportedPredicateError`: the fulltext and vector indexes reflect *current*
-state only, so they cannot answer a recorded-time question. `T` must be a
-canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+state only, so they cannot answer a recorded-time question. `T` must use the
+canonical versioned RecordedInstant encoding; a plain ISO timestamp is rejected.
+
+:::caution[Preview-schema migration]
+Timestamp-only anchors and recorded tables created by the initial preview need
+an explicit offline migration. Run `migrateLegacyRecordedTime({ backend })`
+before opening the upgraded store, then translate externally persisted
+checkpoints with `migrateRecordedAnchor({ backend, graphId, anchor })`. See
+[Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
+:::
+
+### Engine-native recorded time
+
+Everything above describes **TypeGraph-owned** recorded time: `history: true`
+captures into TypeGraph's own recorded relations and clock. A backend can
+instead track recorded time itself — declare `EngineProvisioning.recordedTime`
+on it — and `history: true` then reads and writes through the engine's own
+temporal storage; TypeGraph's capture relations, clock, and write-fence-gated
+clock allocation are never engaged.
+
+Which ownership a store reads under is **derived**, never an option you set:
+it is `"engine-native"` exactly when the backend declares `recordedTime`,
+`"typegraph-relations"` otherwise. Neither bundled SQLite nor PostgreSQL
+profile declares it, so every example on this page runs under
+`"typegraph-relations"` as shown; see [Supplying
+`recordedTime`](/backend-authoring#supplying-recordedtime) for what a
+third-party engine implements to opt in.
+
+Under engine-native ownership:
+
+- `store.recordedNow()`, `store.revisionNow()`, and `TransactionReceipt.recorded`
+  all come from the engine's own revision instead of TypeGraph's clock — one
+  call per transaction, not per graph. `TransactionReceipt.recorded` is
+  stamped only when a graph node/edge/identity write inside the transaction
+  actually changed a row — a delete of a missing id, an
+  `insertNodeIfAbsent` that found the row, and a coalesced no-op upsert all
+  leave it `undefined`, matching a read-only transaction. A transaction whose
+  only effect is a raw `tx.sql` statement also leaves it `undefined` even
+  though the engine's revision advances underneath it; use a graph collection
+  write when you need `receipt.recorded` to reflect the change. To observe
+  those writes, a receipted engine-native transaction routes every write
+  through an observing wrapper, so `transactionWithReceipt` does not use
+  session-scoped atomic batching where a plain `transaction` on the same
+  store would.
+- `RecordedInstant` anchors use the engine form
+  `e1:<opaque engine revision>:<ISO instant>` rather than
+  `r2:<origin>:<namespace digest>:<16-digit revision>:<ISO instant>`. The revision is an opaque,
+  engine-assigned token, never parsed as a number, so ordering two `e1:`
+  anchors (`compareRecordedInstants`) falls back to the timestamp component
+  only — two engine revisions minted within the same millisecond compare
+  equal even though they are distinct commits, unlike a TypeGraph anchor's strict
+  per-commit counter. `recordedInstantWallTime(instant)` works for either
+  form; `recordedInstantRevision(instant)` throws for an `e1:` anchor, since
+  there is no TypeGraph numeric revision to return.
+- `store.asOfRecorded(instant)` requires an instant minted under the SAME
+  store's own ownership form. An engine-native store refuses an `r2:`
+  instant, and a TypeGraph-owned store refuses an `e1:` instant, both with a
+  `ConfigurationError` (`RECORDED_INSTANT_OWNERSHIP_MISMATCH`) — an anchor
+  from one ownership form is never valid against the other, even against a
+  different store over the same data.
+- No recorded relation is read or written. (A profile built on the bundled
+  schema factories still creates the recorded tables as part of its base DDL
+  — they just stay empty.) `recordedRead: recordedRelation({ schema })`
+  (above) and `migrateLegacyRecordedTime` are both refused: neither has a
+  TypeGraph-owned recorded relation to bind or migrate.
+- `revisionTracking: true` is refused whether or not `history: true` is also
+  requested — there is no TypeGraph clock for it to advance; the engine's
+  own revision is the only tracking engine-native has, and it is available
+  only under `history: true`.
+- `RecordedStoreView.adjacency()` is refused with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`: engine-native sources do
+  not declare the required origin and bounded candidate indexes.
+- Reconstructing identity at a recorded coordinate — `store.identityAtCoordinate`
+  at a past instant, and any query that reaches the historical identity
+  traversal — is refused: identity history reads TypeGraph's own recorded
+  relations directly, which an engine-native backend does not populate. Read
+  identity at the current coordinate instead, or use a TypeGraph-owned store
+  for historical identity reconstruction.
+
+Everything else on this page — `asOfRecorded`'s diagonal composition with
+`asOf`, the recorded view surface's read shape, `includeTombstones`
+composition — behaves the same under either ownership form; only the anchor
+grammar, the write mechanics, and the refusals above differ. See [Lineage and
+pruned diffs](/graph-merge#lineage-and-pruned-diffs) for how graph-merge
+derives a change delta under engine-native ownership — from the engine's own
+`lineage`, never from recorded relations, since none exist to derive one
+from.
 
 ### Writing with history enabled
 
@@ -365,7 +675,10 @@ The takeaway: capture is opt-in and cheap when you batch. Under `history: true`,
 prefer `store.transaction(...)` for bulk writes; a loop of individual
 collection writes is the one pattern that pays the per-write multiple. (Stores
 created without `history: true` are unaffected — graph writes never touch the
-capture path.)
+capture path.) Batching also reduces recorded-clock consumption: one captured
+transaction advances the per-graph clock once, even when it contains many
+writes. See [Logical revision and physical time](#logical-revision-and-physical-time)
+for the anchor format.
 
 > **Performance.** Recorded reads reconstruct from the history relations rather
 > than the live tables, so they are slower than current-state reads — most
@@ -373,56 +686,48 @@ capture path.)
 > PostgreSQL. Reach for `asOfRecorded` for audit and point-in-time
 > reconstruction, not hot-path reads.
 
-## Including Historical Data (includeEnded)
+## Including Ended Rows (includeEnded)
 
-View all versions, including superseded records:
+`includeEnded` drops the validity-window filter and keeps the soft-delete filter: it returns current
+rows, rows whose `validTo` has passed, and rows whose `validFrom` is still in the future, but no
+soft-deleted rows. It still returns one row per id, the row as last written, so it finds facts whose
+window has ended rather than a version history:
 
 ```typescript
-const history = await store
+// Every subscription whose validity window ended before now
+const ended = await store
   .query()
-  .from("Article", "a")
+  .from("Subscription", "s")
   .temporal("includeEnded")
-  .whereNode("a", (a) => a.id.eq(articleId))
-  .orderBy((ctx) => ctx.a.validFrom, "desc")
+  .whereNode("s", (s) => s.$meta.validTo.lt(new Date()))
+  .orderBy("s", "meta.validTo", "desc")
   .select((ctx) => ({
-    title: ctx.a.title,
-    validFrom: ctx.a.validFrom,
-    validTo: ctx.a.validTo,
-    version: ctx.a.version,
+    id: ctx.s.id,
+    validFrom: ctx.s.meta.validFrom,
+    validTo: ctx.s.meta.validTo,
   }))
   .execute();
-
-// Result shows all versions:
-// [
-//   { title: "Final Title", validFrom: "2024-03-01", validTo: undefined, version: 3 },
-//   { title: "Draft v2", validFrom: "2024-02-15", validTo: "2024-03-01", version: 2 },
-//   { title: "Initial Draft", validFrom: "2024-02-01", validTo: "2024-02-15", version: 1 },
-// ]
 ```
 
-### Audit Trail
+### Version History
 
-Build a complete change history:
+The earlier versions of a row exist only in recorded time. On a store created with `history: true`,
+every committed write is recorded, and a read at a recorded instant returns the row as it stood then.
+Pin the instant with a checkpoint from `recordedNow()` taken after the write, or resolve one from a
+wall-clock time with [`resolveRecordedInstant()`](#resolve-a-wall-clock-instant):
 
 ```typescript
-async function getAuditTrail(nodeId: string) {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(nodeId))
-    .select((ctx) => ({
-      version: ctx.d.version,
-      title: ctx.d.title,
-      status: ctx.d.status,
-      validFrom: ctx.d.validFrom,
-      validTo: ctx.d.validTo,
-      updatedAt: ctx.d.updatedAt,
-    }))
-    .orderBy("d", "version", "asc")
-    .execute();
+async function getDocumentAt(docId: NodeId<typeof Document>, wallClock: string) {
+  const anchor = await store.resolveRecordedInstant(wallClock);
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Document.getById(docId);
 }
 ```
+
+Each recorded read is taken at one anchor, so to compare versions read the same id at each anchor you
+kept (see [Version Comparison](#version-comparison)). For a change log that also records who made each
+change and why, write it yourself as in the [Audit Trail example](/examples/audit-trail).
 
 ## Including Soft-Deleted Data (includeTombstones)
 
@@ -436,7 +741,7 @@ const allIncludingDeleted = await store
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
-    deletedAt: ctx.u.deletedAt,  // Will have a value for deleted records
+    deletedAt: ctx.u.meta.deletedAt,  // Will have a value for deleted records
   }))
   .execute();
 ```
@@ -449,37 +754,80 @@ const deletedUsers = await store
   .query()
   .from("User", "u")
   .temporal("includeTombstones")
-  .whereNode("u", (u) => u.deletedAt.isNotNull())
+  .whereNode("u", (u) => u.$meta.deletedAt.isNotNull())
   .select((ctx) => ({
     id: ctx.u.id,
     name: ctx.u.name,
-    deletedAt: ctx.u.deletedAt,
+    deletedAt: ctx.u.meta.deletedAt,
   }))
   .execute();
 ```
 
+A metadata predicate narrows the rows the temporal mode admits. Under the default `"current"`
+mode deleted rows are already excluded, so the same predicate matches nothing; query
+`includeTombstones` to reach them. See [Metadata](/queries/filter#metadata) for every `$meta`
+field.
+
 ## Temporal Metadata Fields
 
-When querying with temporal context, these fields are available:
+When querying with temporal context, these fields are available under `meta`
+(`ctx.a.meta.validFrom`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `validFrom` | `string \| undefined` | When this version became valid |
-| `validTo` | `string \| undefined` | When this version was superseded (undefined if current) |
+| `validFrom` | `string \| undefined` | When the row's validity window starts (`undefined` on an **open-left** row — see below) |
+| `validTo` | `string \| undefined` | When the row's validity window ends (undefined if it has no end; an update does not set it) |
 | `createdAt` | `string` | When the node was first created |
-| `updatedAt` | `string` | When this version was written |
+| `updatedAt` | `string` | When the row was last written |
 | `deletedAt` | `string \| undefined` | Soft-delete timestamp (undefined if not deleted) |
-| `version` | `number` | Optimistic concurrency version number |
+| `version` | `number` | Optimistic concurrency version number (nodes only) |
+
+### Open-left rows (`validFrom` is `undefined`)
+
+A row may have **no lower bound at all**, which means "valid since forever, as
+far as this store knows". `asOf` and `current` treat such a row as valid at
+every instant strictly before its `validTo`, or every instant if it has no end.
+These writes produce one:
+
+- a Store create or resurrecting upsert stating `validFrom: null`;
+- an interchange record stating `validFrom: null` — a source row confirmed to
+  have no lower bound, round-tripped rather than re-stamped;
+- a **born-already-ended** write: one that CREATES a row, or RESETS its window,
+  while stating a `validTo` at or before its own instant and no `validFrom`. The
+  row's start is unknown rather than after its end, so no bound is stored and the
+  row reads back at every `asOf` before that end. A `validTo` in the *future* is
+  unaffected — it still stamps the write instant, so the row stays invisible at
+  instants before it existed. Every **node** path that resets the window
+  qualifies, and reaches the same stored shape: a create on a fresh id, a create
+  on a tombstoned one, and a resurrecting `upsertById` / `bulkUpsertById`. An
+  **edge** never does: an edge create cannot land on a tombstone (a taken id
+  raises `Edge already exists`), and the two paths that resurrect one —
+  `bulkUpsertById` and `getOrCreateByEndpoints` — RETAIN the bound the row
+  carries and judge the stated `validTo` against it.
+
+#### Rows written by older versions
+
+Before that rule existed, a born-already-ended write stored the write instant as
+`valid_from`, leaving a window that runs backwards — a row readable at **no**
+coordinate at all. Upgrading does not rewrite such rows; they keep their window
+and stay invisible until an operator repairs them explicitly with
+`repairInvertedValidityWindows`, which normalizes them to the open-left shape
+above. Prefer `relations: "live-and-recorded"`: repairing only the live axis
+leaves the recorded twin inverted, so `asOfRecorded` reads keep returning the
+invisible shape. See
+[Repairing inverted validity windows](/schema-management#repairing-inverted-validity-windows)
+for the operator checklist — run it with writers stopped, and re-baseline merge
+branches afterwards.
 
 ```typescript
 .select((ctx) => ({
   ...ctx.a,                     // All node properties
-  validFrom: ctx.a.validFrom,
-  validTo: ctx.a.validTo,
-  createdAt: ctx.a.createdAt,
-  updatedAt: ctx.a.updatedAt,
-  deletedAt: ctx.a.deletedAt,
-  version: ctx.a.version,
+  validFrom: ctx.a.meta.validFrom,
+  validTo: ctx.a.meta.validTo,
+  createdAt: ctx.a.meta.createdAt,
+  updatedAt: ctx.a.meta.updatedAt,
+  deletedAt: ctx.a.meta.deletedAt,
+  version: ctx.a.meta.version,
 }))
 ```
 
@@ -508,31 +856,41 @@ const pastEmployees = await store
 `store.subgraph()` and `store.algorithms.*` accept the same `temporalMode`
 and `asOf` options, defaulting to `graph.defaults.temporalMode`. See
 [Temporal Behavior](/graph-algorithms#temporal-behavior) for the algorithm
-surface and [`store.subgraph()` options](/schemas-stores#storesubgraphrootid-options)
+surface and [`store.subgraph()` options](/schemas-stores#storesubgraphroot-options)
 for subgraph.
 
 ## Real-World Examples
 
 ### Version Comparison
 
-Compare two versions of a document:
+Compare two versions of a document. An update rewrites the node's one stored row and raises
+`meta.version`; it does not keep the previous version as a row, so no temporal mode returns two
+versions of one id. Read the earlier version from [recorded time](#recorded-time-bitemporal)
+instead: with `history: true`, keep a `recordedNow()` checkpoint after each revision you may want
+to compare, then read the document at both checkpoints.
 
 ```typescript
-async function compareVersions(docId: string, v1: number, v2: number) {
-  const versions = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(docId))
-    .select((ctx) => ctx.d)
-    .execute();
+import { type RecordedInstant } from "@nicia-ai/typegraph/core";
 
-  const version1 = versions.find((v) => v.version === v1);
-  const version2 = versions.find((v) => v.version === v2);
+// After each revision worth comparing:
+//   await store.nodes.Document.update(docId, { title: "Revised" });
+//   const revised = await store.recordedNow();
+async function compareVersions(
+  docId: NodeId<typeof Document>,
+  before: RecordedInstant,
+  after: RecordedInstant,
+) {
+  const [version1, version2] = await Promise.all([
+    store.asOfRecorded(before).nodes.Document.getById(docId),
+    store.asOfRecorded(after).nodes.Document.getById(docId),
+  ]);
 
   return { version1, version2 };
 }
 ```
+
+Each result is the document as TypeGraph recorded it at that checkpoint, including its
+`meta.version`, or `undefined` when it did not exist (or was deleted) there.
 
 ### Compliance Reporting
 
@@ -565,24 +923,23 @@ async function generateQuarterlyReport(quarterEnd: string) {
 
 ### Undo/Recovery
 
-Find the previous value before an update:
+Find the value a document had before an update. The live row holds only the current value, so take a
+checkpoint before the update on a `history: true` store and read the document there:
 
 ```typescript
-async function getPreviousVersion(nodeId: string) {
-  const versions = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(nodeId))
-    .select((ctx) => ctx.d)
-    .orderBy("d", "version", "desc")
-    .limit(2)
-    .execute();
+// Before an update you may need to undo:
+//   const beforeUpdate = await store.recordedNow();
+//   await store.nodes.Document.update(docId, { title: "Revised" });
+async function getPreviousVersion(
+  docId: NodeId<typeof Document>,
+  beforeUpdate: RecordedInstant,
+) {
+  const [current, previous] = await Promise.all([
+    store.nodes.Document.getById(docId),
+    store.asOfRecorded(beforeUpdate).nodes.Document.getById(docId),
+  ]);
 
-  return {
-    current: versions[0],
-    previous: versions[1],
-  };
+  return { current, previous };
 }
 ```
 
@@ -597,3 +954,49 @@ async function getPreviousVersion(nodeId: string) {
   exact graph an agent saw
 - [Breach Forensics](/examples/breach-forensics) - Traverse a reconstructed
   access graph at the breach instant
+
+### Allocation ownership and physical forks
+
+`await store.allocationOwner()` captures `{ origin, namespace }` even before a
+tracked graph has its first recorded instant. Use the complete owner when
+binding requests or checkpoints; comparing the raw origin component is insufficient.
+A restored backup keeps its owner and can resume its existing checkpoints.
+A copy intended to diverge independently must rotate before publication or writes:
+
+```typescript
+const inheritedOwner = await fork.allocationOwner();
+const forkOwner = await fork.rotateAllocationOwner(inheritedOwner);
+```
+
+Rotation uses the native schema and graph fences and compares the expected owner
+inside the transaction. It preserves live rows, captured history, and the clock,
+while retiring old anchors and merge fences in the copy.
+The allocation log is rebound to the fork's new owner. Table-name namespace
+hashes distinguish managed prefixed allocations, but cannot detect Neon branches,
+template clones, or file copies with unchanged names. Their provisioning lifecycle
+must call this explicit rotation API. `forkedWorkingCopyStrategy()` and
+physical copies allocated by `branchDurable()` verify the copied base and rotate
+automatically before returning a writable fork. Rotation
+is not required when restoring a backup as the continuation of its original allocation.
+
+External recorded relations can supply an owner reader with
+`recordedRelation({ schema, owner: async (session) => externalOwner(session) })`.
+Use it when the relations have no TypeGraph revision-origin metadata; the reader
+must report the source's actual allocation owner and observe retirement. Transactional
+algorithms pass the actual session to this reader. External TypeGraph-style reads
+require bound instants too. Legacy `r1:` checkpoints need migration using independently
+retained origin evidence; fetching today's nonce does not prove a legacy checkpoint's
+origin. Migration rejects coordinates beyond the current clock and checks already-bound
+instants rather than silently passing them through as verified.
+
+Construct external checkpoints with `recordedInstant({ revision, wallTime, owner })`,
+which validates the public owner-bound token format. The owner reader attests the
+source allocation; the factory itself does not establish that the source exists.
+`recordedReadOwner()` uses that same external reader; a missing owner produces
+`ConfigurationError` with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`.
+Historical reads with an absent or different source owner instead raise
+`GraphAllocationMismatchError` (`GRAPH_ALLOCATION_OWNER_MISMATCH`); missing physical
+relations raise `ConfigurationError` (`RECORDED_RELATIONS_MISSING`).
+`allocationOwner()` always identifies native writes and merge fences.
+A store with external reads and revision tracking has both owners. Rotation
+changes only its native allocation; external retirement remains the provider's responsibility.

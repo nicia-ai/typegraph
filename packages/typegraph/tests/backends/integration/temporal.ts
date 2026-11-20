@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { param as parameter } from "../../../src";
+import { isCanonicalIsoDate } from "../../../src/utils/date";
+import { requireDefined } from "../../../src/utils/presence";
 import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -140,6 +142,50 @@ export function registerTemporalIntegrationTests(
       expect(edge.meta.validTo).toBe(pastDate);
     });
 
+    it("returns canonical metadata timestamps consistently from stores and compiled queries (#463)", async () => {
+      const store = context.getStore();
+      const validTo = "2099-01-01T00:00:00.000Z";
+      const alice = await store.nodes.Person.create(
+        { name: "Canonical Alice" },
+        { validTo },
+      );
+      const acme = await store.nodes.Company.create({ name: "Canonical Acme" });
+      const worksAt = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Canonical Tester" },
+        { validTo },
+      );
+
+      const projections = await store
+        .query()
+        .from("Person", "person")
+        .whereNode("person", (person) => person.name.eq("Canonical Alice"))
+        .traverse("worksAt", "employment")
+        .to("Company", "company")
+        .select((selection) => ({
+          person: selection.person,
+          employment: selection.employment,
+        }))
+        .execute();
+      const projected = requireDefined(projections[0]);
+
+      expect(projected.person.meta).toEqual(alice.meta);
+      expect(projected.employment.meta).toEqual(worksAt.meta);
+      for (const timestamp of [
+        projected.person.meta.validFrom,
+        projected.person.meta.validTo,
+        projected.person.meta.createdAt,
+        projected.person.meta.updatedAt,
+        projected.employment.meta.validFrom,
+        projected.employment.meta.validTo,
+        projected.employment.meta.createdAt,
+        projected.employment.meta.updatedAt,
+      ]) {
+        expect(isCanonicalIsoDate(requireDefined(timestamp))).toBe(true);
+      }
+    });
+
     it("includes ended edges with includeEnded mode", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -259,6 +305,41 @@ export function registerTemporalIntegrationTests(
         asOf: PAST,
       });
       expect(pastNode).toBeUndefined();
+    });
+
+    it("still stamps the create timestamp when a FUTURE validTo is stated alone", async () => {
+      // The sibling of the #240 test above, and the standing guard against the
+      // naive reading of #407. A lone `validTo` leaves the row with no lower
+      // bound only when stamping one would make the window readable at no
+      // coordinate — that is, when the end is at or before the write instant. A
+      // SCHEDULED end means "valid from now until then", so the create instant
+      // is still stamped and the row is still invisible before it existed. A
+      // rule that dropped the bound whenever a `validTo` was named would make
+      // this row visible at `asOf(2020)`, widening a window the caller narrowed.
+      const { PAST } = TEMPORAL_ANCHORS;
+      const scheduledEnd = new Date(Date.now() + 3_600_000).toISOString();
+      const store = context.getStore();
+
+      const alice = await store.nodes.Person.create(
+        { name: "Alice" },
+        { validTo: scheduledEnd },
+      );
+
+      expect(alice.meta.validFrom).toBeDefined();
+      expect(alice.meta.validTo).toBe(scheduledEnd);
+
+      const pastNode = await store.nodes.Person.getById(alice.id, {
+        temporalMode: "asOf",
+        asOf: PAST,
+      });
+      expect(pastNode).toBeUndefined();
+
+      // ...and it is current right now, so the stamped bound is a real bound
+      // rather than a value that happens to sort before every coordinate.
+      const currentNode = await store.nodes.Person.getById(alice.id, {
+        temporalMode: "current",
+      });
+      expect(currentNode?.id).toBe(alice.id);
     });
 
     it("defaults an omitted edge validFrom to the create timestamp, even when both endpoints predate it", async () => {

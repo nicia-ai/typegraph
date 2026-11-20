@@ -11,42 +11,43 @@ import { z } from "zod";
 
 import {
   asRecordedInstant,
-  createFragment,
+  type RecordedInstant,
+  type TemporalMode,
+} from "../dist/core";
+import type {
+  BulkFindEdgesFromResult,
+  EdgeBatchReads,
+  EdgeTemporalReads,
+  EdgeWrites,
+  NodeCurrentReads,
+  NodeTemporalReads,
+  NodeWrites,
+  LabelPropagationMembership,
+  PageRankScore,
+  QueryOptions,
+  ReachableNode,
+  RecordedStoreView,
+  RecordedStoreViewEdgeCollection,
+  RecordedStoreViewNodeCollection,
+  StoreSearch,
+  StoreView,
+  StoreViewEdgeCollection,
+  StoreViewNodeCollection,
+  WeaklyConnectedComponentMembership,
+} from "../dist/store-entry";
+import { createFragment, type InitialQueryBuilder } from "../dist/query-entry";
+import {
   defineEdge,
   defineGraph,
   defineNode,
   type Edge,
-  type EdgeBatchReads,
   type EdgeCollection,
   type EdgeId,
-  type EdgeTemporalReads,
-  type EdgeWrites,
-  type EmptyEdgeAliasMap,
-  type EmptyRecursiveAliasMap,
   type Node,
-  type NodeAlias,
   type NodeCollection,
-  type NodeCurrentReads,
   type NodeId,
   type NodeRef,
-  type NodeTemporalReads,
-  type NodeWrites,
-  type InitialQueryBuilder,
-  type LabelPropagationMembership,
-  type PageRankScore,
-  type QueryOptions,
-  type ReachableNode,
-  type RecordedInstant,
-  type RecordedStoreView,
-  type RecordedStoreViewEdgeCollection,
-  type RecordedStoreViewNodeCollection,
   type Store,
-  type StoreSearch,
-  type StoreView,
-  type StoreViewEdgeCollection,
-  type StoreViewNodeCollection,
-  type TemporalMode,
-  type WeaklyConnectedComponentMembership,
 } from "..";
 
 const Person = defineNode("Person", {
@@ -79,7 +80,6 @@ declare const recordedAnchor: RecordedInstant;
 
 const CANONICAL = "2024-01-01T00:00:00.000Z";
 const LEAKED_RECORDED_OPTIONS = { recordedAsOf: recordedAnchor };
-type PersonAliasMap = Readonly<Record<"p", NodeAlias<typeof Person>>>;
 
 // ============================================================
 // Entry points return a StoreView
@@ -134,6 +134,23 @@ expectAssignable<Promise<Node<typeof Person>[]>>(
 expectType<Promise<number>>(view.nodes.Person.count());
 expectAssignable<Promise<Edge<typeof worksAt>[]>>(
   view.edges.worksAt.findFrom(personRef),
+);
+expectType<
+  Promise<readonly BulkFindEdgesFromResult<typeof graph, "worksAt">[]>
+>(
+  view.bulkFindEdgesFrom({
+    sources: [{ kind: "Person", ids: [personId] }],
+    edgeKinds: ["worksAt"],
+  }),
+);
+expectError(
+  view.bulkFindEdgesFrom(
+    {
+      sources: [{ kind: "Person", ids: [personId] }],
+      edgeKinds: ["worksAt"],
+    },
+    { temporalMode: "current" },
+  ),
 );
 expectType<InitialQueryBuilder<typeof graph, "sealed">>(view.query());
 expectType<StoreSearch<typeof graph>>(view.search);
@@ -206,14 +223,9 @@ expectError(
 );
 
 const fragment = createFragment<typeof graph>();
-const personNameFragment = fragment<
-  PersonAliasMap,
-  PersonAliasMap,
-  EmptyEdgeAliasMap,
-  EmptyEdgeAliasMap,
-  EmptyRecursiveAliasMap,
-  EmptyRecursiveAliasMap
->((query) => query.whereNode("p", ({ name }) => name.eq("Alice")));
+const personNameFragment = fragment({ p: "Person" }, (query) =>
+  query.whereNode("p", ({ name }) => name.eq("Alice")),
+);
 
 void store
   .query()
@@ -270,10 +282,10 @@ expectError(
   }),
 );
 expectError(
-  view.subgraph(personId, { edges: ["knows"], temporalMode: "asOf" }),
+  view.subgraph(personRef, { edges: ["knows"], temporalMode: "asOf" }),
 );
 expectError(
-  store.subgraph(personId, {
+  store.subgraph(personRef, {
     edges: ["knows"],
     recordedAsOf: CANONICAL,
   }),
@@ -315,7 +327,7 @@ expectError(
   ),
 );
 expectError(
-  store.subgraph(personId, {
+  store.subgraph(personRef, {
     edges: ["knows"],
     ...LEAKED_RECORDED_OPTIONS,
   }),

@@ -28,13 +28,14 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  fts5Strategy,
   MigrationError,
   searchable,
   StoreNotInitializedError,
 } from "../src";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../src/backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
+import { fts5Strategy } from "../src/backend/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
 import { requireDefined } from "../src/utils/presence";
 
@@ -66,6 +67,12 @@ const Document = defineNode("Doc", {
 
 const FtGraph = defineGraph({
   id: "fulltext-bootstrap-gap",
+  nodes: { Doc: { type: Document } },
+  edges: {},
+});
+
+const SecondFtGraph = defineGraph({
+  id: "sqlite_fulltext_bootstrap_second",
   nodes: { Doc: { type: Document } },
   edges: {},
 });
@@ -116,12 +123,21 @@ describe("#135 durable fulltext materialization (SQLite)", () => {
       materialized_at: string | null;
       last_error: string | null;
     }[];
-    expect(markers).toHaveLength(1);
-    expect(markers[0]?.graph_id).toBe(FtGraph.id);
-    expect(markers[0]?.logical_name).toBe("fulltext");
-    expect(markers[0]?.owner).toBe(fts5Strategy.name);
-    expect(markers[0]?.materialized_at).not.toBeNull();
-    expect(markers[0]?.last_error).toBeNull();
+    expect(markers).toHaveLength(2);
+    const deploymentMarker = markers.find(
+      (marker) => marker.graph_id === DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
+    );
+    const graphMarker = markers.find(
+      (marker) => marker.graph_id === FtGraph.id,
+    );
+    expect(deploymentMarker?.logical_name).toBe("fulltext");
+    expect(deploymentMarker?.owner).toBe(fts5Strategy.name);
+    expect(deploymentMarker?.materialized_at).not.toBeNull();
+    expect(deploymentMarker?.last_error).toBeNull();
+    expect(graphMarker?.logical_name).toBe("fulltext");
+    expect(graphMarker?.owner).toBe(fts5Strategy.name);
+    expect(graphMarker?.materialized_at).not.toBeNull();
+    expect(graphMarker?.last_error).toBeNull();
 
     // And the searchable() write lands without error.
     await store.nodes.Doc.create({ title: "hello world" });
@@ -132,6 +148,40 @@ describe("#135 durable fulltext materialization (SQLite)", () => {
     expect(fulltext).toHaveLength(1);
     expect(fulltext[0]?.content).toBe("hello world");
 
+    sqlite.close();
+  });
+
+  it("activates a second graph without repeating fulltext DDL", async () => {
+    const backend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    await createStoreWithSchema(FtGraph, backend);
+
+    // A fresh backend instance represents a new runtime process. The shared
+    // table is already physically attested; opening this graph should only
+    // add its graph-local activation marker.
+    const secondBackend = createSqliteBackend(db, {
+      executionProfile: { isSync: true },
+      tables: defaultTables,
+    });
+    const [secondStore] = await createStoreWithSchema(
+      SecondFtGraph,
+      secondBackend,
+    );
+    await secondStore.nodes.Doc.create({ title: "second graph" });
+
+    const markers = sqlite
+      .prepare(
+        `SELECT graph_id FROM ${CONTRIB_MAT_TABLE} ` +
+          `WHERE logical_name = 'fulltext' ORDER BY graph_id`,
+      )
+      .all() as readonly { graph_id: string }[];
+    expect(markers.map((row) => row.graph_id)).toEqual([
+      "__typegraph_deployment__",
+      FtGraph.id,
+      SecondFtGraph.id,
+    ]);
     sqlite.close();
   });
 
@@ -306,6 +356,26 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     });
     await createStoreWithSchema(FtGraph, bootBackend);
 
+    function readMarkers(): readonly {
+      signature: string;
+      materialized_at: string | null;
+      last_error: string | null;
+    }[] {
+      return sqlite
+        .prepare(
+          `SELECT signature, materialized_at, last_error FROM ` +
+            `${CONTRIB_MAT_TABLE} WHERE graph_id = '${DEPLOYMENT_CONTRIBUTION_GRAPH_ID}'`,
+        )
+        .all() as readonly {
+        signature: string;
+        materialized_at: string | null;
+        last_error: string | null;
+      }[];
+    }
+
+    const provisioned = readMarkers();
+    expect(provisioned).toHaveLength(1);
+
     const driftBackend = createSqliteBackend(db, {
       executionProfile: { isSync: true },
       tables: defaultTables,
@@ -317,19 +387,29 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
     ).rejects.toThrow(/already materialized with a different signature/);
 
     // The recorded marker still reflects the original successful
-    // materialization — the drift attempt did not overwrite it as success.
-    const markers = sqlite
-      .prepare(
-        `SELECT materialized_at, last_error FROM ${CONTRIB_MAT_TABLE} ` +
-          `WHERE graph_id = '${FtGraph.id}'`,
-      )
-      .all() as readonly {
-      materialized_at: string | null;
-      last_error: string | null;
-    }[];
+    // materialization — the drift attempt did not overwrite it as success,
+    // and it did not move the SIGNATURE either. The recorded signature is
+    // the only evidence of the shape the table actually has: overwriting it
+    // with the shape that failed to provision would turn the `stale` verdict
+    // into `missing-marker`, whose repair is an idempotent re-stamp that
+    // blesses the unchanged old-shape table.
+    const markers = readMarkers();
     expect(markers).toHaveLength(1);
     expect(markers[0]?.materialized_at).not.toBeNull();
     expect(markers[0]?.last_error).not.toBeNull();
+    expect(markers[0]?.signature).toBe(provisioned[0]?.signature);
+
+    // So a second boot of the same upgraded code refuses again instead of
+    // finding a signature that now matches and blessing the old table.
+    await expect(
+      requireDefined(
+        createSqliteBackend(db, {
+          executionProfile: { isSync: true },
+          tables: defaultTables,
+          fulltext: driftStrategy,
+        }).ensureRuntimeContributions,
+      )(FtGraph.id),
+    ).rejects.toThrow(/already materialized with a different signature/);
 
     sqlite.close();
   });
@@ -354,6 +434,55 @@ describe("#135 signature drift is a loud error, never silently re-blessed", () =
       name: "StoreNotInitializedError",
       details: { reason: "stale" },
     });
+
+    sqlite.close();
+  });
+
+  it("rebuildContribution is reachable from the zero-DDL Store and clears the refusal", async () => {
+    // The route the troubleshooting docs publish, end to end. It matters
+    // that this is the ONLY route: the managed factory's boot step is what
+    // trips the drift guard, so the rebuild has to be reachable from a
+    // Store that runs no DDL on open — otherwise the ladder's top rung
+    // cannot be reached in the one state it exists for.
+    await createStoreWithSchema(
+      FtGraph,
+      createSqliteBackend(db, {
+        executionProfile: { isSync: true },
+        tables: defaultTables,
+      }),
+    );
+
+    function upgraded() {
+      return createSqliteBackend(db, {
+        executionProfile: { isSync: true },
+        tables: defaultTables,
+        fulltext: driftStrategy,
+      });
+    }
+
+    await expect(createStoreWithSchema(FtGraph, upgraded())).rejects.toThrow(
+      /already materialized with a different signature/,
+    );
+
+    const admin = createStore(FtGraph, upgraded());
+    const probed = await admin.probeContributions();
+    expect(probed.entries).toMatchObject([
+      { contribution: "fulltext", state: "degraded" },
+    ]);
+    expect(probed.entries[0]?.detail).toContain("stale");
+    expect(await admin.rebuildContribution("fulltext")).toMatchObject({
+      rebuilt: [defaultTables.fulltextTableName],
+    });
+
+    // The refusal is cleared, not merely bypassed: the managed factory
+    // opens again and the projection is usable.
+    const [store] = await createStoreWithSchema(FtGraph, upgraded());
+    await store.nodes.Doc.create({ title: "rebuilt" });
+    const hits = await store.search.fulltext("Doc", {
+      query: "rebuilt",
+      limit: 10,
+    });
+    expect(hits).toHaveLength(1);
 
     sqlite.close();
   });

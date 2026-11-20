@@ -47,6 +47,14 @@ await store.nodes.Document.bulkUpsertById(items);
 await store.nodes.Document.bulkDelete(ids);
 ```
 
+Called on the store, a bulk method owns its transaction: a refused item rolls
+the whole call back. Called on `tx` inside `store.transaction(...)` it runs on
+your transaction, which has no savepoint, so it decides every item before its
+first write and a refusal you catch there leaves none of the batch written —
+unless a concurrent writer raced the batch between its reads and its writes.
+See
+[A bulk refusal caught inside `store.transaction`](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows).
+
 ### upsertById
 
 Creates a node if it doesn't exist, or updates it if it does. This includes
@@ -67,6 +75,20 @@ const doc2 = await store.nodes.Document.upsertById("doc_123", {
 
 // doc1.id === doc2.id - same node, updated in place
 ```
+
+To reopen a previously ended fact without changing its identity, use the
+explicit clear operation:
+
+```typescript
+await store.nodes.Document.upsertById("doc_123", currentProps, {
+  clearValidTo: true,
+});
+```
+
+Omitting both end fields preserves the current end; `validTo` sets it;
+`clearValidTo: true` removes it. With `coalesceUnchangedUpserts`, replaying a
+clear against an already-open row skips the write, but capability validation
+still runs first.
 
 ### bulkCreate
 
@@ -119,6 +141,82 @@ const synced = await store.nodes.Document.bulkUpsertById(
 );
 ```
 
+A feed can deliver the same key twice in one page, so items are applied in
+order: the first item for an id creates or updates the row, and every later copy
+is an update over the value the earlier item wrote. The batch ends in the same
+state the equivalent sequence of `upsertById` calls would leave, whether or not
+the row existed before the batch. Because a later copy is an update, it merges
+over the earlier value — a field the last copy omits keeps what an earlier copy
+set. Edges follow the same rule, except that an update never repoints an edge:
+the endpoints of the first write stand.
+
+#### One batch cannot hand a unique value from one row to another
+
+Item order settles which value each id ends up with, but the writes themselves
+are grouped: every create in the batch runs before every update. A batch where
+one item **releases** a `unique` constraint value and a later item **creates a new
+row that claims** it therefore fails, even though the same operations applied one at a time succeed:
+
+```typescript
+// "alice@example.com" is currently held by person_a.
+await store.nodes.Person.bulkUpsertById([
+  { id: "person_a", props: { email: "moved@example.com" } }, // releases it
+  { id: "person_b", props: { email: "alice@example.com" } }, // claims it
+]);
+// ✗ UniquenessError: person_b's create is checked while person_a still holds
+//   the value. On a backend with transactions nothing is written at all.
+```
+
+Edges have the same limitation for a `cardinality` slot: a batch that ends the
+lone `oneActive` edge from a source while creating its replacement fails with a
+`CardinalityError`, because the replacement's create is checked before the
+update that frees the slot.
+
+This is a stated property of the bulk APIs rather than a bug to work around
+blindly. A batch describes the **set** of rows you want, not a script to reach
+them by, and grouping the creates apart from the updates is what makes a batch a
+couple of statements instead of one per item. The failure is loud and typed —
+never a silently dropped write.
+
+Two workarounds, both exact:
+
+- **Split the handoff across two batches**: one carrying the items that release
+  the value, then one carrying the items that claim it. Reordering items
+  *within* a single batch does not help, since the grouping ignores that order.
+  This keeps bulk throughput for everything else.
+- **Apply the conflicting items as sequential `upsertById` calls** (for edges,
+  as `update` then `create`), which frees the value before the claim is checked.
+
+If a sync feed can legitimately swap unique values between records, the
+two-batch shape is the reliable one: send one `bulkUpsertById` for the ids that
+already exist, then a second for the new ones. The interchange importer
+(`importGraph` with `onConflict: "update"`) is the other option that handles it
+directly — it applies each row in document order regardless of batch size, at the
+cost of the per-row validation and reporting that a bulk write skips.
+
+### bulkReplaceById
+
+Use node `bulkReplaceById` when each source record is authoritative and should
+replace the stored document rather than merge with it:
+
+```typescript
+await store.nodes.Document.bulkReplaceById(
+  externalRecords.map((record) => ({
+    id: record.id,
+    props: {
+      title: record.title,
+      content: record.body,
+    },
+  }))
+);
+```
+
+Omitted optional fields are removed. IDs must be distinct within the call;
+replacement is a set of final documents, not an ordered patch stream. On an
+eligible serverless backend this is the read-free sync path: TypeGraph submits
+creation, replacement, resurrection, claims, and search sidecars as one atomic
+program instead of reading every stored document before writing.
+
 ### bulkDelete
 
 Deletes multiple nodes by ID. Silently ignores IDs that don't exist:
@@ -126,8 +224,15 @@ Deletes multiple nodes by ID. Silently ignores IDs that don't exist:
 ```typescript
 // Remove nodes that no longer exist in source
 const deletedIds = await findDeletedRecords();
-await store.nodes.Document.bulkDelete(deletedIds);
+await store.nodes.Document.bulkDelete(
+  deletedIds.map((id) => asNodeId<typeof Document>(id))
+);
 ```
+
+Ids passed to `delete` and `bulkDelete` are branded `NodeId` values. Use the `id`
+of a node you hold, or brand an external string with `asNodeId` as above.
+(`upsertById` and `bulkUpsertById` take plain string ids because they may create
+the node.)
 
 ### getOrCreate APIs
 
@@ -147,10 +252,27 @@ const membership = await store.edges.memberOf.getOrCreateByEndpoints(
   user,
   org,
   { role: "admin", source: "sync" },
-  { matchOn: ["role"], ifExists: "update" }
+  {
+    matchOn: ["role"],
+    ifExists: "update",
+    validFrom: sourceMembership.startedAt,
+    validTo: sourceMembership.endedAt,
+    onImmutableLowerBound: "preserve",
+  }
 );
 // membership.action: "created" | "found" | "updated" | "resurrected"
 ```
+
+For endpoint writes, `validFrom` applies when a new edge is created and on the
+`"resurrected"` branch, where it restates the revived row's whole window. With
+`onImmutableLowerBound: "preserve"`, an `"updated"` live edge keeps its stored
+lower bound while still applying props and `validTo`; the default `"refuse"`
+policy instead refuses a different stated start. A `"found"` result performs no
+write and preserves the existing validity window. To reopen an ended live edge,
+pass `clearValidTo: true` together with `ifExists: "update"`; the default return
+mode refuses that combination rather than ignoring the clear. An end that precedes the
+row's effective start is refused — see
+[Inverted validity windows](/errors/#inverted_validity_window).
 
 ### Edge Bulk Operations
 
@@ -173,6 +295,16 @@ await store.edges.relatedTo.bulkInsert([
 
 // Delete many edges at once
 await store.edges.relatedTo.bulkDelete(edgeIds);
+
+// Permanently remove many edges at once (no tombstones left behind)
+await store.edges.relatedTo.bulkHardDelete(edgeIds);
+```
+
+Node collections have `bulkHardDelete(ids)` too. It removes each node with its
+connected edges and derived rows, as `hardDelete()` does, in one call:
+
+```typescript
+await store.nodes.Document.bulkHardDelete(expiredIds);
 ```
 
 ## On-Demand Sync
@@ -349,7 +481,9 @@ async function incrementalSync(store: Store, state: SyncState): Promise<SyncStat
     .where(and(gt(documents.deletedAt, since), isNotNull(documents.deletedAt)));
 
   if (deleted.length > 0) {
-    await store.nodes.Document.bulkDelete(deleted.map((d) => d.id));
+    await store.nodes.Document.bulkDelete(
+      deleted.map((d) => asNodeId<typeof Document>(d.id))
+    );
     console.log(`Removed ${deleted.length} deleted documents`);
   }
 
@@ -431,7 +565,7 @@ const syncWorker = new Worker<SyncJob>(
     const { type, entityType, entityId } = job.data;
 
     if (type === "delete") {
-      await store.nodes[entityType].delete(entityId);
+      await store.nodes[entityType].delete(asNodeId(entityId));
       return;
     }
 
@@ -439,7 +573,7 @@ const syncWorker = new Worker<SyncJob>(
     const record = await fetchEntity(entityType, entityId);
     if (!record) {
       // Record was deleted between enqueue and processing
-      await store.nodes[entityType].delete(entityId);
+      await store.nodes[entityType].delete(asNodeId(entityId));
       return;
     }
 
@@ -489,7 +623,7 @@ app.post("/webhooks/documents", async (c) => {
     }
 
     case "deleted": {
-      await store.nodes.Document.delete(event.data.id);
+      await store.nodes.Document.delete(asNodeId<typeof Document>(event.data.id));
       break;
     }
   }
@@ -517,7 +651,7 @@ listener.on("notification", async (msg) => {
   const { operation, id } = payload;
 
   if (operation === "DELETE") {
-    await store.nodes.Document.delete(id);
+    await store.nodes.Document.delete(asNodeId<typeof Document>(id));
     return;
   }
 

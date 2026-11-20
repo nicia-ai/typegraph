@@ -1,0 +1,47 @@
+name: Property Tests (deep)
+
+# The CI property job runs each suite at its smoke budget. This lane runs the
+# same suites with every `propertyRuns` budget multiplied, on a schedule and on
+# demand, to reach the rare interleavings and inputs the smoke budget misses.
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      runs_scale:
+        description: Multiplier applied to every propertyRuns budget
+        required: false
+        default: "10"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_OPTIONS: --max-old-space-size=8192
+
+jobs:
+  property-deep:
+    name: Property tests (deep, SQLite and PGlite, Node 24)
+    runs-on: latchkey-large
+    timeout-minutes: 90
+    env:
+      TYPEGRAPH_PROPERTY_RUNS_SCALE: ${{ inputs.runs_scale || '10' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run property tests at ${{ env.TYPEGRAPH_PROPERTY_RUNS_SCALE }}x
+        run: pnpm turbo run test:property

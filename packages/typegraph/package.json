@@ -1,7 +1,7 @@
 {
   "name": "@nicia-ai/typegraph",
-  "version": "0.39.0",
-  "description": "TypeScript-first embedded knowledge graph library with ontological reasoning",
+  "version": "0.75.0",
+  "description": "TypeScript embedded knowledge graph on SQLite and PostgreSQL: Zod schemas, type-safe queries, ontology, hybrid vector + fulltext search, bitemporal history.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -57,6 +57,31 @@
       "import": "./dist/provenance/index.js",
       "require": "./dist/provenance/index.cjs"
     },
+    "./store": {
+      "types": "./dist/store-entry.d.ts",
+      "import": "./dist/store-entry.js",
+      "require": "./dist/store-entry.cjs"
+    },
+    "./query": {
+      "types": "./dist/query-entry.d.ts",
+      "import": "./dist/query-entry.js",
+      "require": "./dist/query-entry.cjs"
+    },
+    "./errors": {
+      "types": "./dist/errors-entry.d.ts",
+      "import": "./dist/errors-entry.js",
+      "require": "./dist/errors-entry.cjs"
+    },
+    "./identity": {
+      "types": "./dist/identity-entry.d.ts",
+      "import": "./dist/identity-entry.js",
+      "require": "./dist/identity-entry.cjs"
+    },
+    "./maintenance": {
+      "types": "./dist/maintenance.d.ts",
+      "import": "./dist/maintenance.js",
+      "require": "./dist/maintenance.cjs"
+    },
     "./sqlite/local": {
       "types": "./dist/backend/sqlite/local-store.d.ts",
       "import": "./dist/backend/sqlite/local-store.js",
@@ -77,6 +102,11 @@
       "import": "./dist/backend/postgres/index.js",
       "require": "./dist/backend/postgres/index.cjs"
     },
+    "./adapters/drizzle/postgres/working-copy": {
+      "types": "./dist/backend/postgres/working-copy.d.ts",
+      "import": "./dist/backend/postgres/working-copy.js",
+      "require": "./dist/backend/postgres/working-copy.cjs"
+    },
     "./adapters/drizzle/postgres/pglite": {
       "types": "./dist/backend/postgres/pglite.d.ts",
       "import": "./dist/backend/postgres/pglite.js",
@@ -96,17 +126,24 @@
       "types": "./dist/backend/drizzle/indexes.d.ts",
       "import": "./dist/backend/drizzle/indexes.js",
       "require": "./dist/backend/drizzle/indexes.cjs"
+    },
+    "./adapters/drizzle/engine": {
+      "types": "./dist/backend/drizzle/engine/index.d.ts",
+      "import": "./dist/backend/drizzle/engine/index.js",
+      "require": "./dist/backend/drizzle/engine/index.cjs"
     }
   },
   "files": [
     "dist",
+    "etc/root-export-moves.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "sideEffects": false,
   "scripts": {
-    "dev": "tsup --watch",
-    "build": "tsup",
+    "dev": "node --import tsx scripts/build.ts --watch",
+    "build": "node --import tsx scripts/build.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit --skipLibCheck",
     "test:types": "node --import tsx scripts/test-types.ts all",
@@ -116,6 +153,7 @@
     "test:strict-local-consumers": "node --import tsx scripts/test-strict-local-consumers.ts",
     "test:api-report": "pnpm build && node --import tsx scripts/api-report.ts",
     "api-report:update": "pnpm build && node --import tsx scripts/api-report.ts --local",
+    "test:api-surface": "node --import tsx scripts/api-surface-compat.ts",
     "test:examples": "node --import tsx scripts/test-examples.ts sqlite",
     "test:examples:postgres": "node --import tsx scripts/test-examples.ts postgres",
     "pretest": "node --import tsx scripts/ensure-native-sqlite.ts",
@@ -134,17 +172,30 @@
     "test:coverage": "vitest run --coverage",
     "test:coverage:merge": "vitest run --merge-reports=.vitest-reports --coverage",
     "test:mutation": "stryker run",
-    "test:mutation:critical": "stryker run stryker.critical.config.json"
+    "test:mutation:critical": "stryker run stryker.critical.config.json",
+    "test:mutation:claims": "stryker run stryker.claims.config.json"
   },
   "keywords": [
-    "graph",
     "knowledge-graph",
+    "property-graph",
+    "graph",
+    "graph-database",
     "typescript",
-    "sqlite",
-    "drizzle",
     "zod",
+    "drizzle",
+    "sqlite",
+    "postgres",
+    "postgresql",
+    "pgvector",
+    "libsql",
+    "turso",
     "ontology",
-    "semantic"
+    "rag",
+    "graphrag",
+    "agent-memory",
+    "vector-search",
+    "fulltext-search",
+    "bitemporal"
   ],
   "author": "Nicia AI, Inc.",
   "license": "MIT",
@@ -168,11 +219,11 @@
     "@electric-sql/pglite-pgvector": ">=0.0.2 <1.0.0",
     "@libsql/client": ">=0.6.0",
     "@neondatabase/serverless": ">=0.9.0 <2.0.0",
-    "better-sqlite3": ">=9.0.0 <13.0.0",
+    "better-sqlite3": ">=9.0.0 <14.0.0",
     "drizzle-orm": ">=0.35.0 <1.0.0",
     "pg": ">=8.0.0 <9.0.0",
     "postgres": ">=3.4.0 <4.0.0",
-    "zod": "^4.0.0"
+    "zod": "^4.5.0"
   },
   "peerDependenciesMeta": {
     "@electric-sql/pglite": {
@@ -190,6 +241,9 @@
     "better-sqlite3": {
       "optional": true
     },
+    "drizzle-orm": {
+      "optional": true
+    },
     "pg": {
       "optional": true
     },
@@ -198,33 +252,33 @@
     }
   },
   "dependencies": {
-    "nanoid": "^5.1.16"
+    "nanoid": "^6.0.1"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.0",
-    "@electric-sql/pglite": "^0.5.4",
-    "@electric-sql/pglite-pgvector": "^0.0.5",
-    "@libsql/client": "^0.17.4",
-    "@microsoft/api-extractor": "^7.58.11",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
+    "@libsql/client": "^0.18.0",
+    "@microsoft/api-extractor": "^7.59.2",
     "@neondatabase/serverless": "^1.1.0",
-    "@stryker-mutator/core": "^9.6.1",
-    "@stryker-mutator/vitest-runner": "^9.6.1",
-    "@typegraph/eslint-config": "workspace:*",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.13.2",
-    "@types/pg": "^8.20.0",
-    "@vitest/coverage-v8": "^4.1.9",
-    "better-sqlite3": "^12.11.1",
-    "drizzle-orm": "^0.45.2",
-    "eslint": "^10.6.0",
-    "fast-check": "^4.8.0",
-    "pg": "^8.22.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.13.6",
+    "@types/pg": "^8.23.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.3",
+    "eslint": "^10.11.0",
+    "fast-check": "^4.10.2",
+    "libsql-client-017": "npm:@libsql/client@^0.17.4",
+    "pg": "^8.23.0",
     "postgres": "^3.4.9",
     "sqlite-vec": "^0.1.9",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.9",
-    "zod": "^4.4.3"
+    "vitest": "^4.1.11",
+    "zod": "^4.6.5"
   }
 }

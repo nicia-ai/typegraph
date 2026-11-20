@@ -89,7 +89,7 @@ interface ValidationErrorDetails {
   readonly issues: readonly ValidationIssue[];
   readonly entityType?: "node" | "edge";
   readonly kind?: string;
-  readonly operation?: "create" | "update";
+  readonly operation?: "create" | "update" | "delete" | "hardDelete";
   readonly id?: string;
 }
 
@@ -97,6 +97,7 @@ interface ValidationIssue {
   readonly path: string;
   readonly message: string;
   readonly code?: string;
+  readonly assertionId?: string;
 }
 ```
 
@@ -120,6 +121,144 @@ try {
 }
 ```
 
+An option object that carries a key its surface does not declare (a composition
+`partOf` attachment, `reparent`, `parts()` / `wholes()`, `subgraph({ composition })`)
+is refused with a `ValidationError` whose issue `code` is `unrecognized_keys`, one
+issue per key, rather than having the key ignored.
+
+#### `INVERTED_VALIDITY_WINDOW`
+
+A `ValidationError` whose issue carries the exported code
+`INVERTED_VALIDITY_WINDOW` refused a valid-time window of negative width: the
+write's `validTo` precedes the row's effective `validFrom`, so the row would have
+stopped being true before it started and no `asOf` coordinate could observe it.
+Branch on the code rather than on the message.
+
+```typescript
+import { INVERTED_VALIDITY_WINDOW_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  // The stored validFrom is later than this end.
+  await store.edges.worksAt.update(edgeId, {}, { validTo: "2020-01-01T00:00:00.000Z" });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === INVERTED_VALIDITY_WINDOW_CODE)
+  ) {
+    // Supply an explicit validFrom for a historical window, or drop validTo.
+  }
+}
+```
+
+Interchange import records the same refusal as a per-row error prefixed with the
+code, so one bad row does not abort the import; trusted import refuses the whole
+stream with `TrustedImportError` reason `invalid_stream`. A zero-width window
+(`validTo === validFrom`) is legal and never raises this, and neither is a write
+that STAMPS its own start while carrying only a historical `validTo`: any create,
+and a node resurrection through `upsertById` / `bulkUpsertById`. Both store no
+lower bound instead. An edge resurrection RETAINS the bound the row already
+holds, so a `validTo` before that bound still raises this.
+
+#### `IMMUTABLE_VALIDITY_LOWER_BOUND`
+
+A `ValidationError` whose issue carries the exported code
+`IMMUTABLE_VALIDITY_LOWER_BOUND` refused a `validFrom` the write could not apply.
+A live row's lower bound is history: an in-place update never rewrites
+`valid_from`, so a bound naming a different instant is refused rather than
+accepted and silently dropped. The message names both instants — the one stated
+and the one the row stores — so you can restate the stored bound without a
+second read.
+
+```typescript
+import { IMMUTABLE_VALIDITY_LOWER_BOUND_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  // The row is live and started at some other instant.
+  await store.nodes.Person.upsertById(id, props, { validFrom: "2020-01-01T00:00:00.000Z" });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some(
+      (issue) => issue.code === IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
+    )
+  ) {
+    // Omit validFrom, or restate the bound the row already holds.
+  }
+}
+```
+
+What deliberately does not raise it:
+
+- **Restating the stored bound.** Naming the instant the row already holds is
+  accepted; there is nothing to apply and nothing being ignored.
+- **A create, or a resurrection.** Both write a fresh window, so a stated
+  `validFrom` is stored — that is the way to give a row a different lower bound.
+- **`getOrCreateByEndpoints` returning an existing edge.** That branch performs
+  no write, so `validFrom` / `validTo` describe the row to create if none is
+  found. `clearValidTo` is refused on a live return-mode match because it names
+  a mutation; use `ifExists: "update"`.
+- **A node upsert or endpoint-matched edge update with
+  `onImmutableLowerBound: "preserve"`.** This explicitly treats `validFrom` as
+  create/resurrection-only input. A live-row update keeps its stored lower
+  bound while still applying props and `validTo`; the default remains
+  `"refuse"` so an unqualified bound is never silently dropped. Edge updates
+  use the policy with `ifExists: "update"`; the bulk edge form sets it per item.
+
+Under the default `"refuse"` policy, it reaches every path that accepts
+`validFrom` against a live row: `upsertById`, `bulkUpsertById` (including a
+repeated id in one batch, judged against the row the batch just queued),
+`getOrCreateByEndpoints` / `bulkGetOrCreateByEndpoints` with
+`ifExists: "update"`, and interchange import's `onConflict: "update"` legs —
+where, as with the inverted-window refusal, it is recorded as a per-row error
+prefixed with the code rather than aborting the import.
+
+#### `ENTITY_ALREADY_EXISTS`
+
+A `ValidationError` whose issue carries the exported code
+`ENTITY_ALREADY_EXISTS` refused a create because the id is already taken.
+`details.entityType` says whether a node or an edge was refused and
+`details.kind` names its kind.
+
+```typescript
+import { ENTITY_ALREADY_EXISTS_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  await store.nodes.Person.create({ name: "Alice" }, { id: takenId });
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === ENTITY_ALREADY_EXISTS_CODE)
+  ) {
+    // Use a different id, or update the existing entity.
+  }
+}
+```
+
+The code is the same whichever layer noticed, on either backend. A node create
+finds out from its own existence probe — but the probe and the INSERT are two
+statements, and PostgreSQL does not serialize two write transactions under its
+default READ COMMITTED isolation, so a concurrent create of the same NEW id can
+commit in between and the engine refuses the INSERT instead. (SQLite's
+`BEGIN IMMEDIATE` gives the writer slot to one transaction at a time, so its probe
+always sees the winner's row.) An edge create has no existence probe at all, so
+the engine's refusal is always what reports a taken edge id. All of these raise the
+same error, so a caller retrying a generated id needs one branch, not several.
+
+`details.id` names the taken id, and is present for every single-entity create.
+It is absent only when the refused statement inserted more than one row: the
+engine reports that the statement collided without saying which row did, and its
+transaction is already aborted, so there is nothing left to probe. No race is
+needed to reach that — a bulk create of edges, whose ids you supplied and which
+nothing probes, is refused this way on every backend. Treat `details.id` as
+optional if you create in bulk.
+
+This is about identity, not values. A conflict on a declared `unique` constraint
+raises `UniquenessError` instead, and a violated `unique: true` index declaration
+surfaces as the engine's own failure — neither is reshaped into this error.
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.
@@ -142,6 +281,402 @@ try {
 }
 ```
 
+### `IdentityContradictionError`
+
+Thrown when an identity mutation would make the assertion ledger contradictory —
+for example asserting two nodes are the same after they were asserted different,
+folding a same-class pair the ontology forbids, or importing an archive whose
+assertions conflict with the target graph. Only raised on identity-enabled
+graphs.
+
+```typescript
+try {
+  await tx.identity.assertSame(alice, aliceCopy);
+} catch (error) {
+  if (error instanceof IdentityContradictionError) {
+    console.log(error.code); // "IDENTITY_CONTRADICTION"
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // {
+    //   operation: "assertSame",       // "assertSame" | "assertDifferent" | "fold" | "import" | "merge"
+    //   a: { kind: "Person", id: "..." },
+    //   b: { kind: "Person", id: "..." },
+    //   reason: "different-assertion", // "different-assertion" | "same-class" | "disjoint-kinds"
+    //   conflictingAssertionId: "...", // present when an existing assertion conflicts
+    //   conflictingKinds: ["Person", "Organization"], // present when reason is "disjoint-kinds"
+    // }
+    console.log(error.suggestion);
+    // "Retract the conflicting identity assertion or correct the graph ontology before retrying."
+  }
+}
+```
+
+### Identity validity errors
+
+`IdentityValidityWindowError` refuses a future start, future end, inverted
+window, or a second non-identical open window for one current semantic pair.
+Its code identifies the reason: `IDENTITY_VALIDITY_FUTURE_START`,
+`IDENTITY_VALIDITY_FUTURE_END`, `IDENTITY_VALIDITY_INVERTED`, or
+`IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT`.
+
+`IdentityEndpointValidityError` (`IDENTITY_ENDPOINT_VALIDITY`) means an
+explicit assertion window extends outside an endpoint node's own validity or
+deletion bounds. Future or inverted identity windows are user-category input
+errors. A second non-identical open window and an endpoint-window conflict are
+constraint-category errors. Both classes are exported from
+`@nicia-ai/typegraph/identity`.
+
+### `IdentityReplayError`
+
+Thrown by `store.identity.replay` / `transitionsOf` (and by
+`pruneIdentityTransitions`'s own history precondition) when the transition log
+cannot answer a request. Its code names the reason:
+
+- `IDENTITY_REPLAY_REQUIRES_HISTORY` — the store was opened without
+  `history: true`; there is no transition log to annotate reads with. Open
+  with `createStore(graph, backend, { history: true })`. `details.operation`
+  names what was refused (`transitionsOf`, `replay`,
+  `pruneIdentityTransitions` or `archival transition restore`), and so does
+  the message. Also thrown by
+  `importGraph`/`importGraphStream` when an archival document's `transitions`
+  section targets a history-off store: without `history: true` those rows
+  could never be read back through `transitionsOf` / `replay` either, so the
+  import refuses rather than writing them write-only.
+- `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` — the backend owns recorded
+  time itself (it declares `recordedTime`), so TypeGraph performs no recorded
+  capture and keeps no transition log for it, with or without
+  `history: true`. Raised by the same operations as
+  `IDENTITY_REPLAY_REQUIRES_HISTORY`, including an archival-transitions
+  import.
+- `IDENTITY_REPLAY_HISTORY_TRUNCATED` — the requested range lies entirely
+  below the graph's retention watermark (see
+  [`pruneIdentityTransitions`](/identity/#retention)); `details.prunedBefore`
+  is the instant the prune was made at, which `fromRecorded` accepts to read
+  the range the prune left whole.
+- `IDENTITY_REPLAY_WALK_INCOMPLETE` — the lineage walk keyset-pages through
+  every matching row with no per-round limit, so ordinary lineages — however
+  many rows they hold — never hit this refusal; it fires only when a single
+  class lineage's transition rows exceed an internal total safety ceiling
+  (`details.ceiling`), which is a backstop against a pathologically large or
+  corrupted log, not a cap on legitimate history. Its only remedy is
+  destructive: prune older history with `pruneIdentityTransitions`.
+  Narrowing `fromRecorded`/`toRecorded` does not help: lineage discovery
+  reads the whole log deliberately, so that a requested window can never
+  hide the notes that name a class.
+- `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` — `pruneIdentityTransitions` was
+  given a `beforeRecorded` beyond every revision the graph holds: its next
+  commit's revision, or one past the highest retained transition when an
+  archival restore carried in higher revisions
+  (`details.highestPrunableRevision`). A prune there would claim history that
+  does not exist yet as already pruned, so it is refused and nothing is
+  deleted. Pass an instant
+  the graph has reached, such as `store.recordedNow()`.
+
+A `fromRecorded`, `toRecorded`, page `cursor` or prune `beforeRecorded` that
+this graph did not allocate is refused before anything is read or deleted, by
+the same ownership check `store.asOfRecorded` applies: another graph's instant
+or cursor raises `GraphAllocationMismatchError`
+(`GRAPH_ALLOCATION_OWNER_MISMATCH`), and a legacy unowned instant — the form a
+restored transition's `recorded` takes — raises `ConfigurationError` with
+`details.code` `RECORDED_ANCHOR_UNBOUND` (see [Recorded allocation ownership
+and lookup](#recorded-allocation-ownership-and-lookup)).
+
+A range with more boundaries than the requested `limit` is not an error —
+`replay` and `transitionsOf` page, returning a `nextCursor` on the
+result (see [Replay and identity history](/identity/#replay-and-identity-history)).
+
+```typescript
+import { IdentityReplayError } from "@nicia-ai/typegraph/identity";
+
+try {
+  await store.identity.replay(alice, { limit: 50 });
+} catch (error) {
+  if (error instanceof IdentityReplayError) {
+    console.log(error.details.code);
+  }
+}
+```
+
+### `IdentityMergeConflictError`
+
+Detected at merge **plan time** when the branches being merged carry opposing
+or otherwise contradictory identity truth: one branch asserts a pair `same`
+while another asserts it `different` (directly, or transitively through a
+chain of `same` assertions no single branch ever wrote), a branch retracts an
+assertion that a different branch reasserts under a new id, or retracts one
+that a different branch both retracts and reasserts (a retract/reassert race —
+a retraction and a reassertion are convergent, and merge cleanly, only when
+every branch that retracts the pair also reasserts it), or a branch asserts an
+identity relation over a node another branch deleted. Extends `MergeError`, so
+an `instanceof MergeError` catch covers it alongside the other merge failures.
+
+The same error class also covers the identity separation veto (see the
+[graph merge guide](/graph-merge/#identity-separation-veto)): a definitional
+match, or a transitive cluster, crossing a class-lifted `different` assertion
+(`GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT`). Check `error.code` to
+distinguish it from the default `GRAPH_MERGE_IDENTITY_CONFLICT`.
+
+`merge()` and `IdentityMergeConflictError` are both exported from
+`@nicia-ai/typegraph/graph-merge`, not the package root. `merge()` takes an
+array of branches and never throws a `MergeError` — it **returns** a
+`Result<MergeReport, MergeError>`:
+
+```typescript
+import { merge, IdentityMergeConflictError, isErr } from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, [branch]);
+if (isErr(result)) {
+  if (result.error instanceof IdentityMergeConflictError) {
+    console.log(result.error.code); // "GRAPH_MERGE_IDENTITY_CONFLICT" or "GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT"
+    console.log(result.error.details);
+  }
+  throw result.error;
+}
+```
+
+### `MergeConstraintConflictError`
+
+Returned when `merge()`, `mergeIncremental()`, or `applyMergePlan()` resolves a
+plan whose final graph violates a deterministic store constraint. The store
+remains the owner of constraint enforcement: the merge translates its typed
+refusal only at the commit boundary, after the transaction has rolled back.
+
+```typescript
+import {
+  isErr,
+  merge,
+  MergeConstraintConflictError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof MergeConstraintConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_CONSTRAINT_CONFLICT"
+  console.log(result.error.category); // "constraint"
+  console.log(result.error.details.constraintCode); // e.g. "CARDINALITY_ERROR"
+  console.log(result.error.details.edgeKind); // copied from the store error
+  console.log(result.error.cause); // the original CardinalityError, etc.
+}
+```
+
+Cardinality, uniqueness, endpoint, disjointness, and restricted-delete
+refusals share this surface when they arise from node or edge application.
+Those the plan's own writes are certain to meet against the target's current
+rows are refused while the plan is built instead — two edges holding one
+cardinality slot or one part's whole as `CardinalityMergeConflictError`, two
+overlapping composition windows of one part as
+`CompositionWindowMergeConflictError`, a
+restricted node the plan deletes as `RestrictedDeleteMergeConflictError` — so
+this error is the apply-time re-verification for an artifact whose rows no
+longer agree with the target.
+The planner normally co-buckets nodes with the same declared unique key, but a
+late store-owned uniqueness refusal uses the same completeness boundary rather
+than falling back to a system error.
+Identity truth conflicts retain `IdentityMergeConflictError`; backend,
+environment, and stale-plan failures retain their existing system errors.
+Constraint failure is atomic: neither graph writes nor merge provenance records
+survive.
+
+### `AcyclicityMergeConflictError`
+
+Detected at merge **plan time**, alongside `IdentityMergeConflictError`, when
+the resolved plan's edge writes — after canonicalization and repointing,
+layered onto the target's current live edges — would close a cycle in a
+declared-`acyclic: true` relation. This includes a cycle formed entirely from
+edges the plan itself proposes, with nothing live on the target yet.
+
+```typescript
+import {
+  AcyclicityMergeConflictError,
+  isErr,
+  merge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const result = await merge(store, branches);
+if (isErr(result) && result.error instanceof AcyclicityMergeConflictError) {
+  console.log(result.error.code); // "GRAPH_MERGE_ACYCLICITY_CONFLICT"
+  console.log(result.error.details.relation); // the declared-acyclic relation
+  console.log(result.error.details.edges); // every offending proposed edge on a cycle
+  console.log(result.error.details.witness); // one return path, as on EdgeAcyclicityError
+}
+```
+
+When the plan closes cycles in more than one declared-acyclic relation, `details`
+reports the first and lists the others in `details.additionalRelations`
+(`{ relation, edgeIds }` entries).
+
+The witness may be absent if a concurrent deletion removes the path between
+the lock-free verdict and its diagnostic read.
+If the diagnostic statement times out or is cancelled, the conflict carries an
+`EdgeAcyclicityIndeterminateError` as `cause`; on PostgreSQL that failed
+statement aborts the caller's transaction, so roll it back instead of
+continuing to use it.
+
+A cycle that only arises from a write racing the plan-time check (which holds
+no per-graph lock, since planning does no write) is not caught here — the
+unchanged apply-time write path still refuses it as
+`MergeConstraintConflictError` wrapping `EdgeAcyclicityError`.
+
+### `CardinalityMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan would leave two live edges holding one reservation the store
+allows a single holder of: a part's one whole, or a declared `cardinality` /
+`targetCardinality` slot. Two branches that reparent one part to different
+wholes, or a branch and the incremental target that each add an edge to a
+`targetCardinality: "one"` endpoint, are this conflict. The plan's revision
+fence makes the apply's refusal certain, so no plan is returned.
+
+```typescript
+import {
+  CardinalityMergeConflictError,
+  isErr,
+  planMerge,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(store, branches);
+if (isErr(planned) && planned.error instanceof CardinalityMergeConflictError) {
+  console.log(planned.error.code); // "GRAPH_MERGE_CARDINALITY_CONFLICT"
+  console.log(planned.error.details.constraintCode); // "COMPOSITION_WHOLE_OCCUPIED" or "CARDINALITY_ERROR"
+  console.log(planned.error.details.edges); // the incumbent edge, then the one colliding with it
+  console.log(planned.error.cause); // the CompositionError or CardinalityError apply would raise
+}
+```
+
+Like `MergeConstraintConflictError`, `details` copies the store refusal's own
+fields beside `constraintCode`, `constraintErrorName` and `constraintDetails`.
+Reconcile the branches (or the branch with the target) and plan again. See
+[Structural conflicts](/graph-merge#structural-conflicts).
+
+### `CompositionWindowMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan would leave one part of a `population: "oneActive"`
+composition pair with two composition windows that share an instant —
+history rows two branches contributed, or a branch's history overlapping the
+target's. A part holds exactly one whole at every valid-time coordinate (see
+[One whole at every instant](/ontology#one-whole-at-every-instant)), so the
+apply's refusal is certain and no plan is returned. `code` is
+`GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT`, `cause` is the `CompositionError`
+(`COMPOSITION_WINDOW_OVERLAP`, `situation: "windowOverlap"`) the store would
+raise, and `details` copies its fields — the part, both edges, both wholes
+and both windows (`validFrom` / `validTo`, `incumbentValidFrom` /
+`incumbentValidTo`) — beside `constraintCode`, `constraintErrorName`,
+`constraintDetails` and `edges` (the incumbent, then the overlapping edge).
+End one of the windows in its branch so the two only touch, then plan again.
+
+### `RestrictedDeleteMergeConflictError`
+
+Returned at merge **plan time** by every planning entry point when the
+resolved plan deletes an `onDelete: "restrict"` node (the default) that keeps
+a non-composition edge the plan does not delete — typically an edge the
+incremental target added after the fork. `code` is
+`GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT`, `cause` is the `RestrictedDeleteError`
+apply would raise, and `details` carries its `nodeKind`, `nodeId`,
+`edgeCount` and `edgeKinds` beside `constraintCode`, `constraintErrorName` and
+`constraintDetails`. Delete the blocking edges in the branch, or keep the
+node, and plan again.
+
+### `MergeCompositionOrphanError`
+
+Returned at merge **plan time** by every planning entry point, and thrown
+again from inside `applyMergePlan`'s transaction for an artifact whose rows no
+longer agree with the target, when applying the plan would
+delete a composition whole while one of its live parts is not itself among
+the plan's node deletions — the target gained that part after the branch
+point (or independently of it), and the branch's diff carries no deletion for
+it. Applying the plan as trusted would leave the part's composition edge
+pointing at a whole that no longer exists. The mirror case is refused the same
+way: the plan deletes a part (directly, or through the branch's cascade from
+its old whole) that the target has meanwhile moved under another live whole
+the plan leaves standing.
+
+```typescript
+import {
+  isErr,
+  MergeCompositionOrphanError,
+  planMergeIncremental,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMergeIncremental({ forkPoint, target, branches });
+if (isErr(planned) && planned.error instanceof MergeCompositionOrphanError) {
+  console.log(planned.error.code); // "GRAPH_MERGE_COMPOSITION_ORPHAN"
+  console.log(planned.error.details.part); // { kind, id }
+  console.log(planned.error.details.cause); // "deleted" | "moved" | "unattached"
+  console.log(planned.error.details.whole); // { kind, id } — absent for cause: "unattached"
+  console.log(planned.error.details.viaEdgeKind);
+}
+```
+
+The plan is fenced by the target's revision, so a finding computed against
+the target's state at plan time is a certain apply refusal: it is refused
+there rather than returned in a plan that could never apply. `applyMergePlan`
+re-verifies the same check under the per-graph write lock. `cause: "deleted"` names the whole a branch deletes while a part
+survives; `cause: "moved"` names the live whole the target holds a part under
+that the plan would delete; `cause: "unattached"` (a part that requires a
+whole) has no whole to name — recompute the merge plan against the target's
+current state, or delete, attach or reconcile the part in the branch before
+merging.
+
+Every planning entry point also returns this error when two branches conflict
+over one composition attachment: one branch moves, attaches or re-attaches
+(reopens an ended `oneActive` row) a part while another deletes the part (`cause: "moved"`, `whole` is the surviving whole
+the part was moved under) or the whole (`cause: "deleted"`, `whole` is the
+deleted whole). `details.branchId` names the attaching branch; it is absent on
+every finding about the target's own state. See
+[Composition orphans](/graph-merge#composition-orphans).
+
+### Merge plan and evidence errors
+
+The reviewable merge lifecycle also returns errors in its `Result` arm. It does
+not throw them:
+
+```typescript
+import {
+  applyMergePlan,
+  isErr,
+  planMerge,
+  StaleMergePlanError,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const planned = await planMerge(store, branches, options);
+if (isErr(planned)) throw planned.error;
+
+const applied = await applyMergePlan(store, planned.data);
+if (isErr(applied)) {
+  if (applied.error instanceof StaleMergePlanError) {
+    // The reviewed artifact no longer describes the target. Plan and review again.
+  }
+  throw applied.error;
+}
+```
+
+| Error | Code | Meaning |
+| --- | --- | --- |
+| `MergePlanCapabilityError` | `GRAPH_MERGE_PLAN_CAPABILITY` | The target cannot supply a durable revision fence for a cross-time plan. Enable `revisionTracking` or `history`; the contiguous `merge()` wrappers retain their documented compatibility behavior. |
+| `CandidatePlanningScopeError` | `GRAPH_MERGE_PLAN_CAPABILITY` | A `MergePlanCapabilityError`: bounded candidate, mutation or evolution planning needs the whole target. `details.planningScope.reason` names why; pass `planningScope: "full"` to permit a full copy of the target. |
+| `MergePlanningStaleError` | `GRAPH_MERGE_PLANNING_STALE` | The target revision changed between the planner's opening and closing observations. This is an expected retry-and-replan outcome under concurrency: no artifact is returned, so recapture the target and create a new plan before retrying. |
+| `StaleMergePlanError` | `GRAPH_MERGE_PLAN_STALE` | The target moved after planning, the plan already succeeded, or another concurrent application won. No plan writes committed. |
+| `InvalidMergePlanError` | `GRAPH_MERGE_PLAN_INVALID` | The value failed the versioned plan schema or a semantic invariant. |
+| `UnsupportedMergePlanVersionError` | `GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED` | `formatVersion` is not supported by this TypeGraph version. |
+| `MergePlanDigestMismatchError` | `GRAPH_MERGE_PLAN_DIGEST_MISMATCH` | Canonical plan content differs from the recorded digest. |
+| `MergePlanTargetMismatchError` | `GRAPH_MERGE_PLAN_TARGET_MISMATCH` | The plan names a different graph id from the supplied target. |
+| `MergePlanSchemaMismatchError` | `GRAPH_MERGE_PLAN_SCHEMA_MISMATCH` | The plan was resolved under a different active schema version or hash. |
+| `MergePlanOwnerMismatchError` | `GRAPH_ALLOCATION_OWNER_MISMATCH` | The plan and target have different allocation owners (origin or namespace), even if their numeric revisions match. |
+| `MergeReviewError` | `GRAPH_MERGE_REVIEW` | The evidence a durable candidate review needs is invalid, unsupported or unavailable. `details.reason` names why, such as `digest-mismatch`, `unsupported-version`, `revision-tracking-required` or `candidate-scope-ineligible` (a candidate-scoped review on a graph that declares a composition pair, an `acyclic` edge or a target-side cardinality; `details.planningScope` names the cause). |
+| `CandidateSourceError` | `GRAPH_MERGE_CANDIDATE_SOURCE` | A built-in candidate source failed. `details` identifies its source id, entity kind, and operation context. |
+| `MatchEvidenceError` | `GRAPH_MERGE_EVIDENCE` | Candidate evidence is malformed or a score is non-finite. `NaN` and infinity are refused, never serialized or silently dropped. |
+
+Plan validation and the target/schema/origin/revision fence run before canonical
+writes. The revision check is inside the same transaction as apply, so two
+concurrent attempts cannot both commit. A stale plan is not repaired or adapted:
+create a new plan and obtain approval for its new `digest`.
+
+Plans may contain the complete proposed application data. Their digest detects
+content changes and gives approval systems a stable identity, but it is not a
+signature and does not authenticate storage, authorize a caller, or prove who
+created the artifact. Protect plan data and enforce those trust decisions in the
+application before calling `applyMergePlan()`.
+
 ### `EndpointError`
 
 Thrown when an edge is created with invalid endpoint types.
@@ -152,12 +687,46 @@ try {
   await store.edges.worksAt.create(company, person, {}); // Wrong direction
 } catch (error) {
   if (error instanceof EndpointError) {
-    console.log(error.category); // "user"
+    console.log(error.category); // "constraint"
     console.log(error.suggestion);
     // "Check the edge definition to see which node types are allowed..."
   }
 }
 ```
+
+### `EndpointPairError`
+
+Thrown when a [source-dependent edge](/core-concepts#source-dependent-targets)
+receives a source/target combination that matches no declared pair. It extends
+`TypeGraphError` directly, so catching `EndpointError` alone does not catch it.
+An invalid source kind continues to produce `EndpointError`.
+
+```typescript
+import { EndpointPairError } from "@nicia-ai/typegraph/errors";
+
+try {
+  // Dynamic callers are checked at runtime, too.
+  // assignedTo allows Employee -> Department and Student -> Course.
+  await store.getEdgeCollection("assignedTo").create(employee, course, {});
+} catch (error) {
+  if (error instanceof EndpointPairError) {
+    console.log(error.code); // "ENDPOINT_PAIR_ERROR"
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // {
+    //   edgeKind: "assignedTo", endpoint: "pair",
+    //   fromKind: "Employee", toKind: "Course",
+    //   allowedPairs: [
+    //     { from: "Employee", to: "Department" },
+    //     { from: "Student", to: "Course" },
+    //   ],
+    // }
+  }
+}
+```
+
+Malformed target maps and graph registrations that widen built-in constraints
+fail at configuration time with `ConfigurationError`.
 
 ### `CardinalityError`
 
@@ -173,12 +742,295 @@ try {
   if (error instanceof CardinalityError) {
     console.log(error.category); // "constraint"
     console.log(error.details);
-    // { edgeKind: "worksAt", fromKind: "Person", fromId: "<alice-id>", cardinality: "one", existingCount: 1 }
+    // { edgeKind: "worksAt", direction: "source", fromKind: "Person", fromId: "<alice-id>", toKind: "Company", toId: "<other-company-id>", cardinality: "one", existingCount: 1, incumbentEdgeId: "<first-edge-id>" }
     console.log(error.suggestion);
     // "Remove the existing edge before creating a new one, or update the existing edge..."
   }
 }
 ```
+
+`details.direction` names which endpoint's population was overrun —
+`"source"` for a `cardinality` violation, `"target"` for a
+`targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
+name both endpoints, regardless of direction. `details.incumbentEdgeId` is the
+id of the stored edge occupying the slot, so you can delete or update it
+without a second lookup; it comes from the claim row's holder, from a stored
+edge read the portable probe makes only once its count has refused, or from the
+earlier edge of the same batch. It is absent when no stored edge could be named.
+
+### `EdgeAcyclicityError`
+
+Thrown when a write would give a declared `acyclic: true` edge relation a
+cycle.
+
+```typescript
+// If dependsOn declares acyclic: true:
+await store.edges.dependsOn.create(taskA, taskB, {});
+
+try {
+  await store.edges.dependsOn.create(taskB, taskA, {});
+} catch (error) {
+  if (error instanceof EdgeAcyclicityError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { relation: "dependsOn", edgeKind: "dependsOn", edgeId: "<new-edge-id>",
+    //   fromKind: "Task", fromId: "<taskB-id>", toKind: "Task", toId: "<taskA-id>",
+    //   selfLoop: false }
+  }
+}
+```
+
+Store refusals carry `details.witness` (`EdgeCycleWitness`): `edgeId` names the
+refused edge, `nodes` is an ordered list of `{ kind, id }` references from its
+relation-oriented `to` back to its `from`, and `edges[i]` connects `nodes[i]`
+to `nodes[i + 1]`. Each edge names `edgeKind`, `edgeId`, and `source`:
+`"stored"` or `"proposed"` for another edge in the refused batch. Proposed
+edge ids may never be stored, because the batch is refused before writing.
+The refused edge itself is excluded from this return path. A self-loop has
+one node and no return edges.
+
+A path longer than 64 edges reports its first 64 edges and 65 nodes with
+`truncated: true`; otherwise the last node is the refused edge's
+relation-oriented `from` and `truncated` is false. Composition witnesses use
+part-to-whole orientation even when a realizing edge is stored whole-to-part.
+One path is reported, without guaranteeing which of several paths is chosen.
+
+Witness collection runs only after the exhaustive check proves a cycle. It
+uses linear work and memory per bind-budget seed slice in the reachable
+stored/proposed graph; a large batch can read shared regions again in another
+slice. The payload cap does not limit cycle detection or the diagnostic
+search. Accepted
+writes run the same reachability probe as before. `store.verifyConstraintFences()`
+remains the exhaustive list of offending stored edges. The witness field is
+optional on errors constructed directly by callers. If the diagnostic query
+cannot fit the backend's bind budget, the proven cycle still raises
+`EdgeAcyclicityError` with no witness and no SQL failure. If the diagnostic
+statement times out or is cancelled, the refusal carries an
+`EdgeAcyclicityIndeterminateError` as `cause`, whose own `cause` retains the
+driver failure. On PostgreSQL that failed statement aborts the caller's
+transaction: roll back the transaction rather than catching the refusal and
+continuing to use it. A normal cycle refusal has no diagnostic cause.
+
+### `EdgeAcyclicityIndeterminateError`
+
+Thrown when the engine cuts an acyclicity search short — a statement
+timeout, a resource limit — before it can prove or refute a cycle. An
+incomplete search is never reported as "no cycle".
+
+```typescript
+console.log(error.details);
+// { relation: "dependsOn", operation: "edges.create", graphId: "..." }
+```
+
+The suggestion names the two ways out: raise the statement budget for the
+operation, or drop `acyclic: true` from the edge and enforce it in
+application code. Retrying is not suggested — a relation too large for the
+budget will not shrink.
+
+### `CompositionError`
+
+Thrown when a `partOf`/`hasPart` write breaks one of the rules that keep a
+part's attachment a fact of its row. `details.situation` names which one, and
+`code` says the same thing:
+
+| `situation` | `code` | Meaning |
+| --- | --- | --- |
+| `"occupied"` | `COMPOSITION_WHOLE_OCCUPIED` | The write would give a part a second whole |
+| `"futureStart"` | `COMPOSITION_VALIDITY_FUTURE_START` | A composition edge write states a `validFrom` later than the operation clock |
+| `"futureEnd"` | `COMPOSITION_VALIDITY_FUTURE_END` | A composition edge write states a `validTo` later than the operation clock |
+| `"futureMove"` | `COMPOSITION_MOVE_FUTURE` | `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `"boundedAttachment"` | `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | A stated `partOf.validTo` on a `oneActive` pair, where only an open window is a membership, so the edge would not attach the part |
+| `"moveBeforeIncumbent"` | `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `"windowOverlap"` | `COMPOSITION_WINDOW_OVERLAP` | On a `oneActive` pair, the write would leave two composition edges of one part whose valid-time windows share an instant |
+| `"moveGap"` | `COMPOSITION_MOVE_GAP` | `importGraph` moves an `existence: "required"` part with an end and an attach that do not abut: the new attachment opens after the old one ends (one stating no `validFrom` opens at the instant the import judges the move), and the part would hold no whole in between. Reported per row on both rows of the move, neither of which is written |
+| `"existing"` | `COMPOSITION_WHOLE_CONFLICT` | A `getOrCreateByConstraint` call states a `partOf` that contradicts the whole (or realizing edge) the existing node already holds |
+| `"props"` | `COMPOSITION_PROPS_CONFLICT` | A `getOrCreateByConstraint` or `reparent` call states `partOf.props` that differ from the already-satisfied attachment's stored props |
+| `"window"` | `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
+
+A part holds exactly one whole across **every** declared composition pair,
+enforced by a single reserved claim axis — two different realizing edge
+kinds (or two orientations of one part kind) contend for the same row.
+
+```typescript
+// If Chapter partOf Book (via chapterOf) and Chapter partOf Anthology
+// (via includedIn) are both declared:
+await store.edges.chapterOf.create(chapter, book, {});
+
+try {
+  await store.edges.includedIn.create(chapter, anthology, {});
+} catch (error) {
+  if (error instanceof CompositionError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { situation: "occupied", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", incumbentEdgeId: "<the chapterOf edge's id>" }
+    console.log(error.suggestion);
+    // "Call `store.nodes.<PartKind>.reparent(partId, { whole, via? })` to
+    //  move the part — it retires the incumbent attachment and creates the
+    //  new one in one transaction. ..."
+  }
+}
+```
+
+On a `population: "oneActive"` pair the rule holds at every valid-time
+coordinate: the windows of one part's composition edges never overlap
+([One whole at every instant](/ontology#one-whole-at-every-instant)). A
+`"windowOverlap"` refusal names the edge being written and the one it would
+overlap, with both windows (an omitted bound is unbounded):
+
+```typescript
+// Chapter is attached to `book` from 2020, open-ended.
+try {
+  await store.edges.includedIn.create(chapter, anthology, {}, {
+    validFrom: "2019-01-01T00:00:00.000Z",
+    validTo: "2021-01-01T00:00:00.000Z",
+  });
+} catch (error) {
+  if (error instanceof CompositionError && error.code === "COMPOSITION_WINDOW_OVERLAP") {
+    console.log(error.details);
+    // { situation: "windowOverlap", partKind: "Chapter", partId: "<chapter-id>",
+    //   wholeKind: "Anthology", wholeId: "<anthology-id>",
+    //   edgeKind: "includedIn", edgeId: "<new edge id>",
+    //   validFrom: "2019-01-01T00:00:00.000Z", validTo: "2021-01-01T00:00:00.000Z",
+    //   incumbentEdgeKind: "chapterOf", incumbentEdgeId: "<the chapterOf edge's id>",
+    //   incumbentWholeKind: "Book", incumbentWholeId: "<book-id>",
+    //   incumbentValidFrom: "2020-01-01T00:00:00.000Z" }
+  }
+}
+```
+
+Moving a part is [`reparent`](/ontology#reparent-moving-a-part-to-a-new-whole)'s
+job: it retires the incumbent attachment and creates the new one in one
+transaction, which is the only order in which both the one-whole-per-part rule and
+`existence: "required"` hold.
+
+`details.incumbentEdgeId` names the edge that already holds the axis — the
+one fact the claim statement's own result reports. It never names the
+incumbent whole's kind or id: reading that would be a second query this
+refusal path does not make. The refusal is the same class with the same
+detail wherever it is decided: by the claim row, or by the pre-write probe a
+batch, a custom command port's fallback, or a backend without claim
+relations runs instead. That probe counts the part's attachments across
+every realizing edge kind, and reports composition ahead of the edge kind's
+own `CardinalityError`. `incumbentEdgeId` is absent only when the incumbent
+is an earlier row of the same batch, which has no stored edge to name. Run `store.verifyConstraintFences()` (the
+`family: "composition"` entries) to find every part already holding more
+than one whole.
+
+**A request that disagrees with the attachment the part already holds.** A
+`getOrCreateByConstraint` call (or `reparent`) whose `partOf` is already
+satisfied writes nothing, so an option it cannot honor is refused rather than
+dropped: `"existing"` (a different whole or realizing edge — carries
+`currentWhole`/`currentVia` and `requestedWhole`/`requestedVia`, so the move the
+caller would have to make is visible; `requestedVia` is the RESOLVED realizing
+edge, present even when the call omitted `via`), `"props"` (same whole and edge,
+schema-valid but different `partOf.props` — carries `edgeKind`/`edgeId` and
+`currentProps`/`requestedProps`) and `"window"` (a stated `partOf.validFrom` /
+`partOf.validTo`, or a `reparent` `at`, that differs from the realizing edge's
+stored bound — carries `edgeKind`/`edgeId`, the stated `option`, and
+`stated`/`stored`). Call [`store.nodes.<Kind>.reparent(id, attachment)`](/ontology#reparent-moving-a-part-to-a-new-whole)
+to fix an `"existing"` refusal, which is the operation that actually moves a
+part; call `store.edges.<via>.update(edgeId, ...)` to fix a `"props"` or
+`"window"` refusal, which changes the realizing edge itself. None of them fires
+for a match: a call whose `partOf` equals the node's live whole, realizing edge
+and (when stated) props and window succeeds and is idempotent, and one whose
+node has no live whole writes the attachment — see
+[`partOf` is a postcondition](/ontology#existence-a-part-that-cannot-exist-without-a-whole).
+
+**A composition window never starts or ends later than its write.** A row
+with no `validTo` is the part's current attachment and an ended row is
+history, for good — which is what lets the claim, the delete cascade, the
+acyclicity check and every current-time read agree on which whole a part
+holds. A window scheduled to open or close later would make the same row a
+membership at one read instant and history at another, so every write of a
+realizing edge refuses one: `partOf` on every create and get-or-create
+entry, `store.edges.<via>` creates, updates, upserts and their batch forms,
+import (as a per-row error carrying the code) and a graph merge's apply. The
+`"futureStart"` / `"futureEnd"` details carry the stated `bound` and the
+`operationInstant` it was judged against, plus `edgeId` when the edge
+exists already; `partId` is absent while a `partOf` create has not assigned
+the part its id yet. `"futureMove"` carries `at` instead. Record a change
+when it happens: a past `validTo` writes history, and `reparent` moves a part
+now (or at a past `at`).
+
+A move ends a `oneActive` incumbent's window at its `at`, so an `at` earlier
+than that window's `validFrom` would close it before it opened:
+`"moveBeforeIncumbent"` refuses it before any write, carrying `at` and the
+incumbent's `incumbentEdgeKind`, `incumbentEdgeId` and `incumbentValidFrom`.
+An omitted `at` is never refused for this; see
+[reparent](/ontology#reparent-moving-a-part-to-a-new-whole).
+
+The composition claim rides `typegraph_edge_claims`, the same relation
+`CardinalityError`'s claims do. A deployment initialized before that
+relation existed raises `ConfigurationError` (`EDGE_CLAIM_RELATION_MISSING`)
+on the first `partOf`/`hasPart` write and must be migrated under owner
+credentials before declaring one.
+
+### `CompositionExistenceError`
+
+Thrown when a write would leave an `existence: "required"` composition part
+with no live whole: a bare create with no `partOf`, or a detach (ending,
+soft-deleting, or hard-deleting the composition edge) of a live part.
+
+```typescript
+// Segment partOf Episode (via segmentOf, existence: "required"):
+try {
+  await store.nodes.Segment.create({ text: "..." });
+} catch (error) {
+  if (error instanceof CompositionExistenceError) {
+    console.log(error.details);
+    // { partKind: "Segment", situation: "create" }
+  }
+}
+```
+
+`details.situation` distinguishes the two shapes: `"create"` (no `partId`
+yet — deciding the refusal is what keeps the row from ever being written) and
+`"detach"` (carries `edgeKind`/`edgeId`, the composition edge the caller tried
+to end). `details` is a union discriminated by `situation`, so narrowing on it
+types exactly the fields that situation carries.
+
+The error's `code` names the same two shapes, so a handler that routes on
+`code` alone can tell them apart:
+
+| `details.situation` | `code` |
+| --- | --- |
+| `"create"` | `COMPOSITION_WHOLE_REQUIRED` |
+| `"detach"` | `COMPOSITION_DETACH_REFUSED` |
+
+Pass `partOf: { whole, via? }` naming a live, declared whole to fix a
+create refusal; soft-delete or hard-delete the part itself (which frees its
+edge — a retired part is not orphaned by losing it) to fix a detach refusal.
+
+**The guarantee is about the current state.** `existence: "required"` says a
+part has a whole when a write happens; it is not enforced at every historical
+valid-time coordinate. A required part whose node `validFrom` precedes its
+composition edge's `validFrom` shows no whole at an `asOf` instant between the
+two. "At most one whole" on a `oneActive` pair is the rule that holds at every
+valid-time instant ([`CompositionError`](#compositionerror)'s `"windowOverlap"`).
+
+A `partOf` the graph cannot resolve raises `CompositionConfigurationError`
+rather than `CompositionExistenceError` — the option is accepted-shaped but names no
+declared pair, regardless of the part kind's `existence` and regardless of
+whether the call created the node or found it (the attachment is resolved
+before the match is even read, so the refusal cannot depend on what the
+constraint matched):
+
+`CompositionConfigurationError` is a `ConfigurationError` whose `code` is the
+composition code itself (also kept on `details.code`), so every composition
+refusal carries its `COMPOSITION_*` code on `error.code`, whichever class
+raised it. The same class reports a composition navigation or export that
+names what the relation does not have (`COMPOSITION_NO_PARTS_DECLARED`,
+`COMPOSITION_NO_WHOLES_DECLARED`, `COMPOSITION_UNKNOWN_ALIAS`) and a
+composition unit an engine cut short (`COMPOSITION_UNIT_INDETERMINATE`).
+
+| `code` | when |
+| --- | --- |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | no composition pair is declared between the part's kind and `partOf.whole.kind` |
+| `COMPOSITION_VIA_NOT_DECLARED` | `via` names an edge kind that realizes no declared pair between the two kinds |
+| `COMPOSITION_VIA_AMBIGUOUS` | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair at all |
 
 ### `UniquenessError`
 
@@ -201,6 +1053,83 @@ try {
 }
 ```
 
+### `EdgeMatchIdentityConflictError`
+
+Thrown when a direct edge create collides with the edge kind's declared
+`matchIdentity`. Use `getOrCreateByEndpoints()` when the intended behavior is
+to return the existing identity owner.
+
+### `FactNotHoldingError`
+
+Thrown by a provenance capability's `assertHolds(tx, facts)` when a named fact
+is not believed. It lists every failing fact in one error, sorted by fact kind
+and then id, and the throw aborts the caller's transaction; nothing is
+reconciled or closed. `error.failures` and `error.details.failures` are the
+same list. The class is exported from `@nicia-ai/typegraph/errors` and from
+`@nicia-ai/typegraph/provenance`.
+
+```typescript
+import { FactNotHoldingError } from "@nicia-ai/typegraph/provenance";
+
+try {
+  await store.transaction(async (tx) => {
+    // ... write the justification, premise edges and fact ...
+    await provenance.assertHolds(tx, [summary]);
+  });
+} catch (error) {
+  if (error instanceof FactNotHoldingError) {
+    for (const failure of error.failures) {
+      console.log(failure.fact, failure.reason);
+      for (const { justification, premises } of failure.justifications) {
+        console.log(justification, premises);
+      }
+    }
+  }
+}
+```
+
+Each entry of `failures` has this shape:
+
+```typescript
+{
+  fact: { kind, id },
+  reason: "not-current" | "tombstoned" | "no-justification" | "no-firing-justification" | "composition-whole-unsupported",
+  justifications: [{
+    justification: { kind, id },
+    premises: [{ premise: { kind, id }, reason: "retracted" | "not-current" | "unsupported" }],
+  }],
+}
+```
+
+Exactly one `reason` applies to a fact. They are tested in the order of this
+table, so a tombstoned fact that is also unsupported reports why it is
+unsupported, and a required part with no justification reports
+`no-justification`.
+
+| `reason` | The fact |
+| --- | --- |
+| `not-current` | is absent from the support snapshot: never written, or outside its validity window at the read instant (for example a future `validFrom`) |
+| `tombstoned` | is supported but its row is tombstoned |
+| `no-justification` | has no current justification deriving it; a tombstoned justification does not count |
+| `no-firing-justification` | has current justifications, but none fires; `justifications` lists each with the premises that stop it |
+| `composition-whole-unsupported` | has a firing justification but is a required part whose whole is missing, is an unsupported fact, or is a tombstoned node of another kind |
+
+`justifications` is empty for every reason except `no-firing-justification`.
+There it lists every current justification deriving the fact, sorted by kind
+and then id, each with only the premises that fail.
+
+A premise's `reason` explains why its justification does not fire:
+
+| Premise `reason` | The premise |
+| --- | --- |
+| `retracted` | is a source whose `retracted` flag is set |
+| `not-current` | is a source that is missing, tombstoned or outside its validity window; these are not distinguished |
+| `unsupported` | is a fact that is not in the support set; the error does not say why |
+
+Every reason comes from the snapshot the verdict used, so a failure never
+contradicts the check that raised it. A premise-less justification fires, so it
+never appears as a failure.
+
 ## Not Found Errors
 
 ### `NodeNotFoundError`
@@ -209,7 +1138,9 @@ Thrown when a referenced node does not exist.
 
 ```typescript
 try {
-  await store.nodes.Person.update("nonexistent-id", { name: "New Name" });
+  await store.nodes.Person.update(asNodeId<typeof Person>("nonexistent-id"), {
+    name: "New Name",
+  });
 } catch (error) {
   if (error instanceof NodeNotFoundError) {
     console.log(error.category); // "user"
@@ -267,7 +1198,7 @@ try {
   );
 } catch (error) {
   if (error instanceof EndpointNotFoundError) {
-    console.log(error.category); // "user"
+    console.log(error.category); // "constraint"
     console.log(error.details);
     // { edgeKind: "worksAt", endpoint: "from", nodeKind: "Person", nodeId: "nonexistent" }
     console.log(error.suggestion);
@@ -297,6 +1228,73 @@ try {
 }
 ```
 
+### `CompositionCycleError`
+
+Thrown when the composition parts closure of a whole revisits a node already
+in the walk — an instance-level cycle among composition edges (for example a
+`Section partOf Section` ring). Reflexive composition is permitted at the
+kind level, and the store refuses the corresponding **instance** cycle at
+write time: every realizing edge kind belongs to the oriented composition
+union, probed for acyclicity on each composition edge write
+([`EdgeAcyclicityError`](#edgeacyclicityerror)). A ring therefore only
+reaches this walk through rows that bypassed that fence — written before the
+`partOf`/`hasPart` pair was declared, by trusted import, or by direct SQL.
+Deleting any node in the cycle throws this error instead of looping or
+silently truncating the closure.
+
+```typescript
+try {
+  await store.nodes.Section.delete(sectionA.id);
+} catch (error) {
+  if (error instanceof CompositionCycleError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { wholeKind: "Section", wholeId: "<a>", revisitedKind: "Section", revisitedId: "<a>" }
+    console.log(error.suggestion);
+    // "Delete or reassign one of the composition edges that closes this cycle..."
+  }
+}
+```
+
+The affected nodes stay undeletable through the ordinary delete path until
+one of the composition edges that closes the cycle is removed or reassigned
+by hand.
+
+### `NodeDeletePlanMismatchError`
+
+Thrown by `nodes.<Kind>.delete(id, { expect: plan })` when the plan the delete
+computes for itself no longer matches the `plan` from `planDelete(id)`, or
+when the node is absent or already deleted. It is raised before any write.
+The code is `NODE_DELETE_PLAN_MISMATCH` and the category is `"constraint"`,
+like `RestrictedDeleteError`: the graph's current state refuses the delete the
+caller confirmed, and the remedy is a fresh preview the user confirms again.
+See
+[Previewing a delete](/ontology#previewing-a-delete).
+
+| `details.situation` | Meaning |
+| --- | --- |
+| `"changed"` | The delete's plan differs from `expect` |
+| `"notLive"` | The node is absent or already deleted |
+
+On `"changed"`, `addedParts` and `addedEdgeIds` are in the delete's plan but
+not in `expect`, and `droppedParts` and `droppedEdgeIds` are in `expect` but
+no longer in the delete's plan. Parts compare by `(kind, id, whole,
+viaEdgeKind)`, so a part moved to another whole appears in both part lists.
+
+```typescript
+try {
+  await store.nodes.Podcast.delete(podcast.id, { expect: confirmedPlan });
+} catch (error) {
+  if (error instanceof NodeDeletePlanMismatchError) {
+    console.log(error.details);
+    // { kind: "Podcast", id: "<podcast-id>", situation: "changed",
+    //   addedParts: [{ kind: "Episode", id: "<new-episode>", whole: { kind: "Podcast", id: "<podcast-id>" }, viaEdgeKind: "episodeOf" }],
+    //   droppedParts: [], addedEdgeIds: ["<its episodeOf edge>"], droppedEdgeIds: [] }
+    // Preview again and ask the user to confirm the new plan.
+  }
+}
+```
+
 ## Configuration Errors
 
 ### `ConfigurationError`
@@ -311,12 +1309,680 @@ try {
   });
 } catch (error) {
   if (error instanceof ConfigurationError) {
-    console.log(error.category); // "system"
+    console.log(error.category); // "user"
     console.log(error.suggestion);
     // "Check the backend documentation for supported features..."
   }
 }
 ```
+
+#### Definition-time unique-constraint refusals
+
+`defineGraph()` validates every node kind's `unique` constraints when the graph
+is defined, rather than leaving a broken `where` clause to surface as odd
+behavior on the first write. Three states are refused with `ConfigurationError`:
+
+- A `where` callback that **does not return a predicate** — `details` carries
+  `kind` and `constraintName`.
+- A predicate naming a **field the kind's schema does not declare** — `details`
+  adds `field` and `declaredFields`.
+- A `where` clause on a kind whose **schema is not an object schema** (it
+  exposes no `.shape`, so there is no declared-field set to check the clause
+  against) — `details` carries `kind` and `constraintName`. Refused rather than
+  left unvalidated, because skipping the check silently would disable this guard
+  for exactly the untyped callers it exists for. A plain `unique: [{ fields }]`
+  on such a schema is *not* refused: it names props by key and evaluates fine
+  against a non-object schema.
+
+All three carry only the class-level code `CONFIGURATION_ERROR`; match them by
+class, not by a `details.code`. The equivalent invariant on the graph-extension
+document path does have a stable code, `UNKNOWN_UNIQUE_WHERE_FIELD`.
+
+A constraint built **outside** `defineGraph` never passed this gate, so the
+non-predicate case is refused at evaluation too: `checkWherePredicate` throws the
+same `ConfigurationError` (with `constraintName` and `fields`) on the write path
+instead of treating a broken clause as one that applies to every row. All three
+readers of a `where` clause — definition-time validation, per-write evaluation,
+and persistence-time capture — now agree, because they read it through one
+shared function.
+
+Because the check evaluates the clause, a `where` callback now runs once at
+definition time in addition to its per-write evaluations — keep it pure. The
+check applies to node kinds whose schema exposes an object shape; edge `unique`
+constraints are not validated here. Statically typed callers were already unable
+to name an undeclared field, so this bites untyped or generated definitions.
+
+#### Provenance fact kinds and required composition parts
+
+`createRetractionCapability` refuses a configuration whose fact kinds own
+required composition parts it cannot reach, with
+`PROVENANCE_REQUIRED_PART_NOT_A_FACT`. A required part's belief status follows
+its whole's, and the close that enforces that runs over facts, so a fact kind
+that is the whole of an `existence: "required"` pair whose part kind is missing
+from `fact.kinds` is a hole no transition can fill: closing the whole would
+leave a live required part hanging from a closed whole. `details` names the
+`wholeKind` and the `partKind`, and `requiredParts` lists every such pair.
+
+Both sides are read through subsumption, so a fact kind that is a subclass of
+the kind a pair declared its whole against counts, and so does a subclass of a
+declared required part kind. Fix it by adding the part kind to `fact.kinds`
+(with a `derives` endpoint for it) or by declaring the pair
+`existence: "optional"`. See [Composition and
+retraction](/provenance#composition-and-retraction).
+
+#### Definition-time `__proto__` property refusal
+
+`defineNode()` / `defineEdge()` refuse a schema that declares a property named
+`__proto__` with a `ConfigurationError` carrying `details.conflicts` and a
+`nodeType` / `edgeType` key. The name is **unstorable**, not merely reserved:
+Zod accepts it in a shape but drops it from every parse result — reporting
+success even when the field is required — so a value written to it is silently
+lost.
+
+It is only reachable through a computed key. `z.object({ __proto__: … })`
+written literally sets the shape object's own prototype instead of creating an
+entry, while `z.object({ ["__proto__"]: z.string() })` yields a shape whose
+`Object.keys` really does contain it.
+
+The graph-extension document path refuses the identical declaration with the
+stable issue code `RESERVED_PROPERTY_NAME`, at any nesting depth — so a nested
+object field named `__proto__` is refused on the same grounds as a top-level
+one. Before this, the two authoring paths disagreed about the same field: a
+typed refusal on the document path, silent data loss on the typed one.
+
+#### `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`
+
+A write guarded by a declared constraint runs its probe and its write under one
+per-graph mutual exclusion. That fence is transaction-scoped on both dialects
+(SQLite's `BEGIN IMMEDIATE`, PostgreSQL's `pg_advisory_xact_lock`), so a backend
+reporting `capabilities.execution.interactiveTransactions: false` — Cloudflare D1, `drizzle-orm/neon-http`,
+any SQLite backend built with `transactionMode: "none"` — cannot hold it, and the
+write is refused rather than run unfenced. Durable Objects are unaffected.
+
+`details.constraint` names which class needed the fence, because "this backend
+cannot fence constrained writes" is unusable advice while "your
+`cardinality: 'one'` edge cannot be enforced here" is actionable. The
+`suggestion` carries the per-class way forward.
+
+| `details.constraint` | The write it describes |
+| --- | --- |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true`. No claim row backs this axis — a cycle spans a whole reachable subgraph, not a tuple — so it is fenced by the per-graph lock alone. |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair. Backed by the same `typegraph_edge_claims` relation as `edgeCardinality` — reported in preference to it, so the refusal names the composition declaration rather than a generic cardinality one. Also deleting a composition whole, restoring a soft-deleted part of an `existence: "required"` kind, and soft-deleting, hard-deleting or ending the window of a composition edge whose part kind is required: each decides from reads no claim row backs. |
+| `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
+
+`details.graphId` names the graph. Unconstrained writes on the same backend are
+untouched — see
+[Declared constraints require an interactive transaction](/backend-setup#declared-constraints-require-an-interactive-transaction)
+for what still works there.
+
+`CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED` is the corresponding refusal for a
+caller-adopted SQLite transaction whose `DEFERRED` snapshot became stale before
+the constrained write could take the writer slot. Roll back that transaction
+and retry it with `BEGIN IMMEDIATE`; TypeGraph-owned transactions already use
+that mode. The refusal happens before the constraint probe, so the write is
+fenced or refused rather than allowed to rely on a stale decision.
+
+#### `BATCH_WRITE_UNSUPPORTED`
+
+A backend whose `capabilities.execution.unitOfWork` is `"batch"` (Cloudflare
+D1's `batch()`, Neon HTTP's `transaction(queries)`) fixes every statement
+before the first one runs and commits them together with no session in
+between. Every fused write on such a backend — a static batch and a
+certified atomic program alike — asserts the active schema version inside
+the very statement that writes, so a stale version writes nothing and the
+store reports `StaleVersionError`. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares).
+
+A write that needs more than that one guarded statement refuses, but
+`BATCH_WRITE_UNSUPPORTED` is not itself a top-level error code: the
+enforcing gate keeps its own class and code
+(`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `UNSUPPORTED_BACKEND_CAPABILITY`,
+`IDENTITY_REQUIRES_ATOMIC_BACKEND`, or a plain `ConfigurationError` for
+`history` / `revisionTracking` / a schema commit) and nests
+`{ code: "BATCH_WRITE_UNSUPPORTED", reason }` under `details.batchRefusal`,
+naming what a closed batch cannot supply:
+
+| `details.batchRefusal.reason` | What it needs | Raised by |
+| --- | --- | --- |
+| `interactive-callback` | Hold an interactive callback transaction open across several round trips. | `store.transaction(fn)` / `store.transactionWithReceipt(fn)` |
+| `constraint-needs-probe` | Read a value it wrote earlier in the same write before deciding what to write next. | A declared constraint's probe-then-write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, above) |
+| `identity` | Read and write Operational Identity's closure across several round trips inside one held transaction. | `Store` construction, or `requireAtomicIdentityBackend`, when `graph.identity` is declared |
+| `history` | Hold the per-graph write lock and clock open across a whole write cascade. | `history: true` or `revisionTracking: true` |
+| `schema-commit` | Hold one transaction across its compare-and-swap read and its activating write. | `commitSchemaVersion` / `setActiveVersion` |
+
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` — the portable schema-version fence an
+ineligible write falls back to (see [Schema Migrations](/schema-management))
+— does not carry `batchRefusal`. It is reached from many fuse failures that
+are not specific to a batch-tier backend (an ineligible write kind, a
+tombstone-resurrection write a supplied id falls through to, a derived
+backend, a provenance mismatch), so it states its plain limitation without
+guessing which of the reasons above, if any, applies.
+
+#### Write-fence declaration codes
+
+`capabilities.writeFence` resolves one of four write-fence plans a lock site
+consumes — see
+[Write fence declaration](/backend-setup#write-fence-declaration-writefence).
+`ConfigurationError` codes name the ways a backend's fence declaration, or
+its resolved plan, turns out not to cover what a write needs:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` fails runtime validation: an unrecognized `mechanism` string, an unrecognized `drain` string under `mechanism: "advisory"`, or a `drain` key present on `mechanism: "engine-serialized"` / `"caller-serialized"` (`drain` applies only to `"advisory"`). `details.field` names `"mechanism"` or `"drain"`; for an unrecognized value, `details.accepted` lists the allowed strings. Raised by `resolveWriteFencePlan` before any plan is shaped — an invalid `drain` never falls through to behaving like `"quiescent"`. |
+| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved declaration's `mechanism` is `"advisory"` but the backend's `fenceSql` is missing the member that `mechanism`/`drain` combination needs to spell (`advisoryLockExpression`, `isolationFactExpression`, or, under `drain: "table-lock"`, `lockTables`) — or, independently of any lock plan, a session isolation-level read (recorded capture's isolation guard) finds no `fenceSql` at all. Raised at backend construction for the lock-plan case; at the point of the read for the session-fact case. |
+| `RECORDED_CLOCK_REQUIRES_WRITE_FENCE` | The store is constructed with `history: true` or `revisionTracking: true` — TypeGraph-owned recorded-clock allocation — against a backend whose write-fence plan resolves `unfenced`. |
+| `WRITE_FENCE_UNAVAILABLE` | A resolved plan cannot satisfy what a specific operation needs: either the plan is `unfenced` outright, or it is a `lock` plan whose `drain` is `"none"` meeting an operation whose `requires` is `"drain"`. `details.operation` names the operation and `details.requires` names which kind of exclusion (`"keyed"` or `"drain"`) it needed; a `drain: "none"` refusal also names the drain in the message. `"engine-serialized"` and `"caller-serialized"` satisfy either `requires` value without consulting `drain`. |
+| `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized`. An externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue, so `store.withTransaction(externalTx)` is refused rather than let its writes silently interleave with the queue's own. `details.member` names `"adoptTransaction"`. |
+
+`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` refuses at
+`createStore`, never mid-flush, and the message names the exact declaration line to add.
+`WRITE_FENCE_UNAVAILABLE` is not a `createStore`-time check: `requireWriteFence` is called from
+every individual lock site (the identity graph lock, the identity-enablement drain, identity DDL,
+trusted import, contribution DDL, recorded-clock allocation, schema-fence sites, graph-merge
+provenance), so it fires wherever one of those runs — inside a live transaction, mid-operation,
+not only at `createStore`. `WRITE_FENCE_SQL_UNAVAILABLE` and `WRITE_FENCE_DECLARATION_INVALID`
+both refuse earlier, at backend construction for a `createSqlBackend`-built backend (or, for the
+session-fact half of `WRITE_FENCE_SQL_UNAVAILABLE`, at the read that needed it), since they are
+about the declaration itself rather than what a specific store option or operation requires of it.
+`CALLER_SERIALIZED_REFUSES_ADOPTION` fires wherever `adoptTransaction` is actually called, which is
+never at `createStore` time. `IDENTITY_REQUIRES_WRITE_FENCE` is another write-fence-related code —
+see the Operational Identity guard codes table above — but is not in this table because it guards
+identity construction, not recorded-clock allocation.
+
+### Caller-serialized queue codes
+
+The in-process queue a `writeFence: { mechanism: "caller-serialized" }` declaration builds
+(`src/backend/serialized-execution-queue.ts`) raises two more `ConfigurationError` codes, both
+naming `details.subject` — the SQLite dialect string for SQLite's own per-connection queue, or
+`"caller-serialized"` for the write-unit queue a `caller-serialized` declaration builds:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `SERIALIZED_QUEUE_REENTRANT_SUBMISSION` | A queued operation was awaited from inside a transaction already running on the same queue — the transaction holds the queue's execution slot until it completes, so the nested operation could never run. Use the transaction-scoped context (`tx.nodes` / `tx.edges` / `tx.backend`) instead of the root store or backend inside a `store.transaction` callback, or move the operation outside the transaction. |
+| `CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT` | The queue's reentrancy detection depends on `node:async_hooks`' `AsyncLocalStorage`, which is unavailable on this runtime (or had not finished loading). A `caller-serialized` write-fence declaration's in-process promise depends on that detection actually working, so every submission is refused rather than run without it. SQLite's own per-connection queue never raises this code: it runs without detection instead of refusing when the context is unavailable. |
+
+These codes are not part of `RECORDED_CAPTURE_GUARD_CODES` — that set is
+closed to the three codes documented under
+[Recorded-capture guard codes](#recorded-capture-guard-codes) below, and
+`isRecordedCaptureGuardError` does not recognize any write-fence code.
+
+### Optimistic-retry unit codes
+
+The retry owner every `"optimistic-retry"`-tier unit of work runs through
+(`src/backend/capabilities/retried-unit.ts`) raises one more
+`ConfigurationError` code, naming `details.operation` — the same operation
+name `TransactionConflictError` reports for the same unit:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` | The unit's target is on the `"optimistic-retry"` execution tier (see [Backend Capabilities](/backend-setup#backend-capabilities)), and detecting a unit of work nested inside another one depends on `node:async_hooks`' `AsyncLocalStorage`, which is unavailable on this runtime. Running without that detection would let a nested unit's own independent retry commit against reads an outer attempt took before it ever conflicted, so the unit is refused, before its attempt ever runs, rather than run without it. A target on any other execution tier is unaffected: no nested owner exists there, so this code is never raised for it. |
+
+#### Backend capability declaration codes
+
+Custom backend declarations and capability bundles use stable `details.code` values when the
+declared surface disagrees with what TypeGraph can safely execute:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `CAPABILITY_DECLARATION_CONTRADICTION` | `recursiveTraversal.supported` and its `reason` contradict each other: unsupported without a reason, or supported with a dangling reason. |
+| `RECURSIVE_TRAVERSAL_UNSUPPORTED` | A backend declares recursive traversal unsupported and a recursive query, subgraph read, or historical identity operation needs it. `details.operation` names the refusing path and `details.reason` echoes the backend declaration. |
+| `CONSTRAINT_CLAIM_SURFACE_MISMATCH` | The `constraintClaims` declaration and the claim members implemented by the backend disagree in either direction. |
+| `BUNDLE_PORT_SURFACE_MISMATCH` | A non-claim capability bundle resolves a required member as present, but the backend port used by the operation cannot reach it. Fallback-disposition members degrade through their documented fallback instead of throwing this code. |
+| `RECORDED_DDL_CONSTRAINT_NAME_MISMATCH` | `recordedTableDdl` names a primary-key constraint for only one of the temporary or final recorded-table name sets. |
+
+The recorded-time preview migration also throws `UnsupportedBackendCapabilityError` with
+`details.capability: "recordedTableDdl"` when a legacy schema needs rewriting and the custom
+backend does not provide its DDL callback. See
+[Migrating Preview Recorded Time](/schema-management#migrating-preview-recorded-time) and
+[Capability bundles](/backend-setup#capability-bundles) for the corresponding migration and
+backend-author guidance.
+
+#### Approximate retrieval with a mismatched metric
+
+`.similarTo(vector, k, { approximate: true, metric })` is refused with a
+`ConfigurationError` when `metric` differs from the field's declared metric. An
+ANN structure is built for one metric — `vec0` bakes `distance_metric` into the
+virtual table, libSQL's DiskANN index is built with `metric=…`, pgvector's index
+carries a per-metric operator class — so retrieving by the declared metric and
+re-scoring under the override would return the declared metric's neighbors
+wearing the override's scores. The two options state something that cannot both
+hold, so the option is refused rather than downgraded to an exact scan behind the
+caller's back.
+
+`details` carries `nodeKind`, `fieldPath`, `requestedMetric`, `declaredMetric`,
+and `indexType`; there is no stable `details.code`, so match by class and
+`details`. A slot declared `indexType: "none"` is **not** refused — there is no
+ANN structure to be bound to a metric, and the opt-in compiles to the exact scan,
+a degradation stated on the `approximate` option itself. A mismatched metric with
+no `approximate` is not refused on the query builder either; `store.search.vector`
+and `store.search.hybrid` refuse every mismatched override on their own broader
+rule. See
+[Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
+
+#### Kind schema codes
+
+`defineNode` and `defineEdge` refuse a property schema that is not a Zod object.
+A kind's properties are stored, validated and introspected as one object, so a
+schema without an object shape cannot back a kind. TypeScript rejects these at
+compile time; the runtime check is for untyped callers. Objects wrapped by
+`.refine()` / `.superRefine()` or built with `.extend()`, `z.strictObject` and
+`z.looseObject` are objects and are accepted.
+
+| `details.code` | Raised when |
+| --- | --- |
+| `NODE_SCHEMA_NOT_OBJECT` | `defineNode`'s `schema` is not a Zod object: a union or discriminated union, an intersection, a record, an object behind `.transform()` / `.pipe()`, `.optional()`, `.readonly()` or `z.lazy()`, or not a Zod schema at all. `details.nodeType` names the kind and `details.schemaType` the schema type received (`"union"`, `"pipe"`, …). Declare the properties as `z.object({...})`; model alternatives as a property inside one object or as separate kinds, and apply transforms to individual fields. |
+| `EDGE_SCHEMA_NOT_OBJECT` | The same for `defineEdge`'s `schema`, with `details.edgeType`. An edge with no `schema` still defaults to an empty object. |
+
+#### Edge integrity option codes
+
+`defineGraph` refuses an edge registration whose integrity options are stated
+outside their domain, or whose endpoints name a node kind the graph does not
+register. TypeScript rejects the option errors at compile time; the runtime
+check is for untyped callers:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+| `EDGE_ENDPOINT_KIND_NOT_REGISTERED` | An edge's `from` or `to` (an explicit registration, a value of a source-to-target map, or an `EdgeType`'s own endpoints) names a node kind that is not registered in `nodes`. No row could ever be written through such an edge. `details.edge`, `details.endpoint` (`"from"` or `"to"`), `details.kind` and `details.availableKinds` name the registration, the side, the kind and the registered kinds. Register the kind in `nodes`, or remove it from the edge. |
+
+#### Structural subsumption codes
+
+Registry build refuses a pair of node kinds a subsumption relation joins when
+the child's schema does not extend the parent's; see
+[Subsumption](/ontology#subsumption-type-inheritance). `details.relation` names the relation the
+pair comes from (`subClassOf`, `equivalentTo`, or a `sameAs` a persisted
+document still carries), and `details.declared` says whether that relation
+declared the pair or the hierarchy implies it:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE` | A `subClassOf` child's schema does not extend its parent's. |
+| `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a `subClassOf` pair. |
+| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | A pair an equivalence class relates (`equivalentTo` or `sameAs`) fails in one direction. |
+| `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | The projected JSON Schema cannot judge a pair an equivalence class relates. |
+
+#### Composition declaration codes
+
+A `partOf` / `hasPart` declaration is judged twice. The factories and the
+ontology shape check refuse a malformed declaration at the call or on load;
+registry build then checks each declaration against the edge kinds that realize
+it. Either refusal is a `ConfigurationError` whose `details.code` is the code
+below and whose `details.issues` lists every problem found; the declarative
+graph-extension validator reports the four shape codes marked (extension) as
+issue codes on `GraphExtensionValidationError` instead (see
+[Graph Extensions ▸ Ontology](/graph-extensions#ontology)). See
+[Composition](/ontology#composition) for the declarations themselves.
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_OPTION_UNKNOWN` | `partOf()` / `hasPart()` was given an option key other than `via`, `partSide` and `existence`. `details.unknownKeys` names them. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_INVALID` | `existence` is not `"optional"` or `"required"`, on a factory or on a persisted relation. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_INVALID` | `partSide` is not `"from"` or `"to"`, or contradicts the endpoints the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` (extension) | A `partOf` / `hasPart` relation has no `via`, including a `partOf()` / `hasPart()` call from untyped code that omits the options argument or its `via`. Name the realizing edge kind, or delete the relation. A persisted schema that carries one is refused on load until it is rewritten. |
+| `ONTOLOGY_COMPOSITION_VIA_INVALID` | `partOf()` / `hasPart()` was given a `via` that is not an edge type (a string name, a node type). Pass the edge type itself: `{ via: someEdge }`. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` (extension) | A relation other than `partOf` / `hasPart` carries `existence`. |
+| `ONTOLOGY_COMPOSITION_VIA_UNKNOWN` | `via` names an edge kind the graph does not register. |
+| `ONTOLOGY_COMPOSITION_VIA_ENDPOINTS` | Neither orientation of the part and whole kinds is an endpoint pair the `via` edge admits. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED` | The `via` edge admits both orientations between the two kinds, so `partSide` must say which end is the part. |
+| `ONTOLOGY_COMPOSITION_CARDINALITY` | The `via` edge does not declare `"one"` or `"oneActive"` on the part's side: `cardinality` when the part is the `from` end, `targetCardinality` when it is the `to` end. Without it a part could have several wholes. |
+| `ONTOLOGY_COMPOSITION_VIA_MIXED` | One edge kind realizes composition in two orientations, or admits an endpoint pair that is not a declared composition pair. Split the edge so it is exclusively a composition edge. |
+| `ONTOLOGY_COMPOSITION_POPULATION_MIXED` | The pairs that can hold one part kind declare different part-side cardinalities (`"one"` against `"oneActive"`). The claim is relation-wide, so every such edge must agree. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` | A `partOf` and its mirrored `hasPart` state different `existence`, or the pairs that can hold one part kind disagree on it. State the same `existence` everywhere. |
+
+#### Ontology and query expansion codes
+
+Alias expansion (`expansion: "exact" | "subclasses" | "narrower"`, see
+[Query Source ▸ Subclass Expansion](/queries/source#subclass-expansion)) and the
+ontology checks around it raise these `ConfigurationError` codes:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_EQUIVALENCE_INVALID_CLASS` | An `equivalentTo` class mixes node kinds and edge kinds, or holds more than one registered edge kind. `details.reason` says which, with `details.members`, `details.nodeKinds` and `details.edgeKinds`. Raised when the merged graph's registry is built, never by the extension validator on its own. |
+| `QUERY_ALIAS_EXPANSION_INVALID` | `expansion` is not one the surface offers (`store.search()` offers `"exact"` and `"subclasses"` only, and a store-wide default cannot be `"narrower"`), or the removed `includeSubClasses` option was stated. `details.surface` names the call. Pass `expansion: "exact"` where `includeSubClasses` was `false` and `"subclasses"` where it was `true`. |
+| `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES` | An alias typed from the compile-time graph would expand to subclass kinds only the live schema (a persisted extension) declares, so its static row type would be wrong. `details.kind` and `details.extraKinds` name them. State `expansion: "subclasses"` or `"exact"`, or use `fromDynamic()` / `toDynamic()`. |
+| `ONTOLOGY_NARROWER_KIND_NOT_REGISTERED` | `expansion: "narrower"` expands `details.rootKind` to `details.narrowerKind`, which is not a registered node kind. Register it or remove its `broader` / `narrower` relation. |
+| `ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED` | `expansion: "narrower"` on a traversal target expands to a kind the traversed edge does not admit as an endpoint (`details.rootKind`, `details.narrowerKind`, `details.edgeKind`). Widen the edge's endpoints or drop the relation. |
+| `SEARCH_EXPANSION_KIND_UNINDEXED` | A `store.search()` expansion would silently skip rows of some expanded kinds: fulltext, because they declare no `searchable()` field the index covers; vector, because they declare the field with a different `embedding()` tag. `details.capability` says which, `details.kinds` lists them. Declare the field identically on them, search the kinds separately, or pass `expansion: "exact"`. |
+| `SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED` | The candidate query of `updateWhere()` selects more than one concrete node kind (`details.candidateKinds`), typically because its source expands through subclasses. Pass `{ expansion: "exact" }` to `from()` or run one `updateWhere()` per kind. |
+| `EMPTY_KIND_SET` | `toKindSet()` was given no kinds. An empty set would compile to a filter nothing matches. |
+
+#### Composition read and write guard codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `COMPOSITION_NO_PARTS_DECLARED` | `subgraph({ composition: true })` on a graph that declares no `partOf` / `hasPart` relation, or `parts()` on an alias whose kinds are the whole of no composition pair. Declare the relation, or omit the option. |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `wholes()` on an alias whose kinds are the part of no composition pair. |
+| `COMPOSITION_UNKNOWN_ALIAS` | `parts()` / `wholes()` was given `{ from }` naming an alias the query does not have. `details.knownAliases` lists the aliases it does. |
+| `COMPOSITION_UNIT_INDETERMINATE` | The database cut the composition closure of a `subgraph({ composition: true })` read short (a statement timeout, for example), so the owned unit is unknown. The read never returns a prefix of it: retry with a higher timeout. `details.rootKind` and `details.rootId` name the root. |
+| `SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED` | `subgraph({ composition })` was requested inside `batchOnce()`. The composition closure is a separate walk; read the unit with `store.subgraph()` or `tx.subgraph()`. |
+| `COMPOSITION_EXISTENCE_DEFERRAL_NESTED` | A second composition-existence deferral was opened on a transaction that already has one open. The graph-merge apply opens one around its writes, so this signals a nested call from inside such a write. |
+| `COMPOSITION_WINDOW_VERDICT_NESTED` | A second composition-window verdict was opened on a transaction that already has one open. The graph-merge apply decides its whole edge write set once and opens that verdict around its writes, so this signals a nested call from inside such a write. |
+| `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` | An import applies the composition moves a document states as one set, each move whole or not at all, and a move could not land after part of the set was written, or a row ending a part's attachment was written while every row that would attach the part again was refused afterwards, on a backend whose transaction offers no savepoint to take that write back. The import aborts and its transaction rolls back rather than committing half a move or a lone end. Use a backend whose root verdict and transaction port both provide statement execution. |
+| `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED` | `importGraphStream()` into a graph that declares an `existence: "required"` composition pair. Each chunk commits separately, so a part would commit before the edge that attaches it. Use `importGraph()`, which checks every required part's attachment in one transaction. |
+
+`INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE` is not a thrown code: it prefixes the
+per-row error (in `result.errors`) of an edge row that belongs to a composition
+move the import could not apply whole. A move is applied whole or not at all,
+so when one of its rows is refused, or the part no longer holds the destination
+whole once the import's other rows are written, every row of the move is
+reported with this prefix and the refused row additionally carries its own
+error. It also prefixes a row ending a part's attachment that was not written
+because no row of the document attaching the part again was applied, at
+whatever stage that row was refused; the error names those rows.
+
+#### Fresh-snapshot guard codes
+
+A decision protected only by the per-graph write fence (no claim row behind the
+read) is only as good as the snapshot it reads. A backend whose fence cannot
+advance a `typegraph_fences` row, such as one built on an advisory lock alone,
+cannot show a `REPEATABLE READ` or `SERIALIZABLE` session that it observed the
+writers it waited on, so those isolation levels are refused; `READ COMMITTED`
+is the level such a backend supports. The refusal is a `ConfigurationError`
+whose `details` carry `graphId`, `isolation` and `fenceRow`
+(`MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT` carries `isolation` and `fenceRow` only):
+
+| `details.code` | Decision it protects |
+| --- | --- |
+| `EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT` | The cycle probe of a write to a declared-acyclic edge kind. |
+| `COMPOSITION_WINDOW_REQUIRES_FRESH_SNAPSHOT` | Whether a composition edge's valid-time window overlaps another window of the same part. |
+| `MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT` | The create leg of an endpoint-matched edge convergence, at `REPEATABLE READ` or `SERIALIZABLE`, on a custom backend whose fence advances no fence row. |
+| `COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT` | The parts closure a delete of a composition whole reads. |
+| `COMPOSITION_EXISTENCE_REQUIRES_FRESH_SNAPSHOT` | Whether an `existence: "required"` part still holds a whole when its attachment is detached or deleted. |
+
+#### Store view and schema registry codes
+
+| `details.code` | Raised when |
+| --- | --- |
+| `STORE_VIEW_SEALED_COORDINATE` | A read on a `StoreView` stated its own temporal option (`temporalMode`, `asOf` or `recordedAsOf`; `details.stated` names them and `details.method` the read). The view's coordinate is sealed: read at another coordinate through the live store or `store.view(...)`. |
+| `GRAPH_TEMPLATE_CONTENT_CONFLICT` | Registering a graph template under an id that already holds a template with different schema content (`details.templateId`). Pick another template id, or register the same definition. |
+| `IDENTITY_ROLLBACK_REQUIRES_MIGRATION` | `rollbackSchema()` targeted a version whose identity configuration, ontology relations or node kinds differ from the active one, so the identity closure cannot be rebuilt in place (`details.fromVersion`, `details.toVersion`). Commit the target version's graph definition forward with `migrateSchema()`. |
+
+#### Unique constraint option codes
+
+`defineGraph` refuses a unique constraint whose `scope` or `collation` is stated
+outside its domain. TypeScript rejects these at compile time; the runtime check
+is for untyped callers. An untyped caller that omits either gets
+`scope: "kindWithSubClasses"` and `collation: "binary"` written into the
+registration, the values the store has always enforced for an omitted member:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `UNIQUE_CONSTRAINT_OPTION_INVALID` | `scope` is not `"kind"` or `"kindWithSubClasses"`, or `collation` is not `"binary"` or `"caseInsensitive"`. `details.option` names the option, `details.value` is what was stated, `details.kind` is the node kind and `details.constraintName` the constraint. |
+
+#### Export temporal-field codes
+
+`exportGraph` / `exportGraphStream` refuse to drop valid-time fields a graph's
+rows cannot be read without:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An export explicitly set `includeTemporal: false` on a graph with an edge kind whose `cardinality` or `targetCardinality` is `"oneActive"` (a `oneActive` composition pair included). Those kinds count a row only while its window is open, so an ended row exported without its `validTo` would re-import as current. `details.edgeKinds` lists them. Remove `includeTemporal` (such exports default it to `true`) or set it to `true`. |
+
+#### Interchange option codes
+
+The interchange entry points refuse an option key they do not declare rather
+than dropping it, as `ConfigurationError`:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `INTERCHANGE_OPTION_UNKNOWN` | `importGraph()`, `importGraphStream()`, `exportGraph()` or `exportGraphStream()` was given an option key it does not declare. `details.operation` names the entry point and `details.option` the first unknown key; nothing is read or written. A misspelled option is refused rather than dropped, so check the spelling against the options type. `batchSize` and `idleTimeoutMs` are `exportGraphStream()` options; `exportGraph()` refuses them. |
+
+#### Durable edge match identity guard codes
+
+Durable edge match identity uses stable `ConfigurationError` detail codes:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR` | A declared identity field cannot be represented as a portable JSON scalar, or an untyped runtime value violated that declaration. |
+| `EDGE_MATCH_IDENTITY_KEY_TOO_LARGE` | One complete durable identity tuple exceeds the portable 2,000-byte index budget. Normal import records this against the individual edge; trusted import is atomic and refuses the whole stream. |
+| `EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE` | The adapter declares durable identity support, but the database is missing its columns or unique arbiter. Initialize or migrate the schema before serving writes. |
+| `EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND` | Activating or changing an edge kind's match identity needs the edge kind verified empty atomically with the schema commit. Initial adoption needs an atomic empty-kind fence or materialization preflight; a later `migrateSchema` or `rollbackSchema` that re-keys an edge kind needs `commitSchemaVersionWithPreflight` or `setActiveVersionWithPreflight`. The custom backend does not implement the one the commit needs. |
+| `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED` | A custom backend declares durable identity support but refuses the authoritative convergence command. TypeGraph fails closed because the portable read-then-write fallback has no equivalent database arbiter. |
+| `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT` | A durable import batch was refused without savepoint rollback protection, either because the backend is non-transactional or because its root/transaction statement-execution contract cannot serve savepoints. TypeGraph will not retry rows individually because that could double-attribute an already-written prefix. |
+
+The last refusal deliberately differs from optional fused-command fallback:
+the durable identity declaration delegates correctness to a database key, so a
+backend that claims the feature but refuses its command cannot safely re-enter
+the dynamic portable path.
+
+#### Heterogeneous edge-read guard codes
+
+`findEdgesByHeterogeneousEndpointSet` refuses mixed endpoint modes instead of
+guessing how incident and exact-pair rows should be interpreted:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES` | The request contains both incident-endpoint rows (without an opposite endpoint) and exact directed-pair rows. Supply an opposite endpoint for every row to request exact-pair matching. |
+| `EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED` | The endpoint set cannot fit within the backend's bind-parameter budget. Split the request into smaller calls. |
+
+#### Pagination guard codes
+
+`paginate()`, `page()` and `stream()` refuse a query whose cursor could not
+position itself, instead of returning pages that silently lose rows:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
+
+#### Query option codes
+
+The query builder refuses an option it cannot honor with a `ConfigurationError`
+rather than silently sorting or matching differently:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `ORDER_FIELD_RENAMED` | `orderBy(alias, field)` names a system field by its removed storage name (`created_at`, `updated_at`, `deleted_at`, `valid_from`, `valid_to`, `from_id`, `to_id`) and the alias does not declare a property of that name (refused on any schema, open or closed). `details.replacement` is the name to use, such as `"meta.createdAt"`. |
+| `ORDER_FIELD_UNKNOWN` | `orderBy(alias, field)` names neither a property the alias declares nor an orderable system field (`id`, `kind`, `meta.validFrom`, `meta.validTo`, `meta.createdAt`, `meta.updatedAt`, `meta.deletedAt`, plus `meta.version` on nodes and `fromId` / `toId` on edges), and the alias's schema is closed, so the name cannot be stored. An open schema, or one whose shape cannot be read, may hold any key and is not refused. The suggestion lists the valid names. |
+| `ORDER_ALIAS_UNKNOWN` | `orderBy(alias, field)` names an alias the query does not have. |
+| `METADATA_FIELD_UNKNOWN` | A predicate accessor or expression context reads `$meta.<name>` for a name the alias stores no metadata for, such as `$meta.version` on an edge. The typed accessors make this a compile error; untyped code reaches the refusal. `details.available` lists the alias's metadata fields. |
+| `LIKE_PATTERN_TRAILING_ESCAPE` | A `like()` / `ilike()` pattern ends with an escape character that escapes nothing. `details.operator` and `details.pattern` carry the call. Remove the trailing `\`, or double it to match a literal backslash. |
+| `QUERY_FRAGMENT_REQUIREMENT_UNMET` | `pipe()` applies a fragment whose required alias the query does not bind as a node of the declared kind or a subclass of it. Typed code gets a compile error instead; a caller the compile-time check cannot reach gets this refusal. `details.alias`, `details.requiredKind` and `details.boundKinds` name the mismatch. See [Fragment Composition](/queries/compose). |
+
+#### Operational Identity guard codes
+
+Operational Identity lifecycle failures use stable `details.code` values on
+`ConfigurationError`:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
+| `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
+| `IDENTITY_REQUIRES_WRITE_FENCE` | Operational Identity was constructed against a backend whose `capabilities.writeFence` resolves `unfenced` — declare the capability, matching the engine's real locking support. See [Write-fence declaration codes](#write-fence-declaration-codes). |
+| `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
+| `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement, or exists without this graph's fill. Restore ledgers, or recreate and rebuild the derived closure, before serving traffic. `details.reason: "unfilled"` marks the second case: the separation relation is present but holds no row for this graph while the ledger holds a live `different` assertion across two distinct identity classes — reopen the Store (the open runs the fill) or run `rebuildIdentityClosure(store)`. A Store handle opened while the relation did not exist keeps failing until it is reopened, which is deliberate: the alternative is a confident "not separated" the moment another graph's upgrade creates the shared relation. |
+| `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` | The backend cannot publish the derived separation relation's upgrade — the `CREATE` and the fill — as one commit, on a graph that owes rows. `details.missingPorts` names what is absent: `schemaWriteTransaction` / `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the schema-commit path. Refused rather than degraded, because a relation created empty and filled afterwards reads as "nothing is separated" in between. Both bundled Drizzle backends implement all three when transactions are enabled, so this is a custom-backend path. |
+| `IDENTITY_ENABLEMENT_PENDING` | First enablement is pending because `autoMigrate` is disabled. |
+| `IDENTITY_PROFILE_MIGRATION_PENDING` | A `sameIdAcrossKinds` change (a breaking `fold`↔`ignore` flip, or disabling identity) has not been applied — either it is breaking, or `autoMigrate` is disabled. |
+| `IDENTITY_SCHEMA_MIGRATION_PENDING` | An identity-relevant ontology change is pending because `autoMigrate` is disabled. |
+| `IDENTITY_SEPARATION_VIOLATION` | Not a `ConfigurationError`: the top-level `code` of `IdentitySeparationViolationError` (category `constraint`, exported from `@nicia-ai/typegraph/identity`). The derived separation relation refused a write that would place both endpoints of a current `different` assertion in one identity class. `details` carries `graphId`, `classKey`, `assertionId`, the endpoints `a` and `b`, and `enforcedBy` (`"database"` when the relation's CHECK refused the insert, `"writer"` when the database accepted a collapsed pair and the writer refused it). The database-level backstop beneath identity validation; reaching it means an earlier guard let a contradiction through. |
+| `IDENTITY_TRANSACTION_NOT_WRITE_FENCED` | SQLite refused an identity write because the enclosing transaction was begun `DEFERRED` and another connection committed before it could take the writer slot. Only reachable through `store.withTransaction(externalTx)` / `store.withRecordedTransaction(externalTx)`, where the caller owns the `BEGIN` — TypeGraph's own transactions open `BEGIN IMMEDIATE` and hold the slot from the start. SQLite cannot upgrade a stale snapshot in place, so roll back and re-run the transaction, opening it with `BEGIN IMMEDIATE`. |
+| `IDENTITY_SCHEMA_CONTRADICTION` | Existing nodes or assertions contradict the proposed identity profile or ontology, or the materialized closure disagrees with the assertions it was derived from. Run `rebuildIdentityClosure(store)` to recover from a closure mismatch. |
+| `IDENTITY_IMPORT_REQUIRES_PROFILE` | An interchange document carries an `identity` section but the target graph does not have the profile enabled. |
+| `IDENTITY_MERGE_REQUIRES_PROFILE` | A branch carries identity changes but the merge target graph does not have the profile enabled. |
+| `IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS` | An identity-enabled export explicitly disabled temporal fields. Remove `includeTemporal` or set it to `true`; endpoint bounds are required to validate assertion windows on import. |
+| `IDENTITY_IMPORT_ID_CONFLICT` | An imported assertion id already exists in the target ledger identifying different truth (relation, endpoints, or validity window). |
+| `RECORDED_IDENTITY_SCHEMA_MISSING` | A `history: true` open of an identity-enabled graph could not find the recorded identity relation. Bundled backends provision it, so this is rare there and more likely on a custom backend. |
+
+When an unapplied migration's **only** breaking change is the identity one, the
+specific pending code above wins over the generic `MigrationError` (which is
+attached as `cause`); a diff that also breaks nodes, edges, ontology, or
+indexes raises the generic `MigrationError` enumerating all of them.
+
+Identity import also raises `ValidationError` with one of these
+`details.issues[].code` values when an interchange document's `identity`
+section fails shape or integrity checks. Each issue carries the offending
+assertion's id structurally in `details.issues[].assertionId`, and
+`importGraph`/`importGraphStream` record these failures as
+`entityType: "identity"` entries in `result.errors` (a self-assertion —
+`IDENTITY_SELF_ASSERTION` — included) rather than throwing:
+
+| Issue `code` | Meaning |
+| --- | --- |
+| `IDENTITY_IMPORT_UNKNOWN_KIND` | An assertion endpoint names a node kind not in the target graph's registry. |
+| `IDENTITY_IMPORT_PAIR_NOT_NORMALIZED` | An assertion's `a`/`b` endpoints are not in code-point order. |
+| `IDENTITY_STATE_IMPORT_ENDED_ASSERTION` | A `state`-mode import (the default) contains an already-ended assertion; use `identityMode: "archival"` on export to carry ended assertions. |
+| `IDENTITY_IMPORT_FUTURE_VALID_FROM` | An open (current) assertion's `validFrom` is in the future, in either import mode. |
+| `IDENTITY_IMPORT_FUTURE_VALID_TO` | An ended assertion's `validTo` is in the future. |
+| `IDENTITY_IMPORT_INVALID_WINDOW` | An assertion's `validTo` precedes its `validFrom`. |
+| `IDENTITY_IMPORT_ENDED_BY_WITHOUT_END` | An assertion names an `endedBy` cause but carries no `validTo`; only an ended assertion has a cause. |
+| `IDENTITY_IMPORT_ENDED_BY_NOT_ENDPOINT` | An assertion's `endedBy` names a node that is not one of its own endpoints; a deletion cascade only ends assertions that touch the deleted node. |
+| `IDENTITY_SELF_ASSERTION` | An assertion's `a` and `b` name the same node. |
+
+Archival transitions carry five `ValidationError` codes of their own, each a
+precondition failure on the identity section as a whole rather than a per-row
+outcome — unlike the table above, these THROW uncaught and are never recorded
+in `result.errors`:
+
+| Issue `code` | Meaning |
+| --- | --- |
+| `IDENTITY_STATE_IMPORT_TRANSITIONS` | A `state`-mode document names a `transitions` section; only `identityMode: "archival"` exports carry one. Refused before any write. |
+| `IDENTITY_STATE_IMPORT_RETENTION` | A `state`-mode document carries a `retention` watermark; only archival exports carry one. Refused before any write. |
+| `IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE` | An archival document's `transitions` are not ordered by non-decreasing `recordedRevision` — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. |
+| `IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID` | An archival document's `transitions` name one `transitionId` more than once — within the array, or, on `importGraphStream`, across its `identity-transitions` chunks. An export never writes two rows under one id. Re-importing the same archive is not this error: a row already on the target is kept, so the re-import is idempotent. |
+| `IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING` | An `importGraphStream` header announced a transition restore (`hasTransitions`, or a non-zero `retention`), but the stream ended without an `identity-transitions` chunk. Raised at the end of the stream, after its earlier chunks committed. |
+
+A write that records an identity transition, a `transitionsOf` or `replay`
+read, a `pruneIdentityTransitions` call or an archival transition restore on a
+database whose transition-log relations were never created (base-schema
+version 9 not yet adopted; see
+[Base-schema version 9](/backend-setup/#base-schema-version-9-allocation-retention-and-the-identity-transition-log))
+throws a `ConfigurationError` whose `details.code` is
+`IDENTITY_TRANSITION_RELATIONS_MISSING`, whose `details.relations` names
+both relations, and whose `details.surface` is `capture-flush`,
+`transition-read`, `transition-prune` or `transition-restore`.
+
+#### Merge provenance sidecar codes
+
+`persistProvenance: true` writes to a *sidecar* graph beside the merge target,
+and `openProvenanceStore` refuses any sidecar graph id it cannot prove it owns.
+Both refusals are `ConfigurationError`s with a stable `details.code`, and both
+carry `details.graphId` (the sidecar id) and `details.targetGraphId`:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `GRAPH_MERGE_PROVENANCE_ID_COLLISION` | The sidecar graph id is occupied by something this library did not write. `details.reason` names which state was found, and the suggestion is specific to it. |
+| `GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED` | The backend exposes no transactional schema fence (`schemaWriteTransaction`), so the id's emptiness check and its ownership-marker write cannot commit as one unit. Not a collision — the id may well be free. An already-owned sidecar still opens on such a backend, so read-only use of an existing sidecar stays available. |
+
+The five `details.reason` values on `GRAPH_MERGE_PROVENANCE_ID_COLLISION`:
+
+| `details.reason` | The state that was found |
+| --- | --- |
+| `application-graph` | The id holds rows (in any per-graph table) or a schema that is not the sidecar's, so it belongs to an application. When a pre-marker sidecar is classified, revision-change journal entries that record its own stored `Provenance` rows are not counted; every other journal entry is. Rename the colliding graph or point the merge elsewhere. |
+| `empty-legacy-sidecar` | A pre-marker sidecar with no rows at all, which carries no evidence of authorship and is indistinguishable from an application graph of the same shape. |
+| `unupgradeable-legacy-sidecar` | A pre-marker sidecar whose rows do not verify as provenance this library wrote for *this* target, so it cannot be upgraded to an owned sidecar. |
+| `unowned-exact-schema-graph` | The current sidecar schema with no ownership marker. Because the marker is written *first*, this library cannot have produced this state; contents are not consulted, so an empty or provenance-shaped occupant is refused too. |
+| `corrupt-ownership-marker` | A `ProvenanceOwner` row that is not a valid live claim for this target — soft-deleted, schema-invalid, naming a different target, or stored under a different row id. It is never overwritten or resurrected, because it may be an application's row. |
+
+Under `persistProvenance: true` these arrive wrapped: the sidecar is opened and
+claimed **before** the merge commits, and either code refuses the merge as an
+`InvalidMergeOptionsError` (`details.option: "persistProvenance"`,
+`details.provenanceErrorCode` echoing the code above, the `ConfigurationError`
+as `cause`) with the target left unmodified. Only transient row-write failures
+after the commit degrade to a `warnings` entry.
+
+#### Interchange serialized-connection guard codes
+
+Two long-lived interchange streams cannot share one serialized database
+connection: an export snapshot holds a read transaction for the whole stream and
+a streaming import writes a transaction per chunk on that same connection, so
+the second one either nests a `BEGIN` or waits for a slot that never frees. The
+lease is **exclusive** — one stream of any kind per connection — so all four
+pairings refuse with a `ConfigurationError` rather than hanging:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT` | An export snapshot holds the connection, detected through the shared serialized resource the two backend wrappers were marked with. |
+| `INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT` | The same condition, reported by the object-identity detector: one SQLite backend is exporting into itself. Worth telling apart because the fix differs — pass a second backend rather than await whatever else is running. |
+| `INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS` | A streaming import holds the connection, in either order of discovery. |
+
+The code names *what holds the connection*; `details.requested` and
+`details.heldBy` (each `"export-snapshot"` or `"import-stream"`) name which
+pairing was actually refused, so a same-kind refusal is never reported as
+something it is not. `details.graphId` names the graph the refused stream was
+for.
+
+`"import-stream"` is the kind of every long-lived import, not only
+`importGraphStream`: `importGraph` holds the lease for the whole call, and
+`trustedImportGraph` / `trustedImportGraphStream` hold it for the whole trusted
+session — so those APIs throw this `ConfigurationError` as well as their own
+`TrustedImportError`. Connections TypeGraph cannot observe are not refused: two
+clients dialed at one server, or two SQLite handles on one file, are genuinely
+independent. See
+[Scaling branches and interchange](/graph-merge#scaling-branches-and-interchange)
+for which drivers are recognized as serialized.
+
+##### Declaring a connection the driver hides
+
+Recognition is a duck-type over the client object, so a serialized driver
+TypeGraph cannot identify (`expo-sqlite`, `op-sqlite`, `sqlite-proxy`,
+`pg-proxy`, Bun `SQL`, a postgres-js client capped through a string it does not
+coerce) is left unmarked and its stream pairs are not refused.
+`createSqliteBackend` and `createPostgresBackend` accept a `serializedResource`
+declaration for that gap — `{ mode: "shared", resource: client }` — and for the
+reverse case, `{ mode: "independent" }`, when the detection is wrong for your
+topology. See [Serialized connections](/backend-setup#serialized-connections).
+
+The declaration is applied or refused, never quietly ignored:
+
+| Declaration | Outcome |
+| --- | --- |
+| `{ mode: "shared", resource }` on a connection TypeGraph did not detect, or naming the client it did detect | The named object is the serialized resource; two backends naming the same object are one connection |
+| `{ mode: "shared", resource }` naming a **different** object than the one detected | `ConfigurationError` (`code: "CONFIGURATION_ERROR"`) from the factory, with `details.reason: "serialized-resource-conflict"` and `details.declaredKind` / `details.detectedKind` naming what each side was |
+| `{ mode: "independent" }` | Honored, whatever was detected — the documented escape hatch |
+
+The conflict is refused rather than resolved because two wrappers over one
+connection given two different sentinels would stop being seen as a pair, which
+is precisely the refusal this guard exists to make.
+
+The two `*Kind` details are constructor names (`"Database"`, `"BoundPool"`), not
+the handles themselves: `details` is what `toLogString()` serializes, and a
+driver handle there would print whatever that driver stores — a `pg.Pool` keeps
+its `connectionString`, password included — into your logs.
+
+`{ mode: "independent" }` lifts the shared-resource arm between two distinct
+backend objects. It does **not** lift
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`: one SQLite backend exporting into
+itself holds the one snapshot transaction its own import writes through, which
+is a fact about a single handle rather than a claim about connection topology.
+Pass a second backend for that case. That surviving refusal is SQLite-only, so
+on PostgreSQL a backend declared independent exporting into itself is not
+refused either — a client that hands out independent connections is exactly
+what the declaration claims.
+
+#### `ExportStreamCancelledError`
+
+An export stream whose `signal` fires settles with `ExportStreamCancelledError`
+(`code: "INTERCHANGE_EXPORT_STREAM_ABORTED"`) rather than a silent end of stream,
+so a consumer never mistakes a cancelled export for a complete one. It is thrown
+only *after* the export has given back everything it took, so receiving it means
+the connection is already free. What that was depends on the backend: a
+transactional one rolls back the snapshot and releases the connection's stream
+lease; one without transactions held neither and simply abandons its remaining
+reads, its delivered chunks never having been a single snapshot. The message
+says which.
+`details.graphId` names the exported graph and `cause` carries the signal's own
+`reason` when the caller supplied one. A signal that is already aborted refuses
+the export before any transaction is opened. See
+[Cancelling an export](/interchange#cancelling-an-export).
+
+#### `ExportStreamIdleTimeoutError`
+
+An `exportGraphStream` configured with `idleTimeoutMs` settles with
+`ExportStreamIdleTimeoutError` (`code: "INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`)
+when its consumer does not request another chunk within that bound. The timeout
+measures only the interval after a chunk is yielded; time spent waiting for the
+backend to produce the next chunk does not count. `details.graphId` identifies
+the graph and
+`details.idleTimeoutMs` carries the configured bound. As with explicit
+cancellation, a transactional export rolls its snapshot back and releases its
+stream lease before the error is delivered; a non-transactional export held
+neither and abandons its remaining reads. See
+[Cancelling an export](/interchange#cancelling-an-export).
 
 #### Recorded-capture guard codes
 
@@ -353,6 +2019,56 @@ Between them, "history capture forbids raw SQL here" and "this backend has no
 transactions" (which carries **no** guard code) are cleanly distinguishable
 without catching-and-string-matching.
 
+#### Engine-native recorded-time codes
+
+A backend can track recorded (system) time itself by declaring
+`GraphBackend.recordedTime` instead of using TypeGraph's own recorded
+relations and clock — see [Engine-native recorded
+time](/queries/temporal#engine-native-recorded-time) and [Supplying
+`recordedTime`](/backend-authoring#supplying-recordedtime). Which ownership
+form a store reads under is derived from that member's presence, never
+declared separately, so there is no `recordedTimeOwnership` option to set.
+Every refusal specific to that form carries a stable `details.code`:
+
+| `details.code` | Raised when |
+|----------------|-------------|
+| `ENGINE_PROFILE_RECORDED_TIME_REQUIRES_LINEAGE` | An engine profile declares `recordedTime` without also declaring `lineage` — engine-native history keeps no recorded relations of its own for TypeGraph to derive a graph-merge change delta from. Raised at backend construction, naming both members. |
+| `RECORDED_TIME_UNAVAILABLE` | A caller reached `requireRecordedTime` and found `recordedTime` absent on the backend it asked — store construction under `history: true` and the shared `recordedNow()`/`revisionNow()`/receipt-stamping read, both reached only once ownership has already resolved to `"engine-native"`. |
+| `ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED` | A store is constructed with `revisionTracking: true` against an engine-native backend, whether or not `history: true` is also requested — there is no TypeGraph clock for `revisionTracking` to advance; the engine's own revision is available only under `history: true`. |
+| `ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED` | A store is constructed with an external `recordedRead` binding against an engine-native backend — there is no TypeGraph recorded relation for one to populate. |
+| `ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED` | `store.identityAtCoordinate` at a past recorded instant, or the query compiler's historical identity traversal, is reached under engine-native recorded time — identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate. |
+| `ENGINE_NATIVE_MIGRATE_RECORDED_TIME_UNSUPPORTED` | `migrateLegacyRecordedTime` is called against an engine-native backend — the migration rewrites TypeGraph's own recorded relations, which an engine-native backend does not have. |
+| `RECORDED_INSTANT_OWNERSHIP_MISMATCH` | `store.asOfRecorded(instant)` receives an instant minted under the OTHER recorded-time ownership form — an `r2:` (TypeGraph-owned) instant against an engine-native store, or an `e1:` (engine-native) instant against a TypeGraph-owned store. |
+
+The profile refusal fires at backend construction; the two store-option
+refusals, and `RECORDED_TIME_UNAVAILABLE`'s construction arm, fire at
+`createStore`; the remaining codes, and `RECORDED_TIME_UNAVAILABLE`'s read
+arm, fire at the specific call that cannot be honored. None of these codes
+are members of `RECORDED_CAPTURE_GUARD_CODES` above — that set stays closed
+to the three TypeGraph-capture guards.
+
+### Recorded allocation ownership and lookup
+
+`GraphAllocationMismatchError` uses top-level code `GRAPH_ALLOCATION_OWNER_MISMATCH`.
+Merge owner refusals preserve their merge error class and use that same code. Match
+this code to retire checkpoints, plans, or requests after a reset or fork rotation;
+a retry against the same retired owner cannot repair it.
+
+| `details.code` | Meaning |
+| --- | --- |
+| `RECORDED_ANCHOR_UNBOUND` | A legacy `r1:` instant or fence lacks allocation ownership. Migrate with independently retained evidence or regenerate it. Also raised when a restored identity transition's `recorded`, which takes that unowned form, is passed to `asOfRecorded` or to a transition-log window, cursor or prune. |
+| `RECORDED_ANCHOR_NOT_RETAINED` | Migration cannot attest the requested revision/timestamp against the retained clock. |
+| `RECORDED_ANCHOR_OWNERSHIP_UNSUPPORTED` | A TypeGraph origin attestation was supplied for an opaque engine-native checkpoint. |
+| `RECORDED_RETENTION_STATE_INVALID` | Persisted allocation retention metadata is malformed or inconsistent. Repair storage before retrying. |
+| `RECORDED_RETENTION_WRITE_REFUSED` | The pruning transaction could not persist its watermark against the observed clock and owner; the batch rolls back. |
+| `RECORDED_RETENTION_DELETE_REFUSED` | The deletion count differs from the bounded batch selection; the batch rolls back. |
+| `RECORDED_LOOKUP_HISTORY_PRUNED` | The requested wall time falls within pruned allocation coverage. Use a saved anchor or a time within the retained suffix. |
+| `RECORDED_LOOKUP_HISTORY_NOT_LOGGED` | The requested wall time falls outside known allocation-log coverage. This does not mean the historical graph was empty. |
+| `ALLOCATION_OWNER_REQUIRES_TRACKING` | Native owner access or rotation requires the Store option `revisionTracking: true` or TypeGraph-owned `history: true`. |
+| `EXTERNAL_RECORDED_OWNER_REQUIRED` | Public owner capture found no owner for the configured external source. Historical reads without a bound owner instead raise `GraphAllocationMismatchError` with code `GRAPH_ALLOCATION_OWNER_MISMATCH`. |
+| `EXTERNAL_RECORDED_OWNER_INVALID` | An external recorded relation's `owner` option is not a reader function. |
+| `RECORDED_RELATIONS_MISSING` | Required captured relations or the allocation log are missing; complete base-schema adoption before writing. |
+
 ### `SchemaMismatchError`
 
 Thrown when the database schema doesn't match the expected graph definition.
@@ -375,6 +2091,12 @@ try {
 
 Thrown when schema migration fails due to breaking changes that require manual intervention.
 
+The `details.reason` value `"edge-match-identity-rekey"` means a populated edge kind
+changed or newly adopted its durable match identity. Existing rows cannot be assigned
+new identity keys without choosing how conflicts converge. Export the affected edges,
+hard-delete them, apply the schema migration, then reimport them so TypeGraph
+materializes and arbitrates the new durable keys.
+
 ```typescript
 try {
   const [store] = await createStoreWithSchema(graph, backend);
@@ -382,12 +2104,176 @@ try {
   if (error instanceof MigrationError) {
     console.log(error.category); // "system"
     console.log(error.details);
-    // { graphId: "my-graph", fromVersion: 3, toVersion: 4, reason: "Removed required field 'email' from Person" }
+    // { graphId: "my-graph", fromVersion: 3, toVersion: 4, reason: "breaking-change", diff: { ... } }
     console.log(error.suggestion);
     // "Review the breaking changes and perform manual migration if needed..."
   }
 }
 ```
+
+The `details.reason` value `"ontology-tightening-violated"` means a schema
+tightening other than an edge cardinality is false against rows that already
+exist. It is raised for:
+
+- adding `disjointWith`, `subClassOf`, `equivalentTo`, `sameAs`, or
+  `partOf`/`hasPart`, or removing `subClassOf`, `equivalentTo` or `sameAs`;
+- declaring `acyclic: true` over an existing cycle;
+- narrowing an edge kind's `from`/`to` (or its source-dependent target map)
+  out from under an edge it admitted, whatever that edge's validity window;
+- `store.removeKinds()` of a mid-chain kind that a surviving subclass's live
+  edge relied on;
+- re-adding an edge kind over rows a discarded drop left in its table.
+
+Every refusal of this kind and of `"edge-cardinality-tightening-violated"`
+below carries the same four details fields:
+
+| Field | What it holds |
+| --- | --- |
+| `changes` | The ontology changes in this diff that owed a data check (a `safe` or `breaking` change in the same commit is never included, even one alongside the change that was refused). Empty when only an edge kind's own registration tightened. |
+| `edgeKinds` | The edge kinds whose own registration tightened: a newly constrained `cardinality` or `targetCardinality`, `acyclic: true`, or an endpoint pair no longer admitted. Empty when only ontology relations tightened. |
+| `axes` | The edge-cardinality axes this commit newly constrains, each an `{direction, cardinality, edgeKind}` triple. |
+| `violations` | The offending rows, in exactly the shape `store.verifyConstraintFences()` returns for the proposed schema, **every violated family included**: `nodeDisjointness`, `nodeUniqueness`, `edgeEndpointAssignability`, `edgeAcyclicity`, `edgeCardinality`, and for composition `composition`, `compositionExistence`, `compositionFutureWindow` (a realizing edge kind that already holds a row whose window starts or ends later than the commit) and `compositionWindowOverlap` (a part whose stored rows would have overlapping valid-time windows under the pair). |
+
+One refusal reports every family the commit violates, so repair the listed
+rows once and retry: delete them, change their kind, or narrow the change.
+The `reason` only names the headline family: `"edge-cardinality-tightening-violated"`
+whenever at least one cardinality row violates, `"ontology-tightening-violated"`
+otherwise. A refused commit publishes nothing. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+for what each meta-edge checks.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
+    console.log(error.details.violations);
+    // [{ family: "nodeDisjointness", target: {...}, owners: [...] }, ...]
+  }
+}
+```
+
+The `details.reason` value `"unique-constraint-requires-empty-kind"` means the
+commit would leave a uniqueness constraint unenforced over rows that already
+exist: it adds or reshapes a unique constraint on a kind that holds rows
+(including a kind the commit re-adds over rows a discarded drop left behind),
+or drops a member that sorts before the kind from the subclass component of a
+populated kind's `kindWithSubClasses` constraint (a removed `subClassOf` /
+`equivalentTo`, or a removed kind). A schema
+commit neither validates existing rows against a unique constraint nor
+rebuilds its claims, so the kind must be empty. `details.constraints` names
+each blocked constraint — `kind`, `constraintName`, `cause`
+(`"constraint-added"`, `"constraint-reshaped"` or `"claim-axis-moved"`) and
+the claim `axis`, plus `lostKinds` for a component that dropped members. Declare the
+constraint before the kind is populated, or empty the kind, commit, and write
+the rows back. See
+[Unique constraints need an empty kind](/schema-evolution#unique-constraints-need-an-empty-kind).
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "unique-constraint-requires-empty-kind") {
+    console.log(error.details.constraints);
+    // [{ cause: "constraint-added", kind: "Person", constraintName: "person_email", axis: "Person" }]
+  }
+}
+```
+
+The `details.reason` value `"edge-cardinality-tightening-violated"` is the
+same shape for edge cardinality: newly declaring or tightening `cardinality`
+or `targetCardinality` on an edge kind is false against rows that already
+exist. `details.axes` names the axes this commit newly constrains (each an
+`{direction, cardinality, edgeKind}` triple); `details.violations` carries
+the offending rows in exactly the shape `store.verifyConstraintFences()`
+returns, and also lists any other family the same commit violates. A
+cardinality violation names its `edgeKind`, `direction`, `cardinality` and the
+node(s) it is keyed on (`keyedOn.from` and/or `keyedOn.to`, each a kind name
+and id) as plain values; `target` is the claim row's storage address. An
+axis is probed whenever the proposed value is constrained and
+differs from the stored one — including a genuine loosening, which costs one
+read of an already-clean population rather than risk missing a tightening.
+
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError && error.details.reason === "edge-cardinality-tightening-violated") {
+    console.log(error.details.axes);
+    // [{ direction: "target", cardinality: "one", edgeKind: "assignedTo" }]
+    console.log(error.details.violations);
+  }
+}
+```
+
+The `details.reason` value `"custom-relation-removal"` means
+`store.evolve()`, `store.planEvolution()` or `store.removeKinds()` would drop a
+stored relation that names a custom meta-edge from the removed `metaEdge()`
+factory. The stored schema holds the last copy of that relation, so these verbs
+refuse before writing anything. `details.relations` lists each relation as a
+`{ metaEdge, from, to }` object, such as
+`{ metaEdge: "governs", from: "Team", to: "Project" }`. Move them into
+`defineGraph({ annotations })`, commit once with `migrateSchema()`, then retry.
+See
+[Upgrading past the removed `sameAs`/`differentFrom`/`metaEdge()` APIs](/schema-evolution#upgrading-past-the-removed-sameasdifferentfrommetaedge-apis).
+
+#### Schema-tightening and constraint-fence audit guard codes
+
+Committing a schema tightening — ontology, edge cardinality, or a gated
+unique-constraint change — uses stable
+`ConfigurationError` detail codes when the backend cannot run the required
+data check atomically:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the ontology-tightening data check atomically with the schema-version compare-and-swap. A commit that adds an edge kind owes this check too: rows a previous removal left under that name (`discardDroppedKindRows`) must sit on endpoint pairs the new declaration admits, and must not form a cycle if it declares `acyclic: true`. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the edge-cardinality-tightening data check atomically with the schema-version compare-and-swap. Any commit that newly declares a constrained `cardinality` or `targetCardinality` on an edge kind — including declaring one on a brand-new kind — owes this same atomic check. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `UNIQUE_CONSTRAINT_CHANGE_REQUIRES_ATOMIC_BACKEND` | The backend cannot verify that a kind is empty atomically with the schema-version compare-and-swap. A commit that adds or reshapes a unique constraint on a kind — a kind the commit adds included, since it may own rows a previous removal left behind — or moves a `kindWithSubClasses` claim, owes that check even when the kind is empty. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor a schema-tightening preflight can run. |
+| `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED` | The backend ran the audit but did not answer the `edgeEndpointAssignability` family it was asked for (`misassignedEdgeEndpointRows` was left `undefined`). An empty report there would be indistinguishable from a clean database, so the audit refuses rather than reporting one. |
+| `SCHEMA_WRITE_REQUIRES_READ_COMMITTED` | A PostgreSQL schema write took the advisory schema fence on a session that reports an isolation other than `read_committed` (`details.isolation`). Managed writers hold the schema row `FOR SHARE` without changing it, so only a fresh snapshot per statement lets the data check see what they committed while the schema write waited. TypeGraph opens its own schema-write transactions at `read_committed`, so this is raised for a caller-owned `REPEATABLE READ` or `SERIALIZABLE` transaction it cannot move: one handed to `adoptSchemaWriteTransaction`, or one under a transaction-scoped backend (`createPostgresTransactionBackend(tx)`), where every schema write — a commit, an activation, an identity schema transition, the provenance sidecar claim, removal materialization, a contribution rebuild — runs in a savepoint of the caller's transaction. Run the schema write in a `READ COMMITTED` transaction. The caller's transaction is left as it was: no lock held, no setting changed. |
+
+### `BaseSchemaAdoptionTimeoutError`
+
+PostgreSQL raises this error when additive base-schema adoption cannot acquire the
+recorded clock's table lock within its bounded wait. `details.tableName` identifies
+the table and `details.waitBudgetMs` gives the effective session lock timeout
+(at most 1000 ms, or the caller's stricter timeout). Its code is
+`BASE_SCHEMA_ADOPTION_TIMEOUT`; it has no graph ID or graph fence phase. The
+installation marker is not advanced. Retry privileged adoption after transactions
+using that table finish. A stricter caller `lock_timeout` remains effective.
+
+### `BaseSchemaMigrationError`
+
+`pruneRecordedInstants` also raises this error when the installed base schema is
+older than version 9. Its backend lifecycle assertion reads the marker and reports
+the actual installed version. `resolveRecordedInstant` can read pre-v9 allocation
+logs without this assertion and treats absent retention metadata as unpruned storage.
+
+Thrown by zero-DDL verified and graph-template entry points when the
+deployment-wide physical TypeGraph schema has not been adopted to the version
+required by the running library. This is separate from `MigrationError`, which
+describes one graph's serialized schema evolution.
+
+```typescript
+try {
+  const [store] = await createVerifiedStore(graph, backend);
+} catch (error) {
+  if (error instanceof BaseSchemaMigrationError) {
+    console.log(error.details);
+    // {
+    //   installedVersion: undefined,
+    //   requiredVersion: 9,
+    //   reason: "missing"
+    // }
+  }
+}
+```
+
+`reason` is `"missing"`, `"stale"`, or `"newer"`. For missing or stale
+storage, run `createStoreWithSchema()` or `createAdapterStoreWithSchema()` once
+under a DDL-capable role, or apply the published external base-schema migration.
+A newer marker requires a TypeGraph release that supports that version.
 
 ## Query Errors
 
@@ -402,6 +2288,7 @@ try {
     .query()
     .from("Document", "d")
     .whereNode("d", (d) => d.embedding.similarTo(queryVector, 10))
+    .select((ctx) => ctx.d)
     .execute();
 } catch (error) {
   if (error instanceof UnsupportedPredicateError) {
@@ -444,6 +2331,38 @@ the orphaned promise yourself. To avoid orphaning writes at all, use
 transaction ends — so this error cannot arise there. It remains the caller's
 job to await every graph write before committing.
 
+### `TransactionConflictError`
+
+Thrown when a transaction was aborted by a serialization failure or deadlock
+on every attempt available to it. `details.operation` names the transaction
+that failed, `details.attempts` the number tried, and `cause` is the last
+attempt's driver error — PostgreSQL's own protocol for both conditions is to
+re-run the whole transaction from the top, which is what this error reports
+as exhausted.
+
+`store.transaction()` and `store.transactionWithReceipt()` raise it with
+`attempts: 1` for a conflict on their single attempt; passing
+`retry: { attempts }` (see
+[Retrying on conflict](/schemas-stores/#retrying-on-conflict)) raises it only
+once every attempt has conflicted. On PostgreSQL, a collection write or import
+that names a constraint, in a transaction TypeGraph opened, and every
+`bulkUpsertById`, `bulkReplaceById` and `bulkGetOrCreateByConstraint`, is
+replayed whole up to three times on a serialization failure or deadlock and
+raises it with `attempts: 3` once those are spent. Graph-merge's commit paths raise
+`MergeError` on the same exhaustion, with a `TransactionConflictError` as its
+`cause`.
+
+```typescript
+try {
+  await store.transaction(fn, { retry: { attempts: 3 } });
+} catch (error) {
+  if (error instanceof TransactionConflictError) {
+    console.log(error.details.attempts); // 3
+    console.log(error.cause); // the last driver error
+  }
+}
+```
+
 **The serialization covers TypeGraph's own statements, not `tx.sql`.** The raw
 Drizzle handle you get for writing your own relational tables in the same
 transaction shares the one pinned connection but bypasses the queue. Running a
@@ -451,6 +2370,25 @@ raw statement concurrently with a graph write — or with another raw statement 
 races two queries on that connection (the overlap `pg@9` removes), and the
 boundary cannot drain a raw statement it never saw. Await each `tx.sql`
 statement before the next write.
+
+### `ReadSetChangedError`
+
+Thrown by `tx.assertUnchangedSince()` when a declared read-set scope changed
+after the anchor. `details.graphId` and `details.anchor` identify the check, and
+`details.changes` lists one entry per changed scope: its `index` in the list you
+passed, the `scope` as the fence resolved it (kinds and ids only, never the
+objects you passed in, such as `{ target: "node", kind, id }`), and the changed
+`nodes` and `edges` keys. Each key list holds at most the first 100 changed keys
+in `(kind, id)` order; `nodesTruncated` and `edgesTruncated` are `true` when more
+changed, and a truncated scope should be treated as "re-read everything in it".
+Re-read the inputs and retry with a new anchor. See [Refusing a Write Whose Inputs Changed](/read-set-fence/).
+
+### `ReadSetUnverifiableError`
+
+Thrown by `tx.assertUnchangedSince()` when the lineage source cannot prove what
+changed since the anchor: an unknown anchor, one from before `store.clear()`, or
+a span containing a revision that left no evidence. Retrying with the same anchor
+cannot succeed; take a new anchor and re-read.
 
 ## Error Handling Patterns
 
@@ -464,8 +2402,8 @@ import {
   isUserRecoverable,
   isConstraintError,
   isSystemError,
-  getErrorSuggestion,
 } from "@nicia-ai/typegraph";
+import { getErrorSuggestion } from "@nicia-ai/typegraph/errors";
 
 try {
   await store.nodes.Person.create(data);
@@ -574,6 +2512,7 @@ try {
 For library authors or advanced use cases, validation utilities are available from the schema sub-export:
 
 ```typescript
+import { z } from "zod";
 import {
   validateNodeProps,
   validateEdgeProps,
@@ -590,8 +2529,9 @@ const validated = validateNodeProps(PersonSchema, inputData, {
 // Wrap a Zod error with TypeGraph context
 try {
   schema.parse(data);
-} catch (zodError) {
-  throw wrapZodError(zodError, {
+} catch (error) {
+  if (!(error instanceof z.ZodError)) throw error;
+  throw wrapZodError(error, {
     entityType: "node",
     kind: "Person",
     operation: "update",
@@ -606,15 +2546,80 @@ try {
 |------|-------------|----------|-------------|
 | `VALIDATION_ERROR` | `ValidationError` | user | Schema validation failed |
 | `DISJOINT_ERROR` | `DisjointError` | constraint | Disjointness constraint violated |
-| `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
+| `IDENTITY_CONTRADICTION` | `IdentityContradictionError` | constraint | Identity mutation would make the assertion ledger contradictory |
+| `IDENTITY_SEPARATION_VIOLATION` | `IdentitySeparationViolationError` | constraint | The derived separation relation refused a write that would put both endpoints of a `different` assertion in one identity class |
+| `IDENTITY_VALIDITY_FUTURE_START` | `IdentityValidityWindowError` | user | Identity assertion starts after the operation clock |
+| `IDENTITY_VALIDITY_FUTURE_END` | `IdentityValidityWindowError` | user | Identity assertion ends after the operation clock |
+| `IDENTITY_VALIDITY_INVERTED` | `IdentityValidityWindowError` | user | Identity assertion ends before it starts |
+| `IDENTITY_VALIDITY_OPEN_WINDOW_CONFLICT` | `IdentityValidityWindowError` | constraint | A different open window already represents the current semantic pair |
+| `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
+| `IDENTITY_REPLAY_REQUIRES_HISTORY` | `IdentityReplayError` | constraint | `replay` / `transitionsOf` / `pruneIdentityTransitions` / an archival transition restore on a store opened without `history: true` |
+| `IDENTITY_REPLAY_ENGINE_NATIVE_UNSUPPORTED` | `IdentityReplayError` | constraint | The same operations on a store whose backend owns recorded time (engine-native) |
+| `IDENTITY_REPLAY_HISTORY_TRUNCATED` | `IdentityReplayError` | constraint | The requested range lies entirely below the retention watermark |
+| `IDENTITY_REPLAY_WALK_INCOMPLETE` | `IdentityReplayError` | constraint | A single lineage's transition rows exceeded the walk's internal total safety ceiling |
+| `IDENTITY_PRUNE_BEYOND_RECORDED_CLOCK` | `IdentityReplayError` | constraint | A prune named a recorded instant beyond every revision the graph holds |
+| `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
+| `GRAPH_MERGE_IDENTITY_SEPARATION_CONFLICT` | `IdentityMergeConflictError` | system | A definitional match or a transitive cluster crosses a class-lifted `different` assertion |
+| `GRAPH_MERGE_ACYCLICITY_CONFLICT` | `AcyclicityMergeConflictError` | system | The resolved plan's edge writes would close a cycle in a declared-acyclic relation |
+| `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
+| `GRAPH_MERGE_COMPOSITION_ORPHAN` | `MergeCompositionOrphanError` | constraint | The plan would delete a whole while a live part of it is not among the plan's deletions, delete a part the target holds under a live whole the plan keeps, or leave a required part with no whole; or one branch's composition attachment loses its part or whole to another branch's deletion |
+| `GRAPH_MERGE_CARDINALITY_CONFLICT` | `CardinalityMergeConflictError` | constraint | The plan would leave two live edges holding one part's whole or one declared cardinality slot |
+| `GRAPH_MERGE_COMPOSITION_WINDOW_CONFLICT` | `CompositionWindowMergeConflictError` | constraint | The plan would leave one part of a `oneActive` composition pair with two composition windows that share an instant |
+| `GRAPH_MERGE_RESTRICTED_DELETE_CONFLICT` | `RestrictedDeleteMergeConflictError` | constraint | The plan deletes an `onDelete: "restrict"` node that keeps a non-composition edge the plan does not delete |
+| `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
+| `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
+| `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
+| `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
+| `COMPOSITION_WHOLE_OCCUPIED` | `CompositionError` | constraint | A `partOf`/`hasPart` write would give a part a second whole |
+| `COMPOSITION_VALIDITY_FUTURE_START` | `CompositionError` | constraint | A composition edge write states a `validFrom` later than the operation clock |
+| `COMPOSITION_VALIDITY_FUTURE_END` | `CompositionError` | constraint | A composition edge write states a `validTo` later than the operation clock |
+| `COMPOSITION_MOVE_FUTURE` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` later than the operation clock |
+| `COMPOSITION_MOVE_BEFORE_INCUMBENT` | `CompositionError` | constraint | A `reparent` / `bulkReparent` states an `at` earlier than the `validFrom` of the `oneActive` attachment it would end |
+| `COMPOSITION_WINDOW_OVERLAP` | `CompositionError` | constraint | On a `oneActive` pair, a write would leave two composition edges of one part whose valid-time windows share an instant |
+| `COMPOSITION_MOVE_GAP` | `CompositionError` | constraint | `importGraph` moves a required part with an end and an attach that leave a valid-time gap between them; both rows are refused per row |
+| `COMPOSITION_WHOLE_REQUIRED` | `CompositionExistenceError` | constraint | A bare create would leave an `existence: "required"` composition part with no live whole |
+| `COMPOSITION_DETACH_REFUSED` | `CompositionExistenceError` | constraint | A detach would leave a live `existence: "required"` part with no whole |
+| `COMPOSITION_WHOLE_CONFLICT` | `CompositionError` | constraint | A stated `partOf` contradicts the whole (or realizing edge) the existing node already holds |
+| `COMPOSITION_PROPS_CONFLICT` | `CompositionError` | constraint | A stated `partOf.props` differs from the already-satisfied attachment's stored props |
+| `COMPOSITION_ATTACHMENT_WINDOW_CONFLICT` | `CompositionError` | constraint | A stated `partOf.validFrom` / `partOf.validTo` (or a no-op `reparent` `at`) differs from the already-satisfied attachment's stored window |
+| `COMPOSITION_ATTACHMENT_WINDOW_BOUNDED` | `CompositionError` | constraint | A stated `partOf.validTo` on a `oneActive` pair would write an edge that does not attach the part |
+| `COMPOSITION_WHOLE_NOT_DECLARED` | `CompositionConfigurationError` | user | No composition pair is declared between the part's kind and the stated whole's kind |
+| `COMPOSITION_VIA_NOT_DECLARED` | `CompositionConfigurationError` | user | `via` names an edge kind that realizes no declared pair there |
+| `COMPOSITION_VIA_AMBIGUOUS` | `CompositionConfigurationError` | user | `via` was omitted while more than one pair is declared between the two kinds |
+| `COMPOSITION_NOT_A_PART` | `CompositionConfigurationError` | user | `reparent` was called on a kind that declares no `partOf`/`hasPart` pair |
+| `COMPOSITION_NO_PARTS_DECLARED` | `CompositionConfigurationError` | user | `parts()` or `subgraph({ composition })` from a kind (or graph) that declares no composition parts |
+| `COMPOSITION_NO_WHOLES_DECLARED` | `CompositionConfigurationError` | user | `wholes()` from a kind that declares no composition wholes |
+| `COMPOSITION_UNKNOWN_ALIAS` | `CompositionConfigurationError` | user | `parts()` / `wholes()` names a `from` alias the query does not have |
+| `COMPOSITION_UNIT_INDETERMINATE` | `CompositionConfigurationError` | user | The engine cut a composition closure statement short before it could be read whole |
+| `COMPOSITION_WINDOW_REQUIRES_FRESH_SNAPSHOT` | `ConfigurationError` (`details.code`) | user | A composition window decision ran on a snapshot-isolation session whose fence cannot show the snapshot to be fresh; use `read_committed` |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
+| `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |
 | `EDGE_NOT_FOUND` | `EdgeNotFoundError` | user | Referenced edge doesn't exist |
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |
-| `ENDPOINT_NOT_FOUND` | `EndpointNotFoundError` | user | Edge endpoint node doesn't exist |
+| `ENDPOINT_NOT_FOUND` | `EndpointNotFoundError` | constraint | Edge endpoint node doesn't exist |
 | `RESTRICTED_DELETE` | `RestrictedDeleteError` | constraint | Delete blocked by existing edges |
-| `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
+| `COMPOSITION_CYCLE_DETECTED` | `CompositionCycleError` | constraint | An instance-level composition cycle survives from rows that bypassed the write-time acyclicity fence |
+| `CONFIGURATION_ERROR` | `ConfigurationError` | user | Invalid configuration |
+| `PROVENANCE_REQUIRED_PART_NOT_A_FACT` | `ConfigurationError` | user | A `createRetractionCapability` fact kind is the whole of an `existence: "required"` composition pair whose part kind is not itself a fact kind |
+| `FACT_NOT_HOLDING` | `FactNotHoldingError` | constraint | `assertHolds` named a fact that is not believed: not current, tombstoned, or without a firing justification |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
+| `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
+| `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation, or `clearGraphPreservingContributionMaterializations` for `store.clear({ preserveContributionMaterializations: true })` on a custom backend without that member (refused before anything is deleted) |
+| `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
+| `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
+| `READ_SET_CHANGED` | `ReadSetChangedError` | system | A scope declared to `tx.assertUnchangedSince()` changed after the anchor. `details.changes` lists each changed scope and its keys |
+| `READ_SET_UNVERIFIABLE` | `ReadSetUnverifiableError` | system | The lineage source could not prove the span since the anchor, so "unchanged" cannot be established |
+| `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
+
+`recordedReadOwner()` on an external source without an owner raises `ConfigurationError`
+with `details.code: "EXTERNAL_RECORDED_OWNER_REQUIRED"`. Historical reads compare the supplied
+checkpoint owner with the actual source owner and raise `GraphAllocationMismatchError`
+with code `GRAPH_ALLOCATION_OWNER_MISMATCH` if it is absent or different. Missing physical
+relations instead raise `ConfigurationError` with `details.code: "RECORDED_RELATIONS_MISSING"`.
+Native owner access and rotation require the `revisionTracking: true` or TypeGraph-owned
+`history: true` Store option; otherwise they raise `ConfigurationError` with
+`details.code: "ALLOCATION_OWNER_REQUIRES_TRACKING"`.

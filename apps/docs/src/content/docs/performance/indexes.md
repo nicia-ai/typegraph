@@ -30,6 +30,7 @@ const Person = defineNode("Person", {
   schema: z.object({
     email: z.string().email(),
     name: z.string(),
+    createdAt: z.date(),
     isActive: z.boolean().optional(),
   }),
 });
@@ -54,9 +55,12 @@ export const worksAtRoleOut = defineEdgeIndex(worksAt, {
 });
 
 // drizzle-kit will include these indexes in generated migrations
-export const typegraphTables = createPostgresTables({}, {
-  indexes: [personEmail, worksAtRoleOut],
-});
+export const typegraphTables = createPostgresTables(
+  {},
+  {
+    indexes: [personEmail, worksAtRoleOut],
+  },
+);
 ```
 
 For SQLite, use `createSqliteTables`:
@@ -64,21 +68,26 @@ For SQLite, use `createSqliteTables`:
 ```ts
 import { createSqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
-export const typegraphTables = createSqliteTables({}, {
-  indexes: [personEmail, worksAtRoleOut],
-});
+export const typegraphTables = createSqliteTables(
+  {},
+  {
+    indexes: [personEmail, worksAtRoleOut],
+  },
+);
 ```
 
 ## Node Indexes
 
-`defineNodeIndex(nodeType, config)` creates an index definition for node properties and, via
-`keySystemColumns`, TypeGraph system columns.
+`defineNodeIndex(nodeType, config)` creates an index definition for node properties and TypeGraph
+system columns.
 
 **Key options:**
 
+- `keys`: ordered node B-tree keys with an explicit direction. Property and system-column keys can
+  be interleaved to match a complete query order. This node-only option is mutually exclusive with
+  `fields` and `keySystemColumns`, and does not define a `bulkFindByIndex` lookup key.
 - `fields`: JSON property paths used for filtering/ordering (B-tree expression keys). Optional if
-  `coveringFields` or `keySystemColumns` supply the key instead — an index must declare at least
-  one of the three.
+  `keys`, `coveringFields`, or `keySystemColumns` supply the key instead.
 - `coveringFields`: additional properties frequently selected with the same filters. These become
   additional index keys to enable index-only reads when combined with smart select.
 - `keySystemColumns`: system columns (e.g. `"id"`) to include in the key, after the `scope` prefix
@@ -102,6 +111,41 @@ Because `coveringFields` become index keys, they:
 - Must be maintained on writes like any other key
 
 :::
+
+Field ordering emits the database's native `NULLS FIRST` / `NULLS LAST` suffix. This keeps the
+primary sort expression aligned with a matching B-tree expression index. PostgreSQL and SQLite
+still choose plans from their statistics and the full query shape, so confirm important queries
+with `EXPLAIN`; an applicable index does not guarantee that every data distribution will use it.
+
+### Directed node keys
+
+Use `keys` when the direction and interleaving of the B-tree keys must match a query's complete
+ordering. Scope columns remain first, keys retain declaration order, and `coveringFields` remain
+last:
+
+```ts
+const newestPerson = defineNodeIndex(Person, {
+  keys: [
+    { field: "createdAt", direction: "desc" },
+    { system: "id", direction: "asc" },
+  ],
+  coveringFields: ["name"],
+});
+
+const page = await store
+  .query()
+  .from("Person", "person")
+  .select((fields) => ({ name: fields.person.name }))
+  .orderBy("person", "createdAt", "desc")
+  .orderBy("person", "id", "asc")
+  .paginate({ first: 50 });
+```
+
+The resulting key order is `(graph_id, kind, createdAt DESC, id ASC, name)`. In the first version,
+`keys` is supported for node B-tree indexes only and refuses
+`unique: true`. It intentionally does not participate in `bulkFindByIndex`: that operation probes
+the equality lookup fields declared through `fields`, while `keys` describes physical ordering.
+Use a separate legacy `fields` index when the same graph also needs keyed candidate lookup.
 
 ### Nested JSON Paths
 
@@ -266,9 +310,9 @@ Semantics:
   each bucket is a (possibly empty) array — this is candidate retrieval, not a uniqueness guarantee.
   For unique lookups prefer `bulkFindByConstraint` (backed by the uniqueness side-table).
 - TypeGraph computes the lookup key from **`index.fields` only** (JSON-pointer extraction, reusing the
-  index's own extraction expressions). Neither `coveringFields` nor `keySystemColumns` are part of the
-  probe key. An index declared without `fields` (only `coveringFields` and/or `keySystemColumns`) has
-  nothing to probe by and throws `ConfigurationError`.
+  index's own extraction expressions). `keys`, `coveringFields`, and `keySystemColumns` are not part
+  of the probe key. An index declared without `fields` has nothing to probe by and throws
+  `ConfigurationError`.
 - The index's partial `where` is applied in SQL to **stored** rows only; probes carry index-field
   values, nothing else. Only the indexed fields are validated — full records are not required.
 - A missing/`undefined` indexed field matches stored `NULL` (null-safe equality). Live,
@@ -295,11 +339,11 @@ TypeGraph's `defineNodeIndex` / `defineEdgeIndex` generate **B-tree expression i
 choice for scalar equality, range, and ordering queries. But JSON properties can also hold arrays
 and objects, which need different index strategies.
 
-| Data shape | Query pattern | Index type | TypeGraph utility? |
-|------------|--------------|------------|-------------------|
-| Scalar (`string`, `number`, `boolean`) | `eq()`, `gt()`, `in()`, `orderBy()` | B-tree expression | Yes — `defineNodeIndex` |
-| Array of scalars | `contains()`, `containsAll()`, `containsAny()` | GIN (PostgreSQL) | No — use raw SQL |
-| Nested object | `hasKey()`, `pathEquals()`, `pathContains()` | GIN or B-tree expression | Partially — B-tree on specific paths |
+| Data shape                             | Query pattern                                  | Index type               | TypeGraph utility?                   |
+| -------------------------------------- | ---------------------------------------------- | ------------------------ | ------------------------------------ |
+| Scalar (`string`, `number`, `boolean`) | `eq()`, `gt()`, `in()`, `orderBy()`            | B-tree expression        | Yes — `defineNodeIndex`              |
+| Array of scalars                       | `contains()`, `containsAll()`, `containsAny()` | GIN (PostgreSQL)         | No — use raw SQL                     |
+| Nested object                          | `hasKey()`, `pathEquals()`, `pathContains()`   | GIN or B-tree expression | Partially — B-tree on specific paths |
 
 ### B-tree expression indexes (scalar properties)
 
@@ -463,8 +507,30 @@ const profiler = new QueryProfiler({
 TypeGraph ships a set of **system indexes** on its own relations (nodes, edges, and the recorded
 history tables) — the traversal, listing, temporal-validity, and bare-id access paths every
 compiled query relies on. They are declared once (`SYSTEM_INDEX_DECLARATIONS`, exported for
-inspection), and both dialects' schemas derive from that single list, so SQLite and PostgreSQL
-always carry the same set.
+inspection), and both dialects' schemas derive from that single list. A declaration can be scoped
+to one dialect; today the only such indexes are PostgreSQL's
+[live listing indexes](#live-listing-indexes-on-postgresql).
+
+The `acyclic: true` reachability probe is one of the paths these
+system indexes cover: its recursive term seeks `(graph_id, from_kind,
+from_id, kind)`, filters `deleted_at IS NULL`, and projects `to_kind,
+to_id` — every one of those columns is in `typegraph_edges_from_idx`, in
+that leading order, so the walk is a covering index scan on SQLite and an
+index-only scan on PostgreSQL once the visibility map is warm. No
+additional index is needed to declare an edge `acyclic: true`.
+
+`store.edges[kind].bulkCreate()` runs one combined probe across every row in
+the call, treating them all as simultaneous origins against the
+newly-inserted set — the only way to catch a cycle formed entirely *within*
+one batch (`a → b` and `b → a` in the same call). When the batch is itself a
+long path (importing or seeding a 10,000-edge chain in one `bulkCreate`),
+each origin's walk traverses the rest of that path, so cost grows with the
+square of the batch size rather than linearly. Building a long chain-shaped
+run of an acyclic edge kind incrementally — one `create()` per edge, or many
+small `bulkCreate()` batches — avoids this and is also how `importGraph` /
+`importGraphStream` behave: they check an `acyclic: true` edge kind one row
+at a time regardless of `batchSize`, for the same reason (see
+[Interchange](/interchange#an-edge-that-would-close-a-cycle)).
 
 You normally never manage them: fresh databases get them at bootstrap, and
 `createStoreWithSchema()` brings an already-initialized database up to the running library
@@ -472,6 +538,131 @@ version's set on boot (with `CREATE INDEX CONCURRENTLY` on PostgreSQL). Deployme
 without `createStoreWithSchema` can run `store.materializeSystemIndexes()` once after a library
 upgrade; it shares `materializeIndexes()`'s status tracking, drift signatures, and concurrent-build
 claim protocol, and settles with no DDL when everything already exists.
+
+### Live listing indexes on PostgreSQL
+
+On PostgreSQL, TypeGraph keeps a partial index on each of the nodes and edges tables:
+
+```sql
+CREATE INDEX "typegraph_nodes_live_created_idx" ON "typegraph_nodes"
+  ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+CREATE INDEX "typegraph_edges_live_created_idx" ON "typegraph_edges"
+  ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+```
+
+They serve reads of a kind's live rows in creation order: `store.nodes[kind].find()` and
+`store.edges[kind].find()`, which order by `created_at DESC, id DESC`, the query builder's
+`orderBy(alias, "meta.createdAt")`, and `paginate()`. PostgreSQL does not treat
+`deleted_at IS NULL` as an equality for ordering, so `kind_created_idx` cannot return those rows
+in order, and every page sorted the kind's whole live set. With the partial index, the first page
+reads 50 rows in index order.
+
+Measured on PostgreSQL 18, with a 2M-row kind in a table of 3.6M live and 0.4M soft-deleted rows:
+
+| read | without | with |
+| --- | --- | --- |
+| `nodes.find`, first page | 285 ms | 0.31 ms |
+| `nodes.find`, `offset: 10000` | 521 ms | 4.8 ms |
+| `edges.find`, first page | 263 ms | 0.30 ms |
+| query builder `paginate()`, first page | 236 ms | 0.97 ms |
+
+The costs, measured the same way:
+
+- **Size:** 233 MB for that table's 3.6M live rows, about 65 MB per million live rows, on each of
+  the two tables. The index ends in `id`, so PostgreSQL cannot deduplicate its keys.
+- **Writes:** a single `INSERT ... SELECT` of 20,000 nodes is 43% slower. Store-API writes
+  (`create`, `update`, soft and hard `delete`, `bulkCreate` in batches of 500) stayed within run-to-run
+  noise, about ±15%.
+
+SQLite does not get these indexes. SQLite treats `deleted_at IS NULL` as an equality, so
+`kind_created_idx` already returns live rows in order there, and a second ordering index changed
+unrelated SQLite plans for the worse.
+
+#### Upgrading an existing PostgreSQL database
+
+Existing databases gain the two indexes the next time `createStoreWithSchema()` opens them, built
+with `CREATE INDEX CONCURRENTLY`, so reads and writes continue during the build. **The open waits for
+the builds to finish** before it resolves. On a database with 4M nodes and 4M edges the first open
+took 6 seconds, against 0.02 seconds for a normal open, and the build time grows with table size, at
+roughly 0.75 seconds per million rows per table. When several instances boot at once, they share the
+work: each waits for the index another instance is building, none of them fails, and all of them
+resolve when the builds finish. If a build is interrupted, PostgreSQL leaves an `INVALID` index
+behind; the next open drops it and builds it again.
+
+For a large database, build the indexes before you deploy the new version, so no application boot
+waits on them. Run each statement on its own, outside a transaction (`CONCURRENTLY` cannot run inside
+one):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_live_created_idx"
+  ON "typegraph_nodes" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_live_created_idx"
+  ON "typegraph_edges" ("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL;
+```
+
+The first open of the new version then finds both indexes and issues no DDL. With custom table names,
+the index is named `<table>_live_created_idx`, shortened with a hash suffix when that exceeds
+PostgreSQL's 63-character limit. Generate the exact statements rather than writing them by hand:
+
+```typescript
+import {
+  generateSystemIndexDDL,
+  SYSTEM_INDEX_DECLARATIONS,
+} from "@nicia-ai/typegraph/indexes";
+
+for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
+  if (declaration.suffix !== "live_created_idx") continue;
+  const table = declaration.table === "nodes" ? "my_nodes" : "my_edges";
+  console.log(
+    generateSystemIndexDDL(declaration, table, {
+      concurrent: true,
+      dialect: "postgres",
+    }),
+  );
+}
+```
+
+Alternatively, open with `createStoreWithSchema(graph, backend, { systemIndexes: "skip" })` (or
+`schemaManagement: { systemIndexes: "skip" }` on the managed store factories) and run
+`store.materializeSystemIndexes()` from a separate maintenance job.
+
+If you manage the schema with drizzle-kit, the next `drizzle-kit generate` emits the two indexes as
+plain `CREATE INDEX` statements. On PostgreSQL a plain build blocks writes to the table for as long as
+it runs, which takes seconds on a large table. Edit the generated migration to
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and run those two statements outside a transaction:
+`CONCURRENTLY` cannot run inside one, and most migration runners wrap each migration in a
+transaction. If TypeGraph has already built the indexes on open, the `IF NOT EXISTS` form makes the
+migration a no-op.
+
+### Redundant kind indexes on upgraded databases
+
+Databases created before this release also carry `typegraph_nodes_kind_idx` and
+`typegraph_edges_kind_idx`, both on `(graph_id, kind)`. Each is a prefix of an index TypeGraph keeps
+(`kind_created_idx`, and on nodes the primary key), so every query they served still has an index.
+New databases no longer create them, and upgrading does not remove them. Keeping them is harmless.
+
+Dropping them is optional. On PostgreSQL it made inserts 7 to 11% cheaper in our measurements (node
+bulk insert −11%, single-row node insert −9%, edge bulk insert −7%). Run the concurrent form outside
+a transaction, so the drop does not take an `ACCESS EXCLUSIVE` lock that queues behind long-running
+reads:
+
+```sql
+-- PostgreSQL: run each statement on its own, not inside BEGIN ... COMMIT
+DROP INDEX CONCURRENTLY IF EXISTS "typegraph_nodes_kind_idx";
+DROP INDEX CONCURRENTLY IF EXISTS "typegraph_edges_kind_idx";
+```
+
+```sql
+-- SQLite
+DROP INDEX IF EXISTS "typegraph_nodes_kind_idx";
+DROP INDEX IF EXISTS "typegraph_edges_kind_idx";
+```
+
+Use your custom table names if you configured them. If you manage the schema with drizzle-kit, the
+next `drizzle-kit generate` produces a migration with two plain `DROP INDEX` statements for these
+indexes. On PostgreSQL those take an `ACCESS EXCLUSIVE` lock inside the migration transaction.
+Either delete the two statements from the generated migration, which is harmless because the
+indexes are redundant, or delete them and run the concurrent form above separately.
 
 ## Next Steps
 

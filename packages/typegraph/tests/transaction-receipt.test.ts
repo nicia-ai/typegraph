@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
-  createBackendOverlay,
   type TransactionBackend,
   type TransactionOptions,
 } from "../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../src/errors-entry";
 import { createTransactionReceiptRecorder } from "../src/store/transaction-receipt";
 import {
   createInitializedStore,
+  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
 } from "./test-utils";
@@ -79,8 +81,7 @@ function recordBackendCalls(
   const calls: string[] = [];
   return {
     calls,
-    backend: {
-      ...backend,
+    backend: deriveBackend(backend, {
       async insertNode(params) {
         calls.push("insertNode");
         return backend.insertNode(params);
@@ -96,7 +97,7 @@ function recordBackendCalls(
           options,
         );
       },
-    },
+    }),
   };
 }
 
@@ -126,23 +127,30 @@ async function writeFixture(
 }
 
 describe("transaction receipts", () => {
-  it("returns counts on non-transactional backends", async () => {
-    const backend = disableTransactions(createTestBackend());
-    const store = await createInitializedStore(receiptGraph, backend);
+  it("does not expose recorded revision requests on non-history contexts", async () => {
+    const store = await createInitializedStore(
+      receiptGraph,
+      createTestBackend(),
+    );
 
-    const outcome = await store.transactionWithReceipt(async (tx) => {
-      const person = await tx.nodes.Person.create({ name: "Alice" });
-      const company = await tx.nodes.Company.create({ name: "Acme" });
-      await tx.edges.worksAt.create(person, company, { role: "Engineer" });
-      return person.id;
+    await store.transactionWithReceipt((tx) => {
+      expect("requestRecordedRevision" in tx).toBe(false);
+      return Promise.resolve();
     });
+  });
 
-    expect(outcome.receipt.writes.nodes).toEqual({ Person: 1, Company: 1 });
-    expect(outcome.receipt.writes.edges).toEqual({ worksAt: 1 });
-    expect(outcome.receipt.writes.total).toBe(3);
+  it("refuses on non-transactional backends", async () => {
+    const backend = disableTransactions(createTestBackend());
+    const store = await createRawInitializedStore(receiptGraph, backend);
+    let invoked = false;
+
     await expect(
-      store.nodes.Person.getById(outcome.result),
-    ).resolves.toMatchObject({ name: "Alice" });
+      store.transactionWithReceipt(() => {
+        invoked = true;
+        return Promise.resolve("unreachable");
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+    expect(invoked).toBe(false);
   });
 
   it("does not add backend write calls when receipt counting is requested", async () => {
@@ -155,7 +163,7 @@ describe("transaction receipts", () => {
   it("passes isolationLevel through to the backend", async () => {
     const backend = createTestBackend();
     const seenOptions: (TransactionOptions | undefined)[] = [];
-    const spyingBackend = createBackendOverlay(backend, {
+    const spyingBackend = deriveBackend(backend, {
       async transactionWithNative(fn, options) {
         seenOptions.push(options);
         return backend.transactionWithNative(fn, options);
@@ -218,6 +226,34 @@ describe("transaction receipt recorder", () => {
     expect(receipt.writes.total).toBe(11);
   });
 
+  it("hands back ORDINARY objects for every bucket, prototype-colliding kinds and all", () => {
+    // The buckets are null-prototype WHILE COUNTING — a `__proto__` kind on a
+    // `{}` accumulator reaches the prototype setter and is dropped. That is an
+    // internal protection, and the receipt is public: the snapshot spreads each
+    // bucket so the own `__proto__` key survives AND `Object.prototype` is
+    // restored. `identity` always did; `nodes` and `edges` did not, so the same
+    // object literal answered `instanceof Object` two different ways.
+    const recorder = createTransactionReceiptRecorder();
+    recorder.recordNode("__proto__", 2);
+    recorder.recordEdge("__proto__", 3);
+
+    const receipt = recorder.snapshot();
+
+    for (const bucket of [
+      receipt.writes.nodes,
+      receipt.writes.edges,
+      receipt.writes.identity,
+    ]) {
+      expect(Object.getPrototypeOf(bucket)).toBe(Object.prototype);
+      expect(bucket instanceof Object).toBe(true);
+    }
+    // ...and the reason the buckets were null-prototype in the first place still
+    // holds: the colliding kind is an own key carrying its count.
+    expect(Object.hasOwn(receipt.writes.nodes, "__proto__")).toBe(true);
+    expect(Object.entries(receipt.writes.nodes)).toEqual([["__proto__", 2]]);
+    expect(Object.entries(receipt.writes.edges)).toEqual([["__proto__", 3]]);
+  });
+
   it("keeps zero-count intents out of the buckets and the total", () => {
     const recorder = createTransactionReceiptRecorder();
     recorder.recordNode("Person", 0);
@@ -226,5 +262,45 @@ describe("transaction receipt recorder", () => {
 
     expect(Object.entries(receipt.writes.nodes)).toEqual([]);
     expect(receipt.writes.total).toBe(0);
+  });
+
+  // Load-bearing: `transitions` sits BESIDE `total` on `IdentityWriteSummary`,
+  // never inside it — `total` stays the count of ledger truth rows a
+  // transaction produced. Revert check: fold
+  // `recordIdentityTransitions` into `recordIdentity`'s bucket (so it also
+  // bumps `counters.identity.total` and the receipt's overall `total`) and
+  // both `toEqual` assertions below fail (`total` reports 8, not 3).
+  it("records identity transitions beside total, never inside it (enabled + history)", () => {
+    const recorder = createTransactionReceiptRecorder();
+    recorder.recordIdentity("sameAssertions", 2);
+    recorder.recordIdentity("retractions", 1);
+    recorder.recordIdentityTransitions(5);
+
+    const receipt = recorder.snapshot();
+
+    expect(receipt.writes.identity).toEqual({
+      sameAssertions: 2,
+      differentAssertions: 0,
+      retractions: 1,
+      transitions: 5,
+      total: 3,
+    });
+    expect(receipt.writes.total).toBe(3);
+  });
+
+  // Companion to the above: the shared frozen zero-valued summary (identity
+  // disabled, or enabled without any writes) carries `transitions` too, so a
+  // disabled graph's receipt shape never diverges from an enabled one's.
+  it("carries transitions: 0 on the zero-valued identity summary (disabled or untouched)", () => {
+    const recorder = createTransactionReceiptRecorder();
+    const receipt = recorder.snapshot();
+
+    expect(receipt.writes.identity).toEqual({
+      sameAssertions: 0,
+      differentAssertions: 0,
+      retractions: 0,
+      transitions: 0,
+      total: 0,
+    });
   });
 });

@@ -6,7 +6,7 @@
  * `backend.transaction()` / `adoptTransaction()` paths — no
  * `executionProfile` hint. `drizzle(ctx.storage)` must be detected as
  * `transactionMode: "do-sqlite"` and advertise
- * `capabilities.transactions: true`.
+ * `capabilities.execution.interactiveTransactions: true`.
  *
  * The async storage runner `ctx.storage.transaction(async () => ...)`
  * (surfaced by Drizzle as `db.$client.transaction`) rolls back SQL
@@ -17,13 +17,14 @@
  * Boot uses `createAdapterStoreWithSchema` (the real adapter path): `bootstrapTables`
  * DDL and the durable contribution marker run OUTSIDE any storage
  * transaction (the #135 invariant); the schema-version commit runs
- * through the `do-sqlite` storage runner (data only, never DDL).
+ * through the `do-sqlite` storage runner. Ordinary schema-version commits are
+ * data-only; administrative removal cleanup may execute transactional DDL.
  *
  * Each `it` runs in its OWN Durable Object instance (unique
- * `idFromName`) so storage is isolated. The graph node has no
- * `searchable` field, so a create is a pure INSERT and the fulltext
- * gate is never reached. Store reads return the flattened node shape
- * (`node.title`, `node.meta`) — there is no `node.props`.
+ * `idFromName`) so storage is isolated. `Doc` has no `searchable` field,
+ * so its creates remain pure INSERTs; `SearchableDoc` exists only for the
+ * workerd fulltext-gate regressions. Store reads return the flattened node
+ * shape (`node.title`, `node.meta`) — there is no `node.props`.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { sql } from "drizzle-orm";
@@ -44,12 +45,18 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  searchable,
 } from "../../src";
+import { ContributionUnavailableError } from "../../src/errors-entry";
+import { defineGraphExtension } from "../../src/graph-extension";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../../src/backend/sqlite";
 import { DURABLE_OBJECT_MAX_BIND_PARAMETERS } from "../../src/backend/types";
 import { RECORDED_EDGE_COLUMNS } from "../../src/store/recorded-capture";
-import { isSqliteNotAuthorizedError } from "../../src/utils/sql-errors";
+import {
+  errorChain,
+  isSqliteNotAuthorizedError,
+} from "../../src/utils/sql-errors";
 
 import { SpikeDO } from "./worker";
 
@@ -67,13 +74,17 @@ const docVersions = sqliteTable(
 );
 
 const Doc = defineNode("Doc", { schema: z.object({ title: z.string() }) });
+const SearchableDoc = defineNode("SearchableDoc", {
+  schema: z.object({ title: searchable({ language: "english" }) }),
+});
+const FULLTEXT_TABLE = defaultTables.fulltextTableName;
 const linksTo = defineEdge("links_to", {
   schema: z.object({ cost: z.number() }),
 });
 
 const DocGraph = defineGraph({
   id: "do-sqlite",
-  nodes: { Doc: { type: Doc } },
+  nodes: { Doc: { type: Doc }, SearchableDoc: { type: SearchableDoc } },
   edges: { links_to: { type: linksTo, from: [Doc], to: [Doc] } },
 });
 
@@ -98,6 +109,10 @@ const HistoryGraph = defineGraph({
       cardinality: "many",
     },
   },
+});
+
+const removalExtension = defineGraphExtension({
+  nodes: { RemovalTag: { properties: { label: { type: "string" } } } },
 });
 
 // Exercise several chunks, with enough margin that a modest reduction in
@@ -154,7 +169,95 @@ function inObject<T>(
   );
 }
 
+async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
+
+function errorChainMessages(error: unknown): readonly string[] {
+  return [...errorChain(error)].flatMap((link) => {
+    if (typeof link === "string") return [link];
+    if (typeof link !== "object" || link === null || !("message" in link)) {
+      return [];
+    }
+    return typeof link.message === "string" ? [link.message] : [];
+  });
+}
+
+function expectMissingFulltextError(error: unknown): void {
+  expect(error).toBeInstanceOf(ContributionUnavailableError);
+  if (!(error instanceof ContributionUnavailableError)) {
+    throw new Error("Expected ContributionUnavailableError");
+  }
+  expect(error).toMatchObject({
+    code: "CONTRIBUTION_UNAVAILABLE",
+    details: {
+      graphId: DocGraph.id,
+      logicalName: "fulltext",
+      physicalName: FULLTEXT_TABLE,
+      state: "physical-storage-missing",
+    },
+  });
+  expect(error.cause).toBeDefined();
+  expect(errorChainMessages(error.cause)).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining(`no such table: ${FULLTEXT_TABLE}: SQLITE_ERROR`),
+    ]),
+  );
+}
+
 describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
+  it("types a missing fulltext table on searchable writes and rolls back the node", async () => {
+    await inObject("missing-fulltext-write", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+
+      const error = await captureRejection(
+        store.nodes.SearchableDoc.create(
+          { title: "This relational insert must roll back" },
+          { id: "orphaned-fulltext-write" },
+        ),
+      );
+
+      expectMissingFulltextError(error);
+      expect(await store.nodes.SearchableDoc.count()).toBe(0);
+    });
+  });
+
+  it("types a missing fulltext table on reads", async () => {
+    await inObject("missing-fulltext-read", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+
+      const error = await captureRejection(
+        store.search.fulltext("SearchableDoc", {
+          query: "missing",
+          limit: 10,
+        }),
+      );
+
+      expectMissingFulltextError(error);
+    });
+  });
+
+  it("rethrows unrelated fulltext SQLite failures without translation", async () => {
+    await inObject("unrelated-fulltext-error", async ({ db, store }) => {
+      await db.run(sql.raw(`DROP TABLE ${FULLTEXT_TABLE}`));
+      await db.run(sql.raw(`CREATE TABLE ${FULLTEXT_TABLE} (unrelated TEXT)`));
+
+      const error = await captureRejection(
+        store.nodes.SearchableDoc.create({ title: "malformed storage" }),
+      );
+
+      expect(error).not.toBeInstanceOf(ContributionUnavailableError);
+      const messages = errorChainMessages(error).join("\n");
+      expect(messages).not.toContain("no such table");
+      expect(messages).toContain("SQLITE_ERROR");
+    });
+  });
+
   it("continues with ANALYZE when workerd forbids analysis_limit", async () => {
     await inObject(
       "statistics-authorization",
@@ -187,11 +290,11 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
     );
   });
 
-  it("auto-detects do-sqlite and advertises capabilities.transactions:true", async () => {
+  it("auto-detects do-sqlite and advertises interactive transactions", async () => {
     await inObject("detect", async ({ db, backend }, storage) => {
       expect(db.$client).toBe(storage);
       expect(typeof storage.transaction).toBe("function");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
       expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
@@ -204,7 +307,9 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
         executionProfile: { isSync: false, transactionMode: "none" },
         tables: defaultTables,
       });
-      expect(staleHintBackend.capabilities.transactions).toBe(true);
+      expect(
+        staleHintBackend.capabilities.execution.interactiveTransactions,
+      ).toBe(true);
       expect(staleHintBackend.capabilities.graphAnalytics?.supported).toBe(
         false,
       );
@@ -345,6 +450,40 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
           ),
         );
         expect(recordedEdges.every((edge) => edge !== undefined)).toBe(true);
+      },
+    );
+  });
+
+  it("materializes history removals without forbidden SAVEPOINT statements", async () => {
+    const stub = env.SPIKE_DO.get(
+      env.SPIKE_DO.idFromName("history-materialize-removal"),
+    );
+    await runInDurableObject(
+      stub,
+      async (_instance: SpikeDO, state: DurableObjectState) => {
+        const store = await bootHistoryInsideDurableObject(state.storage);
+        const evolved = await store.evolve(removalExtension);
+        await evolved
+          .getNodeCollectionOrThrow("RemovalTag")
+          .create({ label: "remove me" });
+
+        const removed = await evolved.removeKinds(["RemovalTag"]);
+        await expect(removed.materializeRemovals()).resolves.toMatchObject({
+          results: [
+            {
+              entity: "node",
+              kind: "RemovalTag",
+              status: "removed",
+            },
+          ],
+        });
+        await expect(
+          removed.backend.countNodesByKind({
+            graphId: HistoryGraph.id,
+            kind: "RemovalTag",
+            excludeDeleted: false,
+          }),
+        ).resolves.toBe(0);
       },
     );
   });

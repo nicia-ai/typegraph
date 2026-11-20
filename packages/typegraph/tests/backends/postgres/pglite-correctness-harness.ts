@@ -24,7 +24,10 @@ import {
   tables as defaultTables,
 } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
-import { type AdapterBackend } from "../../../src/backend/types";
+import {
+  type AdapterBackend,
+  type BundledBackendCapabilityOverrides,
+} from "../../../src/backend/types";
 
 /**
  * Every TypeGraph-managed table name, derived from the schema module rather
@@ -36,7 +39,10 @@ import { type AdapterBackend } from "../../../src/backend/types";
  */
 const MANAGED_TABLE_NAMES: readonly string[] = Object.values(defaultTables)
   .filter((value) => is(value, Table))
-  .map((table) => getTableName(table));
+  .map((table) => getTableName(table))
+  // The base-schema marker is a deployment fact, not test data: every schema
+  // commit refuses a database without it.
+  .filter((name) => name !== getTableName(defaultTables.baseSchemaVersions));
 
 /** Single TRUNCATE over every managed table — built once from the static list. */
 const TRUNCATE_MANAGED_SQL = `TRUNCATE ${MANAGED_TABLE_NAMES.map(
@@ -53,8 +59,15 @@ export type SharedPgliteEngine = Readonly<{
   /**
    * A fresh plain backend over the shared engine. Its `close()` is a client
    * no-op, so the adapter suite's per-test close never disposes the engine.
+   * `capabilities`, when supplied, is forwarded into `createPostgresBackend`
+   * itself — applied at construction, before this backend's write-fence
+   * target and derived `unitOfWork` are resolved — for a test that needs
+   * this shared engine to declare a non-default write fence.
    */
-  makeBackend: () => AdapterBackend<AnyPgTransaction>;
+  makeBackend: (
+    capabilities?: BundledBackendCapabilityOverrides,
+    schemaProvisioning?: "dml-only" | "transactional",
+  ) => AdapterBackend<AnyPgTransaction>;
   /** TRUNCATE all managed metadata/data tables — default per-test isolation. */
   resetData: () => Promise<void>;
   /**
@@ -83,7 +96,11 @@ export async function setupSharedPgliteEngine(): Promise<SharedPgliteEngine> {
 
   return {
     client,
-    makeBackend: () => createPostgresBackend(db),
+    makeBackend: (capabilities, schemaProvisioning) =>
+      createPostgresBackend(db, {
+        ...(capabilities === undefined ? {} : { capabilities }),
+        schemaProvisioning: schemaProvisioning ?? "dml-only",
+      }),
     resetData: async () => {
       await client.exec(TRUNCATE_MANAGED_SQL);
     },

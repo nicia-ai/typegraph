@@ -7,8 +7,10 @@ community to help make this the best embedded knowledge graph for TypeScript.
 
 ### Prerequisites
 
-- **Node.js**: Version 22 or higher.
-- **pnpm**: We use pnpm for package management.
+- **Node.js**: Use Node 24, matching the release workflow. Changesets supports
+  Node `^22.11 || ^24 || >=26`.
+- **pnpm**: Use the version pinned in the root `packageManager` field. Changesets
+  requires pnpm 10 or higher.
 
 ### Installation
 
@@ -92,6 +94,15 @@ To build the package for distribution:
 ```bash
 pnpm build
 ```
+
+The build has two ordered stages, which `packages/typegraph/scripts/build.ts`
+owns: `tsc` emits the declarations once into `.declaration-emit/`, then tsup
+bundles the JavaScript and rolls each entrypoint's `.d.ts` out of that emit.
+Running `tsup` directly skips the first stage, so its declaration entries do not
+resolve and the build fails — use `pnpm build` (or `pnpm dev`, which keeps both
+stages watching). Deriving declarations from source inside the rollup instead
+costs about 10 GiB of resident memory for any entrypoint; rolling the emitted
+tree costs about 1.5 GiB for the whole build.
 
 ## Making Changes
 

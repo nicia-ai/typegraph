@@ -37,9 +37,14 @@ import {
   type VectorCapabilities,
   type VectorIndexType,
   type VectorMetric,
+  type VectorSearchFrontierTuning,
   type VectorSearchParams,
 } from "../../backend/types";
-import { requireDefined } from "../../utils/presence";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
+import { shortHash } from "../../utils/hash";
 import { sql, type SqlFragment } from "../sql-fragment";
 
 /**
@@ -162,6 +167,24 @@ export type VectorStrategy = Readonly<{
   ) => readonly SqlFragment[];
 
   /**
+   * Emits one atomic upsert sourced from a node `RETURNING` CTE.
+   *
+   * The source alias is backend-owned SQL (normally `inserted_node`), never
+   * caller input. The strategy must take graph/node identity from the source
+   * row rather than from the embedding parameters, so a node insert and its
+   * sidecar cannot disagree about identity. Strategies whose storage needs
+   * more than one statement omit this capability and use {@link buildUpsert}
+   * on the ordinary sidecar path.
+   */
+  buildUpsertFromInsertedNode?: (
+    this: void,
+    slot: VectorSlot,
+    sourceAlias: string,
+    embedding: readonly number[],
+    timestamp: string,
+  ) => SqlFragment;
+
+  /**
    * Emits the statement(s) that upsert MANY embeddings into the slot's
    * storage in multi-row form. Optional — the backend falls back to one
    * {@link buildUpsert} per row when unset. The backend guarantees the
@@ -180,6 +203,13 @@ export type VectorStrategy = Readonly<{
     this: void,
     slot: VectorSlot,
     params: DeleteEmbeddingParams,
+  ) => readonly SqlFragment[];
+  /** Emits one set-based delete for many node ids in a vector slot. */
+  buildDeleteBatch: (
+    this: void,
+    slot: VectorSlot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
   ) => readonly SqlFragment[];
 
   /**
@@ -357,6 +387,194 @@ export function assertVectorSearchLimit(limit: number): void {
 }
 
 /**
+ * The frontier declaration of a backend's active vector strategy, or the
+ * "there is no vector engine here" declaration when vector support is
+ * disabled. Total, so a call site never has to invent a default: a backend
+ * with no strategy has nothing to apply an override to and refuses on the
+ * same arm as an engine that lacks the knob.
+ */
+export function vectorSearchFrontierTuning(
+  strategy: VectorStrategy | undefined,
+): VectorSearchFrontierTuning {
+  return (
+    strategy?.capabilities.searchFrontierTuning ?? {
+      tunable: false,
+      reason: "vector support is disabled on this backend",
+    }
+  );
+}
+
+/** What one backend needs to decide whether it can apply an `efSearch`. */
+export type EfSearchApplicability = Readonly<{
+  /** The caller's override; `undefined` (no override) is always accepted. */
+  efSearch: number | undefined;
+  /** Index type of the slot being searched. */
+  indexType: VectorIndexType;
+  /** The active strategy's declaration. See {@link VectorSearchFrontierTuning}. */
+  tuning: VectorSearchFrontierTuning;
+  /** Whether the backend can open the frame a scoped override needs. */
+  interactiveTransactions: boolean;
+  /**
+   * Dialect name used in the refusal message (`"PostgreSQL"` / `"SQLite"`) —
+   * the only dialect-specific token in the decision, so both backends read
+   * the same predicate rather than re-spelling the arms.
+   */
+  dialect: string;
+  /** Engine identity recorded in the refusal details (`strategy.name`). */
+  engine: string;
+}>;
+
+/**
+ * The single owner of "may this backend apply a per-search `efSearch`?" —
+ * returning the engine parameter to set with it, or `undefined` when no
+ * override was requested.
+ *
+ * An accepted option is applied or refused, never ignored: every arm below is
+ * a state in which the option cannot reach the engine, and each throws naming
+ * that state instead of dropping the value. Both backends call this before
+ * building the search, so the SQLite and PostgreSQL behaviors are two readings
+ * of one predicate — the sqlite-vec silent no-op existed precisely because the
+ * decision lived only on the PostgreSQL side. Returning the parameter (rather
+ * than only asserting) is what keeps it one owner: the caller that applies the
+ * override never re-derives whether it may.
+ *
+ * Refusals:
+ *
+ * - engine has no per-search frontier knob at all (`tunable: false`) —
+ *   `UnsupportedBackendCapabilityError` on `vector.searchFrontierTuning`,
+ *   carrying the strategy's own `reason`.
+ * - slot is not the tunable index type — `ConfigurationError` (the caller can
+ *   fix this by declaring the index, so it is configuration, not capability).
+ * - the override needs a transaction to be scoped to and the backend has none
+ *   — `UnsupportedBackendCapabilityError` on `execution.interactiveTransactions`.
+ *
+ * Range validation (pgvector's 1..1000) stays with the engine that has the
+ * range; this predicate answers only whether the knob exists here at all.
+ */
+export function resolveEfSearchOverride(
+  applicability: EfSearchApplicability,
+): string | undefined {
+  const {
+    efSearch,
+    indexType,
+    tuning,
+    interactiveTransactions,
+    dialect,
+    engine,
+  } = applicability;
+  if (efSearch === undefined) return undefined;
+  if (!tuning.tunable) {
+    throw new UnsupportedBackendCapabilityError(
+      `${dialect} efSearch override`,
+      "vector.searchFrontierTuning",
+      { efSearch, engine, reason: tuning.reason },
+      `Omit efSearch: ${engine} has no per-search ANN frontier parameter (${tuning.reason}). Tune recall with the search limit, or use an exact search.`,
+    );
+  }
+  if (indexType !== tuning.indexType) {
+    // "an HNSW vector index" — the article suits the one tunable index type
+    // any bundled engine declares.
+    throw new ConfigurationError(
+      `${dialect} efSearch requires an ${tuning.indexType.toUpperCase()} vector index.`,
+      { efSearch, indexType },
+      {
+        suggestion: `Configure the embedding with index: { type: "${tuning.indexType}" }, or omit efSearch.`,
+      },
+    );
+  }
+  if (tuning.requiresTransactionScope && !interactiveTransactions) {
+    throw new UnsupportedBackendCapabilityError(
+      `${dialect} efSearch override`,
+      "execution.interactiveTransactions",
+      { efSearch, engine, parameter: tuning.parameter },
+      `Use a transactional ${dialect} driver: ${tuning.parameter} is scoped to the search's own transaction, and a session-wide setting would leak into concurrent searches.`,
+    );
+  }
+  return tuning.parameter;
+}
+
+/** What one call site needs to decide whether ANN retrieval can be honored. */
+export type ApproximateRetrievalRequest = Readonly<{
+  /** Whether the caller STATED `approximate: true`. */
+  approximate: boolean | undefined;
+  /**
+   * The metric the caller explicitly overrode to, or `undefined` when they
+   * passed none (in which case the slot's declared metric is used and no
+   * mismatch is possible).
+   */
+  requestedMetric: VectorMetric | undefined;
+  /** The metric the slot's storage and ANN structure were built for. */
+  declaredMetric: VectorMetric;
+  /** The slot's index type; `"none"` means there is no ANN structure at all. */
+  indexType: VectorIndexType;
+  /** Kind and field named in the refusal, so a union says WHICH slot refused. */
+  nodeKind: string;
+  fieldPath: string;
+}>;
+
+/**
+ * The single owner of "can this slot serve APPROXIMATE retrieval under the
+ * metric the caller asked for?".
+ *
+ * Every engine materializes metric-specific ANN structures — vec0 bakes
+ * `distance_metric` into the virtual table, libSQL's DiskANN index is built
+ * with `metric=…`, pgvector's index carries a per-metric operator class — so
+ * an ANN structure can only retrieve under the metric it was built for.
+ * Retrieving by the declared metric and re-scoring under an overridden one
+ * returns the declared metric's neighbors wearing the override's scores: the
+ * wrong rows, silently.
+ *
+ * Stating `approximate: true` alongside a mismatched `metric` therefore states
+ * two things that cannot both hold. The option is refused naming both metrics
+ * rather than downgraded to an exact scan behind the caller's back — the same
+ * accepted-or-refused rule {@link resolveEfSearchOverride} applies to
+ * `efSearch`.
+ *
+ * NOT refused, deliberately:
+ *
+ * - `indexType: "none"`. There is no ANN structure to be bound to a metric, so
+ *   `approximate` has nothing to opt into and compiles to the strategy's exact
+ *   scan under whichever metric was asked for. That degradation is stated on
+ *   the public `SimilarToOptions.approximate` option.
+ * - A mismatched metric with NO `approximate`. An exact scan computes any
+ *   metric over the stored vectors correctly, and nothing was stated that the
+ *   engine cannot honor. (`store.search.vector` refuses that override too, on
+ *   its own broader rule — see `assertVectorQueryCompatible` in
+ *   `store/search.ts`. The query builder's exact path is deliberately the
+ *   wider surface; only the *silent* half is closed here.)
+ */
+export function assertApproximateMetricSupported(
+  request: ApproximateRetrievalRequest,
+): void {
+  const {
+    approximate,
+    requestedMetric,
+    declaredMetric,
+    indexType,
+    nodeKind,
+    fieldPath,
+  } = request;
+  if (approximate !== true) return;
+  if (indexType === "none") return;
+  if (requestedMetric === undefined || requestedMetric === declaredMetric) {
+    return;
+  }
+  throw new ConfigurationError(
+    `Approximate retrieval for "${nodeKind}.${fieldPath}" cannot use metric "${requestedMetric}": its ${indexType.toUpperCase()} index is built for "${declaredMetric}", and an ANN structure only retrieves under the metric it was built for.`,
+    {
+      nodeKind,
+      fieldPath,
+      requestedMetric,
+      declaredMetric,
+      indexType,
+    },
+    {
+      suggestion: `Omit metric (or pass "${declaredMetric}") to keep approximate retrieval, or drop approximate to scan exactly under "${requestedMetric}".`,
+    },
+  );
+}
+
+/**
  * Validates a `minScore` floor against its (resolved) metric: it must be finite,
  * and for cosine it must lie in [-1, 1] (a cosine score is the `1 - distance`
  * similarity). Shared by the store facade, the compiler's relevance CTE
@@ -391,30 +609,6 @@ const MAX_VECTOR_IDENTIFIER_LENGTH = 63;
 
 function sanitizeIdentifierPart(value: string): string {
   return value.toLowerCase().replaceAll(/[^a-z0-9_]/g, "_");
-}
-
-/**
- * Deterministic 8-char hash for collision-safe truncation of over-long
- * identifiers. Self-contained so the strategy layer has no backend-runtime
- * dependency.
- */
-export function shortHash(input: string): string {
-  let h1 = 0xde_ad_be_ef;
-  let h2 = 0x41_c6_ce_57;
-  for (let index = 0; index < input.length; index++) {
-    const ch = requireDefined(input.codePointAt(index));
-    h1 = Math.imul(h1 ^ ch, 0x9e_37_79_b1);
-    h2 = Math.imul(h2 ^ ch, 0x5f_35_64_95);
-  }
-  h1 =
-    Math.imul(h1 ^ (h1 >>> 16), 0x85_eb_ca_6b) ^
-    Math.imul(h2 ^ (h2 >>> 13), 0xc2_b2_ae_35);
-  h2 =
-    Math.imul(h2 ^ (h2 >>> 16), 0x85_eb_ca_6b) ^
-    Math.imul(h1 ^ (h1 >>> 13), 0xc2_b2_ae_35);
-  const hi = (h2 >>> 0).toString(16).padStart(8, "0");
-  const lo = (h1 >>> 0).toString(16).padStart(8, "0");
-  return `${hi}${lo}`.slice(0, 8);
 }
 
 /**

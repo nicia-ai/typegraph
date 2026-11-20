@@ -4,12 +4,75 @@
  * Implements dialect-specific SQL generation for PostgreSQL databases.
  * Uses PostgreSQL's native JSONB operators for JSON operations.
  */
+import {
+  assertPortableScalarValueType,
+  type PortableCountDistinctValueType,
+} from "../aggregate-value-types";
+import { type ValueType } from "../ast";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { applyAggregateFilter } from "./aggregate-filter";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
-import { getSqlDialectProfile, inlineSqlStringLiteral } from "./profile";
-import { type DialectAdapter } from "./types";
+import { DOUBLE_OVERFLOW_BOUNDARY } from "./numeric-conversion";
+import {
+  getSqlDialectProfile,
+  inlineSqlStringLiteral,
+  packSqlListValue,
+} from "./profile";
+import { type BuiltinDialectAdapter } from "./types";
+
+const SCALAR_SQL_TYPES: Readonly<
+  Record<PortableCountDistinctValueType, string>
+> = {
+  boolean: "boolean",
+  date: "timestamptz",
+  number: "numeric",
+  string: "text",
+};
+
+/** Gives expression membership a concrete PostgreSQL JSON scalar type. */
+function postgresJsonScalar(
+  value: SqlFragment,
+  valueType: ValueType,
+): SqlFragment {
+  switch (valueType) {
+    case "boolean": {
+      return sql`CAST(${value} AS boolean)`;
+    }
+    case "date": {
+      // Date arrays are serialized with Date#toJSON(), whose UTC millisecond
+      // form differs from PostgreSQL's ordinary timestamptz text rendering.
+      return sql`to_char(CAST(${value} AS timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+    }
+    case "number": {
+      return sql`CAST(${value} AS numeric)`;
+    }
+    case "string": {
+      return sql`CAST(${value} AS text)`;
+    }
+    case "array":
+    case "embedding":
+    case "object":
+    case "unknown": {
+      throw new Error(
+        `JSON array expression membership requires a scalar element type, got ${valueType}`,
+      );
+    }
+  }
+}
+
+function buildTextJsonArray(values: readonly SqlFragment[]): SqlFragment {
+  return sql`jsonb_build_array(${sql.join(
+    values.map((value) => sql`CAST(${value} AS text)`),
+    sql`, `,
+  )})`;
+}
+
+// Exact round-to-nearest boundaries for IEEE-754 binary64. Keeping these as
+// decimal NUMERIC literals lets PostgreSQL decide whether a text value can be
+// converted before a DOUBLE PRECISION cast has a chance to throw.
+const DOUBLE_ZERO_ROUNDING_BOUNDARY = `${5n ** 1075n}e-1075`;
 
 /**
  * Escapes a string for use in a PostgreSQL string literal, independent of
@@ -59,9 +122,46 @@ function toPostgresPath(pointer: JsonPointer): SqlFragment {
 }
 
 /**
+ * The cast that turns a text element of a list-valued `IN` parameter into the
+ * type its left operand was extracted as. Mirrors the `jsonExtract*` casts:
+ * `jsonExtractNumber` yields numeric, `jsonExtractBoolean` boolean,
+ * `jsonExtractDate` timestamptz, and everything else stays text.
+ */
+function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
+  switch (elementType) {
+    case "number": {
+      return sql.raw("::numeric");
+    }
+    case "boolean": {
+      return sql.raw("::boolean");
+    }
+    case "date": {
+      return sql.raw("::timestamptz");
+    }
+    // `jsonExtractText` leaves these as text, so the elements must stay text
+    // too. The compiler rejects array/object/embedding before reaching here.
+    case "string":
+    case "array":
+    case "object":
+    case "embedding":
+    case "unknown":
+    case undefined: {
+      return sql.empty();
+    }
+  }
+}
+
+/**
  * PostgreSQL dialect adapter implementation.
  */
-export const postgresDialect: DialectAdapter = {
+export const postgresDialect: BuiltinDialectAdapter = {
+  safeNumericConversion(expression) {
+    const trimmed = sql`btrim(${expression}, ${" \t\r\n"})`;
+    const exact = sql`CAST(${trimmed} AS NUMERIC)`;
+    const converted = sql`CAST(${trimmed} AS DOUBLE PRECISION)`;
+    const signedZero = sql`CASE WHEN left(${trimmed}, 1) = '-' THEN CAST('-0' AS DOUBLE PRECISION) ELSE CAST('0' AS DOUBLE PRECISION) END`;
+    return sql`CASE WHEN length(${trimmed}) <= 400 AND ${trimmed} ~ '^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]{1,3})?$' THEN CASE WHEN abs(${exact}) >= ${sql.raw(DOUBLE_OVERFLOW_BOUNDARY)}::numeric THEN NULL WHEN abs(${exact}) <= ${sql.raw(DOUBLE_ZERO_ROUNDING_BOUNDARY)}::numeric THEN ${signedZero} ELSE ${converted} END ELSE NULL END`;
+  },
   name: "postgres",
   capabilities: {
     standardQueryStrategy: "cte_project",
@@ -72,6 +172,14 @@ export const postgresDialect: DialectAdapter = {
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,
     supportsFulltext: true,
+    // Issue #833 measured ~32 MB of planner memory for 25 independent roots,
+    // versus ~700 MB at 500. Compatible roots consume only one plan slot.
+    // Fluent recursion measured ~25/100/531 MiB at 25/100/500 stages (#839).
+    // One allowance covers all recursive plans, including identity reconstruction.
+    maxRecursiveBatchPlans: 25,
+    subgraphMembershipStrategy: "materialized-ids",
+    textIndexOrderIsBinary: false,
+    transactionReadsShareOneSnapshot: false,
   },
 
   binaryText(expression) {
@@ -87,6 +195,50 @@ export const postgresDialect: DialectAdapter = {
     // scopes the override to the current transaction, matching the pgvector
     // iterative-scan GUC handling elsewhere in the backend.
     return sql`SELECT set_config('work_mem', ${workingMemory}, true)`;
+  },
+
+  orderedRowsJsonArray(rowAlias, _columns, orderColumn) {
+    const row = sql.identifier(rowAlias);
+    const order = sql`${row}.${sql.identifier(orderColumn)}`;
+    return sql`(SELECT COALESCE(jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}), '[]'::jsonb) FROM ${row})`;
+  },
+
+  partitionedRowsJsonArrays(rowAlias, _columns, orderColumn, partitionColumn) {
+    const row = sql.identifier(rowAlias);
+    const order = sql`${row}.${sql.identifier(orderColumn)}`;
+    return sql`SELECT jsonb_agg(to_jsonb(${row}) - ${orderColumn} ORDER BY ${order}) AS payload FROM ${row} GROUP BY ${row}.${sql.identifier(partitionColumn)}`;
+  },
+
+  orderedScalarJsonArray({ filter, orderBy, value, valueType }) {
+    assertPortableScalarValueType(valueType, "COLLECT");
+    // Bind-only operands have no SQL context from which PostgreSQL can infer a type.
+    const typedValue = sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES[valueType])})`;
+    const aggregate = sql`jsonb_agg(to_jsonb(${typedValue}) ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    const filteredAggregate = applyAggregateFilter(aggregate, filter);
+    return sql`COALESCE(${filteredAggregate}, '[]'::jsonb)`;
+  },
+
+  orderedRecordJsonArray({ fields, filter, orderBy }) {
+    const parts = Array.from(
+      { length: Math.ceil(fields.length / 40) },
+      (_, index) => {
+        const chunk = fields.slice(index * 40, (index + 1) * 40);
+        const pairs = chunk.flatMap((field) => {
+          assertPortableScalarValueType(
+            field.valueType,
+            "COLLECT record field",
+          );
+          return [
+            sql`CAST(${field.name} AS text)`,
+            sql`CAST(${field.value} AS ${sql.raw(SCALAR_SQL_TYPES[field.valueType])})`,
+          ];
+        });
+        return sql`jsonb_build_object(${sql.join(pairs, sql`, `)})`;
+      },
+    );
+    const record = sql.join(parts, sql` || `);
+    const aggregate = sql`jsonb_agg(${record} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    return sql`COALESCE(${applyAggregateFilter(aggregate, filter)}, '[]'::jsonb)`;
   },
 
   // ============================================================
@@ -148,6 +300,15 @@ export const postgresDialect: DialectAdapter = {
     return sql`${column} @> ${jsonValue}::jsonb`;
   },
 
+  jsonArrayContainsExpression(column, value, valueType) {
+    const scalar = postgresJsonScalar(value, valueType);
+    return sql`CASE WHEN jsonb_typeof(${column}) = 'array' THEN EXISTS (SELECT 1 FROM jsonb_array_elements(${column}) AS tg_element(value) WHERE tg_element.value = to_jsonb(${scalar})) ELSE FALSE END`;
+  },
+
+  rowValueComparison(operator, left, right) {
+    return sql`(${sql.join(left, sql`, `)}) ${sql.raw(operator)} (${sql.join(right, sql`, `)})`;
+  },
+
   jsonArrayContainsAll(column, values) {
     if (values.length === 0) {
       return sql.raw("1=1");
@@ -205,6 +366,21 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) <> 'null', FALSE)`;
   },
 
+  jsonScalarPathEquals(column, pointer, value) {
+    const path = toPostgresPath(pointer);
+    return sql`${column} #> ${path} = CAST(${JSON.stringify(value)} AS jsonb)`;
+  },
+
+  jsonSetProperties(column, patch, unsetProperties = []) {
+    const withReplacements =
+      Object.keys(patch).length === 0 ?
+        column
+      : sql`${column} || ${JSON.stringify(patch)}::jsonb`;
+    if (unsetProperties.length === 0) return withReplacements;
+    const properties = unsetProperties.map((property) => sql`${property}`);
+    return sql`(${withReplacements}) - ARRAY[${sql.join(properties, sql`, `)}]::text[]`;
+  },
+
   // ============================================================
   // Comparison Operations
   // ============================================================
@@ -219,9 +395,28 @@ export const postgresDialect: DialectAdapter = {
     return sql`${left} ${operator} (${sql.join(placeholders, sql`, `)})`;
   },
 
+  inListParameter(left, packedValues, { negated, elementType }) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    // One placeholder for the whole list: the binding is JSON text, cast to
+    // jsonb and expanded into a one-column relation, so arity never reaches
+    // the SQL text. Elements arrive as text (`jsonb_array_elements_text`) and
+    // are cast to whatever type the left operand was extracted as, mirroring
+    // the jsonExtract* casts above.
+    const element = sql`in_list_element.value${postgresElementCast(elementType)}`;
+    return sql`${left} ${operator} (SELECT ${element} FROM jsonb_array_elements_text(${packedValues}::jsonb) AS in_list_element(value))`;
+  },
+
+  packListValue(values) {
+    return packSqlListValue(values, "postgres");
+  },
+
   // ============================================================
   // String Operations
   // ============================================================
+
+  like(column, pattern) {
+    return sql`${column} LIKE ${pattern} ${likeEscapeClause}`;
+  },
 
   ilike(column, pattern) {
     // PostgreSQL has native ILIKE operator. Declaring backslash as the escape
@@ -243,6 +438,12 @@ export const postgresDialect: DialectAdapter = {
   // ============================================================
   // Recursive CTE Path Operations
   // ============================================================
+
+  textJsonArray: buildTextJsonArray,
+
+  appendTextJsonArray(array, values) {
+    return sql`(${array} || ${buildTextJsonArray(values)})`;
+  },
 
   initializePath(nodeId) {
     // PostgreSQL uses text arrays: ARRAY[id]
@@ -266,6 +467,10 @@ export const postgresDialect: DialectAdapter = {
 
   bindValue(value) {
     return getSqlDialectProfile("postgres").bindValue(value);
+  },
+
+  unboundedLimit() {
+    return sql.raw("ALL");
   },
 
   booleanLiteral(value) {

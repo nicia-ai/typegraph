@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base: a stacked PR targets the branch
+  # beneath it and would otherwise run no checks until that branch merges.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,75 +14,85 @@ concurrency:
 permissions:
   contents: read
 
+# scripts/build.ts gives its tsc and tsup children their own declaration heap
+# (DECLARATION_HEAP_MB); this workflow-wide ceiling covers the remaining steps
+# and must not fall below it (see tests/ci-workflow-contract.test.ts).
+env:
+  NODE_OPTIONS: --max-old-space-size=8192
+
 jobs:
   detect-release-metadata-push:
     name: Detect release metadata push
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     outputs:
-      skip_push_ci: ${{ steps.detect.outputs.skip_push_ci }}
+      skip_heavy_ci: ${{ steps.detect.outputs.skip_heavy_ci }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Detect release metadata-only push
+      - name: Detect release metadata-only change
         id: detect
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ "${{ github.event_name }}" != "push" ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          base_sha="${{ github.event.before }}"
-          head_sha="${{ github.sha }}"
+          case "${{ github.event_name }}" in
+            push)
+              base_sha="${{ github.event.before }}"
+              head_sha="${{ github.sha }}"
+              ;;
+            pull_request)
+              base_sha="${{ github.event.pull_request.base.sha }}"
+              head_sha="${{ github.event.pull_request.head.sha }}"
+              ;;
+            *)
+              echo "skip_heavy_ci=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
 
           if [[ "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
+            echo "skip_heavy_ci=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          mapfile -t changed_files < <(git diff --name-only "$base_sha" "$head_sha")
-
-          if [[ "${#changed_files[@]}" -eq 0 ]]; then
-            echo "skip_push_ci=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          skip_push_ci=true
-          for changed_file in "${changed_files[@]}"; do
-            case "$changed_file" in
-              .changeset/*.md | CHANGELOG.md | */CHANGELOG.md | packages/typegraph/package.json) ;;
-              *)
-                skip_push_ci=false
-                break
-                ;;
-            esac
-          done
-
-          echo "skip_push_ci=$skip_push_ci" >> "$GITHUB_OUTPUT"
+          skip_heavy_ci="$(.github/scripts/is-release-metadata-only.sh "$base_sha" "$head_sha")"
+          echo "skip_heavy_ci=$skip_heavy_ci" >> "$GITHUB_OUTPUT"
 
   lint-and-check:
     name: Lint & Type Check
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
 
+      - name: Restore pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        id: latchkey-cache-pnpm
+        with:
+          action: restore
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Save pnpm cache (Latchkey)
+        uses: latchkey-dev/cache-action@v1
+        if: steps.latchkey-cache-pnpm.outputs.cache-hit != 'true'
+        with:
+          action: save
+          key: pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          path: ~/.local/share/pnpm/store
       - name: Type check
         run: pnpm turbo run typecheck
 
@@ -102,20 +113,20 @@ jobs:
 
   test-sqlite-unit:
     name: Test Unit (SQLite, Node 22, shard ${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
-    timeout-minutes: 20
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/2", "2/2"]
+        shard: ["1/5", "2/5", "3/5", "4/5", "5/5"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -124,20 +135,27 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run unit tests
+        env:
+          TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: pnpm turbo run test:unit -- --shard=${{ matrix.shard }}
 
   test-sqlite-property:
     name: Test Property (SQLite, Node 24)
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -150,16 +168,16 @@ jobs:
 
   test-sqlite-smoke:
     name: Test Smoke (SQLite, Node 24)
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -175,16 +193,16 @@ jobs:
 
   test-strict-local-consumers:
     name: Test Strict Packed Consumers (TypeScript 5 and 6)
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -197,24 +215,30 @@ jobs:
 
   test-coverage:
     name: Coverage shard ${{ matrix.shard }}
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
-    timeout-minutes: 20
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: "1/2"
+          - shard: "1/5"
             artifact: coverage-blob-1
-          - shard: "2/2"
+          - shard: "2/5"
             artifact: coverage-blob-2
+          - shard: "3/5"
+            artifact: coverage-blob-3
+          - shard: "4/5"
+            artifact: coverage-blob-4
+          - shard: "5/5"
+            artifact: coverage-blob-5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -223,19 +247,28 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run coverage shard
+        env:
+          TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
+          # The PGlite and graph-merge projects run their files one at a time
+          # unless told otherwise, which leaves three of the runner's four
+          # cores idle for most of a shard. Their 60s budgets already absorb
+          # concurrent PGlite startup, as the PostgreSQL lane relies on.
+          TYPEGRAPH_HEAVY_FILE_PARALLELISM: "1"
         run: >-
           pnpm --filter @nicia-ai/typegraph exec vitest run --coverage
           --shard=${{ matrix.shard }}
           --reporter=default
           --reporter=blob
           --outputFile.blob=.vitest-reports/blob-${{ matrix.artifact }}.json
+          --reporter=json
+          --outputFile.json=.vitest-durations/${{ matrix.artifact }}.json
           --coverage.thresholds.branches=0
           --coverage.thresholds.functions=0
           --coverage.thresholds.lines=0
 
       - name: Upload coverage blob
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: packages/typegraph/.vitest-reports/*.json
@@ -243,23 +276,34 @@ jobs:
           include-hidden-files: true
           overwrite: true
 
+      # Per-file durations, the input `scripts/update-shard-weights.ts` records
+      # the shard split's weights from (docs/TESTING.md, "Shard balance").
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-sqlite-${{ matrix.artifact }}
+          path: packages/typegraph/.vitest-durations/*.json
+          include-hidden-files: true
+          overwrite: true
+
   test-coverage-merge:
     name: Test (Coverage)
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push, test-coverage]
     if: >-
       ${{
         always() &&
-        needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' &&
+        needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' &&
         needs.test-coverage.result != 'skipped'
       }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -274,7 +318,7 @@ jobs:
           exit 1
 
       - name: Download coverage blobs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-blob-*
           path: packages/typegraph/.vitest-reports
@@ -285,20 +329,20 @@ jobs:
 
   test-typescript-compat:
     name: Type Tests (TS ${{ matrix.typescript-version }})
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        typescript-version: ["5.9.3", "6.0.3"]
+        typescript-version: ["5.9.3", "6.0.3", "7.0.2"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -307,7 +351,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run layered type tests
+        if: matrix.typescript-version != '7.0.2'
         run: pnpm --filter @nicia-ai/typegraph test:types
+        env:
+          TYPEGRAPH_TYPESCRIPT_VERSION: ${{ matrix.typescript-version }}
+
+      - name: Test packed consumers with TypeScript 7
+        if: matrix.typescript-version == '7.0.2'
+        run: pnpm --filter @nicia-ai/typegraph test:types:consumer
         env:
           TYPEGRAPH_TYPESCRIPT_VERSION: ${{ matrix.typescript-version }}
 
@@ -315,16 +366,26 @@ jobs:
         if: matrix.typescript-version == '5.9.3'
         run: pnpm --filter @nicia-ai/typegraph test:api-report
 
+      - name: Fetch last published tag for API-surface comparison
+        if: matrix.typescript-version == '5.9.3'
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            "+refs/tags/@nicia-ai/typegraph@*:refs/tags/@nicia-ai/typegraph@*"
+
+      - name: Verify public API surface compatibility
+        if: matrix.typescript-version == '5.9.3'
+        run: pnpm --filter @nicia-ai/typegraph test:api-surface
+
   test-postgres:
     name: Test (PostgreSQL, shard ${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
-    timeout-minutes: 20
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/2", "2/2"]
+        shard: ["1/3", "2/3", "3/3"]
     services:
       postgres:
         image: pgvector/pgvector:pg18
@@ -341,11 +402,11 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -353,38 +414,84 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The lane runs its suites file-parallel and budgets connections for
+      # it (see scripts/test-postgres.sh). The bundled docker-compose.yml
+      # raises max_connections at container start, but GitHub service
+      # containers accept no command override, so this step raises it the
+      # only way available: ALTER SYSTEM, restart, and prove the setting
+      # took before any test connects.
+      - name: Raise PostgreSQL connection budget for parallel suites
+        run: |
+          set -euo pipefail
+          container='${{ job.services.postgres.id }}'
+          docker exec -i "$container" psql -U typegraph -d typegraph_test <<'SQL'
+          ALTER SYSTEM SET max_connections = 400;
+          ALTER SYSTEM SET client_min_messages = 'warning';
+          ALTER SYSTEM SET log_min_messages = 'fatal';
+          ALTER SYSTEM SET log_min_error_statement = 'fatal';
+          SQL
+          docker restart "$container"
+          for _ in {1..30}; do
+            if docker exec "$container" pg_isready -U typegraph -d typegraph_test >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          applied="$(docker exec "$container" psql -U typegraph -d typegraph_test -tAc 'SHOW max_connections')"
+          if [[ "$applied" != "400" ]]; then
+            echo "max_connections is $applied, expected 400" >&2
+            exit 1
+          fi
+
       - name: Run PostgreSQL integration tests
-        run: pnpm --filter @nicia-ai/typegraph test:postgres
+        run: >-
+          pnpm --filter @nicia-ai/typegraph test:postgres
+          --reporter=json
+          --outputFile.json=.vitest-durations/postgres.json
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
           VITEST_SHARD: ${{ matrix.shard }}
+          # An externally supplied POSTGRES_URL defaults to ONE worker because
+          # the script cannot know the server's connection budget. This job
+          # raised max_connections to 400 in the step above, so it states the
+          # cap that budget affords (the runners have 4 cores).
+          TYPEGRAPH_PG_MAX_WORKERS: 4
+
+      - name: Upload shard durations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-durations-postgres-${{ strategy.job-index }}
+          path: packages/typegraph/.vitest-durations/*.json
+          include-hidden-files: true
+          overwrite: true
 
       - name: Run PostgreSQL perf sanity
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm --filter @nicia-ai/typegraph-benchmarks perf:check:postgres
         env:
           # Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
       - name: Run PostgreSQL example
-        if: ${{ matrix.shard == '1/2' }}
+        if: ${{ matrix.shard == '1/3' }}
         run: pnpm test:examples:postgres
         env:
           POSTGRES_URL: postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test
 
   test-durable-objects:
     name: Test (Durable Objects SQLite)
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -395,28 +502,18 @@ jobs:
       - name: Run Durable Objects SQLite tests (workerd)
         run: pnpm --filter @nicia-ai/typegraph test:do
 
-  build:
-    name: Build
-    runs-on: ubuntu-24.04
+  build-artifacts:
+    name: Build artifacts
+    runs-on: latchkey-large
     timeout-minutes: 15
-    needs:
-      - detect-release-metadata-push
-      - lint-and-check
-      - test-sqlite-unit
-      - test-sqlite-property
-      - test-sqlite-smoke
-      - test-strict-local-consumers
-      - test-coverage-merge
-      - test-typescript-compat
-      - test-postgres
-      - test-durable-objects
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci != 'true' }}
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -430,11 +527,53 @@ jobs:
           NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
           NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
 
+      - name: Verify the shipped artifacts do not reach drizzle-orm
+        run: pnpm --filter @nicia-ai/typegraph exec vitest run tests/drizzle-reachability.test.ts
+        env:
+          TYPEGRAPH_REQUIRE_DIST_GRAIN: "1"
+
+      # The release workflow runs the same smoke before publishing; running it
+      # here makes a packaging break (a missing subpath, a moved export, a split
+      # class across entrypoints) fail the pull request instead of the release.
+      - name: Smoke test the packed tarball (every subpath, ESM and CJS)
+        run: bash packages/typegraph/scripts/smoke-packed-tarball.sh
+
+  build:
+    name: Build
+    runs-on: latchkey-large
+    needs:
+      - build-artifacts
+      - detect-release-metadata-push
+      - lint-and-check
+      - test-sqlite-unit
+      - test-sqlite-property
+      - test-sqlite-smoke
+      - test-strict-local-consumers
+      - test-coverage-merge
+      - test-typescript-compat
+      - test-postgres
+      - test-durable-objects
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true'
+      }}
+    steps:
+      - name: Confirm required jobs passed
+        env:
+          REQUIRED_JOBS: ${{ toJSON(needs) }}
+        run: |
+          failed_jobs="$(jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")' <<< "$REQUIRED_JOBS")"
+          if [[ -n "$failed_jobs" ]]; then
+            echo "Required CI jobs did not pass: $failed_jobs" >&2
+            exit 1
+          fi
+
   release-metadata-push:
     name: Release metadata push check
-    runs-on: ubuntu-24.04
+    runs-on: latchkey-large
     needs: [detect-release-metadata-push]
-    if: ${{ needs.detect-release-metadata-push.outputs.skip_push_ci == 'true' }}
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci == 'true' }}
     steps:
-      - name: Skip heavy CI on release metadata-only push
-        run: echo "Skipping heavy CI for release metadata-only push to main."
+      - name: Skip heavy CI on release metadata-only change
+        run: echo "Skipping heavy CI because only release metadata changed."

@@ -141,7 +141,6 @@ export const typegraphTables = createSqliteTables({
   edges: "myapp_graph_edges",
   uniques: "myapp_graph_uniques",
   schemaVersions: "myapp_graph_schema_versions",
-  embeddings: "myapp_graph_embeddings",
   fulltext: "myapp_graph_fulltext",
   indexMaterializations: "myapp_graph_index_materializations",
   kindRemovals: "myapp_graph_kind_removals",
@@ -149,16 +148,7 @@ export const typegraphTables = createSqliteTables({
 });
 
 // Export individual tables for drizzle-kit
-export const {
-  nodes: myappGraphNodes,
-  edges: myappGraphEdges,
-  uniques: myappGraphUniques,
-  schemaVersions: myappGraphSchemaVersions,
-  embeddings: myappGraphEmbeddings,
-  indexMaterializations: myappGraphIndexMaterializations,
-  kindRemovals: myappGraphKindRemovals,
-  reconciliationMarkers: myappGraphReconciliationMarkers,
-} = typegraphTables;
+export const { nodes: myappGraphNodes, edges: myappGraphEdges, uniques: myappGraphUniques, schemaVersions: myappGraphSchemaVersions, indexMaterializations: myappGraphIndexMaterializations, kindRemovals: myappGraphKindRemovals, reconciliationMarkers: myappGraphReconciliationMarkers } = typegraphTables;
 
 // SQLite fulltext is an FTS5 virtual table — drizzle-kit can't model
 // virtual tables, so this name is exposed as a string. The backend
@@ -166,8 +156,7 @@ export const {
 // `ensureFulltextTable()` ensure (idempotent CREATE VIRTUAL TABLE
 // IF NOT EXISTS), so drizzle-kit-managed setups work without an
 // extra manual step.
-export const myappGraphFulltextTableName =
-  typegraphTables.fulltextTableName;
+export const myappGraphFulltextTableName = typegraphTables.fulltextTableName;
 ```
 
 For PostgreSQL with the default `tsvectorStrategy`, the factory
@@ -249,6 +238,21 @@ before running migrations:
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
+
+When multiple allocations share one PostgreSQL database, give each backend a
+stable namespace so its pgvector tables and indexes remain physically isolated:
+
+```typescript
+import { createPgvectorStrategy } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+const backend = createPostgresBackend(pool, {
+  vector: createPgvectorStrategy("tenant-a"),
+});
+```
+
+Keep the namespace stable for the lifetime of the allocation. The default
+`pgvectorStrategy` continues to use the existing `tg_vec` / `tg_vecidx` names.
 
 Then in your schema:
 
@@ -363,14 +367,7 @@ stores only the relationships and graph-specific metadata.
 Use the `externalRef()` helper to create type-safe references to external tables:
 
 ```typescript
-import {
-  createExternalRef,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  embedding,
-  externalRef,
-} from "@nicia-ai/typegraph";
+import { createExternalRef, defineEdge, defineGraph, defineNode, embedding, externalRef } from "@nicia-ai/typegraph";
 import { z } from "zod";
 
 // Define nodes that reference your existing tables
@@ -402,7 +399,7 @@ const authored = defineEdge("authored");
 
 const graph = defineGraph({
   id: "document_graph",
-  nodes: { User, Document },
+  nodes: { User: { type: User }, Document: { type: Document } },
   edges: {
     relatedTo: { type: relatedTo, from: [Document], to: [Document] },
     authored: { type: authored, from: [User], to: [Document] },
@@ -474,10 +471,7 @@ async function findRelatedDocuments(documentId: string) {
 
   // Hydrate with full data from app database
   const externalIds = related.map((r) => r.source.id);
-  const fullDocuments = await appDb
-    .select()
-    .from(documents)
-    .where(inArray(documents.id, externalIds));
+  const fullDocuments = await appDb.select().from(documents).where(inArray(documents.id, externalIds));
 
   return related.map((r) => ({
     ...r,
@@ -652,7 +646,7 @@ export class GraphObject {
 
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so `store.transaction()` / `store.withTransaction()` are fully atomic
-(`capabilities.transactions: true`). See
+(`capabilities.execution.interactiveTransactions: true`). See
 [Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite) and the
 [Cross-Store Transactions recipe](/recipes#cross-store-transactions-drizzle--typegraph).
 
@@ -734,6 +728,92 @@ const store = createStore(graph, backend);
 - Vector search (cosine/L2): sqlite-vec on the local better-sqlite3 backend;
   libSQL's built-in vectors on the libSQL / Turso backend
 
+### Per-Request Connections (Cache the Verified Store)
+
+Some serverless Postgres setups — Cloudflare Workers behind Hyperdrive, or any
+platform that pools connections for you — want a **fresh connection per
+request**. `createVerifiedAdapterStore` reconciles the committed schema and
+checks index materialization at open time (a few `SELECT`s), so re-opening a
+verified store on every request adds that cost to every graph-backed route.
+
+Verify **once per isolate**, then build a zero-query store per request from the
+cached reconciled schema:
+
+```typescript
+import { createAdapterStore } from "@nicia-ai/typegraph";
+import { createVerifiedAdapterStore, getCommittedSchemaVersion, type ReconciledSchema } from "@nicia-ai/typegraph/schema";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+type Cached = {
+  reconciled: ReconciledSchema<typeof graph>;
+  version: number | undefined;
+};
+
+// Per-isolate cache, plus the in-flight reconciliation. Memoizing the promise
+// collapses concurrent cold (or stale) requests onto ONE verify instead of each
+// running its own — otherwise a burst of first requests reproduces the fan-out
+// stampede this pattern exists to avoid.
+let cached: Cached | undefined;
+let inFlight: Promise<Cached> | undefined;
+
+function reconcileOnce(
+  verifyBackend: ReturnType<typeof createPostgresBackend>,
+): Promise<Cached> {
+  inFlight ??= (async () => {
+    const [store, result] = await createVerifiedAdapterStore(graph, verifyBackend);
+    cached = {
+      reconciled: store.reconciledSchema,
+      version: result.status === "unchanged" ? result.version : store.reconciledSchema.version,
+    };
+    return cached;
+  })().finally(() => {
+    inFlight = undefined;
+  });
+  return inFlight;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const backend = createPostgresBackend(newPoolForThisRequest(env));
+
+    // Cold start: concurrent first requests all await the same reconciliation.
+    let snapshot = cached ?? (await reconcileOnce(backend));
+
+    // A one-row probe detects a schema commit from another isolate; a moved
+    // version refreshes through the same single-flight path.
+    const committed = await getCommittedSchemaVersion(backend, graph.id);
+    if (committed !== snapshot.version) snapshot = await reconcileOnce(backend);
+
+    // Zero database round-trips. Reads and writes still validate against
+    // runtime-committed kinds carried by the reconciled snapshot.
+    const store = createAdapterStore(graph, backend, { reconciled: snapshot.reconciled });
+
+    const results = await store
+      .query()
+      .from("Document", "d")
+      .select((ctx) => ctx.d)
+      .execute();
+    return Response.json(results);
+  },
+};
+```
+
+`store.reconciledSchema` is an opaque snapshot of the reconciled graph
+(compile-time kinds folded with any runtime-committed kinds) plus the committed
+version it reflects. `createAdapterStore(graph, backend, { reconciled })` issues
+**no** queries and validates writes against that snapshot, so kinds committed at
+runtime remain writable without re-verifying. If you already hold a verified
+store and only need to swap the connection, `store.withBackend(freshBackend)`
+returns an equivalent store bound to the new connection with no re-verify.
+
+The `getCommittedSchemaVersion` probe is your read-your-writes seam: one
+round-trip, far cheaper than the full verified open (which also reconciles the
+schema and checks index materialization), and re-verify only fires when the
+version actually moves. Skip the probe only if your schema changes exclusively
+during a deployment that also clears the cache. Otherwise reads may use the
+stale schema snapshot, and the write fence rejects managed writes until the
+cache is refreshed.
+
 ### Read Replica Separation
 
 Route heavy graph queries to read replicas while writes go to primary.
@@ -798,7 +878,7 @@ async function createDocument(data: DocumentInput) {
 
 ### Multi-Tenant Architecture
 
-Three approaches for multi-tenant deployments, each with different tradeoffs.
+Four approaches for multi-tenant deployments, each with different tradeoffs.
 
 #### Option 1: Shared tables with tenant isolation (simplest)
 
@@ -821,16 +901,11 @@ function createTenantQuery(store: Store, tenantId: string) {
       store
         .query()
         .from("Document", "d")
-        .whereNode("d", (d) =>
-          d.tenantId
-            .eq(tenantId)
-            .and(d.embedding.similarTo(queryEmbedding, 10)),
-        )
+        .whereNode("d", (d) => d.tenantId.eq(tenantId).and(d.embedding.similarTo(queryEmbedding, 10)))
         .select((ctx) => ctx.d)
         .execute(),
 
-    createDocument: (data: Omit<DocumentInput, "tenantId">) =>
-      store.nodes.Document.create({ ...data, tenantId }),
+    createDocument: (data: Omit<DocumentInput, "tenantId">) => store.nodes.Document.create({ ...data, tenantId }),
   };
 }
 
@@ -841,7 +916,72 @@ function withTenant(req: Request) {
 }
 ```
 
-#### Option 2: Schema per tenant (PostgreSQL)
+#### Option 2: Separate `graph_id` per tenant (divergent schemas, one database)
+
+Every TypeGraph row is keyed by `graph_id`, and so is the committed schema. Two
+graphs with different `id`s coexist in one database with **independent schemas** —
+tenant A can declare kinds tenant B has never heard of, and neither sees the
+other's nodes, edges, or kind namespace.
+
+```typescript
+function tenantGraph(tenantId: string) {
+  return defineGraph({
+    id: `tenant_${tenantId}`, // the isolation boundary
+    nodes: { Document: { type: Document } },
+    edges: {},
+  });
+}
+
+// Each tenant commits — and evolves — its own schema, in the same database.
+const [store] = await createStoreWithSchema(tenantGraph("acme"), backend);
+```
+
+What `graph_id` isolates:
+
+- **Kinds** — the kind namespace is per `graph_id`. Declaring `Invoice` in one
+  graph does not create it in another.
+- **Data** — nodes and edges are filtered by `graph_id` on every read and write.
+- **Schema version and evolution** — each graph owns its committed schema
+  document and version, so tenants migrate independently.
+
+This is the cheap alternative to N physical databases when you want divergent
+per-tenant schemas without N connections. See
+[Graph identity and the kind namespace](/schemas-stores#graph-identity-and-the-kind-namespace).
+
+**Caveat 1 — index names are database-global.** Materialized SQL index names
+are derived from `(kind, fields, shape)` and are **not** namespaced by `graph_id`,
+because a SQL index name is a database-global identifier. Two graphs declaring
+the same kind name *and* the same index therefore resolve to one physical index:
+
+- **Same shape** — the second graph reuses the first graph's index. For a
+  graph-scoped index this is safe: the index is keyed by `graph_id` (or
+  `graph_id, kind`), so each graph still gets its own region of the index.
+- **Different shape** (say one `unique`, one not) — materialization fails loudly
+  with a signature-drift error instead of silently sharing a mismatched index.
+  Rename the declaration, or drop the existing index and retry.
+
+**Caveat 2 — a unique index must stay graph-scoped.** `scope` decides which
+TypeGraph system columns prefix the index key:
+
+| `scope` | Key prefix | Unique constraint applies |
+|---------|-----------|---------------------------|
+| `"graphAndKind"` (default) | `(graph_id, kind)` | per kind, per graph |
+| `"graph"` | `(graph_id)` | per graph |
+| `"none"` | *(none)* | **across every graph in the table** |
+
+A `unique` index declared with `scope: "none"` omits `graph_id` from the key, so
+the database enforces that value as unique across **all** graphs sharing the
+table — one tenant's row will block another tenant's insert. That is a real
+cross-tenant effect, and it holds whether or not two graphs share the physical
+index. Keep unique indexes on the default `"graphAndKind"` (or `"graph"`) scope
+in a multi-graph database; reserve `scope: "none"` for non-unique indexes where
+you deliberately want one index spanning every graph.
+
+Subject to those two rules, per-`graph_id` isolation holds: reads and writes
+stay filtered by `graph_id`, and the coupling is confined to physical index
+reuse.
+
+#### Option 3: Schema per tenant (PostgreSQL)
 
 ```typescript
 import { sql } from "drizzle-orm";
@@ -874,7 +1014,7 @@ async function getTenantStore(tenantId: string): Promise<Store> {
 }
 ```
 
-#### Option 3: Database per tenant (strongest isolation)
+#### Option 4: Database per tenant (strongest isolation)
 
 ```typescript
 interface TenantConfig {

@@ -52,19 +52,38 @@
  */
 
 // Drizzle PostgreSQL backend
+export type { GraphIdentityConfig } from "../../core/define-graph";
 export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
 export {
   createPostgresBackend,
   createPostgresTables,
+  createPostgresTransactionBackend,
   type PostgresBackendOptions,
   type PostgresTableNames,
   type PostgresTables,
   tables,
 } from "../drizzle/postgres";
+export { postgresFenceSql } from "../drizzle/postgres-fence-sql";
+
+// Fulltext and vector strategies for createPostgresBackend
+export { tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
+export {
+  createPgvectorStrategy,
+  pgvectorStrategy,
+} from "../../query/dialect/vector/pgvector-strategy";
+export type { SerializedResourceDeclaration } from "../transaction-resource";
+export type {
+  BundledBackendCapabilityOverrides,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+} from "../types";
 
 // Schema: table definitions and factory options
 export {
   type CreatePostgresTablesOptions,
+  edgeClaims,
   edges,
   fulltext,
   nodes,
@@ -78,5 +97,6 @@ export {
 // DDL generation
 export {
   generatePostgresDDL,
+  generatePostgresDropSQL,
   generatePostgresMigrationSQL,
 } from "../drizzle/ddl";

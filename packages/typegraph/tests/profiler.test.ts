@@ -13,10 +13,10 @@ import {
   defineNode,
   embedding,
   exists,
+  expr,
   field,
   havingGt,
   inSubquery,
-  jsonPointer,
   subClassOf,
 } from "../src";
 import { extractPropertyAccesses } from "../src/profiler/ast-extractor";
@@ -31,6 +31,9 @@ import {
   getUnindexedFilters,
 } from "../src/profiler/recommendations";
 import { type DeclaredIndex } from "../src/profiler/types";
+import type { QueryAst } from "../src/query/ast";
+import { fieldRef, stringField } from "../src/query/predicates";
+import { jsonPointer } from "../src/query-entry";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -64,6 +67,7 @@ const Document = defineNode("Document", {
   schema: z.object({
     title: z.string(),
     embedding: embedding(3),
+    tags: z.array(z.string()).optional(),
   }),
 });
 
@@ -810,15 +814,27 @@ describe("QueryProfiler", () => {
       expect(emailRec).toBeUndefined();
     });
 
-    it("attributes includeSubClasses filters to matching kinds", async () => {
+    it("attributes subclass-expansion filters to matching kinds", async () => {
       const industryPointer = jsonPointer(["industry"]);
       const profiler = new QueryProfiler({ minFrequencyForRecommendation: 1 });
       const profiledStore = profiler.attachToStore(store);
 
+      // "industry" is a Company-only field, not on the polymorphic
+      // Organization alias's own (parent) schema — the typed-subsumption checks guarantee only
+      // the PARENT's properties on a polymorphic alias, so this predicate
+      // (deliberately probing a subclass-only field) needs the same
+      // documented cast pattern graph-extension tests use for a property
+      // outside the alias's statically-known shape.
       await profiledStore
         .query()
-        .from("Organization", "o", { includeSubClasses: true })
-        .whereNode("o", (o) => requireDefined(o["industry"]).eq("Tech"))
+        .from("Organization", "o", { expansion: "subclasses" })
+        // Deliberate low-level subclass-only predicate: the typed shared-field
+        // accessor refuses industry because Organization does not declare it.
+        .whereNode("o", () =>
+          stringField(
+            fieldRef("o", ["props"], { jsonPointer: industryPointer }),
+          ).eq("Tech"),
+        )
         .select((ctx) => ctx.o)
         .execute();
 
@@ -966,6 +982,85 @@ describe("QueryProfiler", () => {
 // ============================================================
 
 describe("AST Extractor", () => {
+  it("extracts every field from tuple comparisons", () => {
+    const emailPointer = jsonPointer(["email"]);
+    const agePointer = jsonPointer(["age"]);
+    const baseAst = store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ctx.p)
+      .toAst();
+    const ast = {
+      ...baseAst,
+      predicates: [
+        {
+          expression: {
+            __type: "tuple_comparison",
+            fields: [
+              fieldRef("p", ["props", "email"], {
+                jsonPointer: emailPointer,
+              }),
+              fieldRef("p", ["props", "age"], { jsonPointer: agePointer }),
+            ],
+            op: "gt",
+            values: [
+              { __type: "literal", value: "a@example.com" },
+              { __type: "literal", value: 18 },
+            ],
+          },
+          targetAlias: "p",
+        },
+      ],
+    } satisfies QueryAst;
+
+    const accesses = extractPropertyAccesses(ast);
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "filter",
+          predicateType: "gt",
+          target: { __type: "prop", pointer: emailPointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          predicateType: "gt",
+          target: { __type: "prop", pointer: agePointer },
+        }),
+      ]),
+    );
+  });
+
+  it("extracts both operands from array membership expressions", () => {
+    const tagsPointer = jsonPointer(["tags"]);
+    const titlePointer = jsonPointer(["title"]);
+    const query = store
+      .query()
+      .from("Document", "document")
+      .where((expressions) =>
+        expr.arrayContains(
+          expressions.document.tags,
+          expressions.document.title,
+        ),
+      )
+      .project((expressions) => ({ title: expressions.document.title }));
+
+    const accesses = extractPropertyAccesses(query.toAst());
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: tagsPointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: titlePointer },
+        }),
+      ]),
+    );
+  });
+
   it("extracts from comparison predicates", () => {
     const emailPointer = jsonPointer(["email"]);
     const builder = store.query().from("Person", "p");
@@ -1180,6 +1275,40 @@ describe("AST Extractor", () => {
     expect(havingAccess).toBeDefined();
   });
 
+  it("extracts collection operands, filters, and aggregate-local ordering", () => {
+    const namePointer = jsonPointer(["name"]);
+    const agePointer = jsonPointer(["age"]);
+    const emailPointer = jsonPointer(["email"]);
+    const query = store
+      .query()
+      .from("Person", "person")
+      .project((fields) => ({
+        names: expr.collect(fields.person.name, {
+          filter: expr.eq(fields.person.email, expr.literal("ada@example.com")),
+          orderBy: [{ expression: fields.person.age }],
+        }),
+      }));
+
+    const accesses = extractPropertyAccesses(query.toAst());
+
+    expect(accesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          context: "select",
+          target: { __type: "prop", pointer: namePointer },
+        }),
+        expect.objectContaining({
+          context: "sort",
+          target: { __type: "prop", pointer: agePointer },
+        }),
+        expect.objectContaining({
+          context: "filter",
+          target: { __type: "prop", pointer: emailPointer },
+        }),
+      ]),
+    );
+  });
+
   it("extracts from AND predicates", () => {
     const emailPointer = jsonPointer(["email"]);
     const agePointer = jsonPointer(["age"]);
@@ -1302,13 +1431,13 @@ describe("AST Extractor", () => {
     expect(ageAccess).toBeDefined();
   });
 
-  it("includes expanded kinds for includeSubClasses aliases", () => {
+  it("includes expanded kinds for subclass-expanded aliases", () => {
     const namePointer = jsonPointer(["name"]);
     const builder = store.query().from("Organization", "o", {
-      includeSubClasses: true,
+      expansion: "subclasses",
     });
     const query = builder
-      .whereNode("o", (o) => requireDefined(o["name"]).eq("Acme"))
+      .whereNode("o", (o) => requireDefined(o.name).eq("Acme"))
       .select((ctx) => ctx.o);
 
     const accesses = extractPropertyAccesses(query.toAst());

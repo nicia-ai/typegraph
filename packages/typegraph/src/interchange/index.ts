@@ -23,6 +23,15 @@
  * ```
  */
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+} from "../backend/types";
+export type { CompiledOneStatementRead } from "../query";
+export type { BatchReadBuilder } from "../store";
+
 // ============================================================
 // Types & Schemas
 // ============================================================
@@ -47,6 +56,8 @@ export {
   GraphDataSourceSchema,
   type GraphInterchangeChunk,
   GraphInterchangeChunkSchema,
+  type IdentityInterchangeMode,
+  IdentityInterchangeModeSchema,
   type ImportError,
   ImportErrorSchema,
   type ImportOptions,
@@ -55,6 +66,14 @@ export {
   ImportResultSchema,
   type InterchangeEdge,
   InterchangeEdgeSchema,
+  type InterchangeIdentity,
+  type InterchangeIdentityAssertion,
+  InterchangeIdentityAssertionSchema,
+  type InterchangeIdentityRetention,
+  InterchangeIdentityRetentionSchema,
+  InterchangeIdentitySchema,
+  type InterchangeIdentityTransition,
+  InterchangeIdentityTransitionSchema,
   type InterchangeNode,
   InterchangeNodeSchema,
   type UnknownPropertyStrategy,
@@ -66,7 +85,8 @@ export {
 // ============================================================
 
 export { exportGraph, exportGraphStream } from "./export";
-export { importGraph, importGraphStream } from "./import";
+export { importGraph, importGraphStream, type ImportTarget } from "./import";
+export type { IngestionImportTarget } from "./ingestion-import-target";
 export {
   trustedImportGraph,
   trustedImportGraphStream,

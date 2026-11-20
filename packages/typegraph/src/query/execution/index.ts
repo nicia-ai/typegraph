@@ -16,9 +16,11 @@ export {
 // Pagination and streaming
 export {
   adjustOrderByForDirection,
+  applyCursorFilters,
   buildCursorFromContext,
   buildCursorPredicate,
   buildPaginatedResult,
+  buildPaginatedResultFromRows,
   createStreamIterable,
   getStreamBatchSize,
   parsePaginateOptions,
@@ -37,4 +39,12 @@ export {
 } from "./selective-result-mapper";
 
 // Value decoding for selective projections
+export {
+  executeSchemaCheckedRead,
+  type SchemaCheckedReadInput,
+} from "./schema-checked-read";
+export {
+  containsSelectableAliasObject,
+  SELECTABLE_ALIAS_MARKER,
+} from "./selectable-alias";
 export { decodeSelectedValue, nullToUndefined } from "./value-decoder";

@@ -12,8 +12,17 @@
  * agent-induced schemas use in practice. Anything outside this set fails
  * loudly at `defineGraphExtension(...)`.
  */
-import { type KindAnnotations, type NullCheckOp } from "../core/types";
+import { type z } from "zod";
+
+import {
+  type Cardinality,
+  type GraphAnnotations,
+  type KindAnnotations,
+  type NullCheckOp,
+  type TargetCardinality,
+} from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
+import { type CompositionRealization } from "../registry/composition-relation";
 
 // ============================================================
 // Property Types
@@ -164,6 +173,60 @@ export type ExtensionPropertyType =
   | ExtensionArrayProperty
   | ExtensionObjectProperty;
 
+type ExtensionDefinedOutput<P extends ExtensionPropertyType> =
+  P extends ExtensionStringProperty ? string
+  : P extends ExtensionNumberProperty ? number
+  : P extends ExtensionBooleanProperty ? boolean
+  : P extends ExtensionEnumProperty ? P["values"][number]
+  : P extends ExtensionArrayProperty ?
+    readonly ExtensionPropertyOutput<P["items"]>[]
+  : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]>
+  : never;
+
+/** TypeScript value represented by one graph-extension property descriptor. */
+export type ExtensionPropertyOutput<P extends ExtensionPropertyType> =
+  P extends { optional: true } ? ExtensionDefinedOutput<P> | undefined
+  : ExtensionDefinedOutput<P>;
+
+/** TypeScript object represented by a graph-extension property map. */
+export type ExtensionObjectOutput<
+  P extends Readonly<Record<string, ExtensionPropertyType>>,
+> = Readonly<
+  {
+    [
+      K in keyof P as P[K] extends { optional: true } ? never : K
+    ]: ExtensionPropertyOutput<P[K]>;
+  } & {
+    [
+      K in keyof P as P[K] extends { optional: true } ? K : never
+    ]?: ExtensionPropertyOutput<P[K]>;
+  }
+>;
+
+type ExtensionPropertySchema<P extends ExtensionPropertyType> =
+  P extends { optional: true } ?
+    z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>>
+  : z.ZodType<ExtensionDefinedOutput<P>>;
+
+/** Phantom Zod object type used by sound runtime-kind evidence. */
+export type ExtensionObjectSchema<
+  P extends Readonly<Record<string, ExtensionPropertyType>>,
+> = z.ZodObject<{
+  [K in keyof P]: ExtensionPropertySchema<P[K]>;
+}>;
+
+/** Property map represented by an edge definition, including the empty default. */
+export type ExtensionEdgeProperties<D extends ExtensionEdgeDef> =
+  D extends (
+    Readonly<{
+      properties: infer P extends Readonly<
+        Record<string, ExtensionPropertyType>
+      >;
+    }>
+  ) ?
+    P
+  : Readonly<Record<never, never>>;
+
 // ============================================================
 // Unique Constraints
 // ============================================================
@@ -225,8 +288,12 @@ export type ExtensionEdgeDef = Readonly<{
   description?: string;
   annotations?: KindAnnotations;
   from: readonly string[];
-  to: readonly string[];
+  to: readonly string[] | Readonly<Record<string, readonly string[]>>;
   properties?: Readonly<Record<string, ExtensionPropertyType>>;
+  cardinality?: Cardinality;
+  targetCardinality?: TargetCardinality;
+  /** See `EdgeRegistration.acyclic`. A runtime-authored edge may declare it. */
+  acyclic?: boolean;
 }>;
 
 // ============================================================
@@ -300,7 +367,8 @@ export type ExtensionOntologyRelation = Readonly<{
   metaEdge: MetaEdgeName;
   from: string;
   to: string;
-}>;
+}> &
+  CompositionRealization;
 
 // ============================================================
 // Document
@@ -365,6 +433,8 @@ export type GraphExtensionVersion = number;
  */
 export type GraphExtension = Readonly<{
   version?: GraphExtensionVersion;
+  /** Graph-scoped annotations shallow-merged into the host graph by key. */
+  annotations?: GraphAnnotations;
   nodes?: Readonly<Record<string, ExtensionNodeDef>>;
   edges?: Readonly<Record<string, ExtensionEdgeDef>>;
   ontology?: readonly ExtensionOntologyRelation[];
@@ -388,6 +458,7 @@ export type GraphExtension = Readonly<{
  */
 export const GRAPH_EXTENSION_TOP_LEVEL_KEYS = [
   "version",
+  "annotations",
   "nodes",
   "edges",
   "ontology",

@@ -17,7 +17,7 @@ TypeGraph's power comes from its type system. Define your schema once with Zod, 
   - [Node Operations](#node-operations)
 - [Edges](#edges) — Relationships between nodes
   - [Defining Edge Types](#defining-edge-types) (domain/range constraints)
-  - [Edge Constraints](#edge-constraints) (cardinality)
+  - [Edge Constraints](#edge-constraints) (cardinality, acyclicity)
   - [Edge Operations](#edge-operations)
 - [Graph Definition](#graph-definition) — Combining nodes, edges, and ontology
 - [Delete Behaviors](#delete-behaviors) — Restrict, cascade, disconnect
@@ -52,7 +52,8 @@ const Person = defineNode("Person", {
 
 ### Schema Features
 
-TypeGraph supports all Zod validation features:
+A property schema can use any Zod validation feature, with one requirement
+on transforms (below):
 
 ```typescript
 const Product = defineNode("Product", {
@@ -81,28 +82,56 @@ const Product = defineNode("Product", {
 });
 ```
 
+#### Transforms must be idempotent
+
+TypeGraph stores a schema's parsed output, and an `update()` parses the
+merged stored properties through the schema again. A `.transform()` therefore
+runs again on every update, on the value it produced last time. A transform
+is safe when its output is valid input that parses to itself, as `slug` above
+is: slugging an already-slugged value changes nothing.
+
+Two kinds of transform are not safe:
+
+- **One that is not idempotent is applied again.** With
+  `z.string().transform((v) => v + "!")`, a create stores `"x!"`, and an
+  `update()` that does not touch the field stores `"x!!"`.
+- **One that changes the type makes every later update throw.** With
+  `z.string().transform((v) => v.length)`, a create stores a number, and the
+  next `update()` is refused with a `ValidationError`, even one that does not
+  touch the field, because the stored number is not a string.
+
+This holds for node and edge properties, and for every write that updates a
+stored row: an edge `update()` that only states `validTo`, and a `reparent`
+that ends a `oneActive` incumbent's window, re-parse the stored properties too.
+Keep a value that must change type in its input form and derive the other form
+when you read it. Planning a [graph merge](/graph-merge) from staged
+operations already refuses a schema whose output does not survive a second
+parse.
+
 ### Node Operations
 
 ```typescript
 // Create with auto-generated ID
-const node = await store.nodes.Person.create({ fullName: "Alice Smith" });
+const bob = await store.nodes.Person.create({ fullName: "Bob Jones" });
 
 // Create with specific ID
-const node = await store.nodes.Person.create({ fullName: "Alice Smith" }, { id: "person-alice" });
+const alice = await store.nodes.Person.create({ fullName: "Alice Smith" }, { id: "person-alice" });
 
-// Retrieve
-const person = await store.nodes.Person.getById("person-alice");
+// Retrieve. Ids are typed `NodeId<typeof Person>`; use the id a node carries,
+// or brand a string you hold with `asNodeId`.
+const person = await store.nodes.Person.getById(alice.id);
+const same = await store.nodes.Person.getById(asNodeId<typeof Person>("person-alice"));
 
 // Update (partial)
-const updated = await store.nodes.Person.update("person-alice", {
+const updated = await store.nodes.Person.update(alice.id, {
   email: "alice@example.com",
 });
 
 // Delete (soft delete by default)
-await store.nodes.Person.delete("person-alice");
+await store.nodes.Person.delete(alice.id);
 
 // Hard delete (permanent removal) - use carefully!
-await store.nodes.Person.hardDelete("person-alice");
+await store.nodes.Person.hardDelete(bob.id);
 ```
 
 ### Node Object Shape
@@ -122,7 +151,9 @@ const alice = await store.nodes.Person.create({ name: "Alice", email: "a@example
 //     createdAt: "2024-01-15T10:30:00.000Z",
 //     updatedAt: "2024-01-15T10:30:00.000Z",
 //     deletedAt: undefined,
-//     validFrom: "2024-01-15T10:30:00.000Z", // defaults to createdAt when omitted
+//     validFrom: "2024-01-15T10:30:00.000Z", // defaults to createdAt when omitted,
+//                                            // unless a stated past validTo makes
+//                                            // the row "born already ended" (undefined)
 //     validTo: undefined,
 //   }
 // }
@@ -247,6 +278,7 @@ allow all node types:
 
 ```typescript
 const graph = defineGraph({
+  id: "my_graph",
   nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: {
     worksAt,  // Constrained - uses built-in from/to
@@ -271,7 +303,13 @@ const graph = defineGraph({
 });
 ```
 
-Attempting to widen beyond the edge's built-in constraints throws a `ValidationError`:
+An edge whose `from` or `to` names a node kind that is not registered in `nodes`
+also throws a `ConfigurationError` at `defineGraph` time
+(`details.code: "EDGE_ENDPOINT_KIND_NOT_REGISTERED"`), as does an unknown
+`cardinality`, `targetCardinality` or `acyclic` value from untyped code
+(`EDGE_INTEGRITY_OPTION_INVALID`).
+
+Attempting to widen beyond the edge's built-in constraints throws a `ConfigurationError`:
 
 ```typescript
 const worksAt = defineEdge("worksAt", {
@@ -279,13 +317,83 @@ const worksAt = defineEdge("worksAt", {
   to: [Company],
 });
 
-// This throws ValidationError - OtherEntity is not in the edge's range
+// This throws ConfigurationError - OtherEntity is not in the edge's range
 defineGraph({
   edges: {
     worksAt: { type: worksAt, from: [Person], to: [OtherEntity] },
   },
 });
 ```
+
+#### Source-Dependent Targets
+
+An array-valued `to` allows every combination of the source and target types.
+When the valid target depends on the source, use a map instead:
+
+```typescript
+const Employee = defineNode("Employee", { schema: z.object({ name: z.string() }) });
+const Student = defineNode("Student", { schema: z.object({ name: z.string() }) });
+const Department = defineNode("Department", { schema: z.object({ name: z.string() }) });
+const Course = defineNode("Course", { schema: z.object({ name: z.string() }) });
+
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: {
+    Employee: [Department],
+    Student: [Course],
+  },
+});
+
+const graph = defineGraph({
+  id: "assignments",
+  nodes: {
+    Employee: { type: Employee },
+    Student: { type: Student },
+    Department: { type: Department },
+    Course: { type: Course },
+  },
+  edges: { assignedTo },
+});
+```
+
+This permits `Employee → Department` and `Student → Course`. It rejects
+`Employee → Course` and `Student → Department`. Using
+`to: [Department, Course]` would permit all four combinations.
+
+Map keys are the literal node kind names (`Employee.kind`), not aliases used to
+register nodes in a graph. Every kind in `from` must have a map entry, no other
+keys are allowed, and each target array must be nonempty. You can also use
+computed keys such as `[Employee.kind]: [Department]`.
+
+The map syntax works in an explicit graph registration too:
+
+```typescript
+edges: {
+  assignedTo: {
+    type: assignedTo,
+    from: [Employee],
+    to: { Employee: [Department] },
+  },
+}
+```
+
+A registration may narrow the built-in allowed pairs, but it cannot introduce
+new pairs. Replacing a map with arrays is valid only when every resulting
+combination is already allowed by the edge definition.
+
+At runtime, both endpoints must match the **same** declared pair, including
+`subClassOf` assignability. A source matching several source entries can use the
+targets allowed by any of those entries. An undeclared pair fails with
+[`EndpointPairError`](/errors#endpointpairerror); an invalid source kind still
+fails with `EndpointError`. Malformed declarations fail with `ConfigurationError`.
+
+Typed collection writes preserve the source/target relationship; dynamic writes
+and imports enforce it at runtime. Bulk writes reject invalid pairs atomically.
+Import pair validation remains active even when reference validation is disabled;
+imports retain their own documented error-handling and partial-success behavior.
+See [collection types](/types#typededgecollectionr-g) for inference limits,
+[graph extensions](/graph-extensions#edges) for runtime declarations, and
+[schema management](/schema-management#endpoint-pair-changes) for schema changes.
 
 ### Edge Constraints
 
@@ -340,6 +448,189 @@ await store.edges.currentEmployer.create(alice, other, {}); // Throws Cardinalit
 
 The check queries existing edges and throws `CardinalityError` if violated.
 For `oneActive`, only edges with `validTo` unset count toward the limit.
+
+#### Target cardinality
+
+`targetCardinality` bounds the edges that point **at** one target node,
+independently of `cardinality`, which bounds the edges leaving one source:
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    // Many-to-one ownership: a source may point at many targets, but each
+    // target may be pointed at by at most one live edge.
+    assignedTo: {
+      type: assignedTo,
+      from: [Person],
+      to: [Ticket],
+      targetCardinality: "one",
+    },
+
+    // At most one ACTIVE edge (valid_to IS NULL) into any target.
+    currentOwner: {
+      type: currentOwner,
+      from: [Person],
+      to: [Asset],
+      targetCardinality: "oneActive",
+    },
+  },
+});
+```
+
+| Target cardinality | Description |
+|---------------------|-------------|
+| `"many"` | No limit (default) |
+| `"one"` | At most one edge of this type into any target node |
+| `"oneActive"` | At most one edge with `valid_to IS NULL` into any target |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, and `cardinality: "unique"` already declares it
+from the source side — a second pair declaration on the target side would be
+the same axis stated twice.
+
+`cardinality` and `targetCardinality` compose freely. All twelve
+combinations are accepted; one is *redundant* (`unique` already implies the
+pair bound that `targetCardinality: "one"` would separately declare) and is
+still honored, because refusing an author's explicit, true statement would be
+surprising:
+
+| `cardinality` \ `targetCardinality` | `many` (default) | `one` | `oneActive` |
+| --- | --- | --- | --- |
+| `many` (default) | unconstrained multigraph | many-to-one: a target has at most one incoming edge ever | many-to-one over open-ended edges only |
+| `one` | one outgoing per source (as above) | strict 1:1 over the live population | 1:1 where the target bound counts open-ended edges only |
+| `unique` | at most one edge per `(from, to)` pair (as above) | *redundant*: target `"one"` already implies pair uniqueness | pair uniqueness plus an active-only target bound |
+| `oneActive` | one open-ended outgoing per source (as above) | one open-ended out, at most one incoming ever | strict 1:1 over the open-ended population |
+
+Both axes are limits on **edge count**, not on distinct neighbours: a second
+distinct edge from the same source to an already-`targetCardinality: "one"`
+target is refused exactly like a second edge from a different source would
+be. The reservation is scoped to `(graph, edge kind, target kind, target
+id)` — the source kind is deliberately not part of the key, so two different
+source kinds contend for one target allowance, and two nodes with the same
+id under different target kinds or edge kinds never collide.
+
+The temporal rules mirror the source-side ones, read from the target end:
+`"one"` counts every non-deleted edge at the target (including edges with a
+stated validity end); `"oneActive"` counts only those whose `validTo` is
+unset. Soft-deleting an edge frees the slot it held on both axes; ending an
+edge (setting `validTo`) frees only an active-only (`"oneActive"`) slot,
+never a `"one"` slot; a resurrection or a reopened validity window
+reacquires every applicable reservation, on both axes.
+
+`CardinalityErrorDetails` names which endpoint's population was overrun via
+`direction: "source" | "target"`, alongside `toKind` / `toId` for the target
+endpoint (`fromKind` / `fromId` keep their existing meaning).
+
+#### Acyclicity
+
+Declaring `acyclic: true` makes an edge kind's live relation a DAG (directed
+acyclic graph): no write can create a path from an edge's `to` endpoint back
+to its `from` endpoint, and a self-loop is a cycle of length one.
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+  },
+});
+
+await store.edges.dependsOn.create(a, b, {}); // OK
+await store.edges.dependsOn.create(b, c, {}); // OK
+await store.edges.dependsOn.create(c, a, {}); // Throws EdgeAcyclicityError
+```
+
+`acyclic` is orthogonal to `cardinality`: `cardinality: "many", acyclic: true`
+(a dependency graph, where any number of edges may point at or from a task) is
+the common case. Every write path that can put an edge into the relation
+enforces it: `create`, `bulkCreate`, `getOrCreateByEndpoints`, resurrecting a
+soft-deleted edge, validating import, and merge apply after canonicalization.
+
+A refusal's `details.witness` identifies one return path, including the node
+references and stored or proposed edge ids a caller can show for repair. It
+reports at most 64 edges with a `truncated` flag. This diagnostic runs only on
+refused writes; see [EdgeAcyclicityError](/errors#edgeacyclicityerror).
+
+**Population.** Every non-deleted edge counts, regardless of its validity
+window. Soft-deleting an edge frees the relation — `a -> b` then `b -> a` is
+accepted once the first edge is deleted. Ending an edge's validity window does
+**not** free it: `a -> b` with its window closed still blocks `b -> a`. This
+is the one place the two temporal axes disagree: acyclicity is a claim about
+the relation's *shape*, not about an instant, so a future-dated edge could
+otherwise close a cycle no write ever probed.
+
+**The check is exhaustive**, not a bounded traversal: it is a set-semantics
+recursive reachability query with no depth bound, so a cycle of any length is
+found — the query builder's `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply
+here. An engine that cuts the search short (a statement timeout, a resource
+limit) raises `EdgeAcyclicityIndeterminateError` rather than reporting "no
+cycle".
+
+**Concurrency.** The check and the write it guards commit under the same
+per-graph write fence edge cardinality uses, so two concurrent writers of
+`a -> b` and `b -> a` serialize and exactly one commits. A backend with no
+transactions refuses the write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`) rather
+than enforcing the rule only when nothing races.
+
+On PostgreSQL the check reads the relation after taking the fence, so the
+session must see what committed while it waited. A `READ COMMITTED` session
+does: every statement takes a new snapshot. A `REPEATABLE READ` or
+`SERIALIZABLE` session keeps the snapshot of its first statement however long
+it then waits, and PostgreSQL arbitrates `SERIALIZABLE` transactions only
+against each other, so a lock alone would let such a session and a
+`READ COMMITTED` writer close a cycle between them. A write that checks an
+acyclic relation therefore also advances the graph's row in
+`typegraph_fences` behind the lock, at every isolation level: a session whose
+snapshot predates another such writer's commit fails on that row with a
+serialization failure (SQLSTATE `40001`) instead of checking a relation it can
+no longer see. The guarantee above holds at every isolation level, and between
+writers at different levels.
+
+Who retries depends on who owns the transaction. A collection write, an import
+or a merge commit that TypeGraph opened the transaction for is replayed whole,
+in a new transaction, and then sees the winner. Inside
+`store.transaction(...)` or an adopted transaction, the failure surfaces as
+`TransactionConflictError`; re-run the whole transaction, or pass
+`store.transaction(fn, { retry: { attempts } })`.
+
+Only the writes that make such a decision touch that row: a write into an
+acyclic or composition relation, a delete of a composition whole, and a
+match-key convergence. Every other write, on any graph, leaves it alone, so a
+graph that declares neither kind of relation and never converges on a match
+key never writes it. Where it is written it is one row per graph and behaves
+like any hot row under MVCC: see
+[Write Fence Row](/limitations#write-fence-row) for how a long-lived snapshot
+affects it.
+
+A custom backend whose write fence is an advisory lock with no fences relation
+(`tableNames.fences`) cannot detect a stale snapshot. There a
+`REPEATABLE READ` or `SERIALIZABLE` write is refused with `ConfigurationError`
+(`EDGE_ACYCLICITY_REQUIRES_FRESH_SNAPSHOT`) in every frame of the transaction,
+batches and concurrent sibling writes included; `READ COMMITTED` is the level
+it supports.
+
+Use `store.verifyConstraintFences()` to find edges already on a cycle (the
+`edgeAcyclicity` family), and see [Errors](/errors) for
+`EdgeAcyclicityError` / `EdgeAcyclicityIndeterminateError` and
+[Limitations](/limitations) for what a transactionless backend and a fused
+write program cannot do with an acyclic edge kind.
+
+Cardinality and target cardinality constrain one edge kind's own population;
+they say nothing about what happens to the nodes on either end when the
+relation is a real whole/part relationship. That's a separate declaration,
+[**composition**](/ontology#composition) (`partOf` / `hasPart`): it names
+which edge kind *realizes* containment and requires that edge to declare
+`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side.
+Ownership (one whole per part, enforced cross-relation) and cascade (deleting
+a whole deletes its parts) are the guarantees this declaration is *for*, and
+both are enforced — see the
+[containment tiers](/ontology#choosing-a-containment-tier) table for the
+complete list.
 
 ### Edge Operations
 
@@ -402,6 +693,15 @@ const graph = defineGraph({
 });
 ```
 
+`subClassOf(Company, Organization)` here requires `Company`'s schema to
+structurally extend `Organization`'s — checked at compile time and at
+registry build (see [Ontology](/ontology#subsumption-type-inheritance)).
+Because of that guarantee, querying `Organization` returns `Company` rows
+by default: `store.query().from("Organization", "o")` is polymorphic, with
+`o`'s `kind` widened to `string` and only `Organization`'s own properties
+statically typed on the alias. Pass `{ expansion: "exact" }` to get
+back the exact-kind reading.
+
 ## Delete Behaviors
 
 Control what happens when nodes are deleted:
@@ -445,6 +745,17 @@ nodes: {
 await store.nodes.Review.delete(reviewId);
 ```
 
+### Deletes and concurrent edge writes
+
+A delete behavior applies to every edge that exists when the delete commits,
+including one another writer creates while the delete runs: the edge write and
+the delete wait for each other, so the edge write is refused with
+`EndpointNotFoundError` or the delete sees the edge and removes or refuses it.
+Creating or resurrecting an edge always requires both endpoints to be live.
+On PostgreSQL this holds for deletes at the default READ COMMITTED isolation;
+see [Limitations](/limitations#concurrent-endpoint-deletes-above-read-committed-postgresql)
+for a delete at REPEATABLE READ or SERIALIZABLE.
+
 ## Uniqueness Constraints
 
 Ensure unique values within node types:
@@ -481,8 +792,25 @@ const graph = defineGraph({
 
 ### Scope Options
 
-- `"kind"`: Unique within this exact type only
-- `"kindWithSubClasses"`: Unique across this type and all subclasses
+- `"kind"`: The constraint keys the rows of the kind that declares it.
+- `"kindWithSubClasses"`: The constraint keys the rows of every kind in the
+  declaring kind's `subClassOf` hierarchy (its ancestors, descendants and
+  siblings) in one shared key space, so a value taken by a row of one kind is
+  refused for a row of another.
+
+A constraint is enforced on the writes of the kind that declares it; a subclass
+does not inherit it. A constraint declared only on a parent kind therefore does
+not cover rows written as a subclass, whichever scope it has. To get uniqueness
+across a hierarchy, declare the constraint on every kind in it with the same
+`name`, `fields` and `collation` and `scope: "kindWithSubClasses"`:
+each kind's writes then claim the same key and probe the others' rows. Declared
+with `scope: "kind"`, the same constraint on each kind is uniqueness per kind.
+
+TypeScript requires both `scope` and `collation`. An untyped caller that omits
+`scope` gets `"kindWithSubClasses"`, and one that omits `collation` gets
+`"binary"`. A [graph extension](/graph-extensions) that omits `scope` gets
+`"kind"`. A `scope` or `collation` outside the values listed here is refused at
+`defineGraph` with `ConfigurationError` (`UNIQUE_CONSTRAINT_OPTION_INVALID`).
 
 ### Collation Options
 
@@ -509,7 +837,7 @@ const Person = defineNode("Person", {
 
 // For functions that work with full nodes (id, kind, metadata, props):
 type PersonNode = Node<typeof Person>;
-// { id: NodeId<Person>; kind: "Person"; name: string; email?: string; version: number; createdAt: Date; ... }
+// { id: NodeId<Person>; kind: "Person"; name: string; email?: string; meta: NodeMeta }
 
 // For functions that only need the property data:
 type PersonProps = NodeProps<typeof Person>;
@@ -537,8 +865,8 @@ alice.id;              // NodeId<typeof Person> - branded string
 alice.name;            // string
 alice.email;           // string | undefined
 alice.age;             // number | undefined
-alice.version;         // number
-alice.createdAt;       // Date
+alice.meta.version;    // number
+alice.meta.createdAt;  // string (ISO 8601)
 
 // Type errors caught at compile time
 await store.nodes.Person.create({

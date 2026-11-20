@@ -2,22 +2,29 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   type EdgeId,
+  KindNotFoundError,
   type NodeId,
-  type RecordedInstant,
-  type TransactionReceipt,
   ValidationError,
 } from "../../../src";
-import { RECORDED_MAX } from "../../../src/core/temporal";
+import {
+  type RecordedInstant,
+  recordedInstantRevision,
+} from "../../../src/core";
+import { RECORDED_MAX_REVISION } from "../../../src/core/temporal";
+import { EndpointPairError } from "../../../src/errors-entry";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
-import { toCanonicalIso } from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
+import type { TransactionReceipt } from "../../../src/store-entry";
+import { requireDefined } from "../../../src/utils/presence";
+import { recordedRevisionFromDriver } from "../../test-utils";
 import {
   type HistoryIntegrationStore,
   type IntegrationStore,
@@ -74,6 +81,24 @@ const receiptSurfaceGraph = defineGraph({
   },
 });
 
+const OtherEntity = defineNode("OtherEntity", {
+  schema: z.object({ name: z.string() }),
+});
+const dynamicPairGraph = defineGraph({
+  id: "dynamic_pairs",
+  nodes: {
+    ReceiptEntity: { type: ReceiptEntity },
+    OtherEntity: { type: OtherEntity },
+  },
+  edges: {
+    receiptLinks: {
+      type: receiptLinks,
+      from: [ReceiptEntity, OtherEntity],
+      to: { ReceiptEntity: [ReceiptEntity], OtherEntity: [OtherEntity] },
+    },
+  },
+});
+
 function entityId(id: string): NodeId<typeof ReceiptEntity> {
   return id as NodeId<typeof ReceiptEntity>;
 }
@@ -114,7 +139,7 @@ async function readOpenRecordedFrom(
   table: SqlFragment,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   const backend = store[STORE_RUNTIME].backend;
   const rows = await backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -123,21 +148,21 @@ async function readOpenRecordedFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${id}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded row for ${kind}:${id}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readOpenRecordedNodeFrom(
   store: RecordedSqlStore,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   return readOpenRecordedFrom(
     store,
     createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedNodesTable,
@@ -150,7 +175,7 @@ async function readOpenRecordedEdgeFrom(
   store: RecordedSqlStore,
   kind: string,
   id: string,
-): Promise<string> {
+): Promise<number> {
   return readOpenRecordedFrom(
     store,
     createSqlSchema(store[STORE_RUNTIME].backend.tableNames).recordedEdgesTable,
@@ -299,6 +324,7 @@ export function registerTransactionReceiptIntegrationTests(
         await edges.delete(edge1.id);
         await edges.hardDelete(edge3.id);
         await edges.bulkDelete([edge4.id, linkId("be1")]);
+        await edges.bulkHardDelete([edge4.id, linkId("be2")]);
       });
 
       // Node intents: create 1 + createFromRecord 1 + update 1 + upsertById 1
@@ -310,9 +336,9 @@ export function registerTransactionReceiptIntegrationTests(
       // Edge intents: create 1 + update 1 + getOrCreateByEndpoints 1
       // + bulkCreate 2 + bulkUpsertById 2 + bulkInsert 2
       // + bulkGetOrCreateByEndpoints 2 + delete 1 + hardDelete 1
-      // + bulkDelete 2 = 15.
-      expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 15 });
-      expect(outcome.receipt.writes.total).toBe(33);
+      // + bulkDelete 2 + bulkHardDelete 2 = 17.
+      expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 17 });
+      expect(outcome.receipt.writes.total).toBe(35);
     });
 
     it("does not count cascade-removed edges", async () => {
@@ -347,6 +373,87 @@ export function registerTransactionReceiptIntegrationTests(
       await expect(store.edges.receiptLinks.findFrom(source)).resolves.toEqual(
         [],
       );
+    });
+
+    for (const history of [false, true]) {
+      it(`binds dynamic edge lookups to transaction and scope receipts (history=${String(history)})`, async () => {
+        const store =
+          history ?
+            await context.createHistoryStore(dynamicPairGraph)
+          : await context.createStore(dynamicPairGraph);
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          const source = await tx.nodes.ReceiptEntity.create({
+            name: "source",
+            slot: "s",
+          });
+          const target = await tx.nodes.ReceiptEntity.create({
+            name: "target",
+            slot: "t",
+          });
+          const other = await tx.nodes.OtherEntity.create({ name: "other" });
+          expect(tx.getEdgeCollection("receiptLinks")).toBe(
+            tx.edges.receiptLinks,
+          );
+          expect(tx.getEdgeCollection("toString")).toBeUndefined();
+          expect(() => tx.getEdgeCollectionOrThrow("missing")).toThrow(
+            KindNotFoundError,
+          );
+          const measured = await tx.measure(async (scoped) => {
+            expect(scoped.getEdgeCollection("receiptLinks")).toBe(
+              scoped.edges.receiptLinks,
+            );
+            await scoped
+              .getEdgeCollectionOrThrow("receiptLinks")
+              .getOrCreateByEndpoints(source, target, { label: "measured" });
+            await expect(
+              scoped.getEdgeCollectionOrThrow("receiptLinks").bulkCreate([
+                {
+                  from: target,
+                  to: source,
+                  props: { label: "must roll back" },
+                },
+                { from: source, to: other, props: { label: "invalid pair" } },
+              ]),
+            ).rejects.toBeInstanceOf(EndpointPairError);
+            expect(await scoped.edges.receiptLinks.count()).toBe(1);
+          });
+          expect(measured.receipt.writes.edges).toEqual({ receiptLinks: 1 });
+          return { source, target };
+        });
+        expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 1 });
+        expect(await store.edges.receiptLinks.count()).toBe(1);
+        const pinned = store.asOf("2000-01-01T00:00:00.000Z");
+        expect(
+          await pinned
+            .getEdgeCollection("receiptLinks")
+            ?.findByEndpoints(outcome.result.source, outcome.result.target),
+        ).toBeUndefined();
+        expect(pinned.getEdgeCollection("missing")).toBeUndefined();
+        expect(pinned.getEdgeCollection("receiptLinks")).toBe(
+          pinned.edges.receiptLinks,
+        );
+      });
+    }
+
+    it("rolls back dynamic edge writes with their transaction", async () => {
+      const store = await context.createStore(dynamicPairGraph);
+      const source = await store.nodes.ReceiptEntity.create({
+        name: "source",
+        slot: "s",
+      });
+      const target = await store.nodes.ReceiptEntity.create({
+        name: "target",
+        slot: "t",
+      });
+      await expect(
+        store.transaction(async (tx) => {
+          await tx
+            .getEdgeCollectionOrThrow("receiptLinks")
+            .create(source, target, { label: "abort" });
+          throw new Error("abort transaction");
+        }),
+      ).rejects.toThrow("abort transaction");
+      expect(await store.edges.receiptLinks.count()).toBe(0);
     });
 
     it("counts writes made through tx.getNodeCollection", async () => {
@@ -509,10 +616,10 @@ export function registerTransactionReceiptIntegrationTests(
       );
       await expect(
         readOpenRecordedNodeFrom(store, "Person", outcome.result.alice.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
       await expect(
         readOpenRecordedEdgeFrom(store, "knows", outcome.result.edge.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
     });
 
     it("returns the recorded anchor for an edge-only transaction", async () => {
@@ -535,7 +642,7 @@ export function registerTransactionReceiptIntegrationTests(
       expect(outcome.receipt.writes.edges).toEqual({ knows: 1 });
       await expect(
         readOpenRecordedEdgeFrom(store, "knows", outcome.result.id),
-      ).resolves.toBe(recorded);
+      ).resolves.toBe(recordedInstantRevision(recorded));
     });
 
     it("leaves recorded undefined without history and for read-only transactions", async () => {
@@ -746,6 +853,122 @@ export function registerTransactionReceiptIntegrationTests(
 
         // The outer transaction still allocates and surfaces the anchor.
         expect(outcome.receipt.recorded).toBeDefined();
+      });
+    });
+
+    describe("retained transaction handle", () => {
+      type RetainedHandle = Parameters<
+        Parameters<IntegrationStore["transaction"]>[0]
+      >[0];
+
+      async function expectRefusedAfterSettle(
+        context: IntegrationTestContext,
+        settle: (
+          store: IntegrationStore,
+          capture: (tx: RetainedHandle) => void,
+        ) => Promise<unknown>,
+      ): Promise<void> {
+        const store = context.getStore();
+        let retained: RetainedHandle | undefined;
+        const seed = await store.nodes.Person.create({ name: "Seed" });
+        const other = await store.nodes.Person.create({ name: "Other" });
+
+        await settle(store, (tx) => {
+          retained = tx;
+        });
+        const handle = requireDefined(retained);
+
+        await expect(
+          handle.nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.nodes.Person.update(seed.id, { name: "Changed" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.nodes.Person.delete(seed.id),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(
+          handle.edges.knows.create(seed, other, { since: "2020" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+
+        const people = await store.nodes.Person.find();
+        expect(people.map((person) => person.name).toSorted()).toEqual([
+          "Other",
+          "Seed",
+        ]);
+        expect(await store.edges.knows.find()).toHaveLength(0);
+      }
+
+      it("refuses every write after store.transaction commits", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store.transaction((tx) => {
+            capture(tx);
+            return Promise.resolve();
+          }),
+        );
+      });
+
+      it("refuses every write after store.transaction rolls back", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store
+            .transaction((tx) => {
+              capture(tx);
+              return Promise.reject(new Error("rollback"));
+            })
+            .catch(() => 0),
+        );
+      });
+
+      it("refuses every write after transactionWithReceipt commits", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store.transactionWithReceipt((tx) => {
+            capture(tx);
+            return Promise.resolve();
+          }),
+        );
+      });
+
+      it("refuses every write after transactionWithReceipt rolls back", async () => {
+        await expectRefusedAfterSettle(context, (store, capture) =>
+          store
+            .transactionWithReceipt((tx) => {
+              capture(tx);
+              return Promise.reject(new Error("rollback"));
+            })
+            .catch(() => 0),
+        );
+      });
+
+      it("keeps the returned receipt unchanged by a refused retained write", async () => {
+        const store = context.getStore();
+        let retained: RetainedHandle | undefined;
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          retained = tx;
+          await tx.nodes.Person.create({ name: "In" });
+        });
+
+        await expect(
+          requireDefined(retained).nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+
+        expect(outcome.receipt.writes.total).toBe(1);
+        expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
+      });
+
+      it("refuses a write through a measure scope retained past the callback", async () => {
+        const store = context.getStore();
+        let scopedHandle: RetainedHandle | undefined;
+        await store.transactionWithReceipt(async (tx) => {
+          await tx.measure((scoped) => {
+            scopedHandle = scoped;
+            return Promise.resolve();
+          });
+        });
+
+        await expect(
+          requireDefined(scopedHandle).nodes.Person.create({ name: "Late" }),
+        ).rejects.toBeInstanceOf(ConfigurationError);
+        expect(await store.nodes.Person.find()).toHaveLength(0);
       });
     });
   });

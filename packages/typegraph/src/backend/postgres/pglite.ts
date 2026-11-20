@@ -41,9 +41,13 @@ import { type Extension, PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { ConfigurationError } from "../../errors";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
+import { wrapWithManagedClose } from "../derive-backend";
+export type { GraphIdentityConfig } from "../../core/define-graph";
 import {
-  generatePostgresDDL,
   generatePostgresMigrationSQL,
+  generateVectorlessPostgresMigrationSQL,
 } from "../drizzle/ddl";
 import { type AnyPgTransaction } from "../drizzle/execution";
 export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
@@ -55,7 +59,13 @@ import {
 import {
   type AdapterBackend,
   closeAfterFailure,
-  wrapWithManagedClose,
+  type SchemaProvisioning,
+} from "../types";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 // ============================================================
@@ -93,6 +103,17 @@ export type LocalPgliteBackendOptions = Readonly<{
    *   package version.
    */
   vector?: false | Extension;
+
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table,
+   * mirroring `vector: false`.
+   */
+  fulltext?: FulltextStrategy | false;
+  /** Opt in to provisioning within caller-owned schema transactions. */
+  schemaProvisioning?: SchemaProvisioning;
 }>;
 
 /**
@@ -193,20 +214,28 @@ export async function createLocalPgliteBackend(
     // EXTENSION` when enabled) in one round trip.
     const migrationSql =
       vectorEnabled ?
-        generatePostgresMigrationSQL(tables)
-      : generatePostgresDDL(tables).join("\n\n");
+        generatePostgresMigrationSQL(tables, options.fulltext)
+      : generateVectorlessPostgresMigrationSQL(tables, options.fulltext);
     await client.exec(migrationSql);
 
     const db = drizzle(client);
     const backend = createPostgresBackend(db, {
+      ...(options.schemaProvisioning === undefined ?
+        {}
+      : { schemaProvisioning: options.schemaProvisioning }),
       tables,
       ...(vectorEnabled ? {} : { vector: false }),
+      ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
     });
     const managedBackend = wrapWithManagedClose(backend, async () => {
       await client.close();
     });
 
-    return { backend: managedBackend, db, client };
+    return {
+      backend: markBundledRootAutocommitEligible(managedBackend),
+      db,
+      client,
+    };
   } catch (error) {
     return closeAfterFailure(client, error);
   }

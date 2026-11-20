@@ -27,6 +27,7 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
@@ -39,10 +40,9 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let pool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -110,8 +110,7 @@ function withTransactionCapture(backend: GraphBackend): {
     throw new Error("Postgres backend must expose compileSql");
   }
   const statements: CapturedStatement[] = [];
-  const captured: GraphBackend = {
-    ...backend,
+  const captured: GraphBackend = deriveBackend(backend, {
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
@@ -133,7 +132,7 @@ function withTransactionCapture(backend: GraphBackend): {
         return fn(observedTransaction);
       }, options);
     },
-  };
+  });
   return { backend: captured, statements };
 }
 

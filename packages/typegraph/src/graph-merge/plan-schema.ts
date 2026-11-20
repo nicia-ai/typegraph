@@ -1,0 +1,1292 @@
+import { z } from "zod";
+
+import { type GraphAllocationOwner } from "../core/allocation-owner";
+import {
+  CLUSTER_EXCLUSION_REASONS,
+  type ClusterExclusionReason,
+  compareEntityRefs,
+  compareMatchSources,
+} from "./evidence";
+import type { JsonValue } from "./typegraph-internal";
+
+// Format 3 adds the identity-conflict review field (`identityConflicts`) to
+// format 2's allocation owner, validity clearing and recreation intent, and is
+// written only by a planner that refuses every structural conflict the apply
+// is certain to meet (`plan-structure.ts`). A required field added under
+// an existing version number would make the strict current schema reject
+// every artifact serialized before it as "malformed", when the correct signal
+// is "this artifact predates the current format": `parseMergePlanArtifact`
+// reads `formatVersion` before any other validation to draw that distinction.
+// Formats 1 and 2 still parse under their own grammar for inspection; applying
+// one is refused (`UnsupportedMergePlanVersionError`).
+export const MERGE_PLAN_FORMAT_VERSION = 3 as const;
+/** Formats that still parse for inspection; applying one is refused. */
+export const LEGACY_MERGE_PLAN_FORMAT_VERSIONS = [1, 2] as const;
+export const MERGE_PLAN_DIGEST_ALGORITHM = "sha256" as const;
+
+export type MergePlanEntityRef = Readonly<{ kind: string; id: string }>;
+
+export type MergePlanSchemaFence = Readonly<{
+  managed: boolean;
+  version: number;
+  hash: string;
+}>;
+
+export type MergePlanRevisionFence = Readonly<{
+  owner: GraphAllocationOwner;
+  origin: string;
+  revision: string | null;
+}>;
+
+export type MergePlanTargetFence = Readonly<{
+  graphId: string;
+  schema: MergePlanSchemaFence;
+  revision: MergePlanRevisionFence;
+}>;
+
+export type MergePlanBranchAnchor = Readonly<{
+  branchId: string;
+  baseVersion: string;
+}>;
+
+export type MergePlanAnchors =
+  | Readonly<{
+      kind: "snapshot";
+      base: Readonly<{ graphId: string; baseVersion: string }>;
+      branches: readonly MergePlanBranchAnchor[];
+    }>
+  | Readonly<{
+      kind: "incremental";
+      forkPoint: Readonly<{
+        graphId: string;
+        baseVersion: string;
+        schema: MergePlanSchemaFence;
+      }>;
+      branches: readonly MergePlanBranchAnchor[];
+    }>;
+
+export type MergePlanNodeDelete = MergePlanEntityRef;
+
+export type MergePlanNodeUpsert = Readonly<{
+  kind: string;
+  id: string;
+  setProps: Readonly<Record<string, JsonValue>>;
+  unsetProps: readonly string[];
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
+  /** Delete then recreate through native collections, resetting the validity window. */
+  recreate?: true | undefined;
+}>;
+
+export type MergePlanEdgeDelete = MergePlanEntityRef;
+
+export type MergePlanEdgeUpsert = Readonly<{
+  kind: string;
+  id: string;
+  from: MergePlanEntityRef;
+  to: MergePlanEntityRef;
+  setProps: Readonly<Record<string, JsonValue>>;
+  unsetProps: readonly string[];
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
+  /** Reopens the row: its upper bound is cleared. Exclusive with `validTo`. */
+  clearValidTo?: true | undefined;
+}>;
+
+export type MergePlanIdentityAssertion = Readonly<{
+  id: string;
+  relation: "same" | "different";
+  a: MergePlanEntityRef;
+  b: MergePlanEntityRef;
+  validFrom: string;
+  validTo?: string | undefined;
+  endedBy?: MergePlanEntityRef | undefined;
+}>;
+
+export type MergePlanWrites = Readonly<{
+  nodeDeletes: readonly MergePlanNodeDelete[];
+  nodeUpserts: readonly MergePlanNodeUpsert[];
+  edgeDeletes: readonly MergePlanEdgeDelete[];
+  edgeUpserts: readonly MergePlanEdgeUpsert[];
+  identityAssertions: readonly MergePlanIdentityAssertion[];
+  identityRetractions: readonly MergePlanIdentityAssertion[];
+}>;
+
+export type MergePlanProposedSummary = Readonly<{
+  nodes: Readonly<{ upserts: number; deletions: number }>;
+  edges: Readonly<{ upserts: number; deletions: number }>;
+  identity: Readonly<{ assertions: number; retractions: number }>;
+}>;
+
+export type MergePlanCanonicalMapping = Readonly<{
+  member: MergePlanEntityRef;
+  canonical: MergePlanEntityRef;
+}>;
+
+export type MergePlanRetype = Readonly<{
+  entity: MergePlanEntityRef;
+  toKind: string;
+}>;
+
+export type MergePlanGuards = Readonly<{
+  /** Explicit create/replace intent may restore these initially tombstoned rows. */
+  /** Explicit node-create exceptions to the default incremental tombstone refusal. Requires the same target fence. */
+  nodeResurrections?: readonly MergePlanEntityRef[];
+  canonicalMappings: readonly MergePlanCanonicalMapping[];
+  retypes: readonly MergePlanRetype[];
+  deletedNodes: readonly MergePlanEntityRef[];
+  incremental?: Readonly<{
+    tombstoneResurrection: "refuse";
+    lossyUpdates: "refuse";
+    edgeIdentity: "preserve";
+  }>;
+}>;
+
+export type MergePlanMatchSource =
+  | Readonly<{ kind: "block"; sourceId: string }>
+  | Readonly<{
+      kind: "unique";
+      sourceId: string;
+      constraintName: string;
+    }>
+  | Readonly<{
+      kind: "baseUnique";
+      sourceId: string;
+      constraintName: string;
+    }>
+  | Readonly<{
+      kind: "baseIndex";
+      sourceId: string;
+      indexName: string;
+    }>
+  | Readonly<{ kind: "keyless"; sourceId: string }>
+  | Readonly<{ kind: "retype"; sourceId: string }>
+  | Readonly<{
+      kind: "custom";
+      sourceId: string;
+      metadata?: JsonValue | undefined;
+    }>;
+
+export type MergePlanSimilarityStrategy =
+  | Readonly<{ kind: "fulltext" | "vector"; fields: readonly string[] }>
+  | Readonly<{
+      kind: "hybrid";
+      fields: readonly string[];
+      weights: Readonly<{ vector: number; fulltext: number }>;
+    }>
+  | Readonly<{ kind: "custom" }>;
+
+export type MergePlanMatchEvidence =
+  | Readonly<{
+      a: MergePlanEntityRef;
+      b: MergePlanEntityRef;
+      sources: readonly MergePlanMatchSource[];
+      decision: "definitional";
+    }>
+  | Readonly<{
+      a: MergePlanEntityRef;
+      b: MergePlanEntityRef;
+      sources: readonly MergePlanMatchSource[];
+      decision: "scored";
+      strategy: MergePlanSimilarityStrategy;
+      score: number;
+      threshold: number;
+    }>;
+
+export type MergePlanEntityResolution = Readonly<{
+  canonicalId: string;
+  memberIds: readonly string[];
+  kind: string;
+  branchOrigins: readonly string[];
+  decisiveEdges: readonly MergePlanMatchEvidence[];
+}>;
+
+export type MergePlanCandidateDiagnostic = Readonly<{
+  evidence: MergePlanMatchEvidence;
+  scoreDecision: "accepted" | "rejected";
+  reason?: "noComparableValues" | undefined;
+  clusterDisposition?:
+    | "retained"
+    | Readonly<{
+        kind: "excluded";
+        reason: ClusterExclusionReason;
+      }>
+    | undefined;
+}>;
+
+export type MergePlanDiagnostics = Readonly<{
+  entries: readonly MergePlanCandidateDiagnostic[];
+  total: number;
+  limit: number;
+  truncated: boolean;
+}>;
+
+export type MergePlanTypeReconciliation = Readonly<{
+  entityId: string;
+  fromTypes: readonly string[];
+  toType: string;
+  decisiveEdges?: readonly MergePlanMatchEvidence[] | undefined;
+}>;
+
+/**
+ * A composition part this merge would separate from its whole without the
+ * target's consent. Three independent causes, all surfaced through the SAME
+ * shape and the SAME `MergeCompositionOrphanError` — a caller distinguishes
+ * them only by `cause`, never by a second error class:
+ *
+ * - `"deleted"`: a whole the plan deletes has a live
+ *   part the plan does NOT itself delete — attached on the target after the
+ *   branch point, or independently of it — found by re-reading the parts
+ *   closure (`planCompositionCascade`) against every planned node deletion.
+ *   `whole` is that about-to-be-deleted whole.
+ * - `"moved"`: the mirror case. The plan deletes a part — directly, or
+ *   because the branch's cascade from its old whole deleted it — that the
+ *   target has meanwhile moved under (or attached to) a live whole the plan
+ *   neither deletes nor detaches it from. `whole` is that surviving whole.
+ * - `"unattached"`: a required-existence part THIS
+ *   MERGE WRITES resolves, after canonicalization, to no live whole at
+ *   all — its composition edge was dropped or collapsed while both
+ *   endpoints survive. There is no whole to name, so `whole` is absent.
+ *
+ * Every finding is refused while the plan is built: the plan's revision
+ * fence makes it a certain apply refusal, since the unchanged target refuses
+ * it and any target write that would resolve it makes the plan stale. Apply
+ * re-verifies the same finding under the write lock and refuses with
+ * `MergeCompositionOrphanError` too.
+ *
+ * Between branches, the same two shapes carry `branchId`, naming the branch
+ * whose attachment would be lost: `"moved"` when one branch attached a part
+ * to a whole that survives while another deletes the part, `"deleted"` when
+ * one branch attached a surviving part to a whole another deletes.
+ */
+export type MergePlanCompositionOrphan = Readonly<{
+  part: MergePlanEntityRef;
+  /** Present for `cause: "deleted"` and `"moved"`; absent for `cause: "unattached"` — there is no whole to name. */
+  whole?: MergePlanEntityRef;
+  viaEdgeKind: string;
+  cause: "deleted" | "moved" | "unattached";
+  /** The branch whose staged attachment the merge would lose; absent when the conflict is with the target's own state. */
+  branchId?: string;
+}>;
+
+export type MergePlanReview = Readonly<{
+  resolutions: readonly MergePlanEntityResolution[];
+  conflicts: readonly JsonValue[];
+  deleteModifyConflicts: readonly JsonValue[];
+  typeReconciliations: readonly MergePlanTypeReconciliation[];
+  dropped: readonly JsonValue[];
+  validityEnds: readonly JsonValue[];
+  baseAmbiguities: readonly JsonValue[];
+  provenanceRecords: readonly JsonValue[];
+  warnings: readonly string[];
+  diagnostics?: MergePlanDiagnostics | undefined;
+  /** Optional, omitted when empty — see the review schema's format-version note. */
+  identityConflicts?: readonly JsonValue[] | undefined;
+}>;
+
+export type MergePlanProvenanceOptions = Readonly<{
+  includeInReport: boolean;
+  persist: boolean;
+}>;
+
+export type MergePlanDigest = Readonly<{
+  algorithm: typeof MERGE_PLAN_DIGEST_ALGORITHM;
+  value: string;
+}>;
+
+/** A review as formats 1 and 2 wrote it, before identity conflicts. */
+export type LegacyMergePlanReview = Omit<MergePlanReview, "identityConflicts">;
+
+/** The current wire contract, the only format a plan can be applied from. */
+export type MergePlanArtifactV3 = Readonly<{
+  formatVersion: typeof MERGE_PLAN_FORMAT_VERSION;
+  digest: MergePlanDigest;
+  mode: "snapshot" | "incremental";
+  target: MergePlanTargetFence;
+  anchors: MergePlanAnchors;
+  proposed: MergePlanProposedSummary;
+  writes: MergePlanWrites;
+  guards: MergePlanGuards;
+  review: MergePlanReview;
+  provenance: MergePlanProvenanceOptions;
+}>;
+
+/** Legacy wire contract with an allocation-bound fence; inspect-only. */
+export type MergePlanArtifactV2 = Readonly<{
+  formatVersion: 2;
+  digest: MergePlanDigest;
+  mode: "snapshot" | "incremental";
+  target: MergePlanTargetFence;
+  anchors: MergePlanAnchors;
+  proposed: MergePlanProposedSummary;
+  writes: MergePlanWrites;
+  guards: MergePlanGuards;
+  review: LegacyMergePlanReview;
+  provenance: MergePlanProvenanceOptions;
+}>;
+
+/** Legacy wire contract without an allocation owner; inspect-only. */
+export type MergePlanArtifactV1 = Readonly<{
+  formatVersion: 1;
+  digest: MergePlanDigest;
+  mode: "snapshot" | "incremental";
+  target: Omit<MergePlanTargetFence, "revision"> &
+    Readonly<{
+      revision: Omit<MergePlanRevisionFence, "owner"> &
+        Readonly<{ owner?: undefined }>;
+    }>;
+  anchors: MergePlanAnchors;
+  proposed: MergePlanProposedSummary;
+  writes: MergePlanWrites;
+  guards: MergePlanGuards;
+  review: LegacyMergePlanReview;
+  provenance: MergePlanProvenanceOptions;
+}>;
+
+/** Every format `parseMergePlanArtifact` accepts. Writers emit V3. */
+export type MergePlanArtifact =
+  MergePlanArtifactV1 | MergePlanArtifactV2 | MergePlanArtifactV3;
+export type MergePlanArtifactV1Input = Omit<MergePlanArtifactV1, "digest">;
+export type MergePlanArtifactV2Input = Omit<MergePlanArtifactV2, "digest">;
+export type MergePlanArtifactV3Input = Omit<MergePlanArtifactV3, "digest">;
+export type MergePlanArtifactInput =
+  | MergePlanArtifactV1Input
+  | MergePlanArtifactV2Input
+  | MergePlanArtifactV3Input;
+
+const nonEmptyStringSchema = z.string().min(1);
+// Zod 4's number schema rejects NaN and infinities by default.
+const finiteNumberSchema = z.number();
+const nonNegativeIntegerSchema = finiteNumberSchema.int().nonnegative();
+const jsonObjectSchema = z.record(z.string(), z.json());
+
+const mergePlanEntityRefSchema = z
+  .object({ kind: nonEmptyStringSchema, id: nonEmptyStringSchema })
+  .strict();
+
+const mergePlanSchemaFenceSchema = z
+  .object({
+    managed: z.boolean(),
+    version: nonNegativeIntegerSchema,
+    hash: nonEmptyStringSchema,
+  })
+  .strict();
+
+const mergePlanRevisionFenceSchema = z
+  .object({
+    owner: z
+      .object({
+        origin: z.string().min(1),
+        namespace: z.string().regex(/^[a-f0-9]{32}$/u),
+      })
+      .strict()
+      .optional(),
+    origin: nonEmptyStringSchema,
+    revision: nonEmptyStringSchema.nullable(),
+  })
+  .strict();
+
+const legacyMergePlanTargetFenceSchema = z
+  .object({
+    graphId: nonEmptyStringSchema,
+    schema: mergePlanSchemaFenceSchema,
+    revision: mergePlanRevisionFenceSchema,
+  })
+  .strict();
+
+export const mergePlanTargetFenceSchema =
+  legacyMergePlanTargetFenceSchema.extend({
+    revision: mergePlanRevisionFenceSchema.extend({
+      owner: mergePlanRevisionFenceSchema.shape.owner.unwrap(),
+    }),
+  });
+
+const branchAnchorSchema = z
+  .object({
+    branchId: nonEmptyStringSchema,
+    baseVersion: nonEmptyStringSchema,
+  })
+  .strict();
+
+const snapshotAnchorsSchema = z
+  .object({
+    kind: z.literal("snapshot"),
+    base: z
+      .object({
+        graphId: nonEmptyStringSchema,
+        baseVersion: nonEmptyStringSchema,
+      })
+      .strict(),
+    branches: z.array(branchAnchorSchema),
+  })
+  .strict();
+
+const incrementalAnchorsSchema = z
+  .object({
+    kind: z.literal("incremental"),
+    forkPoint: z
+      .object({
+        graphId: nonEmptyStringSchema,
+        baseVersion: nonEmptyStringSchema,
+        schema: mergePlanSchemaFenceSchema,
+      })
+      .strict(),
+    branches: z.array(branchAnchorSchema),
+  })
+  .strict();
+
+const mergePlanAnchorsSchema = z.discriminatedUnion("kind", [
+  snapshotAnchorsSchema,
+  incrementalAnchorsSchema,
+]);
+
+function statesAtMostOneValidityEnd(
+  upsert: Readonly<{
+    validTo?: string | undefined;
+    clearValidTo?: true | undefined;
+  }>,
+): boolean {
+  return upsert.validTo === undefined || !upsert.clearValidTo;
+}
+
+const VALIDITY_END_EXCLUSIVITY_ISSUE = {
+  message: 'A write states either "validTo" or "clearValidTo", never both',
+  path: ["clearValidTo"],
+};
+
+const nodeUpsertSchema = z
+  .object({
+    kind: nonEmptyStringSchema,
+    id: nonEmptyStringSchema,
+    setProps: jsonObjectSchema,
+    unsetProps: z.array(nonEmptyStringSchema),
+    validFrom: nonEmptyStringSchema.nullable().optional(),
+    validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
+    recreate: z.literal(true).optional(),
+  })
+  .strict()
+  .refine(statesAtMostOneValidityEnd, VALIDITY_END_EXCLUSIVITY_ISSUE);
+
+const edgeUpsertSchema = z
+  .object({
+    kind: nonEmptyStringSchema,
+    id: nonEmptyStringSchema,
+    from: mergePlanEntityRefSchema,
+    to: mergePlanEntityRefSchema,
+    setProps: jsonObjectSchema,
+    unsetProps: z.array(nonEmptyStringSchema),
+    validFrom: nonEmptyStringSchema.nullable().optional(),
+    validTo: nonEmptyStringSchema.optional(),
+    clearValidTo: z.literal(true).optional(),
+  })
+  .strict()
+  .refine(statesAtMostOneValidityEnd, VALIDITY_END_EXCLUSIVITY_ISSUE);
+
+const mergePlanIdentityAssertionSchema = z
+  .object({
+    id: nonEmptyStringSchema,
+    relation: z.enum(["same", "different"]),
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    validFrom: nonEmptyStringSchema,
+    validTo: nonEmptyStringSchema.optional(),
+    endedBy: mergePlanEntityRefSchema.optional(),
+  })
+  .strict();
+
+const mergePlanWritesSchema = z
+  .object({
+    nodeDeletes: z.array(mergePlanEntityRefSchema),
+    nodeUpserts: z.array(nodeUpsertSchema),
+    edgeDeletes: z.array(mergePlanEntityRefSchema),
+    edgeUpserts: z.array(edgeUpsertSchema),
+    identityAssertions: z.array(mergePlanIdentityAssertionSchema),
+    identityRetractions: z.array(mergePlanIdentityAssertionSchema),
+  })
+  .strict();
+
+const proposedRoleSchema = z
+  .object({
+    upserts: nonNegativeIntegerSchema,
+    deletions: nonNegativeIntegerSchema,
+  })
+  .strict();
+
+const mergePlanProposedSummarySchema = z
+  .object({
+    nodes: proposedRoleSchema,
+    edges: proposedRoleSchema,
+    identity: z
+      .object({
+        assertions: nonNegativeIntegerSchema,
+        retractions: nonNegativeIntegerSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+const mergePlanGuardsSchema = z
+  .object({
+    canonicalMappings: z.array(
+      z
+        .object({
+          member: mergePlanEntityRefSchema,
+          canonical: mergePlanEntityRefSchema,
+        })
+        .strict(),
+    ),
+    retypes: z.array(
+      z
+        .object({
+          entity: mergePlanEntityRefSchema,
+          toKind: nonEmptyStringSchema,
+        })
+        .strict(),
+    ),
+    deletedNodes: z.array(mergePlanEntityRefSchema),
+    nodeResurrections: z.array(mergePlanEntityRefSchema).optional(),
+    incremental: z
+      .object({
+        tombstoneResurrection: z.literal("refuse"),
+        lossyUpdates: z.literal("refuse"),
+        edgeIdentity: z.literal("preserve"),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const matchSourceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({ kind: z.literal("block"), sourceId: nonEmptyStringSchema })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("unique"),
+      sourceId: nonEmptyStringSchema,
+      constraintName: nonEmptyStringSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("baseUnique"),
+      sourceId: nonEmptyStringSchema,
+      constraintName: nonEmptyStringSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("baseIndex"),
+      sourceId: nonEmptyStringSchema,
+      indexName: nonEmptyStringSchema,
+    })
+    .strict(),
+  z
+    .object({ kind: z.literal("keyless"), sourceId: nonEmptyStringSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("retype"), sourceId: nonEmptyStringSchema })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("custom"),
+      sourceId: nonEmptyStringSchema,
+      metadata: z.json().optional(),
+    })
+    .strict(),
+]);
+
+const similarityStrategySchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("fulltext"),
+      fields: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("vector"),
+      fields: z.array(nonEmptyStringSchema),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("hybrid"),
+      fields: z.array(nonEmptyStringSchema),
+      weights: z
+        .object({ vector: finiteNumberSchema, fulltext: finiteNumberSchema })
+        .strict(),
+    })
+    .strict(),
+  z.object({ kind: z.literal("custom") }).strict(),
+]);
+
+const definitionalEvidenceSchema = z
+  .object({
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    sources: z.array(matchSourceSchema),
+    decision: z.literal("definitional"),
+  })
+  .strict();
+
+const scoredEvidenceSchema = z
+  .object({
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    sources: z.array(matchSourceSchema),
+    decision: z.literal("scored"),
+    strategy: similarityStrategySchema,
+    score: finiteNumberSchema,
+    threshold: finiteNumberSchema,
+  })
+  .strict();
+
+const mergePlanMatchEvidenceSchema = z.discriminatedUnion("decision", [
+  definitionalEvidenceSchema,
+  scoredEvidenceSchema,
+]);
+
+const entityResolutionSchema = z
+  .object({
+    canonicalId: nonEmptyStringSchema,
+    memberIds: z.array(nonEmptyStringSchema),
+    kind: nonEmptyStringSchema,
+    branchOrigins: z.array(nonEmptyStringSchema),
+    decisiveEdges: z.array(mergePlanMatchEvidenceSchema),
+  })
+  .strict();
+
+const diagnosticsSchema = z
+  .object({
+    entries: z.array(
+      z
+        .object({
+          evidence: mergePlanMatchEvidenceSchema,
+          scoreDecision: z.enum(["accepted", "rejected"]),
+          reason: z.literal("noComparableValues").optional(),
+          clusterDisposition: z
+            .union([
+              z.literal("retained"),
+              z
+                .object({
+                  kind: z.literal("excluded"),
+                  reason: z.enum(CLUSTER_EXCLUSION_REASONS),
+                })
+                .strict(),
+            ])
+            .optional(),
+        })
+        .strict(),
+    ),
+    total: nonNegativeIntegerSchema,
+    limit: nonNegativeIntegerSchema,
+    truncated: z.boolean(),
+  })
+  .strict();
+
+const identityProvenanceRecordSchema = z
+  .object({
+    role: z.enum(["node", "edge"]),
+    canonicalId: nonEmptyStringSchema,
+    canonicalKind: nonEmptyStringSchema,
+    branchId: nonEmptyStringSchema,
+    sourceId: nonEmptyStringSchema,
+  })
+  .strict();
+
+/**
+ * The public `IdentityUnresolvedConflict`, validated STRICTLY rather than as
+ * opaque JSON: an entry the merge could not have produced fails at parse,
+ * where the plan artifact is read, rather than at the point a consumer reaches
+ * into a field that is not there.
+ */
+const identityUnresolvedConflictSchema = z
+  .object({
+    kind: z.literal("separation"),
+    a: mergePlanEntityRefSchema,
+    b: mergePlanEntityRefSchema,
+    assertionIds: z.array(nonEmptyStringSchema),
+    source: matchSourceSchema.optional(),
+  })
+  .strict();
+
+const mergePlanReviewSchema = z
+  .object({
+    resolutions: z.array(entityResolutionSchema),
+    conflicts: z.array(
+      z
+        .object({
+          entityId: nonEmptyStringSchema,
+          kind: nonEmptyStringSchema,
+          property: nonEmptyStringSchema,
+          values: z.array(
+            z
+              .object({ branchId: nonEmptyStringSchema, value: z.json() })
+              .strict(),
+          ),
+          resolution: z.json(),
+        })
+        .strict(),
+    ),
+    deleteModifyConflicts: z.array(
+      z
+        .object({
+          entityId: nonEmptyStringSchema,
+          kind: nonEmptyStringSchema,
+          deletedBy: nonEmptyStringSchema,
+          modifiedBy: nonEmptyStringSchema,
+          resolution: z.enum(["deleteWins", "modifyWins", "flag"]),
+        })
+        .strict(),
+    ),
+    typeReconciliations: z.array(
+      z
+        .object({
+          entityId: nonEmptyStringSchema,
+          fromTypes: z.array(nonEmptyStringSchema),
+          toType: nonEmptyStringSchema,
+          decisiveEdges: z.array(mergePlanMatchEvidenceSchema).optional(),
+        })
+        .strict(),
+    ),
+    dropped: z.array(
+      z.discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("node"),
+            id: nonEmptyStringSchema,
+            reason: nonEmptyStringSchema,
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("edge"),
+            id: nonEmptyStringSchema,
+            reason: nonEmptyStringSchema,
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("identity"),
+            id: nonEmptyStringSchema,
+            reason: nonEmptyStringSchema,
+          })
+          .strict(),
+      ]),
+    ),
+    validityEnds: z.array(
+      z
+        .object({
+          entity: z.enum(["node", "edge"]),
+          kind: nonEmptyStringSchema,
+          id: nonEmptyStringSchema,
+          validTo: nonEmptyStringSchema.optional(),
+          clearValidTo: z.literal(true).optional(),
+          claimedBy: z.array(nonEmptyStringSchema),
+          precedence: z.literal("target").optional(),
+        })
+        .strict()
+        .refine(
+          (resolution) =>
+            (resolution.validTo === undefined) ===
+            (resolution.clearValidTo === true),
+          {
+            message:
+              'A validity end states exactly one of "validTo" or "clearValidTo"',
+            path: ["clearValidTo"],
+          },
+        ),
+    ),
+    baseAmbiguities: z.array(
+      z
+        .object({
+          baseIds: z.array(mergePlanEntityRefSchema),
+          memberIds: z.array(mergePlanEntityRefSchema),
+        })
+        .strict(),
+    ),
+    provenanceRecords: z.array(identityProvenanceRecordSchema),
+    warnings: z.array(z.string()),
+    diagnostics: diagnosticsSchema.optional(),
+    // Optional and omitted when empty (the `diagnostics` precedent above): a
+    // merge the separation veto never touched produces the review object it
+    // would have without the veto. Format 1 and 2 grammars refuse the field.
+    identityConflicts: z.array(identityUnresolvedConflictSchema).optional(),
+  })
+  .strict();
+
+const mergePlanDigestSchema = z
+  .object({
+    algorithm: z.literal(MERGE_PLAN_DIGEST_ALGORITHM),
+    value: z.string().regex(/^[\da-f]{64}$/),
+  })
+  .strict();
+
+const mergePlanArtifactBodyShape = {
+  digest: mergePlanDigestSchema,
+  mode: z.enum(["snapshot", "incremental"]),
+  anchors: mergePlanAnchorsSchema,
+  proposed: mergePlanProposedSummarySchema,
+  writes: mergePlanWritesSchema,
+  guards: mergePlanGuardsSchema,
+  provenance: z
+    .object({ includeInReport: z.boolean(), persist: z.boolean() })
+    .strict(),
+};
+
+const mergePlanArtifactV3BaseSchema = z
+  .object({
+    ...mergePlanArtifactBodyShape,
+    formatVersion: z.literal(MERGE_PLAN_FORMAT_VERSION),
+    target: mergePlanTargetFenceSchema,
+    review: mergePlanReviewSchema,
+  })
+  .strict();
+
+const legacyMergePlanArtifactBaseSchema = z
+  .object({
+    ...mergePlanArtifactBodyShape,
+    formatVersion: z.union([
+      z.literal(LEGACY_MERGE_PLAN_FORMAT_VERSIONS[0]),
+      z.literal(LEGACY_MERGE_PLAN_FORMAT_VERSIONS[1]),
+    ]),
+    target: legacyMergePlanTargetFenceSchema,
+    review: mergePlanReviewSchema.omit({ identityConflicts: true }),
+  })
+  .strict();
+
+const mergePlanArtifactV3InputBaseSchema = mergePlanArtifactV3BaseSchema.omit({
+  digest: true,
+});
+type ParsedMergePlanArtifactInput =
+  | z.infer<typeof mergePlanArtifactV3InputBaseSchema>
+  | Omit<z.infer<typeof legacyMergePlanArtifactBaseSchema>, "digest">;
+
+function addSemanticIssues(
+  artifact: ParsedMergePlanArtifactInput,
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    artifact.formatVersion === 2 &&
+    artifact.target.revision.owner === undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["target", "revision", "owner"],
+      message: "Merge plan format 2 requires an allocation owner.",
+    });
+  if (artifact.formatVersion === 1) {
+    for (const [role, entries] of Object.entries({
+      nodeUpserts: artifact.writes.nodeUpserts,
+      edgeUpserts: artifact.writes.edgeUpserts,
+      validityEnds: artifact.review.validityEnds,
+    })) {
+      for (const [index, entry] of entries.entries()) {
+        if (entry.clearValidTo !== undefined)
+          ctx.addIssue({
+            code: "custom",
+            path: [role, index],
+            message: "Clearing validity requires merge plan format 2.",
+          });
+      }
+    }
+  }
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.guards.nodeResurrections !== undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["guards", "nodeResurrections"],
+      message: "Explicit resurrection requires merge plan format 2.",
+    });
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.writes.nodeUpserts.some((upsert) => upsert.recreate !== undefined)
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["writes", "nodeUpserts"],
+      message: "Recreation requires merge plan format 2.",
+    });
+  if (
+    artifact.formatVersion === 1 &&
+    artifact.target.revision.owner !== undefined
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["target", "revision", "owner"],
+      message: "Allocation-bound fences require merge plan format 2.",
+    });
+  const resurrectionKeys = new Set<string>();
+  for (const ref of artifact.guards.nodeResurrections ?? []) {
+    const key = entityKey(ref);
+    if (
+      resurrectionKeys.has(key) ||
+      !artifact.writes.nodeUpserts.some((upsert) => entityKey(upsert) === key)
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["guards", "nodeResurrections"],
+        message:
+          "Resurrection guards must name each written node exactly once.",
+      });
+    resurrectionKeys.add(key);
+  }
+  if (artifact.mode !== artifact.anchors.kind) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["anchors", "kind"],
+      message: `Expected ${artifact.mode} anchors for a ${artifact.mode} plan.`,
+    });
+  }
+  if (
+    (artifact.mode === "incremental") !==
+    (artifact.guards.incremental !== undefined)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["guards", "incremental"],
+      message:
+        "Incremental write guards must be present exactly for incremental plans.",
+    });
+  }
+
+  const expectedCounts = {
+    nodeUpserts: artifact.writes.nodeUpserts.length,
+    nodeDeletions: artifact.writes.nodeDeletes.length,
+    edgeUpserts: artifact.writes.edgeUpserts.length,
+    edgeDeletions: artifact.writes.edgeDeletes.length,
+    assertions: artifact.writes.identityAssertions.length,
+    retractions: artifact.writes.identityRetractions.length,
+  };
+  const receivedCounts = {
+    nodeUpserts: artifact.proposed.nodes.upserts,
+    nodeDeletions: artifact.proposed.nodes.deletions,
+    edgeUpserts: artifact.proposed.edges.upserts,
+    edgeDeletions: artifact.proposed.edges.deletions,
+    assertions: artifact.proposed.identity.assertions,
+    retractions: artifact.proposed.identity.retractions,
+  };
+  if (JSON.stringify(expectedCounts) !== JSON.stringify(receivedCounts)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["proposed"],
+      message: "Proposed counts must equal the resolved write-set counts.",
+    });
+  }
+
+  addOperationIssues(
+    artifact.writes.nodeDeletes,
+    artifact.writes.nodeUpserts,
+    "node",
+    ctx,
+  );
+  addOperationIssues(
+    artifact.writes.edgeDeletes,
+    artifact.writes.edgeUpserts,
+    "edge",
+    ctx,
+  );
+  for (const [index, upsert] of artifact.writes.nodeUpserts.entries()) {
+    addPropertyPatchIssues(upsert, ["writes", "nodeUpserts", index], ctx);
+  }
+  for (const [index, upsert] of artifact.writes.edgeUpserts.entries()) {
+    addPropertyPatchIssues(upsert, ["writes", "edgeUpserts", index], ctx);
+  }
+
+  const canonicalByMember = new Map<string, string>();
+  let invalidCanonicalMappings = false;
+  for (const mapping of artifact.guards.canonicalMappings) {
+    const member = entityKey(mapping.member);
+    const canonical = entityKey(mapping.canonical);
+    if (canonicalByMember.has(member)) invalidCanonicalMappings = true;
+    canonicalByMember.set(member, canonical);
+  }
+  for (const canonical of canonicalByMember.values()) {
+    if (canonicalByMember.get(canonical) !== canonical) {
+      invalidCanonicalMappings = true;
+    }
+  }
+  if (invalidCanonicalMappings) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["guards", "canonicalMappings"],
+      message:
+        "Canonical mappings must name each member once and include a self-mapped canonical root.",
+    });
+  }
+
+  const diagnostics = artifact.review.diagnostics;
+  if (diagnostics !== undefined) {
+    const expectedRetained = Math.min(diagnostics.total, diagnostics.limit);
+    if (
+      diagnostics.entries.length !== expectedRetained ||
+      diagnostics.truncated !== diagnostics.total > diagnostics.entries.length
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["review", "diagnostics"],
+        message:
+          "Diagnostic retention and truncation metadata must exactly match total and limit.",
+      });
+    }
+    for (const [index, diagnostic] of diagnostics.entries.entries()) {
+      addEvidenceIssues(
+        diagnostic.evidence,
+        ["review", "diagnostics", "entries", index, "evidence"],
+        ctx,
+      );
+      const accepted =
+        diagnostic.evidence.decision === "definitional" ||
+        (diagnostic.evidence.score >= diagnostic.evidence.threshold &&
+          diagnostic.reason === undefined);
+      if (
+        diagnostic.scoreDecision !== (accepted ? "accepted" : "rejected") ||
+        (diagnostic.evidence.decision === "scored" &&
+          diagnostic.reason === "noComparableValues" &&
+          diagnostic.evidence.score !== 0) ||
+        (diagnostic.evidence.decision === "definitional" &&
+          (diagnostic.reason !== undefined ||
+            typeof diagnostic.clusterDisposition !== "object")) ||
+        (diagnostic.scoreDecision === "rejected" &&
+          diagnostic.clusterDisposition !== undefined)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["review", "diagnostics", "entries", index],
+          message:
+            "Diagnostic decision, reason, and cluster disposition must agree with its score evidence.",
+        });
+      }
+    }
+  }
+
+  for (const [index, resolution] of artifact.review.resolutions.entries()) {
+    addResolutionEvidenceIssues(artifact, resolution, index, ctx);
+  }
+  for (const [
+    reconciliationIndex,
+    reconciliation,
+  ] of artifact.review.typeReconciliations.entries()) {
+    for (const [edgeIndex, evidence] of (
+      reconciliation.decisiveEdges ?? []
+    ).entries()) {
+      addEvidenceIssues(
+        evidence,
+        [
+          "review",
+          "typeReconciliations",
+          reconciliationIndex,
+          "decisiveEdges",
+          edgeIndex,
+        ],
+        ctx,
+      );
+    }
+  }
+}
+
+function addResolutionEvidenceIssues(
+  artifact: ParsedMergePlanArtifactInput,
+  resolution: ParsedMergePlanArtifactInput["review"]["resolutions"][number],
+  resolutionIndex: number,
+  ctx: z.RefinementCtx,
+): void {
+  const retypedKinds = new Map(
+    artifact.guards.retypes.map((retype) => [
+      entityKey(retype.entity),
+      retype.toKind,
+    ]),
+  );
+  const clusterMembers = artifact.guards.canonicalMappings
+    .filter((mapping) => {
+      const canonicalKind =
+        retypedKinds.get(entityKey(mapping.canonical)) ??
+        mapping.canonical.kind;
+      return (
+        mapping.canonical.id === resolution.canonicalId &&
+        canonicalKind === resolution.kind
+      );
+    })
+    .map((mapping) => mapping.member);
+  const uniqueMembers = new Map(
+    clusterMembers.map((member) => [entityKey(member), member]),
+  );
+  const memberIds = new Set(
+    [...uniqueMembers.values()].map((member) => member.id),
+  );
+  const declaredMemberIds = new Set(resolution.memberIds);
+  if (
+    uniqueMembers.size < 2 ||
+    declaredMemberIds.size !== resolution.memberIds.length ||
+    memberIds.size !== declaredMemberIds.size ||
+    [...memberIds].some((id) => !declaredMemberIds.has(id)) ||
+    resolution.decisiveEdges.length !== uniqueMembers.size - 1
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["review", "resolutions", resolutionIndex],
+      message:
+        "A resolution must name its complete guarded cluster and carry exactly N-1 decisive edges.",
+    });
+    return;
+  }
+
+  const parent = new Map([...uniqueMembers.keys()].map((key) => [key, key]));
+  const find = (key: string): string => {
+    const next = parent.get(key);
+    if (next === undefined || next === key) return key;
+    const root = find(next);
+    parent.set(key, root);
+    return root;
+  };
+  let invalidTree = false;
+  for (const [edgeIndex, evidence] of resolution.decisiveEdges.entries()) {
+    addEvidenceIssues(
+      evidence,
+      ["review", "resolutions", resolutionIndex, "decisiveEdges", edgeIndex],
+      ctx,
+    );
+    const a = entityKey(evidence.a);
+    const b = entityKey(evidence.b);
+    if (!uniqueMembers.has(a) || !uniqueMembers.has(b)) {
+      invalidTree = true;
+      continue;
+    }
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA === rootB) invalidTree = true;
+    else parent.set(rootB, rootA);
+  }
+  if (
+    invalidTree ||
+    new Set([...uniqueMembers.keys()].map((key) => find(key))).size !== 1
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["review", "resolutions", resolutionIndex, "decisiveEdges"],
+      message:
+        "Decisive edges must be an acyclic connected witness over the guarded cluster.",
+    });
+  }
+}
+
+function addEvidenceIssues(
+  evidence: ParsedMergePlanArtifactInput["review"]["resolutions"][number]["decisiveEdges"][number],
+  path: readonly (string | number)[],
+  ctx: z.RefinementCtx,
+): void {
+  const sourcesCanonical = evidence.sources.every((source, index) => {
+    const previous = evidence.sources[index - 1];
+    return previous === undefined || compareMatchSources(previous, source) < 0;
+  });
+  const invalidStrategy =
+    evidence.decision === "scored" &&
+    ((evidence.strategy.kind === "vector" &&
+      evidence.strategy.fields.length !== 1) ||
+      (evidence.strategy.kind === "hybrid" &&
+        (evidence.strategy.weights.vector < 0 ||
+          evidence.strategy.weights.vector > 1 ||
+          evidence.strategy.weights.fulltext < 0 ||
+          evidence.strategy.weights.fulltext > 1 ||
+          Math.abs(
+            evidence.strategy.weights.vector +
+              evidence.strategy.weights.fulltext -
+              1,
+          ) > Number.EPSILON)));
+  if (
+    compareEntityRefs(evidence.a, evidence.b) >= 0 ||
+    evidence.sources.length === 0 ||
+    !sourcesCanonical ||
+    (evidence.decision === "scored" &&
+      (evidence.score < 0 ||
+        evidence.score > 1 ||
+        evidence.threshold < 0 ||
+        evidence.threshold > 1)) ||
+    invalidStrategy
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: [...path],
+      message:
+        "Evidence endpoints and sources must be canonical, and scored values must be within [0, 1].",
+    });
+  }
+}
+
+function addOperationIssues(
+  deletions: readonly MergePlanEntityRef[],
+  upserts: readonly MergePlanEntityRef[],
+  role: "node" | "edge",
+  ctx: z.RefinementCtx,
+): void {
+  const deletionKeys = deletions.map((entry) => entityKey(entry));
+  const upsertKeys = upserts.map((entry) => entityKey(entry));
+  if (
+    new Set(deletionKeys).size !== deletionKeys.length ||
+    new Set(upsertKeys).size !== upsertKeys.length
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["writes"],
+      message: `The ${role} write set must not contain duplicate identities.`,
+    });
+  }
+  const deleted = new Set(deletionKeys);
+  if (upsertKeys.some((key) => deleted.has(key))) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["writes"],
+      message: `The same ${role} identity cannot be both deleted and upserted.`,
+    });
+  }
+}
+
+function addPropertyPatchIssues(
+  patch: Readonly<{
+    setProps: Readonly<Record<string, JsonValue>>;
+    unsetProps: readonly string[];
+  }>,
+  path: readonly (string | number)[],
+  ctx: z.RefinementCtx,
+): void {
+  const unset = new Set(patch.unsetProps);
+  if (
+    unset.size !== patch.unsetProps.length ||
+    Object.keys(patch.setProps).some((key) => unset.has(key))
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: [...path],
+      message:
+        "unsetProps must be duplicate-free and disjoint from setProps keys.",
+    });
+  }
+}
+
+function entityKey(entity: MergePlanEntityRef): string {
+  return JSON.stringify([entity.kind, entity.id]);
+}
+
+/** The current format's input, for writers: every new artifact is V3. */
+export const mergePlanArtifactV3InputSchema =
+  mergePlanArtifactV3InputBaseSchema.superRefine((artifact, ctx) =>
+    addSemanticIssues(artifact, ctx),
+  );
+
+/** The current format alone, the only one a plan is applied from. */
+export const mergePlanArtifactV3Schema =
+  mergePlanArtifactV3BaseSchema.superRefine((artifact, ctx) =>
+    addSemanticIssues(artifact, ctx),
+  );
+
+/** Formats 1 and 2, parsed for inspection only. */
+export const legacyMergePlanArtifactSchema =
+  legacyMergePlanArtifactBaseSchema.superRefine((artifact, ctx) =>
+    addSemanticIssues(artifact, ctx),
+  );

@@ -14,10 +14,21 @@ import {
 } from "../../ast";
 import { type DialectAdapter } from "../../dialect/types";
 import {
+  assertApproximateMetricSupported,
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
+import { type DatabaseExpression } from "../../expressions";
+import { compileOrderTerm, resolveNullOrdering } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { validateAggregateOperand } from "../aggregate-validation";
+import {
+  compileDatabaseExpression,
+  compileLegacyAggregateExpression,
+} from "../database-expressions";
+import { planIdentityFrontierExpansion } from "../identity-traversal";
+import { compileInverseTraversalDuplicateGuard } from "../inverse-traversal-guard";
+import { compileLimitOffsetClauses } from "../limit-offset";
 import { type TemporalFilterPass } from "../passes";
 import {
   compileKindFilter,
@@ -311,7 +322,7 @@ export function buildStandardTraversalCte(
   const nodeKinds = traversal.nodeKinds;
   const nodeKindFilter = compileKindFilter(sql.raw("n.kind"), nodeKinds);
 
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   const nodeCteContext: PredicateCompilerContext = {
@@ -335,7 +346,7 @@ export function buildStandardTraversalCte(
   const baseWhereClauses = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
-    edgeTemporalFilter,
+    edgeRowFilter,
     nodeTemporalFilter,
     ...nodePredicateClauses,
     ...edgePredicateClauses,
@@ -381,6 +392,75 @@ export function buildStandardTraversalCte(
     : ctx.dialect.capabilities.emitNotMaterializedHint ? sql`NOT MATERIALIZED `
     : sql``;
 
+  // A traversal CTE holds one row per edge matched from its frontier, and the
+  // outer query joins it back on the frontier node's (id, kind). The start CTE
+  // holds each node once, but an earlier traversal's CTE holds a node once per
+  // path into it; expanding each of those rows and then joining on the node
+  // would return every path once per path. So unless this CTE carries the
+  // whole path forward itself, it expands each frontier node exactly once. The
+  // derived table keeps the CTE's name, so the frontier reads the same either
+  // way.
+  const frontierHoldsOneRowPerNode =
+    carryForwardPreviousColumns || previousAlias === ast.start.alias;
+  const frontierSource =
+    frontierHoldsOneRowPerNode ?
+      sql`cte_${sql.raw(previousAlias)}`
+    : sql`(SELECT DISTINCT ${sql.raw(previousAlias)}_id, ${sql.raw(previousAlias)}_kind FROM cte_${sql.raw(previousAlias)}) AS cte_${sql.raw(previousAlias)}`;
+
+  const previousIdColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`;
+  const previousKindColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`;
+  const identityFrontierExpansion =
+    traversal.includeIdentityMembers === true ?
+      planIdentityFrontierExpansion({
+        ast,
+        ctx,
+        graphId,
+        previousId: previousIdColumn,
+        previousKind: previousKindColumn,
+        temporalFilterPass,
+      })
+    : undefined;
+
+  // A widened frontier reaches the edge through COALESCE over an outer join, so
+  // the engine sees no plain frontier-to-edge equality to plan from and may drive
+  // the nested loop from the edge table instead — a rescan of every candidate
+  // edge per frontier row, which is the cost typegraph#270 removes. Pinning the
+  // frontier ahead of the edge table restores the indexed
+  // (graph_id, from_kind, from_id) seek on engines that read FROM order as a
+  // directive; the same planner control the recursive emitter applies to its
+  // worktable, so it rides the same capability. A traversal without identity
+  // expansion joins on the frontier's own columns and needs no pin, so its SQL is
+  // left untouched.
+  const pinFrontierAheadOfEdges =
+    identityFrontierExpansion !== undefined &&
+    ctx.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
+
+  /**
+   * Connects a candidate edge to the frontier. A widened frontier and a plain
+   * one join the edge the same way — on the frontier row's (kind, id) or on the
+   * class member's — so no traversal reaches an edge through a correlated
+   * membership test.
+   */
+  function compileSourceJoin(
+    branch: Readonly<{
+      joinField: "from_id" | "to_id";
+      joinKindField: "from_kind" | "to_kind";
+    }>,
+  ): SqlFragment {
+    const edgeId = sql`e.${sql.raw(branch.joinField)}`;
+    const edgeKind = sql`e.${sql.raw(branch.joinKindField)}`;
+    if (identityFrontierExpansion !== undefined) {
+      return sql`
+        ${identityFrontierExpansion.memberId} = ${edgeId}
+        AND ${identityFrontierExpansion.memberKind} = ${edgeKind}
+      `;
+    }
+    return sql`
+      ${previousIdColumn} = ${edgeId}
+      AND ${previousKindColumn} = ${edgeKind}
+    `;
+  }
+
   function compileTraversalBranch(
     branch: Readonly<{
       duplicateGuard?: SqlFragment | undefined;
@@ -393,23 +473,53 @@ export function buildStandardTraversalCte(
   ): SqlFragment {
     const whereClauses = [
       ...baseWhereClauses,
+      // Conditions the frontier widening cannot state in a join condition —
+      // currently the member-visibility guard. Every branch of the step carries
+      // them, because every branch reads the widened frontier.
+      ...(identityFrontierExpansion?.whereClauses ?? []),
       compileKindFilter(sql.raw("e.kind"), branch.edgeKinds),
-      compileKindFilter(
-        sql.raw(`e.${branch.joinKindField}`),
-        previousNodeKinds,
-      ),
       compileKindFilter(sql.raw(`e.${branch.targetKindField}`), nodeKinds),
     ];
+
+    if (traversal.includeIdentityMembers !== true) {
+      whereClauses.push(
+        compileKindFilter(
+          sql.raw(`e.${branch.joinKindField}`),
+          previousNodeKinds,
+        ),
+      );
+    }
 
     if (branch.duplicateGuard !== undefined) {
       whereClauses.push(branch.duplicateGuard);
     }
 
+    const sourceJoin = compileSourceJoin(branch);
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
+
+    // The target join is spelled out in both orderings rather than hoisted into
+    // a shared fragment: interpolating one would surround it with the
+    // fragment's own leading and trailing newlines, and a traversal that needs
+    // no pin has to compile byte-identically to what it did before the pin
+    // existed. The recursive emitter repeats it for the same reason.
+    if (pinFrontierAheadOfEdges) {
+      return sql`
+        SELECT ${sql.join(selectColumns, sql`, `)}
+        FROM ${frontierSource}
+        ${frontierJoin}
+        CROSS JOIN ${ctx.schema.edgesTable} e
+        JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
+          AND n.id = e.${sql.raw(branch.targetField)}
+          AND n.kind = e.${sql.raw(branch.targetKindField)}
+        WHERE ${sql.join([sourceJoin, ...whereClauses], sql` AND `)}
+      `;
+    }
+
     return sql`
       SELECT ${sql.join(selectColumns, sql`, `)}
-      FROM cte_${sql.raw(previousAlias)}
-      JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id = e.${sql.raw(branch.joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind = e.${sql.raw(branch.joinKindField)}
+      FROM ${frontierSource}
+      ${frontierJoin}
+      JOIN ${ctx.schema.edgesTable} e ON ${sourceJoin}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}
@@ -459,17 +569,12 @@ export function buildStandardTraversalCte(
   const inverseTargetKindField =
     traversal.direction === "out" ? "from_kind" : "to_kind";
 
-  const overlappingKinds = inverseEdgeKinds.filter((kind) =>
-    directEdgeKinds.includes(kind),
+  const duplicateGuard = compileInverseTraversalDuplicateGuard(
+    directEdgeKinds,
+    inverseEdgeKinds,
+    (overlappingKinds) =>
+      compileKindFilter(sql.raw("e.kind"), overlappingKinds),
   );
-
-  const duplicateGuard =
-    overlappingKinds.length > 0 ?
-      sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(
-        sql.raw("e.kind"),
-        overlappingKinds,
-      )})`
-    : undefined;
 
   const inverseBranch = compileTraversalBranch({
     duplicateGuard,
@@ -505,66 +610,53 @@ export function buildStandardTraversalCte(
 function compileAggregateExprFromSource(
   expr: AggregateExpr,
   dialect: DialectAdapter,
+  cteAliasOverride?: string,
 ): SqlFragment {
+  validateAggregateOperand(expr);
   const { field } = expr;
-  const fn = expr.function;
-
-  switch (fn) {
-    case "count":
-    case "countDistinct":
-    case "sum":
-    case "avg":
-    case "min":
-    case "max": {
-      const cteAlias = `cte_${field.alias}`;
-      const column = compileFieldValue(
-        field,
-        dialect,
-        field.valueType,
-        cteAlias,
-      );
-      if (fn === "countDistinct") {
-        return sql`COUNT(DISTINCT ${column})`;
-      }
-      return sql`${sql.raw(fn.toUpperCase())}(${column})`;
-    }
-    default: {
-      throw new UnsupportedPredicateError(
-        `Unknown aggregate function: ${String(fn)}`,
-      );
-    }
-  }
+  return compileLegacyAggregateExpression(expr, {
+    dialect,
+    resolveFieldCteAlias() {
+      return cteAliasOverride ?? `cte_${field.alias}`;
+    },
+  });
 }
 
 function compileProjectedSource(
   field: {
     cteAlias?: string;
-    source: FieldRef | AggregateExpr;
+    source: DatabaseExpression | FieldRef | AggregateExpr;
   },
-  dialect: DialectAdapter,
+  ast: QueryAst,
+  ctx: PredicateCompilerContext,
+  cteAliasOverride?: string,
 ): SqlFragment {
-  if (isAggregateExpr(field.source)) {
-    return compileAggregateExprFromSource(field.source, dialect);
+  const { dialect } = ctx;
+  const cteAlias = cteAliasOverride ?? field.cteAlias;
+  if (field.source.__type === "database_expression") {
+    return compileStandardDatabaseExpression(ast, field.source, ctx, cteAlias);
   }
-  const cteAlias = field.cteAlias ?? `cte_${field.source.alias}`;
+  if (isAggregateExpr(field.source)) {
+    return compileAggregateExprFromSource(field.source, dialect, cteAlias);
+  }
   return compileFieldValue(
     field.source,
     dialect,
     field.source.valueType,
-    cteAlias,
+    cteAlias ?? `cte_${field.source.alias}`,
   );
 }
 
 type BuildStandardProjectionInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
-  dialect: DialectAdapter;
+  ctx: PredicateCompilerContext;
 }>;
 
 export function buildStandardProjection(
   input: BuildStandardProjectionInput,
 ): SqlFragment {
-  const { ast, collapsedTraversalCteAlias, dialect } = input;
+  const { ast, collapsedTraversalCteAlias, ctx } = input;
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileSelectiveProjection(
       ast.selectiveFields,
@@ -579,7 +671,12 @@ export function buildStandardProjection(
   }
 
   const projectedFields = fields.map((field) => {
-    const source = compileProjectedSource(field, dialect);
+    const source = compileProjectedSource(
+      field,
+      ast,
+      ctx,
+      collapsedTraversalCteAlias,
+    );
     return sql`${source} AS ${quoteIdentifier(field.outputName)}`;
   });
   return sql.join(projectedFields, sql`, `);
@@ -627,10 +724,13 @@ function compileSelectiveProjection(
 
 function compileOrderFieldValue(
   ast: QueryAst,
-  field: FieldRef,
+  field: DatabaseExpression | FieldRef,
   dialect: DialectAdapter,
   cteAlias: string,
 ): SqlFragment {
+  if (field.__type === "database_expression") {
+    return compileStandardDatabaseExpression(ast, field, dialect, cteAlias);
+  }
   const selectiveField = findSelectivePropsFieldForFieldRef(
     ast.selectiveFields,
     field,
@@ -640,6 +740,40 @@ function compileOrderFieldValue(
   }
 
   return compileFieldValue(field, dialect, field.valueType, cteAlias);
+}
+
+function compileStandardDatabaseExpression(
+  ast: QueryAst,
+  expression: DatabaseExpression,
+  context: PredicateCompilerContext | DialectAdapter,
+  cteAliasOverride?: string,
+  allowAggregates = true,
+): SqlFragment {
+  const ctx = isPredicateCompilerContext(context) ? context : undefined;
+  const dialect =
+    isPredicateCompilerContext(context) ? context.dialect : context;
+  const aliasToCte = buildAliasToCteMap(ast);
+  return compileDatabaseExpression(expression, {
+    allowAggregates,
+    ...(allowAggregates ? {} : { aggregateClause: "GROUP BY" }),
+    dialect,
+    orderedAggregates: ctx?.orderedAggregates ?? true,
+    ...(ctx?.compileExpressionSubquery === undefined ?
+      {}
+    : { compileSubquery: ctx.compileExpressionSubquery }),
+    ...(ctx?.compileExpressionOuterReference === undefined ?
+      {}
+    : { compileOuterReference: ctx.compileExpressionOuterReference }),
+    resolveFieldCteAlias(field) {
+      return cteAliasOverride ?? aliasToCte.get(field.alias);
+    },
+  });
+}
+
+function isPredicateCompilerContext(
+  context: DialectAdapter | PredicateCompilerContext,
+): context is PredicateCompilerContext {
+  return "schema" in context;
 }
 
 function buildRelevanceJoins(
@@ -770,22 +904,19 @@ export function buildStandardOrderBy(
     }
     const cteAlias =
       collapsedTraversalCteAlias ??
-      aliasToCte?.get(orderSpec.field.alias) ??
-      `cte_${orderSpec.field.alias}`;
+      (orderSpec.field.__type === "field_ref" ?
+        (aliasToCte?.get(orderSpec.field.alias) ??
+        `cte_${orderSpec.field.alias}`)
+      : undefined) ??
+      "";
     const field = compileOrderFieldValue(
       ast,
       orderSpec.field,
       dialect,
       cteAlias,
     );
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    parts.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    const nulls = resolveNullOrdering(orderSpec);
+    parts.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
 
   // Aggregate ordering references the projected SELECT-list output alias
@@ -794,23 +925,10 @@ export function buildStandardOrderBy(
   // an alias, and both SQLite and PostgreSQL allow ORDER BY to reference
   // it, so this needs no per-CTE or per-dialect resolution.
   //
-  // Nulls ordering can't reuse the `(field IS NULL) direction, field
-  // direction` trick above: unlike a source-table field reference, an
-  // output alias is only resolved by either dialect when the ORDER BY term
-  // is the bare identifier itself — wrapping it in `(alias IS NULL)`
-  // makes both SQLite and PostgreSQL look for a real column named
-  // `alias` and fail. The standard `NULLS FIRST`/`NULLS LAST` suffix
-  // (supported by both dialects) sidesteps that: it attaches to the bare
-  // identifier rather than embedding it in a larger expression.
   for (const orderSpec of aggregateOrderBy) {
     const column = quoteIdentifier(orderSpec.outputName);
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-    const nullsKeyword = sql.raw(
-      nulls === "first" ? "NULLS FIRST" : "NULLS LAST",
-    );
-    parts.push(sql`${column} ${direction} ${nullsKeyword}`);
+    const nulls = resolveNullOrdering(orderSpec);
+    parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
 
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
@@ -867,6 +985,7 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
   collapsedTraversalCteAlias?: string;
   dialect: DialectAdapter;
   fromClause: SqlFragment;
+  where?: SqlFragment;
   limit: number;
   offset?: number | undefined;
 }>;
@@ -903,7 +1022,9 @@ export function buildLateMaterializedTopKCte(
       ast,
       orderSpec.field,
       dialect,
-      cteAliasFor(orderSpec.field.alias),
+      orderSpec.field.__type === "field_ref" ?
+        cteAliasFor(orderSpec.field.alias)
+      : (collapsedTraversalCteAlias ?? ""),
     );
     columns.push(
       sql`${value} AS ${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`,
@@ -920,12 +1041,14 @@ export function buildLateMaterializedTopKCte(
   const limitOffset = buildLimitOffsetClause({
     limit: input.limit,
     offset: input.offset,
+    dialect,
   });
 
   const parts: SqlFragment[] = [
     sql`SELECT ${sql.join(columns, sql`, `)}`,
     fromClause,
   ];
+  if (input.where !== undefined) parts.push(input.where);
   if (innerOrderBy !== undefined) parts.push(innerOrderBy);
   if (limitOffset !== undefined) parts.push(limitOffset);
 
@@ -960,8 +1083,7 @@ export function buildLateMaterializedOuterProjection(
 /**
  * The outer ORDER BY: re-orders the LIMIT survivors by the `__lm_sk{n}` sort
  * values carried out of the topK CTE, matching `buildStandardOrderBy`'s
- * null-ordering semantics. Referencing the CTE's real columns (not bare output
- * aliases) keeps the `(x IS NULL)` null-placement trick valid on both dialects.
+ * null-ordering semantics.
  */
 export function buildLateMaterializedOuterOrderBy(
   ast: QueryAst,
@@ -972,14 +1094,8 @@ export function buildLateMaterializedOuterOrderBy(
   const parts: SqlFragment[] = [];
   for (const [index, orderSpec] of orderBy.entries()) {
     const column = sql`${topk}.${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`;
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    parts.push(
-      sql`(${column} IS NULL) ${nullsDirection}`,
-      sql`${column} ${direction}`,
-    );
+    const nulls = resolveNullOrdering(orderSpec);
+    parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
 }
@@ -1019,7 +1135,7 @@ export function buildStandardGroupBy(
   }
 
   const seenKeys = new Set<string>();
-  const allFields: FieldRef[] = [];
+  const allFields: (DatabaseExpression | FieldRef)[] = [];
 
   for (const projectedField of ast.projection.fields) {
     if (projectedField.source.__type === "field_ref") {
@@ -1032,6 +1148,10 @@ export function buildStandardGroupBy(
   }
 
   for (const field of ast.groupBy.fields) {
+    if (field.__type === "database_expression") {
+      allFields.push(field);
+      continue;
+    }
     const key = fieldRefKey(field);
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
@@ -1045,15 +1165,36 @@ export function buildStandardGroupBy(
 
   const aliasToCte = buildAliasToCteMap(ast);
   const parts = allFields.map((field) =>
-    compileFieldValue(
-      field,
-      dialect,
-      field.valueType,
-      aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
-    ),
+    field.__type === "database_expression" ?
+      compileStandardDatabaseExpression(ast, field, dialect, undefined, false)
+    : compileFieldValue(
+        field,
+        dialect,
+        field.valueType,
+        aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
+      ),
   );
 
   return sql`GROUP BY ${sql.join(parts, sql`, `)}`;
+}
+
+/** Filters completed alias matches, never the candidate or optional-match CTEs. */
+export function buildStandardResultWhere(
+  input: Readonly<{
+    ast: QueryAst;
+    ctx: PredicateCompilerContext;
+  }>,
+): SqlFragment | undefined {
+  const { ast, ctx } = input;
+  if (ast.resultPredicate === undefined) return undefined;
+  const aliases = buildAliasToCteMap(ast);
+  const condition = compilePredicateExpression(ast.resultPredicate, {
+    ...ctx,
+    databaseExpressionAggregates: false,
+    resolveFieldCteAlias: (field) =>
+      aliases.get(field.alias) ?? `cte_${field.alias}`,
+  });
+  return sql`WHERE ${condition}`;
 }
 
 type BuildStandardHavingInput = Readonly<{
@@ -1069,7 +1210,10 @@ export function buildStandardHaving(
     return undefined;
   }
 
-  const condition = compilePredicateExpression(ast.having, ctx);
+  const condition = compilePredicateExpression(ast.having, {
+    ...ctx,
+    databaseExpressionAggregates: true,
+  });
   return sql`HAVING ${condition}`;
 }
 
@@ -1094,7 +1238,9 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
  * `MATCH … k=`, libSQL `vector_top_k`, pgvector's index-eligible scan) —
  * scoped to the alias's candidate nodes via the same `candidates` pushdown
  * the search facade uses. Semantics become approximate (index recall); a
- * slot declared `indexType: "none"` degrades to the exact scan.
+ * slot declared `indexType: "none"` degrades to the exact scan, and a
+ * `metric` override the slot's ANN structure cannot serve is refused rather
+ * than degraded (see {@link assertApproximateMetricSupported}).
  */
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
@@ -1138,8 +1284,8 @@ export function buildStandardEmbeddingsCte(
     const tableName = vectorStrategy.tableName(graphId, kind, fieldPath);
     const slotDescriptor = vectorSlots?.get(vectorSlotKey(kind, fieldPath));
     // Use the predicate's explicit metric if given, else this kind's DECLARED
-    // metric (the one its ANN index was built for). Resolving per kind keeps an
-    // includeSubClasses union correct when subkinds declare different metrics.
+    // metric (the one its ANN index was built for). Resolving per kind keeps a
+    // subclass-expanded union correct when subkinds declare different metrics.
     const branchMetric = metric ?? slotDescriptor?.metric ?? "cosine";
 
     // Approximate opt-in: retrieve this kind's candidates via the
@@ -1158,13 +1304,28 @@ export function buildStandardEmbeddingsCte(
     // libSQL's DiskANN index and pgvector's operator class are built for
     // one metric), so retrieving by the declared metric and re-scoring
     // under an overridden one would silently miss the override metric's
-    // true nearest neighbors. A mismatched override falls back to the
-    // exact scan below — correct for any metric, like `indexType: "none"`.
-    // Engines whose `buildSearch` is EXACT (vec0's brute-force C KNN)
-    // serve the non-approximate branch through it as well: identical
-    // results to the SQL distance scan at engine speed (489ms -> 113ms
-    // at 50k on the SQLite lane). The metric gate stays: the engine
-    // form is built for the slot's declared metric.
+    // true nearest neighbors.
+    //
+    // A caller who STATED `approximate: true` for such a slot is refused
+    // ({@link assertApproximateMetricSupported}) rather than quietly served
+    // the exact scan: the two options cannot both be honored, and which one
+    // was dropped is not something the caller can see in the results. Where
+    // nothing was stated the fallback stays silent because nothing is being
+    // ignored — engines whose `buildSearch` is EXACT (vec0's brute-force C
+    // KNN) serve the non-approximate branch through the engine form when the
+    // metric matches (identical results to the SQL distance scan at engine
+    // speed: 489ms -> 113ms at 50k on the SQLite lane) and through the SQL
+    // scan when it does not.
+    if (slotDescriptor !== undefined) {
+      assertApproximateMetricSupported({
+        approximate: vectorPredicate.approximate,
+        requestedMetric: metric,
+        declaredMetric: slotDescriptor.metric,
+        indexType: slotDescriptor.indexType,
+        nodeKind: kind,
+        fieldPath,
+      });
+    }
     const engineFormEligible =
       vectorPredicate.approximate === true ||
       vectorStrategy.searchIsExact === true;
@@ -1456,22 +1617,18 @@ function compileUserOrderBy(
       );
     }
     const cteAlias =
-      aliasToCte.get(orderSpec.field.alias) ??
-      `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`;
+      orderSpec.field.__type === "field_ref" ?
+        (aliasToCte.get(orderSpec.field.alias) ??
+        `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`)
+      : "";
     const field = compileOrderFieldValue(
       ast,
       orderSpec.field,
       dialect,
       cteAlias,
     );
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-    fragments.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    const nulls = resolveNullOrdering(orderSpec);
+    fragments.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
   return fragments;
 }
@@ -1527,9 +1684,12 @@ export function buildStandardHybridRrfOrderBy(
   // non-finite / negative values before we reach here. sql.raw on these
   // numeric constants is deliberate — they're schema-level config, not
   // user-bindable.
+  // `* 1.0` is also deliberate: PostgreSQL otherwise performs integer
+  // division when the default weight and rank constant are integers. Keep
+  // this promotion in lockstep with the backend hybrid statement emitter.
   const rrfOrder = sql.raw(
-    `(COALESCE(${vectorWeight} / (${k} + ${EMBEDDINGS_CTE_ALIAS}.ord), 0) + ` +
-      `COALESCE(${fulltextWeight} / (${k} + ${FULLTEXT_CTE_ALIAS}.ord), 0)) DESC`,
+    `(COALESCE((${vectorWeight} * 1.0) / (${k} + ${EMBEDDINGS_CTE_ALIAS}.ord), 0) + ` +
+      `COALESCE((${fulltextWeight} * 1.0) / (${k} + ${FULLTEXT_CTE_ALIAS}.ord), 0)) DESC`,
   );
   // Deterministic tiebreak on the CTE-projected node_id. At least one of
   // the two CTEs always has a non-NULL node_id for any row returned by
@@ -1559,6 +1719,7 @@ export function buildStandardVectorOrderBy(
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{
+  dialect: DialectAdapter;
   limit: number | undefined;
   offset: number | undefined;
 }>;
@@ -1566,15 +1727,10 @@ type BuildLimitOffsetClauseInput = Readonly<{
 export function buildLimitOffsetClause(
   input: BuildLimitOffsetClauseInput,
 ): SqlFragment | undefined {
-  const { limit, offset } = input;
-  const parts: SqlFragment[] = [];
-
-  if (limit !== undefined) {
-    parts.push(sql`LIMIT ${limit}`);
-  }
-  if (offset !== undefined) {
-    parts.push(sql`OFFSET ${offset}`);
-  }
-
+  const parts = compileLimitOffsetClauses(
+    input.limit,
+    input.offset,
+    input.dialect,
+  );
   return parts.length > 0 ? sql.join(parts, sql` `) : undefined;
 }

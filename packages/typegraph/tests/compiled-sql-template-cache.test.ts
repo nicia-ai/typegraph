@@ -19,6 +19,10 @@ import {
   field,
   param as parameter,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
 import { compileQuery } from "../src/query/compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../src/query/compiler/temporal";
@@ -42,8 +46,7 @@ function countingBackend(real: GraphBackend): {
   counts: { compileSql: number; executeRaw: number };
 } {
   const counts = { compileSql: 0, executeRaw: 0 };
-  const backend: GraphBackend = {
-    ...real,
+  const backend: GraphBackend = deriveBackend(real, {
     compileSql(query) {
       counts.compileSql++;
       return requireDefined(real.compileSql)(query);
@@ -55,14 +58,13 @@ function countingBackend(real: GraphBackend): {
       counts.executeRaw++;
       return requireDefined(real.executeRaw)<T>(sqlText, params);
     },
-  };
+  });
   return { backend, counts };
 }
 
 /** A backend that cannot run raw SQL text (the recompilation-fallback path). */
 function backendWithoutRawExecution(real: GraphBackend): GraphBackend {
-  const { executeRaw: _omitted, ...rest } = real;
-  return rest;
+  return projectBackendWithout(real, ["executeRaw"]);
 }
 
 async function waitForNextMillisecond(): Promise<void> {
@@ -118,6 +120,54 @@ describe("compiled SQL template cache", () => {
     expect(counts.executeRaw).toBe(3);
   });
 
+  it("compiles a list-valued in() parameter once across differing list lengths", async () => {
+    const { backend, counts } = countingBackend(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+
+    const peopleByName = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.in(parameter("names")))
+      .select((ctx) => ctx.p.name)
+      .prepare();
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await peopleByName.execute({ names: ["Alice"] })).toEqual(["Alice"]);
+    const both = await peopleByName.execute({ names: ["Alice", "Bob"] });
+    expect(both.toSorted()).toEqual(["Alice", "Bob"]);
+    expect(await peopleByName.execute({ names: [] })).toEqual([]);
+
+    // The list rides on a single placeholder, so arity never reaches the SQL
+    // text — three different list lengths share one compiled statement.
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(3);
+  });
+
+  it("binds a list-valued in() parameter without executeRaw", async () => {
+    const backend = backendWithoutRawExecution(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+
+    // The fallback substitutes the binding into the AST as a literal list
+    // instead of packing it behind a placeholder; results must not differ.
+    const peopleByName = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.in(parameter("names")))
+      .select((ctx) => ctx.p.name)
+      .prepare();
+
+    const both = await peopleByName.execute({ names: ["Alice", "Bob"] });
+    expect(both.toSorted()).toEqual(["Alice", "Bob"]);
+    expect(await peopleByName.execute({ names: ["Bob"] })).toEqual(["Bob"]);
+    expect(await peopleByName.execute({ names: [] })).toEqual([]);
+  });
+
   it("compiles a reused ExecutableQuery instance once across executions", async () => {
     const { backend, counts } = countingBackend(real);
     const store = createStore(graph, backend);
@@ -158,6 +208,138 @@ describe("compiled SQL template cache", () => {
 
     expect(counts.compileSql).toBe(1);
     expect(counts.executeRaw).toBe(2);
+  });
+
+  it("compiles a reused projection once and refreshes its current read instant", async () => {
+    const { backend, counts } = countingBackend(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    const names = store
+      .query()
+      .from("Person", "p")
+      .project((ctx) => ({ name: ctx.p.name }));
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await names.execute()).toEqual([{ name: "Alice" }]);
+    await waitForNextMillisecond();
+    await store.nodes.Person.create({ name: "Bob" });
+    expect(await names.execute()).toEqual(
+      expect.arrayContaining([{ name: "Alice" }, { name: "Bob" }]),
+    );
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await names.count()).toBe(2);
+    expect(await names.count()).toBe(2);
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+  });
+
+  it("reuses one projection template across prepared bindings", async () => {
+    const { backend, counts } = countingBackend(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+    const personByName = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq(parameter("name")))
+      .project((ctx) => ({ name: ctx.p.name }))
+      .prepare();
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await personByName.execute({ name: "Alice" })).toEqual([
+      { name: "Alice" },
+    ]);
+    expect(await personByName.execute({ name: "Bob" })).toEqual([
+      { name: "Bob" },
+    ]);
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+  });
+
+  it("reuses one relation template across direct and prepared execution", async () => {
+    const { backend, counts } = countingBackend(real);
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+    const relation = store
+      .query()
+      .from("Person", "p")
+      .project((ctx) => ({ name: ctx.p.name }))
+      .asRelation();
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    await relation.execute();
+    await relation.execute();
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await relation.count()).toBe(2);
+    expect(await relation.count()).toBe(2);
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+
+    const prepared = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq(parameter("name")))
+      .project((ctx) => ({ name: ctx.p.name }))
+      .asRelation()
+      .prepare();
+
+    counts.compileSql = 0;
+    counts.executeRaw = 0;
+
+    expect(await prepared.execute({ name: "Alice" })).toEqual([
+      { name: "Alice" },
+    ]);
+    expect(await prepared.execute({ name: "Bob" })).toEqual([{ name: "Bob" }]);
+
+    expect(counts.compileSql).toBe(1);
+    expect(counts.executeRaw).toBe(2);
+  });
+
+  it("keeps projection and relation prepared execution correct without raw SQL", async () => {
+    const store = createStore(graph, backendWithoutRawExecution(real));
+    await store.nodes.Person.create({ name: "Alice" });
+    await store.nodes.Person.create({ name: "Bob" });
+
+    const projection = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq(parameter("name")))
+      .project((ctx) => ({ name: ctx.p.name }))
+      .prepare();
+    expect(await projection.execute({ name: "Alice" })).toEqual([
+      { name: "Alice" },
+    ]);
+
+    const relation = store
+      .query()
+      .from("Person", "p")
+      .whereNode("p", (p) => p.name.eq(parameter("name")))
+      .project((ctx) => ({ name: ctx.p.name }))
+      .asRelation()
+      .prepare();
+    expect(await relation.execute({ name: "Bob" })).toEqual([{ name: "Bob" }]);
   });
 
   it("falls back to per-call recompilation and stays correct without executeRaw", async () => {

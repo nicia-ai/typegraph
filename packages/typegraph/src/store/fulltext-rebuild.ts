@@ -11,6 +11,7 @@
  */
 import { type z } from "zod";
 
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
   type GraphBackend,
   type NodeRow,
@@ -18,9 +19,17 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../backend/types";
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+  ValidationError,
+} from "../errors";
 import { type KindRegistry } from "../registry";
-import { computeFulltextContent, getSearchableFields } from "./fulltext-sync";
+import {
+  assertFulltextMember,
+  computeFulltextContent,
+  getSearchableFields,
+} from "./fulltext-sync";
 
 /**
  * Default page size. Fits under SQLite's ~32766 placeholder limit with
@@ -81,6 +90,32 @@ type RebuildContext = Readonly<{
   registry: KindRegistry;
 }>;
 
+/** Anything the rebuild can read nodes from and write fulltext rows to. */
+type FulltextRebuildTarget = GraphBackend | TransactionBackend;
+
+/**
+ * How the rebuild frames its writes. The paging, content computation, and
+ * accounting are identical whichever way a caller drives it; only the
+ * transaction boundary differs, so that is the only thing injected.
+ *
+ * - The standalone `store.search.rebuildFulltext()` transacts per page, so
+ *   a maintenance pass over a large graph never holds one long
+ *   transaction and can resume where it stopped.
+ * - The destructive `store.rebuildContribution()` runs every page inside
+ *   the single transaction that also dropped, recreated, and will stamp
+ *   the storage, because there the refill is not optional: publishing the
+ *   marker over a half-filled table would advertise a healthy index that
+ *   answers queries with nothing.
+ */
+type FulltextRebuildDriver = Readonly<{
+  /** Backend the paged node reads go through. */
+  read: FulltextRebuildTarget;
+  /** Runs one page's writes under whatever framing the caller wants. */
+  runPage: (
+    write: (target: FulltextRebuildTarget) => Promise<void>,
+  ) => Promise<void>;
+}>;
+
 function validatePageSize(value: number | undefined): number {
   if (value === undefined) return DEFAULT_PAGE_SIZE;
   if (!Number.isInteger(value) || value <= 0) {
@@ -121,14 +156,66 @@ export async function rebuildFulltextIndex(
   nodeKind: string | undefined,
   options: RebuildFulltextOptions,
 ): Promise<RebuildFulltextResult> {
-  const { backend, registry } = ctx;
+  const { backend } = ctx;
+  return runFulltextRebuild(
+    {
+      read: backend,
+      runPage: (write) => runOptionallyInTransaction(backend, write),
+    },
+    ctx,
+    nodeKind,
+    options,
+  );
+}
 
-  if (!backend.upsertFulltext || !backend.deleteFulltext) {
-    throw new ConfigurationError(
-      "Backend does not support fulltext; cannot rebuild index",
-      { backend: backend.dialect, capability: "fulltext" },
+/**
+ * Reconstructs fulltext content entirely inside a transaction the caller
+ * already owns, with no nested transaction of its own.
+ *
+ * Used by the destructive contribution rebuild, whose whole point is that
+ * the drop, the recreate, this refill, and the marker stamp commit
+ * together. `target` must be a transaction-scoped backend whose fulltext
+ * methods are NOT gated on the durable marker: this runs while the
+ * contribution is mid-rebuild, so a gate would refuse the very writes
+ * that make it healthy again.
+ */
+export async function repopulateFulltextInTransaction(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  target: TransactionBackend,
+  options: RebuildFulltextOptions = {},
+): Promise<RebuildFulltextResult> {
+  return runFulltextRebuild(
+    { read: target, runPage: (write) => write(target) },
+    ctx,
+    undefined,
+    options,
+  );
+}
+
+async function runFulltextRebuild(
+  driver: FulltextRebuildDriver,
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  nodeKind: string | undefined,
+  options: RebuildFulltextOptions,
+): Promise<RebuildFulltextResult> {
+  const { registry } = ctx;
+  const backend = driver.read;
+
+  // `resolveBackendFulltext` is the one decision for "is fulltext
+  // available on this backend" — the same one the write path consults.
+  // A member missing past that point is a contract violation, asserted
+  // separately below rather than folded into this availability check.
+  if (resolveBackendFulltext(backend) === false) {
+    throw new UnsupportedBackendCapabilityError(
+      "rebuildFulltext()",
+      "fulltext",
+      { backend: backend.dialect, reason: "fulltext_unsupported" },
+      "This backend declares no fulltext capability, so there is no " +
+        "fulltext index to rebuild. Use a backend with fulltext support.",
     );
   }
+  assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+  assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
 
   const pageSize = validatePageSize(options.pageSize);
   const maxSkippedIds = validateMaxSkippedIds(options.maxSkippedIds);
@@ -175,7 +262,7 @@ export async function rebuildFulltextIndex(
       }
 
       const writePage = async (
-        target: GraphBackend | TransactionBackend,
+        target: FulltextRebuildTarget,
       ): Promise<void> => {
         if (pageResult.toUpsert.length > 0) {
           if (target.upsertFulltextBatch) {
@@ -194,6 +281,12 @@ export async function rebuildFulltextIndex(
                 language: item.language,
               });
             }
+          } else {
+            assertFulltextMember(
+              target.upsertFulltext,
+              "upsertFulltext",
+              target,
+            );
           }
         }
         if (pageResult.toDelete.length > 0) {
@@ -211,15 +304,23 @@ export async function rebuildFulltextIndex(
                 nodeId,
               });
             }
+          } else {
+            assertFulltextMember(
+              target.deleteFulltext,
+              "deleteFulltext",
+              target,
+            );
           }
         }
       };
 
-      // Wrapped in a transaction when supported so a partial failure
-      // mid-page doesn't leave the index half-rebuilt. On backends without
-      // transactions, refusing to rebuild would be worse than the lost
-      // atomicity (the index would stay permanently stale).
-      await runOptionallyInTransaction(backend, writePage);
+      // Framed by the driver: transacted per page for a standalone
+      // maintenance pass (so a partial failure mid-page doesn't leave the
+      // index half-rebuilt, and a backend without transactions still
+      // rebuilds rather than staying permanently stale), or run directly
+      // on the caller's transaction when the refill is one step of a
+      // larger atomic operation.
+      await driver.runPage(writePage);
 
       processed += rows.length;
       upserted += pageResult.toUpsert.length;

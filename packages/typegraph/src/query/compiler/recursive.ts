@@ -8,13 +8,28 @@ import {
   CompilerInvariantError,
   UnsupportedPredicateError,
 } from "../../errors";
-import { type QueryAst, type SelectiveField } from "../ast";
+import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../../utils/path";
+import {
+  type FieldRef,
+  type QueryAst,
+  type SelectiveField,
+  type TraversalDirection,
+} from "../ast";
 import {
   type DialectAdapter,
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
+import type { DatabaseExpression } from "../expressions";
+import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
+import { compileDatabaseExpression } from "./database-expressions";
 import { emitRecursiveQuerySql } from "./emitter";
+import {
+  compileIdentityClassCte,
+  planIdentityFrontierExpansion,
+} from "./identity-traversal";
+import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard";
+import { compileLimitOffsetClauses } from "./limit-offset";
 import {
   createTemporalFilterPass,
   runCompilerPass,
@@ -25,11 +40,22 @@ import {
 import { type LogicalPlan, lowerRecursiveQueryToLogicalPlan } from "./plan";
 import { compileKindFilter as sharedCompileKindFilter } from "./predicate-utils";
 import {
+  assertRecursiveTraversalSupported,
   compileFieldValue,
+  compileFieldValueFromColumn,
   compilePredicateExpression,
   type PredicateCompilerContext,
 } from "./predicates";
 import { assertRecordedQueryAstDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
+import {
+  type RecursivePathTokenShape,
+  recursivePathTokenShape,
+  recursiveWalkNodeKinds,
+} from "./recursive-path-token";
+import {
+  markPredicateFieldsAsRequired,
+  visitExpressionFields,
+} from "./standard-pass-pipeline";
 import { compileSelectivePropsExtraction } from "./typed-json-extract";
 import {
   addRequiredColumn,
@@ -53,8 +79,8 @@ import {
  * Graphs with branching factor B produce O(B^depth) rows before cycle
  * detection can prune them. A default of 10 covers typical neighborhood,
  * shortest-path, and hierarchy use-cases without risking exponential blowup
- * on dense graphs. Users who need deeper traversals should call .maxHops(N)
- * explicitly (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
+ * on dense graphs. Users who need deeper traversals should pass
+ * `.recursive({ maxHops: N })` explicitly (up to MAX_EXPLICIT_RECURSIVE_DEPTH).
  */
 export const MAX_RECURSIVE_DEPTH = 10;
 
@@ -67,6 +93,114 @@ export const MAX_RECURSIVE_DEPTH = 10;
 export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 
 const NO_ALWAYS_REQUIRED_COLUMNS = new Set<string>();
+
+type EdgeJoinField = "from_id" | "to_id";
+type EdgeKindField = "from_kind" | "to_kind";
+
+/** The normalizing CTE's uniform endpoint columns a mixed traversal reads. */
+type DirectedEdgeJoinField = EdgeJoinField | "tg_source_id" | "tg_target_id";
+type DirectedEdgeKindField =
+  EdgeKindField | "tg_source_kind" | "tg_target_kind";
+
+type EdgeEndpointColumns = Readonly<{
+  joinField: EdgeJoinField;
+  targetField: EdgeJoinField;
+  joinKindField: EdgeKindField;
+  targetKindField: EdgeKindField;
+}>;
+
+/** The edge endpoint columns a walk entering an edge in `direction` joins and exits on. */
+function traversalEndpointColumns(
+  direction: TraversalDirection,
+): EdgeEndpointColumns {
+  return direction === "out" ?
+      {
+        joinField: "from_id",
+        targetField: "to_id",
+        joinKindField: "from_kind",
+        targetKindField: "to_kind",
+      }
+    : {
+        joinField: "to_id",
+        targetField: "from_id",
+        joinKindField: "to_kind",
+        targetKindField: "from_kind",
+      };
+}
+
+function reversedEndpointColumns(
+  columns: EdgeEndpointColumns,
+): EdgeEndpointColumns {
+  return {
+    joinField: columns.targetField,
+    targetField: columns.joinField,
+    joinKindField: columns.targetKindField,
+    targetKindField: columns.joinKindField,
+  };
+}
+
+/**
+ * The column a mixed-orientation traversal's normalizing CTE carries each
+ * arm's qualified-path direction in, since its uniform `tg_source_id` join
+ * no longer says which physical endpoint the walk entered the edge from.
+ */
+const QUALIFIED_PATH_DIRECTION_COLUMN = "tg_path_direction";
+
+/**
+ * The qualified-path direction of an edge the walk joined on `joinField`:
+ * entering at `from_id` follows the edge as stored (`"out"`), entering at
+ * `to_id` walks it reversed (`"in"`).
+ */
+function qualifiedPathDirection(joinField: EdgeJoinField): "out" | "in" {
+  return joinField === "from_id" ? "out" : "in";
+}
+
+/**
+ * The per-step cycle/path token for a node table alias, in the shape
+ * {@link recursivePathTokenShape} chose: the bare id, or the composite
+ * `kind || SEP || id` that keeps same-id nodes of different kinds distinct.
+ *
+ * The separator is bound as a parameter (not `sql.raw`) so it needs no
+ * dialect-specific `char()`/`chr()` builtin — both dialects concatenate bound
+ * text with `||`. Composite tokens never reach the caller: result
+ * materialization strips them back to bare ids with
+ * `stripKindQualifiedPathTokens`.
+ */
+function compilePathToken(
+  tableAlias: string,
+  shape: RecursivePathTokenShape,
+): SqlFragment {
+  if (shape === "id") {
+    return sql.raw(`${tableAlias}.id`);
+  }
+  return compileKindQualifiedPathToken(tableAlias);
+}
+
+/**
+ * The composite `kind || SEP || id` path token for a node table alias, which
+ * keeps same-id nodes of different kinds distinct on a recursive walk's path.
+ */
+export function compileKindQualifiedPathToken(tableAlias: string): SqlFragment {
+  return compileKindQualifiedToken(
+    sql.raw(`${tableAlias}.kind`),
+    sql.raw(`${tableAlias}.id`),
+  );
+}
+
+/**
+ * The composite `kind || SEP || id` token over explicit kind and id columns:
+ * the SQL spelling of `kindQualifiedToken` (`utils/path.ts`), so a row's
+ * token compares equal to the one JavaScript builds for the same (kind, id).
+ */
+export function compileKindQualifiedToken(
+  kindColumn: SqlFragment,
+  idColumn: SqlFragment,
+): SqlFragment {
+  // Parenthesized so dialect path builders that splice this fragment into a
+  // larger `||` chain keep it one text operand — PostgreSQL's `text[] || x`
+  // would otherwise re-associate and coerce the separator as an array literal.
+  return sql`(${kindColumn} || ${KIND_QUALIFIED_PATH_TOKEN_SEPARATOR} || ${idColumn})`;
+}
 
 type RecursiveQueryPassState = Readonly<{
   ast: QueryAst;
@@ -113,6 +247,7 @@ function runRecursiveQueryPassPipeline(
       return createTemporalFilterPass(
         currentState.ast,
         currentState.ctx.readInstant,
+        currentState.ctx.recordedReadBinding,
       );
     },
     update(currentState, temporalFilterPass): RecursiveQueryPassState {
@@ -188,9 +323,46 @@ export function compileVariableLengthQuery(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): SqlFragment {
+  assertRecursiveOutputSupported(ast);
+  assertRecursiveTraversalSupported(ctx, "variable-length traversal");
   const strategy = ctx.dialect.capabilities.recursiveQueryStrategy;
   const handler = RECURSIVE_QUERY_STRATEGY_HANDLERS[strategy];
   return handler(ast, graphId, ctx);
+}
+
+/** Applies the shared output contract to single and composed recursion. */
+export function assertRecursiveOutputSupported(ast: QueryAst): void {
+  if (
+    ast.groupBy !== undefined ||
+    ast.having !== undefined ||
+    (ast.aggregateOrderBy?.length ?? 0) > 0
+  )
+    throw new UnsupportedPredicateError(
+      "Aggregating recursive traversals is not yet supported; project nodes as a relation before aggregating.",
+    );
+  const materialized = new Set(
+    [
+      ast.start.alias,
+      ...ast.traversals.map((traversal) => traversal.nodeAlias),
+    ].flatMap((alias) => NODE_COLUMNS.map((column) => `${alias}_${column}`)),
+  );
+  for (const field of ast.projection.fields) materialized.add(field.outputName);
+  for (const field of ast.selectiveFields ?? [])
+    materialized.add(field.outputName);
+  for (const traversal of ast.traversals) {
+    for (const alias of [
+      traversal.variableLength?.depthAlias,
+      traversal.variableLength?.pathAlias,
+    ]) {
+      if (alias === undefined) continue;
+      if (materialized.has(alias)) {
+        throw new UnsupportedPredicateError(
+          `Recursive traversal output alias "${alias}" collides with another result column`,
+        );
+      }
+      materialized.add(alias);
+    }
+  }
 }
 
 type RecursiveQueryStrategyHandler = (
@@ -206,10 +378,27 @@ const RECURSIVE_QUERY_STRATEGY_HANDLERS: Record<
   recursive_cte: compileVariableLengthQueryWithRecursiveCteStrategy,
 };
 
+/** Compiles one traversal stage restricted to kind-qualified upstream seeds. */
+export function compileRecursiveStage(
+  ast: QueryAst,
+  graphId: string,
+  ctx: PredicateCompilerContext,
+  seedQuery: SqlFragment,
+): SqlFragment {
+  assertRecursiveTraversalSupported(ctx, "variable-length traversal stage");
+  return compileVariableLengthQueryWithRecursiveCteStrategy(
+    ast,
+    graphId,
+    ctx,
+    seedQuery,
+  );
+}
+
 function compileVariableLengthQueryWithRecursiveCteStrategy(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
+  seedQuery?: SqlFragment,
 ): SqlFragment {
   const passState = runRecursiveQueryPassPipeline(ast, graphId, ctx);
 
@@ -238,34 +427,69 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
   }
 
   // Build the recursive CTE
-  const recursiveCte = compileRecursiveCte(
+  const { cte: recursiveCte, precedingCte: directedEdgesCte } =
+    compileRecursiveCte(
+      ast,
+      vlTraversal,
+      graphId,
+      ctx,
+      requiredColumnsByAlias,
+      temporalFilterPass,
+      seedQuery,
+    );
+
+  // A historical read reconstructs its class relation from outside the recursive
+  // term, so the ledger fixed point is evaluated once for the whole traversal
+  // rather than per expanded (frontier row, edge) pair. A current read emits no
+  // such relation: its step seeks the closure from the worktable row itself.
+  const identityClassCte = compileIdentityClassCte({
     ast,
-    vlTraversal,
-    graphId,
     ctx,
-    requiredColumnsByAlias,
+    graphId,
     temporalFilterPass,
-  );
+  });
 
   // Build projection
-  const projection = compileRecursiveProjection(ast, vlTraversal, dialect);
+  const projection = compileRecursiveProjection(ast, vlTraversal, ctx);
 
   // Build final SELECT
   const minDepth = vlTraversal.variableLength.minDepth;
+  const resultClauses: SqlFragment[] = [];
+  if (minDepth > 0) resultClauses.push(sql`depth >= ${minDepth}`);
+  if (vlTraversal.variableLength.stopExpansion?.emitStopNode === false)
+    resultClauses.push(sql`stop_reached = ${dialect.booleanLiteral(false)}`);
+  if (ast.resultPredicate !== undefined)
+    resultClauses.push(
+      compilePredicateExpression(ast.resultPredicate, {
+        ...ctx,
+        resolveFieldCteAlias: () => ctx.recursiveResultAlias,
+      }),
+    );
   const depthFilter =
-    minDepth > 0 ? sql`WHERE depth >= ${minDepth}` : sql.raw("");
+    resultClauses.length > 0 ?
+      sql`WHERE ${sql.join(resultClauses, sql` AND `)}`
+    : sql.raw("");
 
   // Order by and limit/offset
-  const orderBy = compileRecursiveOrderBy(ast, dialect);
-  const limitOffset = compileLimitOffset(ast);
+  const orderBy = compileRecursiveOrderBy(ast, ctx);
+  const limitOffset = compileLimitOffset(ast, dialect);
+
+  const precedingCtes = [
+    ...(directedEdgesCte === undefined ? [] : [directedEdgesCte]),
+    ...(identityClassCte === undefined ? [] : [identityClassCte]),
+  ];
 
   return emitRecursiveQuerySql({
     depthFilter,
     ...(limitOffset === undefined ? {} : { limitOffset }),
     logicalPlan,
     ...(orderBy === undefined ? {} : { orderBy }),
+    ...(precedingCtes.length === 0 ? {} : { precedingCtes }),
     projection,
     recursiveCte,
+    ...(ctx.recursiveResultAlias === undefined ?
+      {}
+    : { resultAlias: ctx.recursiveResultAlias }),
   });
 }
 
@@ -280,6 +504,13 @@ export function hasVariableLengthTraversal(ast: QueryAst): boolean {
 // Recursive CTE Generation
 // ============================================================
 
+/** {@link compileRecursiveCte}'s result: the recursive CTE, plus a normalizing helper CTE it reads when the traversal mixes edge orientations. */
+type RecursiveCteResult = Readonly<{
+  cte: SqlFragment;
+  /** Present only when the traversal has a non-empty `inverseEdgeKinds`. */
+  precedingCte?: SqlFragment;
+}>;
+
 /**
  * Compiles the recursive CTE for variable-length traversal.
  */
@@ -290,7 +521,8 @@ function compileRecursiveCte(
   ctx: PredicateCompilerContext,
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined,
   temporalFilterPass: TemporalFilterPass,
-): SqlFragment {
+  seedQuery?: SqlFragment,
+): RecursiveCteResult {
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
   const startKinds = ast.start.kinds;
@@ -303,13 +535,16 @@ function compileRecursiveCte(
   const forceWorktableOuterJoinOrder =
     dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
   const nodeKinds = traversal.nodeKinds;
-  const previousNodeKinds = [...new Set([...startKinds, ...nodeKinds])];
+  const previousNodeKinds = recursiveWalkNodeKinds(ast, traversal);
+  const pathTokenShape = recursivePathTokenShape(ast, traversal);
   const direction = traversal.direction;
   const vl = traversal.variableLength;
   const shouldEnforceCycleCheck = vl.cyclePolicy !== "allow";
-  const shouldTrackPath = shouldEnforceCycleCheck || vl.pathAlias !== undefined;
+  const shouldTrackPath =
+    shouldEnforceCycleCheck ||
+    (vl.pathAlias !== undefined && vl.pathFormat !== "qualified");
   const recursiveJoinRequiredColumns = new Set<string>(["id"]);
-  if (previousNodeKinds.length > 1) {
+  if (pathTokenShape === "kind_qualified") {
     recursiveJoinRequiredColumns.add("kind");
   }
   const requiredStartColumns =
@@ -348,7 +583,7 @@ function compileRecursiveCte(
   const nodeKindFilter = compileKindFilter(nodeKinds, "n.kind");
 
   const startTemporalFilter = temporalFilterPass.forAlias("n0");
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   // Start predicates (with cteColumnPrefix "" for raw n0 columns)
@@ -370,27 +605,56 @@ function compileRecursiveCte(
     nodeAlias,
     targetContext,
   );
+  const stopExpression = traversal.variableLength.stopExpansion?.expression;
+  const compiledStopExpression =
+    stopExpression === undefined ? undefined : (
+      compilePredicateExpression(stopExpression, targetContext)
+    );
+  const compiledBaseStopExpression =
+    stopExpression === undefined ? undefined : (
+      compilePredicateExpression(stopExpression, {
+        ...ctx,
+        cteColumnPrefix: "n0",
+      })
+    );
 
   // Max depth condition:
   // - unlimited traversals are capped at MAX_RECURSIVE_DEPTH
   // - explicit maxDepth traversals must not exceed MAX_EXPLICIT_RECURSIVE_DEPTH
+  // - exhaustive traversals carry no ceiling, so only the per-path cycle check
+  //   ends them
+  if (vl.exhaustive === true) {
+    if (!shouldEnforceCycleCheck) {
+      throw new UnsupportedPredicateError(
+        'An exhaustive recursive traversal requires cyclePolicy "prevent": without a hop ceiling, cycle prevention is its only termination guarantee',
+      );
+    }
+    if (vl.maxDepth > 0) {
+      throw new UnsupportedPredicateError(
+        `An exhaustive recursive traversal cannot also state maxDepth(${vl.maxDepth}); state one or the other`,
+      );
+    }
+  }
   if (vl.maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH) {
     throw new UnsupportedPredicateError(
       `Recursive traversal maxHops(${vl.maxDepth}) exceeds maximum explicit depth of ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
     );
   }
   const effectiveMaxDepth = vl.maxDepth > 0 ? vl.maxDepth : MAX_RECURSIVE_DEPTH;
-  const maxDepthCondition = sql`r.depth < ${effectiveMaxDepth}`;
+  const maxDepthCondition =
+    vl.exhaustive === true ? undefined : sql`r.depth < ${effectiveMaxDepth}`;
 
+  const baseToken = compilePathToken("n0", pathTokenShape);
+  const stepToken = compilePathToken("n", pathTokenShape);
   const cycleCheck =
     shouldEnforceCycleCheck ?
-      dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
+      dialect.cycleCheck(stepToken, sql.raw("r.path"))
     : undefined;
   const initialPath =
-    shouldTrackPath ? dialect.initializePath(sql.raw("n0.id")) : undefined;
+    shouldTrackPath ? dialect.initializePath(baseToken) : undefined;
   const pathExtension =
     shouldTrackPath ?
-      dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
+      dialect.extendPath(sql.raw("r.path"), stepToken)
     : undefined;
 
   // Base case WHERE clauses
@@ -401,34 +665,109 @@ function compileRecursiveCte(
     ...startPredicates,
   ];
 
+  if (seedQuery !== undefined) {
+    baseWhereClauses.push(
+      sql`EXISTS (SELECT 1 FROM (${seedQuery}) AS __tg_seed WHERE __tg_seed.kind = n0.kind AND __tg_seed.id = n0.id)`,
+    );
+  }
+
+  const previousIdColumn = sql`r.${sql.raw(nodeAlias)}_id`;
+  const previousKindColumn = sql`r.${sql.raw(nodeAlias)}_kind`;
+  const identityFrontierExpansion =
+    traversal.includeIdentityMembers === true ?
+      planIdentityFrontierExpansion({
+        ast,
+        ctx,
+        graphId,
+        previousId: previousIdColumn,
+        previousKind: previousKindColumn,
+        temporalFilterPass,
+      })
+    : undefined;
+
   const recursiveBaseWhereClauses: SqlFragment[] = [
     sql`e.graph_id = ${graphId}`,
     nodeKindFilter,
-    edgeTemporalFilter,
+    edgeRowFilter,
     nodeTemporalFilter,
-    maxDepthCondition,
+    ...(maxDepthCondition === undefined ? [] : [maxDepthCondition]),
+    ...(stopExpression === undefined ?
+      []
+    : [
+        sql`COALESCE(r.stop_reached, ${dialect.booleanLiteral(false)}) = ${dialect.booleanLiteral(false)}`,
+      ]),
+    // Conditions the frontier widening cannot state in a join condition —
+    // currently the member-visibility guard. Every branch of the recursive term
+    // carries them, because every branch reads the widened frontier.
+    ...(identityFrontierExpansion?.whereClauses ?? []),
   ];
   if (cycleCheck !== undefined) {
     recursiveBaseWhereClauses.push(cycleCheck);
   }
   recursiveBaseWhereClauses.push(...edgePredicates, ...targetNodePredicates);
 
+  /**
+   * Connects a candidate edge to the row the worktable is expanding from. A
+   * widened frontier and a plain one join the edge the same way — on the
+   * worktable row's (kind, id) or on the class member's — so no traversal reaches
+   * an edge through a correlated membership test.
+   */
+  function compileWorktableJoinClauses(
+    branch: Readonly<{
+      joinField: DirectedEdgeJoinField;
+      joinKindField: DirectedEdgeKindField;
+    }>,
+  ): SqlFragment[] {
+    const edgeId = sql`e.${sql.raw(branch.joinField)}`;
+    const edgeKind = sql`e.${sql.raw(branch.joinKindField)}`;
+    if (identityFrontierExpansion !== undefined) {
+      return [
+        sql`${edgeId} = ${identityFrontierExpansion.memberId}`,
+        sql`${edgeKind} = ${identityFrontierExpansion.memberKind}`,
+      ];
+    }
+    const clauses = [sql`${edgeId} = ${previousIdColumn}`];
+    if (previousNodeKinds.length > 1) {
+      clauses.push(sql`${edgeKind} = ${previousKindColumn}`);
+    }
+    return clauses;
+  }
+
   function compileRecursiveBranch(
     branch: Readonly<{
-      joinField: "from_id" | "to_id";
-      targetField: "from_id" | "to_id";
-      joinKindField: "from_kind" | "to_kind";
-      targetKindField: "from_kind" | "to_kind";
+      joinField: DirectedEdgeJoinField;
+      targetField: DirectedEdgeJoinField;
+      joinKindField: DirectedEdgeKindField;
+      targetKindField: DirectedEdgeKindField;
       edgeKinds: readonly string[];
       duplicateGuard?: SqlFragment | undefined;
+      /**
+       * The qualified-path direction label of the edge this branch walks:
+       * a literal for a single-orientation branch, or the normalizing CTE's
+       * per-arm {@link QUALIFIED_PATH_DIRECTION_COLUMN} for a mixed one.
+       */
+      pathDirection: SqlFragment;
+      /**
+       * The relation `e` reads from. Defaults to the real edges table;
+       * a mixed-orientation traversal (see
+       * {@link compileRecursiveDirectedEdgesCte}) passes the normalizing
+       * CTE instead, so `joinField`/`targetField` name that CTE's uniform
+       * `tg_source_*`/`tg_target_*` columns rather than `from_id`/`to_id`.
+       */
+      edgeSource?: SqlFragment;
     }>,
   ): SqlFragment {
+    const edgeSource = branch.edgeSource ?? ctx.schema.edgesTable;
     const recursiveFilterClauses = [
       ...recursiveBaseWhereClauses,
       compileKindFilter(branch.edgeKinds, "e.kind"),
-      compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
       compileKindFilter(nodeKinds, `e.${branch.targetKindField}`),
     ];
+    if (traversal.includeIdentityMembers !== true) {
+      recursiveFilterClauses.push(
+        compileKindFilter(previousNodeKinds, `e.${branch.joinKindField}`),
+      );
+    }
 
     if (branch.duplicateGuard !== undefined) {
       recursiveFilterClauses.push(branch.duplicateGuard);
@@ -439,17 +778,26 @@ function compileRecursiveCte(
       ...nodeColumnsFromRecursive,
       sql`r.depth + 1 AS depth`,
     ];
+    if (compiledStopExpression !== undefined) {
+      recursiveSelectColumns.push(
+        sql`COALESCE(${compiledStopExpression}, ${dialect.booleanLiteral(false)}) AS stop_reached`,
+      );
+    }
     if (pathExtension !== undefined) {
       recursiveSelectColumns.push(sql`${pathExtension} AS path`);
     }
-    const recursiveJoinClauses: SqlFragment[] = [
-      sql`e.${sql.raw(branch.joinField)} = r.${sql.raw(nodeAlias)}_id`,
-    ];
-    if (previousNodeKinds.length > 1) {
-      recursiveJoinClauses.push(
-        sql`e.${sql.raw(branch.joinKindField)} = r.${sql.raw(nodeAlias)}_kind`,
-      );
+    if (vl.pathFormat === "qualified") {
+      const qualifiedPath = dialect.appendTextJsonArray(sql`r.qualified_path`, [
+        sql`e.kind`,
+        sql`e.id`,
+        branch.pathDirection,
+        sql`n.kind`,
+        sql`n.id`,
+      ]);
+      recursiveSelectColumns.push(sql`${qualifiedPath} AS qualified_path`);
     }
+    const recursiveJoinClauses = compileWorktableJoinClauses(branch);
+    const frontierJoin = identityFrontierExpansion?.frontierJoin ?? sql``;
 
     if (forceWorktableOuterJoinOrder) {
       const recursiveWhereClauses = [
@@ -460,7 +808,8 @@ function compileRecursiveCte(
       return sql`
         SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
         FROM recursive_cte r
-        CROSS JOIN ${ctx.schema.edgesTable} e
+        ${frontierJoin}
+        CROSS JOIN ${edgeSource} e
         JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
           AND n.id = e.${sql.raw(branch.targetField)}
           AND n.kind = e.${sql.raw(branch.targetKindField)}
@@ -471,7 +820,8 @@ function compileRecursiveCte(
     return sql`
       SELECT ${sql.join(recursiveSelectColumns, sql`, `)}
       FROM recursive_cte r
-      JOIN ${ctx.schema.edgesTable} e ON ${sql.join(recursiveJoinClauses, sql` AND `)}
+      ${frontierJoin}
+      JOIN ${edgeSource} e ON ${sql.join(recursiveJoinClauses, sql` AND `)}
       JOIN ${ctx.schema.nodesTable} n ON n.graph_id = e.graph_id
         AND n.id = e.${sql.raw(branch.targetField)}
         AND n.kind = e.${sql.raw(branch.targetKindField)}
@@ -479,76 +829,158 @@ function compileRecursiveCte(
     `;
   }
 
-  const directJoinField = direction === "out" ? "from_id" : "to_id";
-  const directTargetField = direction === "out" ? "to_id" : "from_id";
-  const directJoinKindField = direction === "out" ? "from_kind" : "to_kind";
-  const directTargetKindField = direction === "out" ? "to_kind" : "from_kind";
+  const directColumns = traversalEndpointColumns(direction);
 
-  const directBranch = compileRecursiveBranch({
-    joinField: directJoinField,
-    targetField: directTargetField,
-    joinKindField: directJoinKindField,
-    targetKindField: directTargetKindField,
-    edgeKinds: directEdgeKinds,
-  });
+  // PostgreSQL allows one recursive reference per recursive term, so both
+  // orientations are normalized into this single CTE before recursion starts.
+  const mixesOrientations = inverseEdgeKinds.length > 0;
+  const directedEdgesCteName = `${traversal.edgeAlias}_directed_edges`;
 
-  function compileInverseRecursiveBranch(): SqlFragment {
-    const inverseJoinField = direction === "out" ? "to_id" : "from_id";
-    const inverseTargetField = direction === "out" ? "from_id" : "to_id";
-    const inverseJoinKindField = direction === "out" ? "to_kind" : "from_kind";
-    const inverseTargetKindField =
-      direction === "out" ? "from_kind" : "to_kind";
-    const overlappingKinds = inverseEdgeKinds.filter((kind) =>
-      directEdgeKinds.includes(kind),
+  function compileRecursiveDirectedEdgesCte(): SqlFragment {
+    // A self-loop of a kind in both lists would yield two identical rows; the
+    // guard drops the inverse arm's copy.
+    const duplicateGuard = compileInverseTraversalDuplicateGuard(
+      directEdgeKinds,
+      inverseEdgeKinds,
+      (overlappingKinds) => compileKindFilter(overlappingKinds, "e.kind"),
     );
 
-    const duplicateGuard =
-      overlappingKinds.length > 0 ?
-        sql`NOT (e.from_id = e.to_id AND ${compileKindFilter(overlappingKinds, "e.kind")})`
-      : undefined;
+    // `e.*` materializes every edge column (props included) into this CTE
+    // on every execution — measured to switch SQLite from a covering-index
+    // seek to a full MATERIALIZE + automatic index build. The recursive term
+    // only ever reads graph_id/kind (structural filters), the temporal
+    // columns — including `recorded_from`/`recorded_to` on a recorded-pinned
+    // read, which `temporalFilterPass.recordedColumns` is the one owner of,
+    // so that `edgeRowFilter`'s references to them below always have a
+    // column to read — and the four tg_source_*/tg_target_* aliases derived
+    // below — UNLESS a predicate on this edge alias or the identity
+    // frontier widening can reference an arbitrary column (e.g. `e.props`
+    // via `whereEdge`), in which case only `e.*` is guaranteed to carry
+    // whatever they need. Narrow only in the provably safe case; keep the
+    // wildcard whenever either is present.
+    const requiresFullEdgeProjection =
+      edgePredicates.length > 0 || identityFrontierExpansion !== undefined;
+    // A qualified path reads the edge id and the direction each arm walked
+    // the edge in, so both are projected whenever that path is requested.
+    const qualifiedPath = vl.pathFormat === "qualified";
+    const directedEdgeBaseColumns: SqlFragment =
+      requiresFullEdgeProjection ?
+        sql`e.*`
+      : sql.join(
+          [
+            sql`e.graph_id, e.kind, e.valid_from, e.valid_to, e.deleted_at`,
+            ...(qualifiedPath ? [sql`e.id`] : []),
+            ...temporalFilterPass.recordedColumns.map(
+              (column) => sql`e.${sql.raw(column)}`,
+            ),
+          ],
+          sql`, `,
+        );
+    function armDirectionColumn(joinField: EdgeJoinField): SqlFragment {
+      return qualifiedPath ?
+          sql`, ${sql.raw(`'${qualifiedPathDirection(joinField)}'`)} AS ${sql.raw(QUALIFIED_PATH_DIRECTION_COLUMN)}`
+        : sql``;
+    }
 
-    const inverseBranch = compileRecursiveBranch({
-      joinField: inverseJoinField,
-      targetField: inverseTargetField,
-      joinKindField: inverseJoinKindField,
-      targetKindField: inverseTargetKindField,
-      edgeKinds: inverseEdgeKinds,
+    // Both arms also filter on `e.graph_id` and on the edge row filter —
+    // not only the recursive term downstream — so this CTE normalizes just the
+    // current graph's currently-visible edge versions of these kinds instead
+    // of every graph's every version, which SQLite would MATERIALIZE and index
+    // on every execution. The result is unchanged either way (the recursive
+    // term applies both again, and `edgeRowFilter` is row-local over
+    // `e`'s own temporal columns); this only bounds what gets normalized
+    // before those filters run.
+    function compileDirectedEdgeArm(
+      columns: EdgeEndpointColumns,
+      edgeKinds: readonly string[],
+      duplicateGuard?: SqlFragment,
+    ): SqlFragment {
+      return sql`
+        SELECT ${directedEdgeBaseColumns},
+          e.${sql.raw(columns.joinField)} AS tg_source_id,
+          e.${sql.raw(columns.joinKindField)} AS tg_source_kind,
+          e.${sql.raw(columns.targetField)} AS tg_target_id,
+          e.${sql.raw(columns.targetKindField)} AS tg_target_kind${armDirectionColumn(columns.joinField)}
+        FROM ${ctx.schema.edgesTable} e
+        WHERE e.graph_id = ${graphId} AND ${compileKindFilter(edgeKinds, "e.kind")} AND ${edgeRowFilter}${
+          duplicateGuard === undefined ? sql`` : sql` AND ${duplicateGuard}`
+        }
+      `;
+    }
+    const directArm = compileDirectedEdgeArm(directColumns, directEdgeKinds);
+    const inverseArm = compileDirectedEdgeArm(
+      reversedEndpointColumns(directColumns),
+      inverseEdgeKinds,
       duplicateGuard,
-    });
+    );
 
     return sql`
-      ${directBranch}
-      UNION ALL
-      ${inverseBranch}
+      ${sql.raw(directedEdgesCteName)} AS (
+        ${directArm}
+        UNION ALL
+        ${inverseArm}
+      )
     `;
   }
 
   const recursiveBranchSql =
-    inverseEdgeKinds.length === 0 ?
-      directBranch
-    : compileInverseRecursiveBranch();
+    mixesOrientations ?
+      compileRecursiveBranch({
+        joinField: "tg_source_id",
+        targetField: "tg_target_id",
+        joinKindField: "tg_source_kind",
+        targetKindField: "tg_target_kind",
+        // Both inputs are already deduped individually (above); the union
+        // is not automatically, so a kind present in both — the ordinary
+        // `direction: "both"` case on one symmetric kind — would otherwise
+        // bind a duplicate parameter in the emitted `IN` list.
+        edgeKinds: [...new Set([...directEdgeKinds, ...inverseEdgeKinds])],
+        pathDirection: sql.raw(`e.${QUALIFIED_PATH_DIRECTION_COLUMN}`),
+        edgeSource: sql.raw(directedEdgesCteName),
+      })
+    : compileRecursiveBranch({
+        ...directColumns,
+        edgeKinds: directEdgeKinds,
+        pathDirection: sql`${qualifiedPathDirection(directColumns.joinField)}`,
+      });
   const baseSelectColumns = [
     ...startColumnsFromBase,
     ...nodeColumnsFromBase,
     sql`0 AS depth`,
   ];
+  if (compiledBaseStopExpression !== undefined) {
+    baseSelectColumns.push(
+      sql`COALESCE(${compiledBaseStopExpression}, ${dialect.booleanLiteral(false)}) AS stop_reached`,
+    );
+  }
   if (initialPath !== undefined) {
     baseSelectColumns.push(sql`${initialPath} AS path`);
   }
 
-  return sql`
-    recursive_cte AS (
-      -- Base case: starting nodes
-      SELECT ${sql.join(baseSelectColumns, sql`, `)}
-      FROM ${ctx.schema.nodesTable} n0
-      WHERE ${sql.join(baseWhereClauses, sql` AND `)}
+  if (vl.pathFormat === "qualified") {
+    baseSelectColumns.push(
+      sql`${dialect.textJsonArray([sql`n0.kind`, sql`n0.id`])} AS qualified_path`,
+    );
+  }
 
-      UNION ALL
+  return {
+    cte: sql`
+      recursive_cte AS (
+        -- Base case: starting nodes
+        SELECT ${sql.join(baseSelectColumns, sql`, `)}
+        FROM ${ctx.schema.nodesTable} n0
+        WHERE ${sql.join(baseWhereClauses, sql` AND `)}
 
-      -- Recursive case: follow edges
-      ${recursiveBranchSql}
-    )
-  `;
+        UNION ALL
+
+        -- Recursive case: follow edges
+        ${recursiveBranchSql}
+      )
+    `,
+    ...(mixesOrientations ?
+      { precedingCte: compileRecursiveDirectedEdgesCte() }
+    : {}),
+  };
 }
 
 // ============================================================
@@ -605,13 +1037,11 @@ function collectRequiredColumnsByAlias(
   }
 
   const requiredColumnsByAlias = new Map<string, Set<string>>();
-  const previousNodeKinds = [
-    ...new Set([...ast.start.kinds, ...traversal.nodeKinds]),
-  ];
 
-  // Recursive expansion always needs node alias id for joins/cycle checks.
+  // Recursive expansion always needs node alias id for joins/cycle checks, and
+  // the kind wherever the walk's joins and path tokens key on it.
   addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "id");
-  if (previousNodeKinds.length > 1) {
+  if (recursivePathTokenShape(ast, traversal) === "kind_qualified") {
     addRequiredColumn(requiredColumnsByAlias, traversal.nodeAlias, "kind");
   }
 
@@ -619,11 +1049,38 @@ function collectRequiredColumnsByAlias(
     markSelectiveFieldAsRequired(requiredColumnsByAlias, field);
   }
 
-  if (ast.orderBy) {
-    for (const orderSpec of ast.orderBy) {
-      markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
+  const edgeAliases = new Set(ast.traversals.map((item) => item.edgeAlias));
+  for (const projected of ast.projection.fields) {
+    const source = projected.source;
+    if (source.__type === "aggregate") {
+      if (!edgeAliases.has(source.field.alias)) {
+        markFieldRefAsRequired(requiredColumnsByAlias, source.field);
+      }
+    } else if (source.__type === "database_expression") {
+      visitExpressionFields(source, (field) => {
+        if (!edgeAliases.has(field.alias)) {
+          markFieldRefAsRequired(requiredColumnsByAlias, field);
+        }
+      });
+    } else if (!edgeAliases.has(source.alias)) {
+      markFieldRefAsRequired(requiredColumnsByAlias, source);
     }
   }
+
+  if (ast.orderBy) {
+    for (const orderSpec of ast.orderBy) {
+      if (orderSpec.field.__type === "field_ref") {
+        markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
+      } else {
+        visitExpressionFields(orderSpec.field, (field) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, field);
+        });
+      }
+    }
+  }
+
+  if (ast.resultPredicate !== undefined)
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.resultPredicate);
 
   return requiredColumnsByAlias;
 }
@@ -661,14 +1118,14 @@ function compileNodeSelectColumnsFromRecursiveRow(
 function compileRecursiveProjection(
   ast: QueryAst,
   traversal: VariableLengthTraversal,
-  dialect: DialectAdapter,
+  ctx: PredicateCompilerContext,
 ): SqlFragment {
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileRecursiveSelectiveProjection(
       ast.selectiveFields,
       ast,
       traversal,
-      dialect,
+      ctx,
     );
   }
 
@@ -676,36 +1133,47 @@ function compileRecursiveProjection(
   const nodeAlias = traversal.nodeAlias;
   const vl = traversal.variableLength;
 
-  const fields: SqlFragment[] = [
-    // Start alias fields with metadata
-    sql`${sql.raw(startAlias)}_id`,
-    sql`${sql.raw(startAlias)}_kind`,
-    sql`${sql.raw(startAlias)}_props`,
-    sql`${sql.raw(startAlias)}_version`,
-    sql`${sql.raw(startAlias)}_valid_from`,
-    sql`${sql.raw(startAlias)}_valid_to`,
-    sql`${sql.raw(startAlias)}_created_at`,
-    sql`${sql.raw(startAlias)}_updated_at`,
-    sql`${sql.raw(startAlias)}_deleted_at`,
-    // Node alias fields with metadata
-    sql`${sql.raw(nodeAlias)}_id`,
-    sql`${sql.raw(nodeAlias)}_kind`,
-    sql`${sql.raw(nodeAlias)}_props`,
-    sql`${sql.raw(nodeAlias)}_version`,
-    sql`${sql.raw(nodeAlias)}_valid_from`,
-    sql`${sql.raw(nodeAlias)}_valid_to`,
-    sql`${sql.raw(nodeAlias)}_created_at`,
-    sql`${sql.raw(nodeAlias)}_updated_at`,
-    sql`${sql.raw(nodeAlias)}_deleted_at`,
-  ];
+  const explicitProjection = hasExplicitRecursiveProjection(ast);
+  const fields: SqlFragment[] =
+    explicitProjection ?
+      compileAdditionalRecursiveProjectionFields(
+        ast,
+        new Set(),
+        ctx,
+        undefined,
+        new Set([traversal.edgeAlias]),
+      )
+    : [startAlias, nodeAlias].flatMap((alias) =>
+        NODE_COLUMNS.map((column) => {
+          const name = `${alias}_${column}`;
+          return sql`${sql.raw(name)} AS ${quoteIdentifier(name)}`;
+        }),
+      );
 
   if (vl.depthAlias !== undefined) {
     fields.push(sql`depth AS ${quoteIdentifier(vl.depthAlias)}`);
   }
 
   if (vl.pathAlias !== undefined) {
-    fields.push(sql`path AS ${quoteIdentifier(vl.pathAlias)}`);
+    fields.push(
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(vl.pathAlias)}`,
+    );
   }
+
+  if (!explicitProjection)
+    fields.push(
+      ...compileAdditionalRecursiveProjectionFields(
+        ast,
+        new Set(
+          [startAlias, nodeAlias].flatMap((alias) =>
+            NODE_COLUMNS.map((column) => `${alias}_${column}`),
+          ),
+        ),
+        ctx,
+        undefined,
+        new Set([traversal.edgeAlias]),
+      ),
+    );
 
   return sql.join(fields, sql`, `);
 }
@@ -714,26 +1182,24 @@ function compileRecursiveSelectiveProjection(
   fields: readonly SelectiveField[],
   ast: QueryAst,
   traversal: VariableLengthTraversal,
-  dialect: DialectAdapter,
+  ctx: PredicateCompilerContext,
 ): SqlFragment {
+  const dialect = ctx.dialect;
   const allowedAliases = new Set([ast.start.alias, traversal.nodeAlias]);
 
-  const columns: SqlFragment[] = fields.map((field) => {
-    if (!allowedAliases.has(field.alias)) {
-      throw new UnsupportedPredicateError(
-        `Selective projection for recursive traversals does not support alias "${field.alias}"`,
-      );
-    }
+  const columns = fields.map((field) =>
+    compileRecursiveSelectiveField(field, allowedAliases, dialect),
+  );
 
-    if (field.isSystemField) {
-      const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
-      return sql`${sql.raw(`${field.alias}_${dbColumn}`)} AS ${quoteIdentifier(field.outputName)}`;
-    }
-
-    const column = sql.raw(`${field.alias}_props`);
-    const extracted = compileSelectivePropsExtraction(field, column, dialect);
-    return sql`${extracted} AS ${quoteIdentifier(field.outputName)}`;
-  });
+  columns.push(
+    ...compileAdditionalRecursiveProjectionFields(
+      ast,
+      new Set(fields.map((field) => field.outputName)),
+      ctx,
+      undefined,
+      new Set([traversal.edgeAlias]),
+    ),
+  );
 
   // Include recursive depth/path columns when present
   const vl = traversal.variableLength;
@@ -741,18 +1207,149 @@ function compileRecursiveSelectiveProjection(
     columns.push(sql`depth AS ${quoteIdentifier(vl.depthAlias)}`);
   }
   if (vl.pathAlias !== undefined) {
-    columns.push(sql`path AS ${quoteIdentifier(vl.pathAlias)}`);
+    columns.push(
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(vl.pathAlias)}`,
+    );
   }
 
   return sql.join(columns, sql`, `);
 }
 
+/** Explicit SQL projections choose their output shape; compatibility select() hydrates aliases. */
+export function hasExplicitRecursiveProjection(ast: QueryAst): boolean {
+  return ast.projection.fields.some(
+    (field) => field.source.__type !== "field_ref",
+  );
+}
+
+/** Compiles a decoded node field consistently in single and composed recursion. */
+export function compileRecursiveSelectiveField(
+  field: SelectiveField,
+  allowedAliases: ReadonlySet<string>,
+  dialect: DialectAdapter,
+  resultAlias?: string,
+): SqlFragment {
+  if (!allowedAliases.has(field.alias))
+    throw new UnsupportedPredicateError(
+      `Selective projection for recursive traversals does not support alias "${field.alias}"`,
+    );
+  const column = `${field.alias}_${field.isSystemField ? mapSelectiveSystemFieldToColumn(field.field) : "props"}`;
+  const reference =
+    resultAlias === undefined ?
+      sql.raw(column)
+    : sql`${sql.identifier(resultAlias)}.${sql.identifier(column)}`;
+  const value =
+    field.isSystemField ? reference : (
+      compileSelectivePropsExtraction(field, reference, dialect)
+    );
+  return sql`${value} AS ${quoteIdentifier(field.outputName)}`;
+}
+
+/** Emits envelope-only projection fields that selective decoding did not request. */
+export function compileAdditionalRecursiveProjectionFields(
+  ast: QueryAst,
+  emittedOutputNames: ReadonlySet<string>,
+  ctx: PredicateCompilerContext,
+  resultAlias?: string,
+  edgeAliases: ReadonlySet<string> = new Set(),
+): SqlFragment[] {
+  return ast.projection.fields
+    .filter((field) => !emittedOutputNames.has(field.outputName))
+    .map((field) => {
+      const source = field.source;
+      const sourceAlias =
+        source.__type === "aggregate" ? source.field.alias
+        : source.__type === "database_expression" ? undefined
+        : source.alias;
+      if (source.__type === "database_expression") {
+        visitExpressionFields(source, (reference) => {
+          if (edgeAliases.has(reference.alias))
+            throw new UnsupportedPredicateError(
+              "Scalar recursive-edge projection is not supported; request a qualified path instead.",
+            );
+        });
+      }
+      if (sourceAlias !== undefined && edgeAliases.has(sourceAlias)) {
+        // Compatibility select() carries structural edge columns even when the
+        // callback never reads an edge. Only these synthetic columns are empty.
+        if (field.cteAlias !== undefined)
+          return sql`NULL AS ${quoteIdentifier(field.outputName)}`;
+        throw new UnsupportedPredicateError(
+          "Scalar recursive-edge projection is not supported; request a qualified path instead.",
+        );
+      }
+      if (source.__type === "aggregate") {
+        throw new UnsupportedPredicateError(
+          "Aggregate projection is not supported for recursive traversals",
+        );
+      }
+      const value =
+        source.__type === "database_expression" ?
+          compileRecursiveDatabaseExpression(
+            source,
+            ctx,
+            resultAlias,
+            "recursive projection",
+          )
+        : resultAlias === undefined ?
+          compileFieldValue(source, ctx.dialect, source.valueType)
+        : compileRecursiveResultField(source, ctx.dialect, resultAlias);
+      return sql`${value} AS ${quoteIdentifier(field.outputName)}`;
+    });
+}
+
+function compileRecursiveDatabaseExpression(
+  expression: DatabaseExpression,
+  ctx: PredicateCompilerContext,
+  resultAlias: string | undefined,
+  clause: string,
+): SqlFragment {
+  return compileDatabaseExpression(expression, {
+    dialect: ctx.dialect,
+    allowAggregates: false,
+    aggregateClause: clause,
+    ...(ctx.compileExpressionSubquery === undefined ?
+      {}
+    : { compileSubquery: ctx.compileExpressionSubquery }),
+    ...(ctx.compileExpressionOuterReference === undefined ?
+      {}
+    : { compileOuterReference: ctx.compileExpressionOuterReference }),
+    ...(resultAlias === undefined ?
+      {}
+    : {
+        compileFieldExpression(field, fieldExpression) {
+          return compileRecursiveResultField(
+            field,
+            ctx.dialect,
+            resultAlias,
+            fieldExpression.valueType,
+          );
+        },
+      }),
+  });
+}
+
+export function compileRecursiveResultField(
+  field: FieldRef,
+  dialect: DialectAdapter,
+  resultAlias: string,
+  valueType = field.valueType,
+): SqlFragment {
+  const baseColumn =
+    field.path[0] === "props" ?
+      `${field.alias}_props`
+    : `${field.alias}_${field.path.join("_")}`;
+  const column = sql`${sql.identifier(resultAlias)}.${sql.identifier(baseColumn)}`;
+  return compileFieldValueFromColumn(field, dialect, valueType, column);
+}
+
 /**
  * Compiles ORDER BY for recursive query.
  */
-function compileRecursiveOrderBy(
+export function compileRecursiveOrderBy(
   ast: QueryAst,
-  dialect: DialectAdapter,
+  ctx: PredicateCompilerContext,
+  resultAlias?: string,
 ): SqlFragment | undefined {
   if (!ast.orderBy || ast.orderBy.length === 0) {
     return undefined;
@@ -767,16 +1364,24 @@ function compileRecursiveOrderBy(
         "Ordering by JSON arrays or objects is not supported",
       );
     }
-    const field = compileFieldValue(orderSpec.field, dialect, valueType);
-    const direction = sql.raw(orderSpec.direction.toUpperCase());
-    const nulls =
-      orderSpec.nulls ?? (orderSpec.direction === "asc" ? "last" : "first");
-    const nullsDirection = sql.raw(nulls === "first" ? "DESC" : "ASC");
-
-    parts.push(
-      sql`(${field} IS NULL) ${nullsDirection}`,
-      sql`${field} ${direction}`,
-    );
+    const field =
+      orderSpec.field.__type === "database_expression" ?
+        compileRecursiveDatabaseExpression(
+          orderSpec.field,
+          ctx,
+          resultAlias,
+          "recursive ORDER BY",
+        )
+      : resultAlias === undefined ?
+        compileFieldValue(orderSpec.field, ctx.dialect, valueType)
+      : compileRecursiveResultField(
+          orderSpec.field,
+          ctx.dialect,
+          resultAlias,
+          valueType,
+        );
+    const nulls = resolveNullOrdering(orderSpec);
+    parts.push(compileOrderTerm(field, orderSpec.direction, nulls));
   }
 
   return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
@@ -785,15 +1390,10 @@ function compileRecursiveOrderBy(
 /**
  * Compiles LIMIT and OFFSET clauses.
  */
-function compileLimitOffset(ast: QueryAst): SqlFragment | undefined {
-  const parts: SqlFragment[] = [];
-
-  if (ast.limit !== undefined) {
-    parts.push(sql`LIMIT ${ast.limit}`);
-  }
-  if (ast.offset !== undefined) {
-    parts.push(sql`OFFSET ${ast.offset}`);
-  }
-
+function compileLimitOffset(
+  ast: QueryAst,
+  dialect: DialectAdapter,
+): SqlFragment | undefined {
+  const parts = compileLimitOffsetClauses(ast.limit, ast.offset, dialect);
   return parts.length > 0 ? sql.join(parts, sql` `) : undefined;
 }

@@ -4,15 +4,31 @@
  * Provides diff detection between schema versions to identify
  * what has changed and what migrations might be needed.
  */
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
 import { type IndexEntity } from "../core/types";
+import { MigrationError } from "../errors";
 import { type IndexDeclaration } from "../indexes/types";
+import { isSubsumptionMetaEdge } from "../ontology/constants";
+import { encodeJsonPointerSegment } from "../query/json-pointer";
+import {
+  lostEndpointPairs,
+  serializedEdgeEndpointPairs,
+} from "../registry/edge-kind-facts";
+import { compareStrings } from "../utils/compare";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { canonicalEqual } from "./canonical";
+import { canonicalEqual, canonicalJson } from "./canonical";
+import { buildRegistryFromSerializedSchema } from "./deserializer";
+import {
+  acyclicFlagTransition,
+  classifyOntologyChanges,
+  type OntologyChange,
+} from "./ontology-change";
 import {
   type JsonSchema,
+  type SchemaCommitTransition,
   type SerializedEdgeDef,
   type SerializedNodeDef,
-  type SerializedOntology,
   type SerializedSchema,
 } from "./types";
 
@@ -27,10 +43,23 @@ export type ChangeType = "added" | "removed" | "modified" | "renamed";
 
 /**
  * Severity of a change for migration purposes.
+ *
+ * `warning` auto-migrates only if the data allows it: an ontology tightening
+ * (`disjointWith` / `subClassOf` / `equivalentTo` / `sameAs` addition, or a
+ * `subClassOf` / `equivalentTo` / `sameAs` removal) is `warning`-severity and
+ * still routes through `ensureSchema`'s auto-migrate branch, but the commit
+ * transaction runs a data probe first (`prepareSchemaTighteningPreflight`)
+ * and refuses with `MigrationError` `reason: "ontology-tightening-violated"`
+ * when existing rows would violate the tightened ontology. A unique-constraint
+ * change is `warning`-severity on the same terms: the same preflight refuses
+ * an added or reshaped constraint with `reason:
+ * "unique-constraint-requires-empty-kind"` while the kind holds rows.
+ * `isBackwardsCompatible` keeps meaning exactly "no `breaking` change" — it does not mean "safe to
+ * auto-migrate unconditionally".
  */
 export type ChangeSeverity =
   | "safe" // No data migration needed
-  | "warning" // Might need attention
+  | "warning" // Auto-migrates only if the data allows it
   | "breaking"; // Requires data migration
 
 // ============================================================
@@ -69,14 +98,17 @@ export type EdgeChange = Readonly<{
 // Ontology Changes
 // ============================================================
 
-/**
- * A change to the ontology.
- */
-export type OntologyChange = Readonly<{
+/** A durable graph-level Operational Identity capability change. */
+export type IdentityChange = Readonly<{
   type: ChangeType;
-  entity: "metaEdge" | "relation";
-  name: string;
   severity: ChangeSeverity;
+  details: string;
+}>;
+
+/** A safe metadata-only change to graph-scoped annotations. */
+export type GraphAnnotationsChange = Readonly<{
+  type: ChangeType;
+  severity: "safe";
   details: string;
 }>;
 
@@ -153,7 +185,15 @@ export type DeprecatedKindsChange = Readonly<{
  * A complete diff between two schema versions.
  */
 export type SchemaDiff = Readonly<{
+  /** Version of the schema being compared from. */
   fromVersion: number;
+
+  /**
+   * Version of the schema being compared to. For `getSchemaChanges()`, this
+   * is the version a commit would produce and equals `fromVersion` when
+   * `hasChanges` is false. Direct `computeSchemaDiff()` calls preserve the
+   * supplied after-schema version.
+   */
   toVersion: number;
 
   /** Changes to node definitions */
@@ -164,6 +204,12 @@ export type SchemaDiff = Readonly<{
 
   /** Changes to ontology */
   ontology: readonly OntologyChange[];
+
+  /** Change to the graph-level identity capability, if any. */
+  identity?: IdentityChange;
+
+  /** Change to consumer-owned graph-scoped annotations, if any. */
+  annotations?: GraphAnnotationsChange;
 
   /** Changes to index declarations */
   indexes: readonly IndexChange[];
@@ -203,6 +249,23 @@ export type SchemaDiff = Readonly<{
  * @param before - The previous schema version
  * @param after - The new schema version
  * @returns A diff describing all changes
+ * @throws ConfigurationError when `before` or `after` adds or removes a
+ *   relation and the ontology on the affected side cannot be interpreted —
+ *   see {@link classifyOntologyChanges}. Every caller of this function
+ *   inherits the throw: `loadAndVerifyGraph` / `createVerifiedStore`,
+ *   `getSchemaChanges`, and (through it) `requiresMigration` are audited at
+ *   their own declarations.
+ * @throws ConfigurationError (structural-subsumption check, `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE`
+ *   / `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` /
+ *   `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` /
+ *   `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE`) when `after` declares a
+ *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy whose child does not
+ *   structurally extend its parent — including a hierarchy this diff never
+ *   touched. A migration that only edits a node kind's property schema can
+ *   break an existing hierarchy, and an unchanged graph can carry one an
+ *   earlier release accepted, so this diff builds and enforces the AFTER
+ *   registry whenever `after` declares any of those three meta-edges, even
+ *   when nothing changed at all.
  */
 export function computeSchemaDiff(
   before: SerializedSchema,
@@ -210,7 +273,19 @@ export function computeSchemaDiff(
 ): SchemaDiff {
   const nodeChanges = diffNodes(before.nodes, after.nodes);
   const edgeChanges = diffEdges(before.edges, after.edges);
-  const ontologyChanges = diffOntology(before.ontology, after.ontology);
+  const ontologyChanges = classifyOntologyChanges(before, after);
+  // `classifyOntologyChanges` builds (and thereby structurally enforces
+  // subsumption on) the AFTER registry only when a relation changed. The
+  // contract has to hold for the proposed graph whatever this diff touched:
+  // a property-only edit can break an existing hierarchy, and an UNCHANGED
+  // graph can carry one an earlier release accepted — which is the case the
+  // pre-upgrade report exists for.
+  if (declaresSubsumption(after)) buildRegistryFromSerializedSchema(after);
+  const identityChange = diffIdentity(before.identity, after.identity);
+  const annotationsChange = diffGraphAnnotations(
+    before.annotations,
+    after.annotations,
+  );
   const indexChanges = diffIndexes(before.indexes, after.indexes);
   const extensionChange = diffExtension(before.extension, after.extension);
   const deprecatedKindsChange = diffDeprecatedKinds(
@@ -224,11 +299,13 @@ export function computeSchemaDiff(
     ...ontologyChanges,
     ...indexChanges,
   ];
-  const hasBreakingChanges = allChanges.some(
-    (change) => change.severity === "breaking",
-  );
+  const hasBreakingChanges =
+    allChanges.some((change) => change.severity === "breaking") ||
+    identityChange?.severity === "breaking";
   const hasChanges =
     allChanges.length > 0 ||
+    identityChange !== undefined ||
+    annotationsChange !== undefined ||
     extensionChange !== undefined ||
     deprecatedKindsChange !== undefined;
 
@@ -236,6 +313,8 @@ export function computeSchemaDiff(
     nodeChanges,
     edgeChanges,
     ontologyChanges,
+    identityChange,
+    annotationsChange,
     indexChanges,
     extensionChange,
     deprecatedKindsChange,
@@ -247,6 +326,10 @@ export function computeSchemaDiff(
     nodes: nodeChanges,
     edges: edgeChanges,
     ontology: ontologyChanges,
+    ...(identityChange === undefined ? {} : { identity: identityChange }),
+    ...(annotationsChange === undefined ?
+      {}
+    : { annotations: annotationsChange }),
     indexes: indexChanges,
     ...(extensionChange === undefined ? {} : { extension: extensionChange }),
     ...(deprecatedKindsChange === undefined ?
@@ -256,6 +339,56 @@ export function computeSchemaDiff(
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
     summary,
+  };
+}
+
+function diffGraphAnnotations(
+  before: SerializedSchema["annotations"],
+  after: SerializedSchema["annotations"],
+): GraphAnnotationsChange | undefined {
+  if (canonicalEqual(before ?? {}, after ?? {})) return undefined;
+  return {
+    type:
+      before === undefined ? "added"
+      : after === undefined ? "removed"
+      : "modified",
+    severity: "safe",
+    details: "Graph annotations changed",
+  };
+}
+
+function diffIdentity(
+  before: SerializedSchema["identity"],
+  after: SerializedSchema["identity"],
+): IdentityChange | undefined {
+  if (before === undefined && after === undefined) return;
+  if (before === undefined) {
+    return {
+      type: "added",
+      severity: "safe",
+      details: "Operational Identity enabled",
+    };
+  }
+  if (after === undefined) {
+    return {
+      type: "removed",
+      severity: "breaking",
+      details: "Operational Identity disabled",
+    };
+  }
+  if (before.sameIdAcrossKinds === after.sameIdAcrossKinds) return;
+  // A fold<->ignore flip rewrites the materialized identity closure and
+  // changes every areSame/membersOf/includeIdentityMembers answer against
+  // existing data — a read-semantics change, not a mechanical migration.
+  // Classified `breaking` (the same severity as identity removal, just
+  // above) so it cannot auto-migrate silently: it requires the same
+  // explicit `migrateSchema()` opt-in as any other breaking change.
+  return {
+    type: "modified",
+    severity: "breaking",
+    details:
+      `Operational Identity sameIdAcrossKinds changed from ` +
+      `"${before.sameIdAcrossKinds}" to "${after.sameIdAcrossKinds}"`,
   };
 }
 
@@ -314,6 +447,304 @@ function diffNodes(
 }
 
 /**
+ * Whether a document declares any `subClassOf`/`equivalentTo`/`sameAs`
+ * relation — the cheap gate on building a registry just to enforce
+ * structural subsumption. A document declaring none has nothing to enforce.
+ */
+function declaresSubsumption(schema: SerializedSchema): boolean {
+  return schema.ontology.relations.some((relation) =>
+    isSubsumptionMetaEdge(relation.metaEdge),
+  );
+}
+
+/**
+ * JSON-Schema keywords whose array value is semantically a *set*: `required`
+ * lists which properties must be present, `enum` lists which values are
+ * allowed. Reordering either changes nothing a validator — or a stored row —
+ * can observe, so a reordering must not read as a schema change.
+ *
+ * Other arrays are deliberately left in order: `prefixItems` is positional,
+ * and composition members (`allOf` / `anyOf` / `oneOf`) can carry
+ * order-dependent evaluation semantics.
+ */
+const SET_VALUED_KEYWORDS: ReadonlySet<string> = new Set(["required", "enum"]);
+
+/**
+ * Keywords whose value is a subschema, or an array of subschemas. Recursion is
+ * an **allowlist**: anything not named here is preserved verbatim.
+ *
+ * That direction matters. Recursing by default would apply schema semantics to
+ * values that are not schemas — instance data (`default`, `const`, `examples`)
+ * and arbitrary extension keys, which Zod's `.meta()` merges straight into the
+ * generated JSON Schema. A key merely *named* `required` inside one of those
+ * would then be sorted, silently normalizing away a real change. Failing the
+ * other way is safe: an unrecognized schema-valued keyword is left unsorted, so
+ * a reordering inside it reads as a change rather than being hidden.
+ */
+const SCHEMA_VALUED_KEYWORDS: ReadonlySet<string> = new Set([
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "oneOf",
+  "prefixItems",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+
+/**
+ * Keywords holding a *map of subschemas keyed by user-chosen names*. Their keys
+ * are property names, not keywords, so a property called `default` or `enum`
+ * must not be read as the keyword of the same name — its value is an ordinary
+ * subschema and still needs normalizing.
+ */
+const SUBSCHEMA_MAP_KEYWORDS: ReadonlySet<string> = new Set([
+  "properties",
+  "patternProperties",
+  "dependentSchemas",
+  "$defs",
+  "definitions",
+]);
+
+/**
+ * Maps a property name to the set of property names it requires. User-keyed
+ * like {@link SUBSCHEMA_MAP_KEYWORDS}, but each value is a set of names rather
+ * than a subschema.
+ */
+const DEPENDENT_REQUIRED_KEYWORD = "dependentRequired";
+
+function sortedByCanonicalForm(items: readonly unknown[]): readonly unknown[] {
+  // `compareStrings`, not `localeCompare`: the ordering has to be identical in
+  // every process that diffs this schema, and locale-aware collation varies
+  // with the host's ICU configuration.
+  return items.toSorted((left, right) =>
+    compareStrings(canonicalJson(left), canonicalJson(right)),
+  );
+}
+
+/**
+ * Whether `schema` closes a tuple by OMITTING `items` beside `prefixItems`.
+ *
+ * The projection closes a tuple that has no rest element with `items: false`.
+ * A document stored by an earlier projection closes one by omission instead,
+ * so both spellings read as closed. The one owner of that reading: the diff
+ * ({@link projectionSpellingNormalized}) and the structural-subtype predicate
+ * (`arrayTail`, `./structural-subtype`) both ask here.
+ */
+export function closesTupleByOmission(
+  schema: Readonly<{ prefixItems?: unknown; items?: unknown }>,
+): boolean {
+  return schema.prefixItems !== undefined && schema.items === undefined;
+}
+
+/**
+ * The type tokens a union member is exactly made of: `{ type: "string" }` or,
+ * once an inner union has been folded, `{ type: ["string", "null"] }`. A
+ * member carrying any other keyword is not a bare union of primitives.
+ */
+function bareTypeTokens(member: unknown): readonly string[] | undefined {
+  if (member === null || typeof member !== "object") return undefined;
+  const entries: readonly (readonly [string, unknown])[] =
+    Object.entries(member);
+  const [only, ...others] = entries;
+  if (only === undefined || others.length > 0) return undefined;
+  const [key, token] = only;
+  if (key !== "type") return undefined;
+  if (typeof token === "string") return [token];
+  const isTokenArray =
+    Array.isArray(token) && token.every((entry) => typeof entry === "string");
+  return isTokenArray ? token : undefined;
+}
+
+/**
+ * Folds the spellings different projections give ONE schema into a single
+ * form, so a stored document and the same graph projected today compare
+ * equal instead of reading as a breaking property change.
+ *
+ * Two spellings changed between projections, and each rule rewrites only the
+ * known keywords that spell it — every other key, unknown extension keys
+ * included, passes through untouched:
+ *
+ *  - **A union of bare primitives.** `anyOf: [{ type: "string" }, { type:
+ *    "null" }]` and `type: ["string", "null"]` admit the same values; sibling
+ *    keywords are ANDed with either form. Folded to the token array, in member
+ *    order; a member that is itself a folded union (`.nullable()` over a
+ *    primitive `z.union()`, or `.nullable().nullable()`) is flattened into it
+ *    and a repeated token collapses. A member carrying any other keyword keeps
+ *    the union as written.
+ *  - **A closed tuple's arity.** An earlier projection wrote a tuple with no
+ *    rest element as a bare `prefixItems`; the current one closes it with
+ *    `items: false` and states its arity as `minItems` / `maxItems`. The bare
+ *    spelling ({@link closesTupleByOmission}) is the only one that is
+ *    provably the earlier projection's — the current one always writes
+ *    `items` — so it alone is rewritten: closed explicitly, with both bounds
+ *    restated at the prefix length. That reads it as the required-arity
+ *    tuple, because the earlier projection wrote a required and an optional
+ *    trailing member identically and the document cannot say which was
+ *    meant; a stored optional-trailing tuple therefore still reads as
+ *    changed. Beside an explicit `items`, `minItems` is never touched: the
+ *    current projection OMITS it when every prefix member is optional, so
+ *    there an absent `minItems` means zero and a stated one is information.
+ *    A rest tuple stored by the earlier projection carries no `minItems`
+ *    either and so reads as the all-optional one. A closed tuple's absent
+ *    `maxItems` is restated, since a closed tuple cannot exceed its prefix.
+ */
+function projectionSpellingNormalized(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = createDataKeyedBag<unknown>();
+  for (const [key, entry] of Object.entries(schema)) normalized[key] = entry;
+
+  const { anyOf } = normalized;
+  if (
+    normalized["type"] === undefined &&
+    Array.isArray(anyOf) &&
+    anyOf.length > 1
+  ) {
+    const memberTokens = anyOf.map((member) => bareTypeTokens(member));
+    if (memberTokens.every((tokens) => tokens !== undefined)) {
+      delete normalized["anyOf"];
+      normalized["type"] = [...new Set(memberTokens.flat())];
+    }
+  }
+
+  const { prefixItems } = normalized;
+  if (Array.isArray(prefixItems)) {
+    if (closesTupleByOmission(normalized)) {
+      normalized["items"] = false;
+      normalized["minItems"] ??= prefixItems.length;
+    }
+    if (normalized["items"] === false) {
+      normalized["maxItems"] ??= prefixItems.length;
+    }
+  }
+  return normalized;
+}
+
+/**
+ * The form two property schemas are compared in: {@link SET_VALUED_KEYWORDS}
+ * arrays order-normalized so a pure reordering compares equal, and
+ * projection spellings folded ({@link projectionSpellingNormalized}) so a
+ * respelling does too. Recursive over the {@link SCHEMA_VALUED_KEYWORDS}
+ * allowlist only.
+ *
+ * Deliberately *not* folded into `canonicalEqual` / `sortedReplacer`: that
+ * canonical form also feeds `computeSchemaHash`, and normalizing there would
+ * change the hash of every schema already committed to a database. This
+ * normalization is scoped to diff comparison only.
+ */
+function comparisonNormalizedSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => comparisonNormalizedSchema(item));
+  }
+  if (value !== null && typeof value === "object") {
+    const normalized = createDataKeyedBag<unknown>();
+    for (const [key, entry] of Object.entries(value)) {
+      normalized[key] = normalizedKeywordValue(key, entry);
+    }
+    return projectionSpellingNormalized(normalized);
+  }
+  return value;
+}
+
+/**
+ * Normalizes one keyword's value according to what that keyword *holds*.
+ *
+ * The distinction matters: descending into a keyword blindly would apply
+ * schema semantics to instance data, so a reordered array inside a `default`
+ * (or inside an `enum` member) would be silently treated as unchanged.
+ */
+function normalizedKeywordValue(key: string, value: unknown): unknown {
+  if (SET_VALUED_KEYWORDS.has(key) && Array.isArray(value)) {
+    // Order-normalize the set itself, but leave each member alone: `enum`
+    // members are instance values and `required` members are plain names.
+    return sortedByCanonicalForm(value);
+  }
+  if (SUBSCHEMA_MAP_KEYWORDS.has(key)) return normalizedSubschemaMap(value);
+  if (key === DEPENDENT_REQUIRED_KEYWORD) {
+    return normalizedDependentRequired(value);
+  }
+  if (SCHEMA_VALUED_KEYWORDS.has(key)) return comparisonNormalizedSchema(value);
+  // Everything else is preserved verbatim: annotations (`title`), instance
+  // data (`default`, `const`, `examples`), and unknown extension keys. See
+  // {@link SCHEMA_VALUED_KEYWORDS} for why recursion is an allowlist.
+  return value;
+}
+
+/** Order-normalizes each name set in a `dependentRequired` map. */
+function normalizedDependentRequired(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const normalized = createDataKeyedBag<unknown>();
+  for (const [name, required] of Object.entries(value)) {
+    normalized[name] =
+      Array.isArray(required) ? sortedByCanonicalForm(required) : required;
+  }
+  return normalized;
+}
+
+/**
+ * Normalizes a map of subschemas without treating its user-chosen keys as
+ * keywords — so a property named `default` is still normalized as the
+ * subschema it is.
+ */
+function normalizedSubschemaMap(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return comparisonNormalizedSchema(value);
+  }
+  const normalized = createDataKeyedBag<unknown>();
+  for (const [name, subschema] of Object.entries(value)) {
+    normalized[name] = comparisonNormalizedSchema(subschema);
+  }
+  return normalized;
+}
+
+/**
+ * Whether two property JSON-Schemas are the same schema. Insensitive to the
+ * order of set-valued keywords and to which projection spelled them, so
+ * restating a kind with its fields declared in a different order — or
+ * reopening a stored document after the projection changed how it spells a
+ * union of primitives or a closed tuple — is correctly a no-op rather than a
+ * "modified" kind that forces a migration.
+ */
+export function propertySchemasEqual(before: unknown, after: unknown): boolean {
+  return canonicalEqual(
+    comparisonNormalizedSchema(before),
+    comparisonNormalizedSchema(after),
+  );
+}
+
+function endpointKindsEqual(
+  before: readonly string[] | undefined,
+  after: readonly string[] | undefined,
+): boolean {
+  return canonicalEqual(before?.toSorted(), after?.toSorted());
+}
+
+function targetKindsBySourceEqual(
+  before: Readonly<Record<string, readonly string[]>> | undefined,
+  after: Readonly<Record<string, readonly string[]>> | undefined,
+): boolean {
+  if (before === undefined && after === undefined) return true;
+  if (before === undefined || after === undefined) return false;
+  const beforeKeys = Object.keys(before).toSorted();
+  const afterKeys = Object.keys(after).toSorted();
+  if (!canonicalEqual(beforeKeys, afterKeys)) return false;
+  for (const key of beforeKeys) {
+    if (!endpointKindsEqual(before[key], after[key])) return false;
+  }
+  return true;
+}
+
+/**
  * Computes changes to a single node definition.
  */
 function diffNodeDef(
@@ -324,11 +755,12 @@ function diffNodeDef(
   const changes: NodeChange[] = [];
 
   // Check property schema changes
-  if (!canonicalEqual(before.properties, after.properties)) {
+  if (!propertySchemasEqual(before.properties, after.properties)) {
     const { severity, details } = classifyPropertyChanges(
       name,
       before.properties,
       after.properties,
+      `/nodes/${encodeJsonPointerSegment(name)}/properties/properties`,
     );
 
     changes.push({
@@ -397,9 +829,15 @@ function propertyTypeSignature(schema: JsonSchema): string {
 
 /**
  * Non-constraining JSON-Schema keywords: changing them cannot invalidate an
- * existing stored value, so a diff limited to these is safe.
+ * existing stored value, so a diff limited to these is safe. Exported (module-
+ * local; not re-exported from `./index`) so `structural-subtype.ts`'s
+ * projection-coverage test can classify a projected keyword as migration
+ * metadata without re-spelling this list — this predicate's own rule 4
+ * silently drops the same keywords for a different reason (see that module's
+ * doc comment), but the KEYWORD SET a Zod projection can emit has exactly one
+ * owner regardless of which predicate is asking about it.
  */
-const NON_CONSTRAINING_KEYWORDS = new Set([
+export const NON_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "description",
   "title",
   "default",
@@ -407,15 +845,74 @@ const NON_CONSTRAINING_KEYWORDS = new Set([
 ]);
 
 /** A copy of `schema` with the non-constraining keywords removed. */
-function stripSchemaMetadata(schema: JsonSchema): Record<string, unknown> {
-  const stripped: Record<string, unknown> = {};
+export function stripSchemaMetadata(
+  schema: JsonSchema,
+): Record<string, unknown> {
+  // Data-keyed: JSON-Schema keywords parsed out of the persisted document.
+  const stripped = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(schema)) {
     if (!NON_CONSTRAINING_KEYWORDS.has(key)) stripped[key] = value;
   }
   return stripped;
 }
 
-function isObjectSchema(schema: JsonSchema): boolean {
+/** Describe leaf-level JSON-Schema differences using RFC 6901 pointers. */
+function describeSchemaDifferences(
+  before: unknown,
+  after: unknown,
+  pointer: string,
+): readonly string[] {
+  if (canonicalEqual(before, after)) return [];
+  if (
+    before !== null &&
+    after !== null &&
+    typeof before === "object" &&
+    typeof after === "object" &&
+    !Array.isArray(before) &&
+    !Array.isArray(after)
+  ) {
+    const beforeRecord = before as Record<string, unknown>;
+    const afterRecord = after as Record<string, unknown>;
+    const keys = new Set([
+      ...Object.keys(beforeRecord),
+      ...Object.keys(afterRecord),
+    ]);
+    return [...keys].flatMap((key) =>
+      describeSchemaDifferences(
+        beforeRecord[key],
+        afterRecord[key],
+        `${pointer}/${encodeJsonPointerSegment(key)}`,
+      ),
+    );
+  }
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const differences: string[] = [];
+    const length = Math.max(before.length, after.length);
+    for (let index = 0; index < length; index += 1) {
+      if (index >= before.length) {
+        differences.push(
+          `${pointer}/${index}: undefined → ${JSON.stringify(after[index])}`,
+        );
+      } else if (index >= after.length) {
+        differences.push(
+          `${pointer}/${index}: ${JSON.stringify(before[index])} → undefined`,
+        );
+      } else {
+        differences.push(
+          ...describeSchemaDifferences(
+            before[index],
+            after[index],
+            `${pointer}/${index}`,
+          ),
+        );
+      }
+    }
+    return differences;
+  }
+  return [`${pointer}: ${JSON.stringify(before)} → ${JSON.stringify(after)}`];
+}
+
+export function isObjectSchema(schema: JsonSchema): boolean {
   return schema.type === "object" || schema.properties !== undefined;
 }
 
@@ -439,7 +936,12 @@ function isBreakingPropertyChange(
   before: JsonSchema,
   after: JsonSchema,
 ): boolean {
-  if (canonicalEqual(stripSchemaMetadata(before), stripSchemaMetadata(after))) {
+  if (
+    propertySchemasEqual(
+      stripSchemaMetadata(before),
+      stripSchemaMetadata(after),
+    )
+  ) {
     return false;
   }
   if (propertyTypeSignature(before) !== propertyTypeSignature(after)) {
@@ -465,7 +967,7 @@ function isBreakingObjectSchemaChange(
   const afterRequired = new Set(after.required);
 
   for (const key of Object.keys(beforeProps)) {
-    if (!(key in afterProps)) return true; // nested property removed
+    if (!hasOwnKey(afterProps, key)) return true; // nested property removed
   }
   for (const key of afterRequired) {
     if (!beforeRequired.has(key)) return true; // nested property newly required
@@ -506,15 +1008,22 @@ function classifyPropertyChanges(
   kind: string,
   before: JsonSchema,
   after: JsonSchema,
+  pointer: string,
 ): { severity: ChangeSeverity; details: string } {
   const beforeProps = before.properties ?? {};
   const afterProps = after.properties ?? {};
   const beforeRequired = new Set(before.required);
   const afterRequired = new Set(after.required);
 
-  const removed = Object.keys(beforeProps).filter((p) => !(p in afterProps));
-  const added = Object.keys(afterProps).filter((p) => !(p in beforeProps));
-  const newRequired = [...afterRequired].filter((p) => !beforeRequired.has(p));
+  const removed = Object.keys(beforeProps).filter(
+    (property) => !hasOwnKey(afterProps, property),
+  );
+  const added = Object.keys(afterProps).filter(
+    (property) => !hasOwnKey(beforeProps, property),
+  );
+  const newRequired = [...afterRequired].filter(
+    (property) => !beforeRequired.has(property),
+  );
 
   // A shared property whose schema changed in a way that can invalidate existing
   // rows (type/shape change, a breaking nested/array/enum/constraint change).
@@ -522,7 +1031,7 @@ function classifyPropertyChanges(
   for (const [property, beforeProperty] of Object.entries(beforeProps)) {
     const afterProperty = afterProps[property];
     if (afterProperty === undefined) continue; // removed — handled below
-    if (canonicalEqual(beforeProperty, afterProperty)) continue; // unchanged
+    if (propertySchemasEqual(beforeProperty, afterProperty)) continue; // unchanged
     if (isBreakingPropertyChange(beforeProperty, afterProperty)) {
       breakingProps.push(property);
     }
@@ -535,9 +1044,18 @@ function classifyPropertyChanges(
     };
   }
   if (breakingProps.length > 0) {
+    const differences = breakingProps.flatMap((property) =>
+      describeSchemaDifferences(
+        beforeProps[property],
+        afterProps[property],
+        `${pointer}/${encodeJsonPointerSegment(property)}`,
+      ),
+    );
     return {
       severity: "breaking",
-      details: `Property schemas changed incompatibly in "${kind}": ${breakingProps.join(", ")}`,
+      details:
+        `Property schemas changed incompatibly in "${kind}": ${breakingProps.join(", ")}. ` +
+        `Differences: ${differences.join("; ")}`,
     };
   }
   if (newRequired.length > 0) {
@@ -622,7 +1140,7 @@ function diffEdgeDef(
   const changes: EdgeChange[] = [];
 
   // Check endpoint kinds
-  if (!canonicalEqual(before.fromKinds, after.fromKinds)) {
+  if (!endpointKindsEqual(before.fromKinds, after.fromKinds)) {
     changes.push({
       type: "modified",
       kind: name,
@@ -633,12 +1151,40 @@ function diffEdgeDef(
     });
   }
 
-  if (!canonicalEqual(before.toKinds, after.toKinds)) {
+  if (!endpointKindsEqual(before.toKinds, after.toKinds)) {
     changes.push({
       type: "modified",
       kind: name,
       severity: "warning",
       details: `toKinds changed for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  // Check targetKindsBySource
+  if (
+    !targetKindsBySourceEqual(
+      before.targetKindsBySource,
+      after.targetKindsBySource,
+    )
+  ) {
+    const removedPairs = lostEndpointPairs(
+      serializedEdgeEndpointPairs(before),
+      serializedEdgeEndpointPairs(after),
+    ).map(({ from, to }) => `(${from} -> ${to})`);
+
+    const isBreaking = removedPairs.length > 0;
+    const details =
+      isBreaking ?
+        `targetKindsBySource narrowed for "${name}"; removed pairs: [${removedPairs.join(", ")}]`
+      : `targetKindsBySource changed for "${name}"`;
+
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: isBreaking ? "breaking" : "warning",
+      details,
       before,
       after,
     });
@@ -656,12 +1202,82 @@ function diffEdgeDef(
     });
   }
 
+  // Check target cardinality — same "modified"/"warning" shape as the source
+  // axis: severity policy is unchanged for both directions, because the data
+  // probe (not the severity) is what actually gates a tightening. Defaulted
+  // before comparing: unlike `cardinality`, an absent key means "many" (see
+  // `SerializedEdgeDef`), so an undeclared-vs-undeclared or
+  // undeclared-vs-explicit-"many" pair must diff as unchanged.
+  const beforeTargetCardinality = effectiveTargetCardinality(
+    before.targetCardinality,
+  );
+  const afterTargetCardinality = effectiveTargetCardinality(
+    after.targetCardinality,
+  );
+  if (beforeTargetCardinality !== afterTargetCardinality) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `Target cardinality changed from "${beforeTargetCardinality}" to "${afterTargetCardinality}" for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  // An edge-registration property like the cardinalities, so reported here
+  // and never as an ontology change. Declaring it is a tightening the schema
+  // commit probes against stored edges (a cycle refuses the commit), hence a
+  // warning; dropping it invalidates nothing.
+  const acyclicTransition = acyclicFlagTransition(before, after);
+  if (acyclicTransition !== undefined) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: acyclicTransition === "declared" ? "warning" : "safe",
+      details: `Edge "${name}" ${acyclicTransition} acyclic: true`,
+      before,
+      after,
+    });
+  }
+
+  // Write-time validation only: stored edges are not invalidated, so this
+  // is a warning (like cardinality), not a breaking change.
+  if (before.endpointExistence !== after.endpointExistence) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `endpointExistence changed from "${before.endpointExistence}" to "${after.endpointExistence}" for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  if (!matchIdentitiesEqual(before.matchIdentity, after.matchIdentity)) {
+    const details =
+      before.matchIdentity === undefined ?
+        `Match identity added to "${name}"; existing edge data must be rekeyed`
+      : after.matchIdentity === undefined ?
+        `Match identity removed from "${name}"; existing edge data must be rekeyed`
+      : `Match identity changed for "${name}"; existing edge data must be rekeyed`;
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "breaking",
+      details,
+      before,
+      after,
+    });
+  }
+
   // Check properties
-  if (!canonicalEqual(before.properties, after.properties)) {
+  if (!propertySchemasEqual(before.properties, after.properties)) {
     const { severity, details } = classifyPropertyChanges(
       name,
       before.properties,
       after.properties,
+      `/edges/${encodeJsonPointerSegment(name)}/properties/properties`,
     );
     changes.push({
       type: "modified",
@@ -687,88 +1303,39 @@ function diffEdgeDef(
   return changes;
 }
 
+export function matchIdentitiesEqual(
+  before: SerializedEdgeDef["matchIdentity"],
+  after: SerializedEdgeDef["matchIdentity"],
+): boolean {
+  if (before === undefined || after === undefined) return before === after;
+  if (
+    before.name !== after.name ||
+    before.fields.length !== after.fields.length
+  ) {
+    return false;
+  }
+  const beforeFields = before.fields.toSorted();
+  const afterFields = after.fields.toSorted();
+  return beforeFields.every((field, index) => field === afterFields[index]);
+}
+
+function isMatchIdentityChange(change: EdgeChange): boolean {
+  return (
+    change.type === "modified" &&
+    change.severity === "breaking" &&
+    change.before !== undefined &&
+    change.after !== undefined &&
+    !matchIdentitiesEqual(
+      change.before.matchIdentity,
+      change.after.matchIdentity,
+    )
+  );
+}
+
 function annotationsChanged(before: unknown, after: unknown): boolean {
   if (before === undefined && after === undefined) return false;
   if (before === undefined || after === undefined) return true;
   return !canonicalEqual(before, after);
-}
-
-// ============================================================
-// Ontology Diff
-// ============================================================
-
-/**
- * Computes changes to the ontology.
- */
-function diffOntology(
-  before: SerializedOntology,
-  after: SerializedOntology,
-): readonly OntologyChange[] {
-  const changes: OntologyChange[] = [];
-
-  // Diff meta-edges
-  const metaEdgesBefore = new Set(Object.keys(before.metaEdges));
-  const metaEdgesAfter = new Set(Object.keys(after.metaEdges));
-
-  for (const name of metaEdgesBefore) {
-    if (!metaEdgesAfter.has(name)) {
-      changes.push({
-        type: "removed",
-        entity: "metaEdge",
-        name,
-        severity: "breaking",
-        details: `Meta-edge "${name}" was removed`,
-      });
-    }
-  }
-
-  for (const name of metaEdgesAfter) {
-    if (!metaEdgesBefore.has(name)) {
-      changes.push({
-        type: "added",
-        entity: "metaEdge",
-        name,
-        severity: "safe",
-        details: `Meta-edge "${name}" was added`,
-      });
-    }
-  }
-
-  // Diff relations (simplified - just detect additions/removals)
-  const relationsBefore = new Set(
-    before.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-  const relationsAfter = new Set(
-    after.relations.map((r) => `${r.metaEdge}:${r.from}:${r.to}`),
-  );
-
-  for (const relationKey of relationsBefore) {
-    if (!relationsAfter.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "removed",
-        entity: "relation",
-        name: relationKey,
-        severity: "warning",
-        details: `Relation ${metaEdge}(${from}, ${to}) was removed`,
-      });
-    }
-  }
-
-  for (const relationKey of relationsAfter) {
-    if (!relationsBefore.has(relationKey)) {
-      const [metaEdge, from, to] = relationKey.split(":");
-      changes.push({
-        type: "added",
-        entity: "relation",
-        name: relationKey,
-        severity: "safe",
-        details: `Relation ${metaEdge}(${from}, ${to}) was added`,
-      });
-    }
-  }
-
-  return changes;
 }
 
 // ============================================================
@@ -933,58 +1500,52 @@ function diffDeprecatedKinds(
 /**
  * Generates a human-readable summary of changes.
  */
+/**
+ * One summary clause for a list of typed changes, or `undefined` when the
+ * list is empty. Every change type is counted, so a list holding only
+ * `modified` entries can never summarize as nothing.
+ */
+function summarizeChangeCounts(
+  label: string,
+  changes: readonly Readonly<{ type: ChangeType }>[],
+): string | undefined {
+  if (changes.length === 0) return undefined;
+  const count = (type: ChangeType): number =>
+    changes.filter((change) => change.type === type).length;
+  return `${label}: ${count("added")} added, ${count("removed")} removed, ${count("modified")} modified`;
+}
+
 function generateSummary(
   nodeChanges: readonly NodeChange[],
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
+  identityChange: IdentityChange | undefined,
+  annotationsChange: GraphAnnotationsChange | undefined,
   indexChanges: readonly IndexChange[],
   extensionChange: ExtensionChange | undefined,
   deprecatedKindsChange: DeprecatedKindsChange | undefined,
 ): string {
   const parts: string[] = [];
 
-  const nodeAdded = nodeChanges.filter((c) => c.type === "added").length;
-  const nodeRemoved = nodeChanges.filter((c) => c.type === "removed").length;
-  const nodeModified = nodeChanges.filter((c) => c.type === "modified").length;
-
-  if (nodeAdded > 0 || nodeRemoved > 0 || nodeModified > 0) {
-    parts.push(
-      `Nodes: ${nodeAdded} added, ${nodeRemoved} removed, ${nodeModified} modified`,
-    );
+  for (const [label, changes] of [
+    ["Nodes", nodeChanges],
+    ["Edges", edgeChanges],
+    ["Ontology", ontologyChanges],
+  ] as const) {
+    const counts = summarizeChangeCounts(label, changes);
+    if (counts !== undefined) parts.push(counts);
   }
 
-  const edgeAdded = edgeChanges.filter((c) => c.type === "added").length;
-  const edgeRemoved = edgeChanges.filter((c) => c.type === "removed").length;
-  const edgeModified = edgeChanges.filter((c) => c.type === "modified").length;
-
-  if (edgeAdded > 0 || edgeRemoved > 0 || edgeModified > 0) {
-    parts.push(
-      `Edges: ${edgeAdded} added, ${edgeRemoved} removed, ${edgeModified} modified`,
-    );
+  if (identityChange !== undefined) {
+    parts.push(`Identity: ${identityChange.type}`);
   }
 
-  const ontologyAdded = ontologyChanges.filter(
-    (c) => c.type === "added",
-  ).length;
-  const ontologyRemoved = ontologyChanges.filter(
-    (c) => c.type === "removed",
-  ).length;
-
-  if (ontologyAdded > 0 || ontologyRemoved > 0) {
-    parts.push(`Ontology: ${ontologyAdded} added, ${ontologyRemoved} removed`);
+  if (annotationsChange !== undefined) {
+    parts.push(`Graph annotations: ${annotationsChange.type}`);
   }
 
-  const indexAdded = indexChanges.filter((c) => c.type === "added").length;
-  const indexRemoved = indexChanges.filter((c) => c.type === "removed").length;
-  const indexModified = indexChanges.filter(
-    (c) => c.type === "modified",
-  ).length;
-
-  if (indexAdded > 0 || indexRemoved > 0 || indexModified > 0) {
-    parts.push(
-      `Indexes: ${indexAdded} added, ${indexRemoved} removed, ${indexModified} modified`,
-    );
-  }
+  const indexCounts = summarizeChangeCounts("Indexes", indexChanges);
+  if (indexCounts !== undefined) parts.push(indexCounts);
 
   if (extensionChange !== undefined) {
     parts.push(`Graph extension document: ${extensionChange.type}`);
@@ -1009,15 +1570,54 @@ function generateSummary(
 // ============================================================
 
 /**
- * Checks if a schema change is backwards compatible.
+ * Checks if a schema change is backwards compatible: exactly "no `breaking`
+ * change" (`!diff.hasBreakingChanges`) — nodes or edges removed, required
+ * properties added, existing properties removed, and a `breaking` ontology
+ * change (`inverseOf`/`implies` added or removed, a relation naming a custom
+ * meta-edge removed, or Operational Identity's `sameIdAcrossKinds` flip) all
+ * count.
  *
- * A change is backwards compatible if:
- * - No nodes or edges were removed
- * - No required properties were added
- * - No existing properties were removed
+ * "Backwards compatible" does NOT mean "will commit unconditionally": a
+ * `warning`-severity ontology change (see `ChangeSeverity`'s docblock)
+ * passes this check and then owes a commit-time data probe that can still
+ * refuse it with `MigrationError` `reason: "ontology-tightening-violated"`,
+ * and a `warning`-severity unique-constraint change one that can refuse it
+ * with `reason: "unique-constraint-requires-empty-kind"`.
+ * See docs/schema-evolution.md's "Ontology tightenings are checked against
+ * your data" section.
  */
 export function isBackwardsCompatible(diff: SchemaDiff): boolean {
   return !diff.hasBreakingChanges;
+}
+
+/**
+ * How a proposed graph relates to the committed schema.
+ *
+ * - `identical` — a semantic no-op; committing it changes nothing.
+ * - `additive` — changes exist and are all backwards compatible
+ *   (`isBackwardsCompatible`). This is a pre-flight classification, not a
+ *   commit guarantee: an `additive` diff that carries a `warning`-severity
+ *   ontology change (see `ChangeSeverity`) is still subject to the
+ *   commit-time data probe and can be refused with `MigrationError`
+ *   `reason: "ontology-tightening-violated"` if existing rows violate the
+ *   tightened ontology.
+ * - `incompatible` — at least one breaking change; needs a deliberate
+ *   migration decision.
+ */
+export type SchemaChangeClassification =
+  "identical" | "additive" | "incompatible";
+
+/**
+ * Classifies a schema diff into the three outcomes a caller actually branches
+ * on. Pure — no I/O, no DDL. Pair with `getSchemaChanges(backend, graph)` (or
+ * `store.schemaChanges()`) to pre-flight a proposal *before* touching a
+ * privileged, migration-gated path.
+ */
+export function classifySchemaChanges(
+  diff: SchemaDiff,
+): SchemaChangeClassification {
+  if (!diff.hasChanges) return "identical";
+  return diff.hasBreakingChanges ? "incompatible" : "additive";
 }
 
 /**
@@ -1041,7 +1641,113 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
     if (change.type === "removed") {
       actions.push(`DELETE data for removed edge kind "${change.kind}"`);
     }
+    if (isMatchIdentityChange(change)) {
+      actions.push(`REKEY edge data for "${change.kind}": ${change.details}`);
+    }
+  }
+
+  const customRelations = removedCustomRelations(diff.ontology);
+  if (customRelations.length > 0) {
+    actions.push(moveCustomRelationsAction(customRelations));
+  }
+
+  if (diff.identity !== undefined) {
+    switch (diff.identity.type) {
+      case "added": {
+        actions.push(
+          `BUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(materializes the closure table, running a same-id fold scan ` +
+            `when sameIdAcrossKinds is "fold")`,
+        );
+        break;
+      }
+      case "modified": {
+        actions.push(
+          `REBUILD Operational Identity closure: ${diff.identity.details} ` +
+            `(every areSame/membersOf/includeIdentityMembers answer is ` +
+            `recomputed under the new profile)`,
+        );
+        break;
+      }
+      case "removed": {
+        actions.push(
+          `DISABLE Operational Identity: ${diff.identity.details} (the ` +
+            `materialized closure is left in place, unread; the identity ` +
+            `API becomes unavailable)`,
+        );
+        break;
+      }
+      case "renamed": {
+        // Unreachable: `diffIdentity` never emits "renamed" — identity is a
+        // graph-level capability, not a named entity that can be renamed.
+        // Handled only so the switch stays exhaustive over `ChangeType`.
+        break;
+      }
+    }
   }
 
   return actions;
 }
+
+/** Every relation `changes` drops whose meta-edge is not built in. */
+function removedCustomRelations(
+  changes: readonly OntologyChange[],
+): readonly NonNullable<OntologyChange["removedCustomRelation"]>[] {
+  return changes.flatMap((change) =>
+    change.removedCustomRelation === undefined ?
+      []
+    : [change.removedCustomRelation],
+  );
+}
+
+function moveCustomRelationsAction(
+  relations: readonly NonNullable<OntologyChange["removedCustomRelation"]>[],
+): string {
+  const written = relations.map(
+    ({ metaEdge, from, to }) => `${metaEdge}(${from}, ${to})`,
+  );
+  return (
+    `MOVE custom ontology relations ${written.join(", ")} ` +
+    `into defineGraph({ annotations }), then commit with migrateSchema() ` +
+    `(their meta-edges are not built in, and the committed schema drops them)`
+  );
+}
+
+/**
+ * Refuses a schema commit that would drop a stored custom-meta-edge relation,
+ * for the store verbs that commit without `ensureSchema`'s severity gate
+ * (`store.evolve()`, `store.planEvolution()`, `store.removeKinds()`). The
+ * removal is breaking (see `classifyOntologyChanges`), and `migrateSchema()`
+ * is the one path that acknowledges it. Call it with the ontology changes of
+ * the exact before/after documents the commit publishes, before any write.
+ *
+ * @throws MigrationError (`reason: "custom-relation-removal"`) naming every
+ *   such relation and the migration action that moves it.
+ */
+export function assertNoRemovedCustomRelations(
+  params: SchemaCommitTransition &
+    Readonly<{ verb: string; changes: readonly OntologyChange[] }>,
+): void {
+  const relations = removedCustomRelations(params.changes);
+  if (relations.length === 0) return;
+  throw new MigrationError(
+    `${params.verb} would drop ${String(relations.length)} stored custom ontology ` +
+      `relation(s) the graph can no longer declare. ${moveCustomRelationsAction(relations)}.`,
+    {
+      graphId: params.graphId,
+      fromVersion: params.fromVersion,
+      toVersion: params.toVersion,
+      reason: "custom-relation-removal",
+      relations,
+    },
+  );
+}
+
+/**
+ * A change to the ontology.
+ *
+ * Defined in `./ontology-change` (alongside the data-probe machinery that
+ * classifies it) and re-exported here so the public path
+ * (`src/schema/index.ts`) is unchanged.
+ */
+export { type OntologyChange } from "./ontology-change";

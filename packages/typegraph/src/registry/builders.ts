@@ -7,20 +7,24 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import {
+  getEdgeEndpointPairs,
+  projectTargetKinds,
+} from "../core/edge-endpoints";
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
+import {
   type AnyEdgeType,
   type EdgeRegistration,
   type NodeRegistration,
   type NodeType,
 } from "../core/types";
-import {
-  computeClosuresFromOntology,
-  createEmptyClosures,
-  KindRegistry,
-} from "./kind-registry";
-import {
-  type EdgeEndpointKinds,
-  validateImpliesEndpointCompatibility,
-} from "./validate-implies";
+import { type NamedOntologyRelation } from "../ontology/validation";
+import { structuralSubtypeProjection } from "../schema/structural-subtype-projection";
+import { buildValidatedKindRegistry } from "./build-validated";
+import { compositionRelationFields } from "./composition-relation";
+import { type EdgeKindFacts } from "./edge-kind-facts";
+import type { KindRegistry } from "./kind-registry";
+
+const EMPTY_NAMED_ONTOLOGY: readonly NamedOntologyRelation[] = [];
 
 // ============================================================
 // Build Registry from GraphDef
@@ -51,36 +55,64 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
   // Extract edge types
   const edgeTypes = extractEdgeTypes(graph);
 
-  // Compute closures from ontology
-  const closures =
-    graph.ontology.length > 0 ?
-      computeClosuresFromOntology(graph.ontology)
-    : createEmptyClosures();
-
-  const registry = new KindRegistry(nodeTypes, edgeTypes, closures);
-  validateImpliesEndpointCompatibility(
-    buildEdgeEndpointKinds(graph.edges),
-    registry,
-  );
-
-  return registry;
+  return buildValidatedKindRegistry({
+    nodeKinds: nodeTypes,
+    edgeKinds: edgeTypes,
+    ontology:
+      graph.ontology.length === 0 ?
+        EMPTY_NAMED_ONTOLOGY
+      : graph.ontology.map((relation): NamedOntologyRelation => ({
+          metaEdge: relation.metaEdge.name,
+          from:
+            typeof relation.from === "string" ?
+              relation.from
+            : relation.from.kind,
+          to: typeof relation.to === "string" ? relation.to : relation.to.kind,
+          ...compositionRelationFields(relation),
+        })),
+    edgeFacts: buildGraphEdgeKindFacts(graph.edges),
+    // Memoized by structuralSubtypeProjection itself (keyed on the Zod
+    // schema reference), so this closure is called once per node kind per
+    // registry build, not once per closure pair — the structural-subsumption
+    // check's schema source for a live, compile-time graph.
+    nodePropertySchemas: (kind) => {
+      const nodeType = nodeTypes.get(kind);
+      return nodeType === undefined ? undefined : (
+          structuralSubtypeProjection(nodeType.schema)
+        );
+    },
+    structuralSubsumption: "enforce",
+    ...(graph.identity === undefined ? {} : { identity: graph.identity }),
+  });
 }
 
 /**
  * Maps each registered edge kind to its declared domain/range kind names,
- * for `validateImpliesEndpointCompatibility`. A `Map` (rather than the
- * plain `graph.edges` object) so a lookup for an edge kind literally named
- * "toString" or another `Object.prototype` member can't resolve to an
- * inherited member instead of `undefined`.
+ * for `validateImpliesEndpointCompatibility` and for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`).
+ * A `Map` (rather than the plain `graph.edges` object) so a lookup for an
+ * edge kind literally named "toString" or another `Object.prototype` member
+ * can't resolve to an inherited member instead of `undefined`.
+ *
+ * The serialized-schema sibling of this adapter is
+ * `buildSerializedEdgeKindFacts` (`./edge-kind-facts.ts`): the two
+ * read genuinely different representations (a live `GraphDef` vs a persisted
+ * document), so they stay separate, but both feed the one
+ * `expandEdgeEndpointAllowance`.
  */
-function buildEdgeEndpointKinds(
+export function buildGraphEdgeKindFacts(
   edges: Record<string, EdgeRegistration>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
   for (const [kind, registration] of Object.entries(edges)) {
     result.set(kind, {
       from: registration.from.map((node) => node.kind),
-      to: registration.to.map((node) => node.kind),
+      to: projectTargetKinds(registration.to),
+      pairs: getEdgeEndpointPairs(registration.from, registration.to),
+      cardinality: registration.cardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(
+        registration.targetCardinality,
+      ),
     });
   }
   return result;

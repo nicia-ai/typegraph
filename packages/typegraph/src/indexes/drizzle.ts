@@ -1,4 +1,4 @@
-import { type SQLWrapper } from "drizzle-orm";
+import { sql as drizzleSql, type SQLWrapper } from "drizzle-orm";
 import {
   index as pgIndex,
   type IndexBuilder as PgIndexBuilder,
@@ -13,7 +13,9 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import { toDrizzleSql } from "../backend/drizzle/execution/types";
+import { type SqlDialect } from "../query/dialect";
 import { sql as portableSql, type SqlFragment } from "../query/sql-fragment";
+import { requireDefined } from "../utils/presence";
 import {
   compileEdgeIndexKeys,
   compileIndexWhere,
@@ -21,8 +23,9 @@ import {
   type IndexCompilationContext,
 } from "./compiler";
 import {
-  SYSTEM_INDEX_DECLARATIONS,
+  graphIdOrderIndexName,
   type SystemIndexDeclaration,
+  systemIndexDeclarationsFor,
   systemIndexName,
   type SystemIndexTable,
 } from "./system";
@@ -40,6 +43,7 @@ import {
 export function buildPostgresNodeIndexBuilders(
   table: NodeIndexTable,
   indexes: readonly IndexDeclaration[],
+  physicalName?: (index: NodeIndexDeclaration) => string,
 ): readonly PgIndexBuilder[] {
   // GIN-family declarations (method: "gin" / "trigram") are
   // materialize-only — like pgvector ANN indexes, they are a pure
@@ -62,7 +66,8 @@ export function buildPostgresNodeIndexBuilders(
     );
     assertNonEmpty(keys, `node index "${index.name}"`);
 
-    const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
+    const name = physicalName?.(index) ?? index.name;
+    const base = index.unique ? pgUniqueIndex(name) : pgIndex(name);
 
     const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
     assertNonEmpty(drizzleKeys, `node index "${index.name}"`);
@@ -87,6 +92,7 @@ export function buildPostgresNodeIndexBuilders(
 export function buildPostgresEdgeIndexBuilders(
   table: EdgeIndexTable,
   indexes: readonly IndexDeclaration[],
+  physicalName?: (index: EdgeIndexDeclaration) => string,
 ): readonly PgIndexBuilder[] {
   const edgeIndexes = indexes.filter(
     (index): index is EdgeIndexDeclaration =>
@@ -106,7 +112,8 @@ export function buildPostgresEdgeIndexBuilders(
     );
     assertNonEmpty(keys, `edge index "${index.name}"`);
 
-    const base = index.unique ? pgUniqueIndex(index.name) : pgIndex(index.name);
+    const name = physicalName?.(index) ?? index.name;
+    const base = index.unique ? pgUniqueIndex(name) : pgIndex(name);
 
     const drizzleKeys = keys.map((key) => toDrizzleSql(key, "postgres"));
     assertNonEmpty(drizzleKeys, `edge index "${index.name}"`);
@@ -402,7 +409,7 @@ function getSqliteEdgeSystemColumn(
 }
 
 // ============================================================
-// System indexes (both dialects)
+// System indexes (both dialects, each declaration's dialect scope applied)
 // ============================================================
 //
 // The schema factories derive their system-index Drizzle builders from
@@ -422,46 +429,76 @@ type SystemIndexColumns<C extends { name: string }> = Readonly<
  * and the schema. A column the table doesn't define throws at
  * table-construction time (exercised by the system-index parity tests).
  */
+function resolveSystemIndexColumn<C extends { name: string }>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+  column: string,
+): C {
+  const value = Object.values(columns).find(
+    (candidate) => candidate.name === column,
+  );
+  if (value === undefined) {
+    throw new Error(
+      `System index "${declaration.table}_${declaration.suffix}" references ` +
+        `a column "${column}" the ${declaration.table} table does not define`,
+    );
+  }
+  return value;
+}
+
 function resolveSystemIndexColumns<C extends { name: string }>(
   declaration: SystemIndexDeclaration,
   columns: SystemIndexColumns<C>,
 ): readonly [C, ...C[]] {
-  const byPhysicalName = new Map(
-    Object.values(columns).map((column) => [column.name, column]),
+  const resolved = declaration.columns.map((column) =>
+    resolveSystemIndexColumn(declaration, columns, column),
   );
-  const resolved = declaration.columns.map((column) => {
-    const value = byPhysicalName.get(column);
-    if (value === undefined) {
-      throw new Error(
-        `System index "${declaration.table}_${declaration.suffix}" references ` +
-          `a column "${column}" the ${declaration.table} table does not define`,
-      );
-    }
-    return value;
-  });
   // `declaration.columns` is non-empty by type, so `resolved` is too.
   return resolved as [C, ...C[]];
 }
 
 /**
- * The two dialect variants do no dialect-specific work (no unique, no
- * where, no expression compilation — unlike the node/edge builder pairs
- * above), so they share one body parameterized by the dialect's index
- * factory.
+ * A partial declaration's predicate over the table's own column object, so
+ * the generated DDL renders `WHERE "<column>" IS NULL` exactly as the runtime
+ * DDL does.
+ */
+function resolveSystemIndexPredicate<C extends { name: string }>(
+  declaration: SystemIndexDeclaration,
+  columns: SystemIndexColumns<C>,
+): ReturnType<typeof drizzleSql> | undefined {
+  if (declaration.predicate === undefined) return undefined;
+  const column = resolveSystemIndexColumn(
+    declaration,
+    columns,
+    declaration.predicate.isNull,
+  );
+  return drizzleSql`${column} IS NULL`;
+}
+
+/**
+ * Plain system indexes share this builder. PostgreSQL applies explicit
+ * binary text collations to the additional ordered text keys below.
  */
 function buildSystemIndexBuilders<C extends { name: string }, B>(
+  dialect: SqlDialect,
   tableKey: SystemIndexTable,
   physicalTableName: string,
   columns: SystemIndexColumns<C>,
-  indexFactory: (name: string) => { on: (...cols: [C, ...C[]]) => B },
+  indexFactory: (
+    name: string,
+    resolved: readonly [C, ...C[]],
+    declaration: SystemIndexDeclaration,
+  ) => B,
 ): readonly B[] {
-  return SYSTEM_INDEX_DECLARATIONS.filter(
-    (declaration) => declaration.table === tableKey,
-  ).map((declaration) =>
-    indexFactory(systemIndexName(physicalTableName, declaration.suffix)).on(
-      ...resolveSystemIndexColumns(declaration, columns),
-    ),
-  );
+  return systemIndexDeclarationsFor(dialect)
+    .filter((declaration) => declaration.table === tableKey)
+    .map((declaration) =>
+      indexFactory(
+        systemIndexName(physicalTableName, declaration.suffix),
+        resolveSystemIndexColumns(declaration, columns),
+        declaration,
+      ),
+    );
 }
 
 export function buildSqliteSystemIndexBuilders(
@@ -470,10 +507,30 @@ export function buildSqliteSystemIndexBuilders(
   columns: SystemIndexColumns<SQLiteColumn>,
 ): readonly SqliteIndexBuilder[] {
   return buildSystemIndexBuilders(
+    "sqlite",
     tableKey,
     physicalTableName,
     columns,
-    (name) => sqliteIndex(name),
+    (name, resolved, declaration) => {
+      const builder = sqliteIndex(name).on(...resolved);
+      const predicate = resolveSystemIndexPredicate(declaration, columns);
+      return predicate === undefined ? builder : builder.where(predicate);
+    },
+  );
+}
+
+/**
+ * The byte-ordered `graph_id` index (see `graphIdOrderIndexName`) as a Drizzle
+ * builder, so the schema factory, drizzle-kit and the generated DDL all carry
+ * the index the graph id listing seeks. PostgreSQL only: SQLite's text indexes
+ * are already in byte order.
+ */
+export function buildPostgresGraphIdOrderIndex(
+  physicalTableName: string,
+  graphIdColumn: PgColumn,
+): PgIndexBuilder {
+  return pgIndex(graphIdOrderIndexName(physicalTableName)).on(
+    drizzleSql`${graphIdColumn} COLLATE "C"`,
   );
 }
 
@@ -483,10 +540,23 @@ export function buildPostgresSystemIndexBuilders(
   columns: SystemIndexColumns<PgColumn>,
 ): readonly PgIndexBuilder[] {
   return buildSystemIndexBuilders(
+    "postgres",
     tableKey,
     physicalTableName,
     columns,
-    (name) => pgIndex(name),
+    (name, resolved, declaration) => {
+      const keys = resolved.map((column) =>
+        declaration.binaryOrderColumns?.includes(column.name) === true ?
+          drizzleSql`${column} COLLATE "C"`
+        : column,
+      );
+      const builder = pgIndex(name).on(
+        requireDefined(keys[0]),
+        ...keys.slice(1),
+      );
+      const predicate = resolveSystemIndexPredicate(declaration, columns);
+      return predicate === undefined ? builder : builder.where(predicate);
+    },
   );
 }
 

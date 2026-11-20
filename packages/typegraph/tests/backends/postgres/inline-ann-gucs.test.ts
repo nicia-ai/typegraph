@@ -24,16 +24,16 @@ import { z } from "zod";
 
 import {
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   embedding,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let pool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -136,7 +136,13 @@ describe("inline approximate queries apply pgvector GUCs", () => {
         const graph = defineGraph({
           id: `ann_gucs_${randomUUID().slice(0, 8)}`,
           nodes: { Doc: { type: Document } },
-          edges: {},
+          edges: {
+            related: {
+              type: defineEdge("related"),
+              from: [Document],
+              to: [Document],
+            },
+          },
         });
         const [store] = await createStoreWithSchema(graph, backend);
         for (let index = 0; index < 20; index++) {
@@ -203,6 +209,28 @@ describe("inline approximate queries apply pgvector GUCs", () => {
 
         gucCalls.length = 0;
         await annQuery().union(categoryQuery("cat-1")).execute();
+        expect(
+          gucCalls.filter((call) => call.params[0] === "hnsw.iterative_scan"),
+        ).not.toHaveLength(0);
+
+        // A fixed stage nested after recursion must preserve its ANN execution metadata.
+        gucCalls.length = 0;
+        await store
+          .query()
+          .from("Doc", "root")
+          .traverse("related", "pathEdge", { expand: "none" })
+          .recursive({ minHops: 0, maxHops: 2 })
+          .to("Doc", "middle")
+          .traverse("related", "fixedEdge", { expand: "none" })
+          .to("Doc", "target")
+          .whereNode("target", (document) =>
+            document.embedding.similarTo(queryVector, 4, {
+              metric: "cosine",
+              approximate: true,
+            }),
+          )
+          .select((row) => row.target.id)
+          .execute();
         expect(
           gucCalls.filter((call) => call.params[0] === "hnsw.iterative_scan"),
         ).not.toHaveLength(0);

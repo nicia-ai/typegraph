@@ -9,54 +9,90 @@ import { z } from "zod";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ResolvedSqlTableNames,
+  sql,
+  type SqlTableNames,
+  type TransactionReadBackend,
+} from "../dist/backend";
+import {
   type BatchableQuery,
+  type DynamicNodeKind,
+  type ExternalRecordedReadSource,
+  recordedRelation,
+  createSqlSchema,
+  type SqlSchema,
+} from "../dist/query-entry";
+import type {
+  BulkFindEdgesFromResult,
+  DynamicEdgeCollection,
+  DynamicNode,
+  DynamicNodeCollection,
+  DynamicNodeReference,
+  AdapterHistoryStore,
+  AdapterHistoryTransactionContext,
+  AdapterRecordedReadStore,
+  AdapterStore,
+  HistoryStore,
+  HistoryStoreBackend,
+  LiveStoreOptions,
+  MeasurableAdapterHistoryTransactionContext,
+  MeasurableHistoryTransactionContext,
+  RecordedReadStore,
+  ScopedMeasure,
+  StoreRef,
+  TransactionOutcome,
+  TransactionReceipt,
+} from "../dist/store-entry";
+import {
   createAdapterStore,
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedAdapterStore,
-  createVerifiedStore,
   defineEdge,
   defineGraph,
   defineNode,
-  type DynamicEdgeCollection,
-  type DynamicNodeCollection,
   type Edge,
   type EdgeId,
-  type ExternalRecordedReadSource,
   type GraphBackend,
-  type GraphExtension,
-  type AdapterHistoryStore,
-  type AdapterHistoryTransactionContext,
-  type AdapterRecordedReadStore,
-  type AdapterStore,
-  type HistoryStore,
-  type HistoryStoreBackend,
-  type LiveStoreOptions,
-  type MeasurableAdapterHistoryTransactionContext,
-  type MeasurableTransactionContext,
-  createQueryBuilder,
+  type NodeId,
+  type NodeRef,
+  type Store,
+  type StoreOptions,
+  type TransactionContext,
+} from "..";
+import {
+  createVerifiedAdapterStore,
+  createVerifiedStore,
+  type SchemaValidationResult,
+} from "../dist/schema";
+import type { GraphExtension } from "../dist/graph-extension";
+import {
+  type IdentityAssertion,
+  type IdentityAssertionResult,
+  IdentityEndpointValidityError,
+  type IdentityNode,
+  type IdentityNodeRefInput,
+  type IdentityNodeReference,
+  type IdentityValidityWindow,
+  IdentityValidityWindowError,
+} from "../dist/identity-entry";
+import {
   getEdgeKinds,
   getNodeKinds,
   type KindAnnotations,
-  type NodeId,
-  type NodeRef,
-  recordedRelation,
-  type RecordedReadStore,
-  type ResolvedSqlTableNames,
-  type ScopedMeasure,
-  type SchemaValidationResult,
-  createSqlSchema,
-  sql,
-  type SqlSchema,
-  type SqlTableNames,
-  type Store,
-  type StoreOptions,
-  type StoreRef,
-  type TransactionOutcome,
-  type TransactionReceipt,
-  type TransactionReadBackend,
-} from "..";
+  type RecordedInstant,
+} from "../dist/core";
+import {
+  captureStoreOperationTarget,
+  getStoreOperation,
+  operateStore,
+  type StoreOperationTarget,
+  type StoreOperationRequest,
+  type StoreOperationOutcome,
+  type StoreOperationEvidence,
+  type DurableOperationError,
+  type Result,
+} from "../dist/graph-merge";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -113,6 +149,12 @@ expectType<string>(legacySchema.tables.recordedNodes);
 expectType<string>(legacySchema.tables.recordedEdges);
 expectType<string>(legacySchema.tables.recordedClock);
 expectAssignable<ResolvedSqlTableNames>(legacySchema.tables);
+const customClaimTableNames = {
+  ...legacyTableNames,
+  edgeClaims: "app_edge_claims",
+} satisfies SqlTableNames;
+expectAssignable<SqlTableNames>(customClaimTableNames);
+expectType<string>(createSqlSchema(customClaimTableNames).tables.edgeClaims);
 const structurallyCompatibleSchema = {
   tables: legacySchema.tables,
   nodesTable: legacySchema.nodesTable,
@@ -201,7 +243,254 @@ const graph = defineGraph({
   ontology: [],
 });
 
+const identityGraph = defineGraph({
+  id: "public_api_identity_test_graph",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+declare const identityStore: Store<typeof identityGraph>;
+declare const identityPerson: Awaited<
+  ReturnType<typeof identityStore.nodes.Person.create>
+>;
+const dynamicIdentityCollection =
+  identityStore.getNodeCollectionOrThrow("RuntimeTag");
+declare const dynamicIdentityNode: Awaited<
+  ReturnType<typeof dynamicIdentityCollection.create>
+>;
+declare const dynamicIdentityReference: DynamicNodeReference<"RuntimeTag">;
+declare const recordedInstant: RecordedInstant;
+
+expectType<DynamicNodeCollection<"RuntimeTag">>(dynamicIdentityCollection);
+expectType<DynamicNodeKind<"RuntimeTag">>(dynamicIdentityNode.kind);
+expectAssignable<"RuntimeTag">(dynamicIdentityNode.kind);
+expectAssignable<DynamicNode>(dynamicIdentityNode);
+expectAssignable<DynamicNodeReference>(dynamicIdentityReference);
+expectAssignable<IdentityNodeRefInput<typeof identityGraph>>(
+  dynamicIdentityNode,
+);
+expectAssignable<IdentityNodeRefInput<typeof identityGraph>>(
+  dynamicIdentityReference,
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    kind: "RuntimeTypo",
+    id: "runtime-id",
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    kind: "RuntimeTypo",
+    id: dynamicIdentityNode.id,
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityNode,
+    kind: "RuntimeTypo",
+  }),
+);
+expectError(
+  identityStore.identity.assertSame(identityPerson, {
+    ...dynamicIdentityReference,
+    kind: "RuntimeTypo",
+  }),
+);
+expectError(identityStore.identity.membersOf({ id: "missing-kind" }));
+expectError(identityStore.identity.membersOf({ kind: "missing-id" }));
+
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityNodeReference<typeof identityGraph>[]>>(
+  identityStore.identity.membersOf(dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityNodeReference<typeof identityGraph>[]>>(
+  identityStore.identity.membersOf(dynamicIdentityReference),
+);
+expectType<Promise<readonly IdentityNode<typeof identityGraph>[]>>(
+  identityStore.identity.nodesOf(dynamicIdentityNode),
+);
+expectType<Promise<boolean>>(
+  identityStore.identity.areSame(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<boolean>>(
+  identityStore.identity.areDifferent(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<readonly IdentityAssertion<typeof identityGraph>[]>>(
+  identityStore.identity.assertionsOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityNode),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityReference),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertDifferent(identityPerson, dynamicIdentityNode),
+);
+expectAssignable<IdentityValidityWindow>({
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2021-01-01T00:00:00.000Z",
+});
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.identity.assertSame(identityPerson, dynamicIdentityNode, {
+    validFrom: "2020-01-01T00:00:00.000Z",
+  }),
+);
+expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
+  identityStore.identity.bulkAssertSame([
+    {
+      a: identityPerson,
+      b: dynamicIdentityNode,
+      validFrom: "2020-01-01T00:00:00.000Z",
+      validTo: "2021-01-01T00:00:00.000Z",
+    },
+  ]),
+);
+expectAssignable<Error>(
+  new IdentityValidityWindowError({
+    reason: "inverted",
+    validFrom: "2021-01-01T00:00:00.000Z",
+    validTo: "2020-01-01T00:00:00.000Z",
+    operationInstant: "2022-01-01T00:00:00.000Z",
+  }),
+);
+expectAssignable<Error>(
+  new IdentityEndpointValidityError({
+    endpoint: { kind: "Person", id: "person" },
+    assertionWindow: { validFrom: "2020-01-01T00:00:00.000Z" },
+    endpointWindow: { validFrom: "2021-01-01T00:00:00.000Z" },
+  }),
+);
+expectType<Promise<readonly IdentityAssertionResult<typeof identityGraph>[]>>(
+  identityStore.identity.bulkAssertDifferent([
+    { a: identityPerson, b: dynamicIdentityNode },
+  ]),
+);
+expectType<Promise<IdentityAssertion<typeof identityGraph> | undefined>>(
+  identityStore.identity.retractSameAssertion(
+    identityPerson,
+    dynamicIdentityNode,
+  ),
+);
+expectType<Promise<IdentityAssertion<typeof identityGraph> | undefined>>(
+  identityStore.identity.retractDifferentAssertion(
+    identityPerson,
+    dynamicIdentityNode,
+  ),
+);
+
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.transaction((tx) =>
+    tx.identity.representativeOf(dynamicIdentityNode),
+  ),
+);
+expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(
+  identityStore.getNodeCollection("RuntimeTag"),
+);
+expectType<Promise<void>>(
+  identityStore.transaction(async (tx) => {
+    const collection = tx.getNodeCollection("RuntimeTag");
+    expectType<DynamicNodeCollection<"RuntimeTag"> | undefined>(collection);
+    if (collection === undefined) return;
+    const node = await collection.create({ label: "transactional" });
+    await tx.identity.assertSame(identityPerson, node);
+  }),
+);
+expectType<Promise<IdentityAssertionResult<typeof identityGraph>>>(
+  identityStore.transaction((tx) =>
+    tx.identity.assertSame(identityPerson, dynamicIdentityNode),
+  ),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore
+    .asOf("2026-01-01T00:00:00.000Z")
+    .identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore
+    .asOfRecorded(recordedInstant)
+    .identity.representativeOf(dynamicIdentityNode),
+);
+expectType<Promise<IdentityNodeReference<typeof identityGraph> | undefined>>(
+  identityStore.snapshot().identity.representativeOf(dynamicIdentityNode),
+);
+
 declare const store: Store<typeof graph>;
+const neighborSource = {
+  kind: "Person",
+  id: "person-1" as NodeId<typeof Person>,
+} as const;
+const oneStatementBatch = store.batchOnce((read) => {
+  const neighbors = read.neighbors(neighborSource, {
+    edges: ["knows"],
+    orderBy: { by: "node", field: "name", direction: "desc" },
+  });
+  expectError(
+    read.countNeighbors(neighborSource, { edges: ["knows"] }).execute(),
+  );
+  expectError(
+    read.neighbors(neighborSource, {
+      edges: ["knows"],
+      orderBy: { by: "node", field: "missing" },
+    }),
+  );
+  const subgraph = read.subgraph(neighborSource, {
+    edges: ["knows", "worksAt"],
+    edgeWindows: {
+      knows: { direction: "both", limit: 1 },
+      worksAt: { direction: "out", limit: 2 },
+    },
+  });
+  return [neighbors, subgraph] as const;
+});
+expectType<Promise<number>>(
+  oneStatementBatch.then(([neighbors]) => neighbors.length),
+);
+
+declare const transactionContext: TransactionContext<typeof graph>;
+expectType<Promise<number>>(
+  transactionContext
+    .neighbors(neighborSource, { edges: ["knows"] })
+    .then((neighbors) => neighbors.length),
+);
+expectType<Promise<number>>(
+  transactionContext.countNeighbors(neighborSource, { edges: ["knows"] }),
+);
+expectType<Promise<number>>(
+  transactionContext
+    .subgraph(neighborSource, { edges: ["knows"] })
+    .then((subgraph) => subgraph.nodes.length),
+);
+const transactionBatch = transactionContext.batchOnce((read) => [
+  transactionContext
+    .query()
+    .from("Person", "person")
+    .select((ctx) => ctx.person.name),
+  read.countNeighbors(neighborSource, { edges: ["knows"] }),
+]);
+expectType<Promise<number>>(transactionBatch.then(([, count]) => count));
+expectError(transactionContext.withCheckedReads);
+expectError(store.neighborsQuery);
+expectError(store.countNeighborsQuery);
+expectError(store.subgraphQuery);
+expectError(
+  store.batchOnce(
+    store
+      .query()
+      .from("Person", "p")
+      .select((ctx) => ctx.p),
+    store
+      .query()
+      .from("Company", "c")
+      .select((ctx) => ctx.c),
+  ),
+);
 declare const backend: GraphBackend;
 type NativeTransaction = Readonly<{
   executeNative: (statement: string) => void;
@@ -324,7 +613,23 @@ expectNotAssignable<StoreRef<Store<typeof graph>>>(adapterRef);
 expectNotAssignable<StoreRef<AdapterStore<typeof graph, NativeTransaction>>>(
   portableRef,
 );
-declare const registry: never;
+const multiKindQuery = store
+  .query()
+  .from(["Person", "Company"], "node")
+  .whereNode("node", (node) => node.name.eq("shared"))
+  .select((context) => context.node);
+expectAssignable<
+  Promise<
+    readonly (
+      | (Readonly<{ kind: "Person"; id: NodeId<typeof Person> }> &
+          Readonly<{ email: string; name: string }>)
+      | (Readonly<{ kind: "Company"; id: NodeId<typeof Company> }> &
+          Readonly<{ name: string }>)
+    )[]
+  >
+>(multiKindQuery.execute());
+expectError(store.query().from([], "node"));
+expectError(store.query().from(["Person", "Missing"], "node"));
 declare const worksAtId: EdgeId<typeof worksAt>;
 declare const worksAtEdge: Awaited<
   ReturnType<typeof store.edges.worksAt.create>
@@ -346,11 +651,6 @@ expectError(
 );
 expectError(
   createStore(graph, backend, {
-    schema: structurallyCompatibleSchema,
-  }),
-);
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
     schema: structurallyCompatibleSchema,
   }),
 );
@@ -467,17 +767,6 @@ const liveRecordedOptions = {
 } satisfies StoreOptions;
 void createStore(graph, backend, liveRecordedOptions);
 
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
-    recordedReadBinding: externalRecordedSource,
-  }),
-);
-expectError(
-  createQueryBuilder<typeof graph>("public-api", registry, {
-    sealedCoordinate: { valid: { mode: "current" } },
-  }),
-);
-
 // Portable transaction contexts expose only TypeGraph-owned operations and a
 // read-only backend projection.
 void historyStore.transaction(async (tx) => {
@@ -553,7 +842,7 @@ void receiptOutcome.then(({ receipt }) => {
 // context, same as transaction() does above (plus the scoped `measure`).
 void historyStore.transactionWithReceipt(async (tx) => {
   expectAssignable<TransactionReadBackend>(tx.backend);
-  expectType<ScopedMeasure<MeasurableTransactionContext<typeof graph>>>(
+  expectType<ScopedMeasure<MeasurableHistoryTransactionContext<typeof graph>>>(
     tx.measure,
   );
   expectError(tx.sql);
@@ -610,6 +899,35 @@ expectError(
 
 declare const personRef: NodeRef<typeof Person>;
 declare const companyRef: NodeRef<typeof Company>;
+declare const personId: NodeId<typeof Person>;
+declare const companyId: NodeId<typeof Company>;
+
+expectType<
+  Promise<readonly BulkFindEdgesFromResult<typeof graph, "worksAt" | "knows">[]>
+>(
+  store.bulkFindEdgesFrom({
+    sources: [
+      { kind: "Person", ids: [personId] },
+      { kind: "Company", ids: [companyId] },
+    ],
+    edgeKinds: ["worksAt", "knows"],
+  }),
+);
+// A source is a polymorphic reference too, whose `kind` is a `string`: a
+// branded id under another kind name compiles, and the runtime reads the
+// `(kind, id)` pair as stated. An unbranded id does not compile.
+expectError(
+  store.bulkFindEdgesFrom({
+    sources: [{ kind: "Company", ids: ["raw-company-id"] }],
+    edgeKinds: ["worksAt"],
+  }),
+);
+expectError(
+  store.bulkFindEdgesFrom({
+    sources: [{ kind: "Person", ids: [personId] }],
+    edgeKinds: ["missing"],
+  }),
+);
 
 // batchFindFrom / batchFindTo return BatchableQuery with correct edge type
 type WorksAtEdge = Edge<typeof worksAt, typeof Person, typeof Company>;
@@ -656,13 +974,15 @@ void dynamicEdge.bulkUpsertById([
   { id: plainId, from: { kind: "X", id: "1" }, to: { kind: "Y", id: "2" } },
 ]);
 
-// getNodeCollection / getEdgeCollection return the dynamic types
+// Known edge lookups preserve the schema; an arbitrary string uses the erased default.
 expectAssignable<DynamicNodeCollection | undefined>(
   store.getNodeCollection("Person"),
 );
-expectAssignable<DynamicEdgeCollection | undefined>(
+expectType<DynamicEdgeCollection<typeof worksAt> | undefined>(
   store.getEdgeCollection("worksAt"),
 );
+
+expectType<DynamicEdgeCollection | undefined>(store.getEdgeCollection(plainId));
 
 // ============================================================
 // Graph extension — public surface published in 0.25
@@ -670,13 +990,6 @@ expectAssignable<DynamicEdgeCollection | undefined>(
 
 import {
   defineGraphExtension,
-  defineEdgeIndex,
-  defineNodeIndex,
-  type EdgeIndexDeclaration,
-  type IndexDeclaration,
-  type MaterializeIndexesEntry,
-  type MaterializeIndexesResult,
-  type NodeIndexDeclaration,
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   type IncompatibleChange,
@@ -688,21 +1001,45 @@ import {
   IncompatibleChangeError,
   KindCollisionError,
   KindHasReferentsError,
-  KindNotFoundError,
   RemoveCompileTimeKindError,
-  TypeGraphError,
-} from "..";
+} from "../dist/graph-extension";
+import {
+  defineEdgeIndex,
+  defineNodeIndex,
+  type EdgeIndexDeclaration,
+  type IndexDeclaration,
+  type NodeIndexDeclaration,
+  type NodeIndexKey,
+  type NodeSystemColumnName,
+} from "../dist/indexes";
+import type {
+  MaterializeIndexesEntry,
+  MaterializeIndexesResult,
+} from "../dist/store-entry";
+import { KindNotFoundError, TypeGraphError } from "..";
 // Per-shape document types live behind the `graph-extension` subpath —
 // agent-prompt builders and codegen tools reach for them explicitly.
 import type {
   ExtensionArrayProperty,
   ExtensionEdgeDef,
   ExtensionNodeDef,
+  ExtensionObjectOutput,
   ExtensionOntologyRelation,
   ExtensionPropertyType,
   ExtensionStringProperty,
   ExtensionUniqueConstraint,
 } from "../src/graph-extension";
+
+type NestedExtensionObject = ExtensionObjectOutput<{
+  required: { type: "string" };
+  optional: { type: "number"; optional: true };
+}>;
+expectAssignable<NestedExtensionObject>({ required: "present" });
+expectAssignable<NestedExtensionObject>({
+  required: "present",
+  optional: 1,
+});
+expectNotAssignable<NestedExtensionObject>({ optional: 1 });
 
 // defineGraphExtension accepts a typed GraphExtension.
 const extension = defineGraphExtension({
@@ -722,7 +1059,7 @@ const extension = defineGraphExtension({
     } satisfies ExtensionNodeDef,
   },
 });
-expectType<GraphExtension>(extension);
+expectAssignable<GraphExtension>(extension);
 
 // Top-level key typo `node` should be a TypeScript error — the public
 // type signature now catches it at the call site instead of letting
@@ -787,6 +1124,69 @@ const nodeIndex: NodeIndexDeclaration = defineNodeIndex(Person, {
 expectAssignable<IndexDeclaration>(nodeIndex);
 expectType<"node">(nodeIndex.entity);
 
+defineNodeIndex(Person, {
+  keys: [
+    { field: "name", direction: "desc" },
+    { system: "id", direction: "asc" },
+  ],
+});
+defineNodeIndex(Person, {
+  keys: [{ system: "created_at", direction: "desc" }],
+});
+expectError(defineNodeIndex(Person, { keys: [] }));
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", system: "id", direction: "asc" }],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    fields: ["name"],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    keySystemColumns: ["id"],
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    unique: true,
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ field: "name", direction: "asc" }],
+    method: "trigram",
+  }),
+);
+expectError(
+  defineNodeIndex(Person, {
+    keys: [{ system: "from_id", direction: "asc" }],
+  }),
+);
+expectAssignable<NodeIndexDeclaration>({
+  ...nodeIndex,
+  keys: [{ type: "system", column: "created_at", direction: "desc" }],
+});
+expectError(
+  expectAssignable<NodeIndexDeclaration>({
+    ...nodeIndex,
+    keys: [{ type: "system", column: "from_id", direction: "asc" }],
+  }),
+);
+type NormalizedSystemIndexColumn = Extract<
+  NodeIndexKey,
+  { type: "system" }
+>["column"];
+declare const normalizedSystemIndexColumn: NormalizedSystemIndexColumn;
+declare const nodeSystemColumnName: NodeSystemColumnName;
+expectType<NodeSystemColumnName>(normalizedSystemIndexColumn);
+expectType<NormalizedSystemIndexColumn>(nodeSystemColumnName);
+
 const edgeIndex: EdgeIndexDeclaration = defineEdgeIndex(worksAt, {
   fields: ["role"],
 });
@@ -805,12 +1205,17 @@ expectType<"edge">(edgeIndex.entity);
 
 import { type Node } from "..";
 
-declare const personHits: Awaited<
-  ReturnType<typeof store.search.fulltext<"Person">>
->;
-declare const runtimeHits: Awaited<
-  ReturnType<typeof store.search.fulltext<"Paper">>
->;
+// Typed through a call, not `ReturnType<typeof store.search.fulltext<K>>`:
+// that reads the last overload, which is the widened one an options value of
+// the library's own option type takes.
+async function searchPeople() {
+  return store.search.fulltext("Person", { query: "x", limit: 1 });
+}
+async function searchPapers() {
+  return store.search.fulltext("Paper", { query: "x", limit: 1 });
+}
+declare const personHits: Awaited<ReturnType<typeof searchPeople>>;
+declare const runtimeHits: Awaited<ReturnType<typeof searchPapers>>;
 
 // Compile-time kind narrows to Node<typeof Person>.
 expectAssignable<Node<typeof Person>>(personHits[0]!.node);
@@ -819,19 +1224,29 @@ expectAssignable<Node<typeof Person>>(personHits[0]!.node);
 expectAssignable<Node>(runtimeHits[0]!.node);
 
 // vector + hybrid follow the same pattern.
-declare const vectorHits: Awaited<
-  ReturnType<typeof store.search.vector<"Paper">>
->;
+async function vectorSearchPapers() {
+  return store.search.vector("Paper", {
+    fieldPath: "embedding",
+    queryEmbedding: [0, 1],
+    limit: 1,
+  });
+}
+declare const vectorHits: Awaited<ReturnType<typeof vectorSearchPapers>>;
 expectAssignable<Node>(vectorHits[0]!.node);
 
-declare const hybridHits: Awaited<
-  ReturnType<typeof store.search.hybrid<"Paper">>
->;
+async function hybridSearch<K extends "Paper" | "Person">(kind: K) {
+  return store.search.hybrid(kind, {
+    limit: 1,
+    vector: { fieldPath: "embedding", queryEmbedding: [0, 1] },
+    fulltext: { query: "x" },
+  });
+}
+declare const hybridHits: Awaited<ReturnType<typeof hybridSearch<"Paper">>>;
 expectAssignable<Node>(hybridHits[0]!.node);
 
 // Compile-time hybrid narrows.
 declare const compileTimeHybrid: Awaited<
-  ReturnType<typeof store.search.hybrid<"Person">>
+  ReturnType<typeof hybridSearch<"Person">>
 >;
 expectAssignable<Node<typeof Person>>(compileTimeHybrid[0]!.node);
 
@@ -946,3 +1361,16 @@ function classifyExtensionError(error: GraphExtensionError): string {
   return "unknown";
 }
 expectType<(error: GraphExtensionError) => string>(classifyExtensionError);
+
+// Ordinary durable outcomes are accessible without importing branch lifecycle APIs.
+expectType<Promise<StoreOperationTarget>>(captureStoreOperationTarget(store));
+declare const persistedOperationRequest: StoreOperationRequest;
+expectType<
+  Promise<Result<StoreOperationEvidence | undefined, DurableOperationError>>
+>(getStoreOperation(store, persistedOperationRequest));
+expectType<Promise<Result<StoreOperationOutcome, DurableOperationError>>>(
+  operateStore(store, persistedOperationRequest, (tx, mutation) => {
+    void tx.nodes;
+    return Promise.resolve(mutation);
+  }),
+);

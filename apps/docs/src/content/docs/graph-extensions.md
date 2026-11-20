@@ -56,8 +56,8 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  defineGraphExtension,
 } from "@nicia-ai/typegraph";
+import { defineGraphExtension } from "@nicia-ai/typegraph/graph-extension";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // 1. Boot with a compile-time kind.
@@ -112,6 +112,57 @@ await papers.create({
 
 A complete runnable version is in [`examples/16-graph-extensions.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/16-graph-extensions.ts).
 
+## Instantiate a graph template
+
+For many tenant graphs with the same final shape, register a verified schema
+once and instantiate each target as schema version 1. The template document
+stays in the database; instantiation sends only its id, the target graph id,
+and a client-computed content hash.
+
+```ts
+const [source] = await createAdapterStoreWithSchema(baseGraph, adminBackend);
+const template = await registerGraphTemplate(adminBackend, {
+  templateId: "research-corpus-v1",
+  reconciled: source.reconciledSchema,
+});
+
+const target = await instantiateGraph(adminBackend, {
+  template,
+  graphId: "tenant-123",
+});
+
+// The returned target snapshot can create a request-scoped Store without
+// another schema read. `tenantGraph` is the same compile-time shape with id
+// "tenant-123".
+const store = createAdapterStore(tenantGraph, runtimeBackend, {
+  reconciled: target.reconciled,
+});
+```
+
+Registering a template id that already exists with different schema content
+throws `ConfigurationError` (`GRAPH_TEMPLATE_CONTENT_CONFLICT`).
+Instantiation is idempotent for the same template and target. A target already
+initialized with a different schema is refused. On PostgreSQL the clone
+statement takes the same graph advisory-lock key as schema commits; SQLite's
+schema and marker writes are serialized by its writer lock.
+
+Templates clone the source graph's graph-local runtime-contribution activation
+markers along with its schema row. Deployment-scoped physical attestations,
+such as the shared fulltext table marker, already belong to the database and
+are not duplicated per template target. A target can therefore be reopened with
+`createVerifiedStore` or `createVerifiedAdapterStore` from a later serverless
+isolate without another schema reconciliation or provisioning DDL step.
+Registration and instantiation are DML-only. They assert the deployment-wide
+base-schema marker and throw `BaseSchemaMigrationError` rather than attempting
+DDL when adoption is missing, stale, or newer than the running library. Run the
+normal privileged `createStoreWithSchema` boot or the published external
+migration before handing runtime requests to a DML-only role.
+
+Template eligibility follows the backend's capabilities. Embedding declarations
+are allowed when the backend is configured with `vector: false`, because that
+backend has no graph-scoped vector storage to clone. A vector-enabled backend
+continues to refuse embedding-bearing schema-only templates.
+
 ## The graph extension
 
 `defineGraphExtension` accepts a structured value describing the new
@@ -153,7 +204,7 @@ The forward-compat policy:
 import {
   CURRENT_GRAPH_EXTENSION_VERSION,
   LEGACY_GRAPH_EXTENSION_VERSION,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/graph-extension";
 
 console.log(CURRENT_GRAPH_EXTENSION_VERSION); // 1 (today; bumps with breaking changes)
 console.log(LEGACY_GRAPH_EXTENSION_VERSION);  // 1 (always; the pre-versioning default)
@@ -193,7 +244,10 @@ Pass `unique: [{ name, fields, ... }]` per kind. The `name` is required
 (used as the diffing identity key) and must be unique within the kind.
 Supports `scope`, `collation`, and a restricted `where` clause limited
 to `isNull` / `isNotNull` (the only operations round-trippable through
-the persisted form).
+the persisted form). An omitted `scope` is `"kind"` and an omitted `collation`
+is `"binary"`. Adding or reshaping a constraint on a kind that already holds
+rows is refused with `IncompatibleChangeError` (`ADD_UNIQUE_ON_POPULATED`),
+because no existing row holds a claim for it.
 
 ### Relational indexes
 
@@ -228,15 +282,137 @@ earlier graph-extension index name for a different declaration, is rejected.
 
 ### Edges
 
-Edges follow the same shape as nodes but add `from: [...]` and `to:
-[...]` listing the kind names they connect. Both endpoint kinds must
-already exist (compile-time or graph-extension) when `evolve()` runs.
+Edges follow the same shape as nodes and declare endpoints using kind names.
+An array-valued `to` permits every combination of `from` and `to` kinds.
+A map-valued `to` restricts targets by source kind:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    assignedTo: {
+      from: ["Employee", "Student"],
+      to: {
+        Employee: ["Department"],
+        Student: ["Course"],
+      },
+      properties: {},
+    },
+  },
+});
+const evolved = await store.evolve(proposal);
+```
+
+All endpoint kinds must resolve in the merged graph when `evolve()` runs.
+Map keys must exactly cover `from`, and each target array must be nonempty.
+The map is persisted and restored on restart, preserving the same runtime pair
+validation as [compile-time declarations](/core-concepts#source-dependent-targets).
+
+Adding allowed pairs broadens an extension edge. Removing a pair tightens it,
+even if the overall source and target kind sets stay the same. Tightening
+currently requires the **entire edge kind** to be empty, not just the removed pair.
+
+A runtime-authored edge may declare `acyclic: true`, exactly like a
+compile-time one — its live relation becomes a DAG, enforced under the same
+per-graph write fence:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    dependsOn: {
+      from: ["Task"],
+      to: ["Task"],
+      properties: {},
+      acyclic: true,
+    },
+  },
+});
+```
+
+It may also declare `cardinality` and `targetCardinality`, bounding the edges
+leaving one source and the edges pointing at one target exactly as a
+compile-time registration does. The same atomic claims enforce them on every
+write path, so a second edge at a `targetCardinality: "one"` target is refused
+with `CardinalityError` (`details.direction: "target"`). A platform that accepts
+extension documents from untrusted authors should therefore expect an extension
+to introduce edge-count constraints, not only additive kinds.
 
 ### Ontology
 
 Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
+
+A `partOf` or `hasPart` relation also carries `via`, the edge kind that
+realizes the composition, and may carry `partSide` (`"from"` or `"to"`) and
+`existence` (`"optional"` or `"required"`):
+`{ metaEdge: "partOf", from: "Section", to: "Chapter", via: "inChapter" }`.
+`via` is required, so a document that carries `{ metaEdge: "partOf", from,
+to }` is refused with `GraphExtensionValidationError`; add the realizing edge
+kind (declared in the document or already in the host graph) or drop the
+relation. `via`, `partSide` and `existence` on any other meta-edge are refused
+as well. `GRAPH_EXTENSION_ISSUE_CODES` names each refusal on the issue's
+`code`, and [Errors](/errors#composition-declaration-codes) says what to do
+about it:
+
+| Issue `code` | Raised when |
+| --- | --- |
+| `ONTOLOGY_COMPOSITION_VIA_REQUIRED` | A `partOf` / `hasPart` relation has no `via`. |
+| `ONTOLOGY_COMPOSITION_VIA_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `via`. |
+| `ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `partSide`. |
+| `ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN` | A relation other than `partOf` / `hasPart` carries `existence`. |
+
+The checks that need the merged graph (the `via` edge exists, admits the
+pair, and bounds each part to one whole) run when `evolve()` builds the merged
+registry and raise `ConfigurationError` with the codes in
+[Errors](/errors#composition-declaration-codes).
+
+A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
+checked against the same structural contract a compile-time declaration
+gets — the child's schema must extend the parent's — at `evolve()`, before
+any write. Because extension relations are authored as plain data (`{
+metaEdge: "subClassOf", from: "Child", to: "Parent" }`) rather than through
+the typed `subClassOf()` function, there is no compile-time check to catch
+the mismatch first; `evolve()` throws a `ConfigurationError` (the same codes
+`/ontology` documents) and no kind from the extension becomes reachable.
+This also covers **redeclaring** an existing kind through a later
+`evolve()`: the registry is rebuilt from the merged graph on every call, so
+a redeclaration that breaks a hierarchy it already participates in — as a
+parent, a child, or an equivalent — is re-checked and refused just as a
+first declaration would be.
+
+**A query that leaves the axis to the default refuses a base-graph kind an
+extension subclasses.** `evolve()` returns `Store<G>` with the same
+compile-time `G` it was called on, and a later `createStoreWithSchema(graph,
+backend)` folds the persisted extension back in under the same `G`, so the
+compile-time alias type of a base-graph kind that only becomes polymorphic
+through an extension's `subClassOf` is still the exact kind. Rather than
+return the extension's subclass rows under that type, a query over
+`from(kind, alias)`, a list source or `to(kind, alias)` with no `expansion`
+throws `ConfigurationError` (`QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`) from
+every terminal that returns rows, on the evolved store and after every
+restart; `count()` and `exists()` still answer. A list source is refused only
+for an extra kind none of its listed kinds' types admits. `store.search()`
+with `expansion: "subclasses"` is not refused: its hit is typed
+polymorphically whatever the compile-time graph declares. State
+`{ expansion: "subclasses" }` or `{ expansion: "exact" }`, or use
+`fromDynamic()`; see [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion).
+
+Because the extension is persisted, this reaches **every deployment that
+shares the database**, not only the one that called `evolve()`: another
+service running the same code graph picks the extension up on its next
+`createStoreWithSchema(...)` boot, and its unchanged unstated-expansion
+queries over the subclassed kind start refusing. Such a service opts out with
+`queryDefaults: { expansion: "exact" }` in its `createStore` /
+`createStoreWithSchema` options, or by declaring the relation in its code
+graph.
+
+The refusal reads the graph's ontology **values** at run time, not the type
+the store was declared with, so it also fires for a store typed over a wide
+graph type (`Store<GraphDef>`) or an ontology whose literals an
+`OntologyRelation` annotation erased, although such a store already types the
+alias polymorphically. Code like that should state `expansion` or use
+`fromDynamic()`.
 
 ## `store.evolve(extension, options?)`
 
@@ -257,26 +433,154 @@ const evolved = await store.evolve(extension, { eager: {} });
    `IncompatibleChangeError` (code `INCOMPATIBLE_CHANGE`).
 3. **Atomically commits** a new schema version via `commitSchemaVersion`
    (CAS on the active version).
-4. **Returns a new `Store<G>`** carrying the extended graph. The type
+4. **Returns the resulting `Store<G>`** carrying the extended graph. The type
    parameter `G` does NOT widen — see [Reaching extension
    kinds](#reaching-extension-kinds-from-the-type-system) below.
 
+:::caution[Use the returned Store]
+`Store` instances are immutable schema snapshots. After `evolve()` resolves,
+use its returned Store for **every subsequent Store operation in the same
+request**, not just operations involving newly added kinds. A Store captured
+before the commit remains pinned to the previous schema version, so its next
+managed write fails the schema-version fence.
+:::
+
+### Plan outside and apply inside a caller-owned transaction
+
+`planEvolution(extension)` prepares a named schema change before the caller
+opens its write transaction. It returns an immutable `"noop"` or `"change"`
+plan with `graphId`, `baseline: { version, hash }`, and
+`result: { version, hash }`. Change plans expose an ordered `requirements`
+array whose entries name new-kind additions, empty-kind checks, vector slots,
+ontology and edge-kind tightening, and identity work. An `ontology-tightening`
+entry lists the ontology relation changes that existing rows must satisfy; an
+`edge-tightening` entry lists the edge kinds (`edgeKinds`) whose own
+registration tightens — a newly constrained cardinality (`edgeCardinalityAxes`),
+`acyclic: true`, or an endpoint pair no longer admitted. Neither entry is ever
+emitted with an empty list. Apply checks them on the fenced session and
+refuses with the same `MigrationError` `evolve()` raises. A `new-kind` entry describes a graph delta; it does not
+indicate that a removal is queued or direct callers to run
+`materializeRemovals()`. The plan is opaque and bound to the loaded TypeGraph
+module: it cannot be serialized, cloned, or reconstructed. It can be passed between
+compatible Stores for the same graph that use the same loaded module; apply
+still checks the active graph and fenced baseline version/hash. The
+default `{ source: "database" }` reloads the active schema. `{ source:
+"cached" }` uses a previously loaded planning snapshot on the same Store; a
+cached plan is not fresh database evidence. A stale baseline is refused during
+apply, so retry by rolling back the whole caller transaction and replanning
+outside it.
+
+Use `withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })` when
+the schema change, TypeGraph writes, and application SQL must share the
+caller's commit. Enter this boundary before other TypeGraph callbacks on the
+same native transaction. The callback receives an evolved transaction context,
+including its reads, collections, and supported composition operations. It
+does not receive a replacement root Store.
+
+```ts
+const cachedStore = store;
+const ref = { current: cachedStore };
+const plan = await cachedStore.planEvolution(proposal);
+const writerStore = cachedStore.withBackend(writerBackend);
+
+const provisional = await db.transaction(async (nativeTx) => {
+  const outcome = await writerStore.withEvolvedTransaction(
+    nativeTx,
+    plan,
+    async (tx) => {
+      const person = await tx.nodes.Person.create({ name: "Ada" });
+      return person.id;
+    },
+    plan.status === "change" ? { waitBudgetMs: 5000 } : undefined,
+  );
+
+  await nativeTx.insert(applicationEvents).values({
+    personId: outcome.result,
+    schemaVersion: outcome.receipt.schema.version,
+  });
+  return outcome;
+});
+
+const refreshed = await cachedStore.refreshSchema({
+  minVersion: provisional.receipt.schema.version,
+  ref,
+});
+```
+
+The callback and receipt finish before the outer SQL transaction commits.
+The receipt's schema version/hash and recorded anchor are provisional until
+that commit succeeds. A callback failure must reject the outer transaction;
+catching it and committing does not prove rollback. Callback contexts and
+queries built from them expire when the callback returns, including after a
+failure. Use `refreshSchema()` only after awaiting a successful outer commit.
+When the cached Store already matches `minVersion`, refresh returns it
+without a read; that shortcut does not check for a newer database version.
+Otherwise refresh reads the active schema, accepts a newer committed version,
+and refuses a missing or older one. It applies no extension or storage
+provisioning.
+
+The adopted apply path supports metadata-only changes, required-empty checks,
+and transactional identity and vector provisioning. Configure the adapter with
+`schemaProvisioning: "transactional"` on a privileged connection when the plan
+names new vector slots or identity work. The adapter's default DML-only policy
+refuses those requirements before the schema fence, DDL, callback, or mutation.
+The privileged path rechecks storage on the caller's fenced session, provisions
+the required relations and vector contribution markers there, and rolls them
+back with the outer transaction. Missing bootstrap tables still refuse; run
+the normal bootstrap before serving adopted evolution requests.
+The apply path uses a bounded schema fence, baseline validation, and a
+version CAS; it can issue multiple statements. `waitBudgetMs` bounds fence
+acquisition for change plans; no-op plans refuse an explicit `waitBudgetMs`.
+On timeout, roll back and retry the complete native transaction.
+Do not pass `ref` or eager-index options to `withEvolvedTransaction`; they
+cannot be honored before the outer commit and are refused.
+Generic and concurrent eager indexes remain explicit maintenance after commit:
+call `materializeIndexes()` on the refreshed Store when they are needed.
+
+When a wiring pass produces a no-op, ordinary recorded adoption is sufficient
+and never takes the exclusive evolution fence. Reconcile only if the Store is
+behind the named snapshot; matching versions make this refresh a cached read:
+
+```typescript
+if (plan.status === "noop") {
+  const current = await store.refreshSchema({ minVersion: plan.baseline.version });
+  await db.transaction((nativeTx) =>
+    current.withRecordedTransaction(nativeTx, async (tx) => {
+      await tx.nodes.Person.create({ name: "Ada" });
+    }),
+  );
+}
+```
+
 ### The `ref` pattern
 
-`Store<G>` is immutable by construction — `evolve()` returns a fresh
-instance. Long-lived consumer code that holds the store in a singleton
-needs a way to re-bind it atomically with the schema commit. Pass
-`options.ref: { current: store }` (a `StoreRef<Store<G>>`):
+`Store<G>` is immutable by construction — `evolve()` returns the Store for the
+resulting schema, using a fresh instance when the schema advances. Long-lived
+consumer code that holds the Store in a singleton needs a way to re-bind it
+before the operation completes. Pass `options.ref: { current: store }` (a
+`StoreRef<Store<G>>`):
 
 ```ts
 const ref: StoreRef<Store<G>> = { current: store };
-await ref.current.evolve(extension, { ref });
-// `ref.current` now points to the new store.
+const evolved = await ref.current.evolve(extension, { ref });
+
+// `ref.current === evolved`; use either reference from here on.
+const papers = ref.current.getNodeCollectionOrThrow("Paper");
+await papers.create({ title: "...", doi: "...", year: 2024 });
 ```
 
-`StoreRef<T>` is just a type alias for `{ current: T }` — the library
-doesn't provide a factory because the consumer composes the handle
-themselves (could be a Vue ref, MobX observable, Zustand atom, etc.).
+Capture `ref.current` once at request entry only when that request will not
+change the schema. If it does call `evolve()`, switch to the returned Store or
+dereference `ref.current` again after the call. `StoreRef<T>` is structurally
+just `{ current: T }`; the library doesn't provide a factory because the
+consumer composes the handle themselves (it could be a Vue ref, MobX
+observable, Zustand atom, etc.).
+
+The ref covers schema changes made by calls that receive it. If another process
+or isolate can advance the schema, probe the committed version before reusing a
+cached Store and perform a verified open when it changes. See
+[Per-request connections: cache the verified Store](/integration#per-request-connections-cache-the-verified-store)
+for the complete `getCommittedSchemaVersion()` recipe.
 
 ### Eager materialization
 
@@ -351,8 +655,24 @@ the call site rather than crashing later on `papers!.create(...)`.
 
 `DynamicNodeCollection` exposes the same CRUD surface as
 `store.nodes.X` — `create`, `getById`, `find`, `update`, `delete`,
-etc. — but with widened `Node<NodeType>` element types since the
-specific Zod schema isn't visible to TypeScript at the call site.
+etc. — but with `DynamicNode` element types since the specific Zod schema isn't
+visible to TypeScript at the call site.
+
+In TypeScript, nodes returned by a dynamic collection carry the nominal
+`DynamicNode<K>` type, preserving the requested kind literal. That proof lets
+runtime kinds participate directly in Operational Identity without weakening
+compile-time references to arbitrary string kinds:
+
+```ts
+const paper = await evolved
+  .getNodeCollectionOrThrow("Paper")
+  .create({ title: "Runtime schemas" });
+
+await evolved.identity.assertSame(document, paper);
+```
+
+Identity reads can consequently return `IdentityNodeReference<G>` values for
+either compile-time or runtime kinds. See [Operational Identity](/identity).
 
 For consumers that need the live Zod schema itself — MCP tool wrappers
 that validate inputs before forwarding to `collection.create`, or
@@ -413,6 +733,37 @@ Each method runtime-validates against the registry: a typo throws
 endpoint for the current edge / direction throws `EndpointError`.
 Compile-time `from` / `traverse` / `to` are unchanged.
 
+When the extension document is available in typed code, mint Store-bound
+runtime-kind evidence from the exact persisted definition. The token narrows
+collections and query aliases without asking callers to restate the schema in
+Zod:
+
+```ts
+const tagKind = store.runtimeNodeKind("Tag", extension.nodes.Tag);
+const taggedWithKind = store.runtimeEdgeKind(
+  "taggedWith",
+  extension.edges.taggedWith,
+);
+
+const tags = store.getNodeCollectionOrThrow(tagKind);
+const rows = await store.query()
+  .fromDynamic(tagKind, "tag")       // ctx.tag has the declared Tag fields
+  .traverseDynamic(taggedWithKind, "edge") // ctx.edge is narrowed too
+  .toDynamic("Document", "document")
+  .select((ctx) => ({ label: ctx.tag.label, weight: ctx.edge.weight }))
+  .execute();
+```
+
+Definitions, rather than hand-authored Zod schemas, are the type evidence:
+TypeGraph compares the complete graph-extension declaration that TypeScript
+infers against the definition persisted for that kind. This keeps refinements
+such as enums, optionality, arrays, and numeric constraints on one authoritative
+surface. Tokens are bound to the issuing Store and active schema hash; use a
+fresh token after reopening or evolving a Store. Token lookups intentionally
+use the throwing `getNodeCollectionOrThrow` / `getEdgeCollectionOrThrow`
+variants because valid Store-issued evidence already proves that the kind
+exists.
+
 Predicate accessors on dynamic aliases use a `.field(name)`
 discriminator:
 
@@ -468,7 +819,9 @@ The `store.search` facade — `fulltext`, `vector`, `hybrid`, and
 `rebuildFulltext` — accepts any registered kind, compile-time or
 runtime, with no type cast. The hit's `node` type narrows to the
 concrete typed node only when the kind literal is statically known
-in `Store<G>`; extension kinds widen to the base `Node`. Misspelled
+in `Store<G>` (and the call does not state `expansion: "subclasses"` on a
+kind the ontology can affect, which widens `kind` and the `NodeId` brand);
+extension kinds widen to the base `Node`. Misspelled
 kind names throw `KindNotFoundError` at the call site instead of
 returning empty results.
 
@@ -495,6 +848,7 @@ durable-state metadata the store has loaded so far. Its shape:
 | Field                  | Type                                  | Notes                                                                                          |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `graphId`              | `string`                              | The graph's stable id.                                                                         |
+| `annotations`          | `GraphAnnotations \| undefined`       | Merged graph-scoped metadata from `defineGraph` and runtime extensions.                         |
 | `kinds`                | `readonly KindIntrospection[]`        | Merged node kinds with `origin: "compile-time" \| "runtime"`, description, annotations, etc.   |
 | `edges`                | `readonly EdgeIntrospection[]`        | Merged edge kinds with the same origin discriminator and endpoint information.                 |
 | `ontology`             | `readonly OntologyIntrospection[]`    | Ontology relations declared on either tier.                                                    |
@@ -506,6 +860,7 @@ durable-state metadata the store has loaded so far. Its shape:
 ```ts
 const intro = store.introspect();
 console.log(intro.schemaVersion); // e.g. 2
+console.log(intro.annotations?.displayName);
 console.log(intro.extension?.nodes?.Paper); // ExtensionNodeDef or undefined
 console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 ```
@@ -513,6 +868,133 @@ console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 The `extension` field round-trips: passing it back through
 `defineGraphExtension(intro.extension!)` and `evolve()` against an
 empty graph reconstructs the same extension kinds.
+
+For schema tooling that has an extension document but no Store, call
+`introspectGraphExtension(extension)`. It compiles the extension through the
+same TypeGraph compiler used by `evolve()` and returns `kinds` and `edges`
+with JSON Schema `properties`, descriptions, annotations, and endpoint names.
+The result describes only the supplied document; it has no graph ID, committed
+schema version, or schema hash.
+
+```ts
+import { introspectGraphExtension } from "@nicia-ai/typegraph/graph-extension";
+
+const declaration = introspectGraphExtension(extension);
+console.log(declaration.kinds[0]?.properties);
+```
+
+Graph extensions may also carry graph-scoped annotations:
+
+```ts
+const extension = defineGraphExtension({
+  annotations: {
+    displayName: "Customer knowledge",
+    capabilities: { semanticSearch: true },
+  },
+});
+```
+
+Annotation keys are shallow-merged. A later extension replaces the complete
+value of each key it supplies; it does not recursively merge nested objects.
+
+## Population statistics and stored-data validation
+
+`await store.describe()` pairs the merged schema introspection with current
+population statistics. It returns node and edge counts for every declared kind
+plus present, explicit-null, and non-null counts (and non-null coverage) for
+each directly addressable declared property:
+
+```ts
+const description = await store.describe();
+const people = description.statistics.nodes.find(
+  (entry) => entry.kind === "Person",
+);
+
+console.log(people?.count);
+console.log(
+  people?.properties.find((property) => property.path === "/email")?.coverage,
+);
+```
+
+The schema coordinate includes the active schema version and hash when present
+and a `schemaFence`. TypeGraph reads that coordinate before and after the
+bounded, sequential SQL aggregate statements and refuses the result if it
+changed. Node and edge properties are queried separately, and wide schemas are
+split into fixed-width path batches. The database, rather than TypeGraph's
+JavaScript process, computes all counts. Coverage follows ordinary nested JSON
+Schema `properties`; TypeGraph intentionally does not invent population
+semantics through `$ref`, unions, intersections, arrays, or conditionals.
+`validateStore()` remains authoritative for those schemas. Concurrent writes
+can affect different `describe()` path batches differently; the schema fence
+detects schema changes, not data changes.
+
+Use `validateStore()` to find rows that no longer satisfy a kind's current
+declared Zod schema, for example after tightening a rule around existing data:
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await store.validateStore({
+    entity: "node",
+    kind: "Person",
+    pageSize: 250,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  for (const failure of page.violations) {
+    console.log(failure.id, failure.path, failure.reason);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+Undeclared properties are healthy semi-structured state and are never reported
+as violations, including when the authored Zod object is strict. Each failure
+names the record id, JSON-pointer path, top-level property when applicable,
+Zod issue code, and reason.
+
+`pageSize` is the number of records scanned, not a cap on violations: one record
+can contribute several Zod issues. Each request performs a bounded SQL keyset
+scan (`LIMIT pageSize + 1`) and reports `scannedCount`; it never materializes or
+rescans the complete kind just to continue. Cursors bind the entity, kind,
+schema fence, and last scanned id. A schema change throws
+`StoreAnalysisCursorStaleError`. Data pages are deliberately live rather than a
+claimed cross-request snapshot, so concurrent inserts, updates, and deletes can
+affect later pages. Each page still reads the schema coordinate before and after
+its data statement and refuses a concurrent schema flip.
+
+Both analysis methods are current-only. They are absent from `StoreView`;
+recorded/as-of population analysis is deferred until it can be backed by an
+equally explicit temporal contract. Root-store calls use sequential SQL
+statements plus schema bracketing, so they also work on non-interactive
+transactional adapters.
+
+Transaction callbacks expose the same methods through their pinned session.
+Choose `repeatable_read` or `serializable` when every `describe()` aggregate or
+every `validateStore()` page must observe one database snapshot, and consume
+all validation pages before the callback returns:
+
+```ts
+await store.transaction(
+  async (tx) => {
+    const description = await tx.describe();
+    let cursor: string | undefined;
+    do {
+      const page = await tx.validateStore({
+        entity: "node",
+        kind: "Person",
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return description;
+  },
+  { isolationLevel: "repeatable_read", accessMode: "read_only" },
+);
+```
+
+Calling root `store.describe()` from inside a transaction callback still does
+not join that transaction; use `tx.describe()` or `tx.validateStore()` for the
+bound-session behavior.
 
 ## `store.materializeIndexes(options?)`
 
@@ -586,8 +1068,8 @@ const Manual = defineNode("Manual", {
 ```
 
 Embeddings live in per-`(graphId, nodeKind, fieldPath)` typed tables
-named `tg_vec_<graphId>_<kind>_<field>` (each carrying the field's
-fixed dimension) — there is no single shared embeddings table. The
+named `tg_vec_<graphId>_<kind>_<field>_<hash>` (lowercased and sanitized,
+truncated to 63 characters, each carrying the field's fixed dimension) — there is no single shared embeddings table. The
 privileged migrator provisions each table plus a durable marker: at boot
 via `createStoreWithSchema`, and for a field a runtime `evolve()`
 introduces, by that `evolve()` call. The runtime hot path then asserts
@@ -694,6 +1176,22 @@ Removing an embedding field from a surviving kind orphans its
 per-`(graphId, kind, field)` `tg_vec_*` table; `materializeRemovals()`
 reclaims it and reports the count in
 `MaterializeRemovalsResult.reclaimedVectorFields`.
+
+For source-dependent edges, removing a node kind removes its source entry and
+any target references to it. A source entry whose targets are exhausted is also
+removed. The edge kind survives while another valid pair remains; it is cascaded
+only when no pairs remain. For example, removing `Course` from the `assignedTo`
+extension above preserves `Employee → Department`.
+
+Removing a kind from the middle of a subclass chain cuts its surviving
+subclasses off from every edge kind that admitted them through it. When a live
+edge still relies on that admission, `removeKinds()` refuses with
+`MigrationError` (`reason: "ontology-tightening-violated"`) and lists the
+edges in `details.violations`; see
+[Ontology changes are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+Edges touching rows of the removed kind itself never block the removal; the
+rows are reclaimed by `materializeRemovals()` or an `eager` removal, not at
+commit.
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code

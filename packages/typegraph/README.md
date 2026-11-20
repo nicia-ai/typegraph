@@ -36,13 +36,54 @@ await store.edges.knows.create(alice, bob);
 await store.close();
 ```
 
+Use `store.query().from(["Person", "Company"], "entity")` for one result stream
+across several node kinds. Queries expose compatible shared fields, full-node
+results retain their concrete kind, and cursor pagination includes both kind
+and ID so overlapping IDs remain distinct. See [Query sources](https://typegraph.dev/queries/source).
+
+For latency-sensitive reads, `store.batchOnce()` combines independent fluent
+queries and set-oriented reads into one statement. Its callback receives a
+batch-scoped builder with `neighbors()`, `countNeighbors()`, and `subgraph()`
+methods. Direct `store.subgraph()` and batch-scoped `read.subgraph()` return the
+same result shape and semantics; the direct form retains backend-tuned hydration
+while the batch-scoped form guarantees one statement.
+Transaction contexts expose the same `query()`, `neighbors()`,
+`countNeighbors()`, `subgraph()`, and `batchOnce()` reads, all bound to the open
+transaction so read-modify-write paths see their uncommitted changes.
+`store.neighbors()` can order by edge metadata or adjacent-node properties,
+while `subgraph({ edgeWindows })` applies per-kind direction, ordering, and
+limits during traversal. See
+[Schemas and Stores](https://typegraph.dev/schemas-stores) for examples and
+constraints.
+
 Use the explicit `/adapters/drizzle/...` entrypoints when your application owns
 the database connection or needs adapter-native transaction handles.
 
 Schema-only packages can import the graph DSL and schema-derived types from the
 Drizzle-free `@nicia-ai/typegraph/core` entrypoint. Custom backend, dialect, and
 search-strategy authors can import the complete Drizzle-free contract vocabulary
-from `@nicia-ai/typegraph/backend`.
+from `@nicia-ai/typegraph/backend`. That authoring surface, and
+`@nicia-ai/typegraph/adapters/drizzle/engine`, is not covered by semver and may
+change in any release; the bundled SQLite and PostgreSQL backends are the
+supported ones. Every other entrypoint is application API and is covered by
+semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
+`/maintenance`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
+`/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
+`/postgres/pglite` and `/adapters/drizzle/...` subpaths other than
+`/adapters/drizzle/engine`. See
+[Stability](https://typegraph.dev/backend-authoring#stability).
+
+## Optional Peer: drizzle-orm
+
+`drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`
+and `@nicia-ai/typegraph/postgres/pglite` load it only when their factory is
+called and refuse with a typed `ConfigurationError`
+(`MISSING_PEER_DEPENDENCY`) naming the package and the install command
+(`npm install drizzle-orm`) when it is absent. The explicit
+`/adapters/drizzle/...` entrypoints expose Drizzle-native backends, connections,
+or schema builders and load `drizzle-orm` when the module is evaluated. Importing
+one without the peer installed therefore surfaces the raw module-resolution
+error, which names the same package.
 
 See the repo README for more.
 
@@ -53,7 +94,17 @@ Examples: [github.com/nicia-ai/typegraph/tree/main/packages/typegraph/examples](
 TypeGraph ships semantic graph merge as a dedicated subpath:
 
 ```ts
-import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
+import {
+  applyDurableMergePlan,
+  applyMergePlan,
+  applyMergePlanInTransaction,
+  branch,
+  branchDurable,
+  destroyDurableBranch,
+  merge,
+  planMerge,
+  reopenDurableBranch,
+} from "@nicia-ai/typegraph/graph-merge";
 ```
 
 `branch()` creates isolated working copies over caller-provided backends, stamped
@@ -71,12 +122,44 @@ append-only pile of duplicates. The merge pipeline can:
 - preserve branch-specific context by repointing edges to canonical nodes;
 - surface property and delete/modify conflicts (for nodes and edges) in a
   `MergeReport`, three-way merged against base so disjoint edits compose;
+- explain every entity collapse with deterministic decisive edges, complete
+  candidate-source attribution, and the actual score/threshold for scored
+  matches, with bounded accepted/rejected diagnostics available on request;
 - expose report-only provenance, with optional sidecar persistence you can query.
 
 `merge()` is a snapshot merge (all branches forked from the current base);
 `mergeIncremental()` additively folds a new source into a target that has already
 advanced, re-discovering committed entities instead of duplicating them — the
 primitive for continuous ingestion.
+
+For approval workflows, `planMerge()` and `planMergeIncremental()` produce a
+deterministically ordered, JSON-serializable `MergePlanArtifact` without
+mutating the target. Store or review that artifact, then pass it to
+`applyMergePlan()`. Apply validates its digest and checks its durable revision,
+graph, schema, and origin fence inside the write transaction; it never re-runs
+candidate generation, scoring, embeddings, or policy callbacks. Plans require a
+target with `revisionTracking: true` or `history: true`. They may contain
+sensitive application data, and their digest provides integrity/identity—not a
+signature, authentication, or authorization. `merge()` and `mergeIncremental()`
+remain one-call compatibility APIs over the same resolution and write owners.
+When a reviewed merge and application records must commit together,
+`applyMergePlanInTransaction()` applies the plan through a transaction context
+created by the same target Store inside `withRecordedTransaction()`. Call it
+before other target-graph writes, then add graph writes or SQL and await the
+caller-owned commit. It throws on failure and leaves rollback and whole-
+transaction retry to the caller. This path refuses persisted provenance, while
+report-only provenance remains available.
+
+Long-running workflows can use `branchDurable()` to allocate a persistent
+working copy, serialize its descriptor, close the current connection, and
+reattach from a later process with `reopenDurableBranch()`. A
+`DurableWorkingCopyStrategy` owns the database's branch lifecycle and declares
+the cross-client fencing or exclusive writer lease that keeps planning sound.
+After review, `applyDurableMergePlan()` may use a strategy's native database
+merge only when it proves the host diff is exactly the approved TypeGraph plan;
+otherwise it applies the complete portable plan. Use `destroyDurableBranch()`
+for explicit teardown. The guide documents the requirements a branch-native
+database strategy must satisfy.
 
 It lives in the core package because the primitive is defined over TypeGraph
 stores, schemas, indexes, backends, and ontology semantics rather than as a

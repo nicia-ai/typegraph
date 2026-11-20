@@ -17,9 +17,12 @@
   },
 
   // MD033 - Inline HTML
-  // Allow HTML elements that are commonly needed
+  // Allow HTML elements that are commonly needed. `a` is for a bare `<a
+  // id="...">` anchor that keeps an old heading slug reachable after a
+  // rename, so a permanent external link (e.g. a shipped CHANGELOG entry)
+  // does not 404.
   "MD033": {
-    "allowed_elements": ["br", "sup", "sub", "details", "summary"],
+    "allowed_elements": ["a", "br", "sup", "sub", "details", "summary"],
   },
 
   // MD041 - First line should be top-level heading

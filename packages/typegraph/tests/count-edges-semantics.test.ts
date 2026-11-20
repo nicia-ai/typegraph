@@ -18,8 +18,6 @@ import { z } from "zod";
 
 import {
   count,
-  countDistinctEdges,
-  countEdges,
   createStore,
   defineEdge,
   defineGraph,
@@ -27,6 +25,7 @@ import {
   field,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import { countDistinctEdges, countEdges } from "../src/query-entry";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -287,7 +286,7 @@ describe("countEdges vs count(target) semantics", () => {
     // double-applied.
     const page1Ids = new Set(page1.map((row) => row.id));
     for (const row of page2) {
-      expect(page1Ids.has(row.id as string)).toBe(false);
+      expect(page1Ids.has(row.id)).toBe(false);
     }
   });
 });

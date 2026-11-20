@@ -1,7 +1,7 @@
 /**
  * Three-way merge LAW properties (complements the T12 determinism gate).
  *
- * `merge()` claims Dolt-class deterministic THREE-WAY merge semantics — NOT
+ * `merge()` claims deterministic three-way merge semantics — NOT
  * CRDT semilattice (ACI) convergence. Entity-resolution merge is not
  * associative or idempotent in general (similarity is not transitive), so the
  * honest, checkable law set for an LCA-anchored merge `m(base, branches…)` is:
@@ -47,11 +47,13 @@ import type {
 } from "../../../src/graph-merge/types";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { requireDefined } from "../../../src/utils/presence";
+import { assertProperty } from "../../graph-merge/assert-property";
 import {
   backendMatrix,
   setupSharedPgliteMergeEngine,
   type SharedPgliteMergeEngine,
 } from "../../graph-merge/test-utils";
+import { propertyRuns } from "../run-budget";
 import type { MergeLawScenario } from "./arbitraries";
 import { mergeLawScenarioArb } from "./arbitraries";
 import { normalizeGraph, normalizeReport } from "./normalize";
@@ -97,7 +99,7 @@ const BRANCH_B = asBranchId("law-branch-b");
  * PGlite engine with isolated tables for this file, matching the determinism
  * gate's rationale.
  */
-const LAW_RUNS = process.env["CI"] ? 8 : 16;
+const LAW_RUNS = propertyRuns({ ci: 8, local: 16 });
 
 /** In-memory Dice trigram over the `name` field (no embeddings). */
 const nameSimilarity: SimilarityStrategy<LawGraph> = {
@@ -287,7 +289,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDENTITY — an unchanged branch merges as a no-op",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {
@@ -332,7 +334,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "DIFF-COHERENCE — a single branch's non-colliding diff is applied faithfully",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {
@@ -381,7 +383,7 @@ describe.each(backendMatrix())("merge law properties [$name]", (entry) => {
     "IDEMPOTENCE — merging an identical twin branch adds nothing",
     { timeout: 300_000 },
     async () => {
-      await fc.assert(
+      await assertProperty(
         fc.asyncProperty(mergeLawScenarioArb, async (scenario) => {
           const disposers: (() => Promise<void>)[] = [];
           try {

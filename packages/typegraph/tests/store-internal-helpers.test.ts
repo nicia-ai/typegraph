@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { gateFulltext } from "../src/backend/drizzle/contribution-materializations";
+import { batchPointReadVerdict } from "../src/backend/capabilities/resolve";
+import {
+  deriveBackend,
+  wrapWithManagedClose,
+} from "../src/backend/derive-backend";
+import {
+  type GatableFulltextBackend,
+  gateFulltext,
+  gateFulltextMethods,
+} from "../src/backend/drizzle/contribution-materializations";
 import {
   closeAfterFailure,
-  createBackendOverlay,
   type EdgeRow,
   type GraphBackend,
   type HardDeleteNodeParams,
@@ -11,7 +19,6 @@ import {
   type InsertNodeParams,
   type NodeRow,
   type TransactionBackend,
-  wrapWithManagedClose,
 } from "../src/backend/types";
 import { asRecordedInstant } from "../src/core/temporal";
 import { ConfigurationError } from "../src/errors";
@@ -208,7 +215,11 @@ class ClosureGraphBackend {
 
   get capabilities(): GraphBackend["capabilities"] {
     return {
-      transactions: true,
+      execution: {
+        interactiveTransactions: true,
+        atomicBatch: "none",
+        unitOfWork: "interactive",
+      },
       windowFunctions: true,
       returning: true,
     };
@@ -217,6 +228,16 @@ class ClosureGraphBackend {
   get tableNames(): GraphBackend["tableNames"] {
     return createSqlSchema().tables;
   }
+
+  readonly commands: GraphBackend["commands"] = {
+    session: "root",
+    execute: () =>
+      Promise.resolve({
+        outcome: "rejected",
+        entity: "node",
+        reason: "unknown",
+      }),
+  };
 
   readonly execute = <T>(_query: CompiledRowsSql): Promise<readonly T[]> => {
     this.calls.push(`execute:${this.#marker}`);
@@ -392,11 +413,18 @@ describe("insert dispatch", () => {
 describe("row fetch dispatch", () => {
   it("supports detached receiver-free batch readers", async () => {
     const backend = new ClosureReadBackend() as unknown as GraphBackend;
+    const batchPointRead = batchPointReadVerdict(backend);
 
-    const nodes = await getNodeRowsByIds(backend, "graph", "Person", [
-      "node-a",
+    const nodes = await getNodeRowsByIds(
+      backend,
+      batchPointRead,
+      "graph",
+      "Person",
+      ["node-a"],
+    );
+    const edges = await getEdgeRowsByIds(backend, batchPointRead, "graph", [
+      "edge-a",
     ]);
-    const edges = await getEdgeRowsByIds(backend, "graph", ["edge-a"]);
 
     expect(nodes.get("node-a")?.id).toBe("node-a");
     expect(edges.get("edge-a")?.id).toBe("edge-a");
@@ -408,6 +436,11 @@ describe("recorded read dispatch", () => {
     const backend = new ClosureRawBackend();
     const service = createRecordedReadService({
       graphId: "graph",
+      revisionOriginSession: () =>
+        Promise.resolve({
+          owner: { origin: "origin", namespace: "0".repeat(32) },
+          sharesSnapshot: false,
+        }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
@@ -416,7 +449,11 @@ describe("recorded read dispatch", () => {
     const recordedBackend = service.backendForCoordinate(
       {
         valid: { mode: "current" },
-        recorded: { asOf: asRecordedInstant("2026-01-01T00:00:00.000Z") },
+        recorded: {
+          asOf: asRecordedInstant(
+            "r2:origin:00000000000000000000000000000000:0000000000000001:2026-01-01T00:00:00.000Z",
+          ),
+        },
       },
       "test-recorded-read",
     );
@@ -433,7 +470,7 @@ describe("recorded read dispatch", () => {
 describe("backend overlay wrappers", () => {
   it("delegates receiver-free methods through generic overlays", async () => {
     const backend = new ClosureGraphBackend();
-    const overlay = createBackendOverlay(backend as unknown as GraphBackend, {
+    const overlay = deriveBackend(backend as unknown as GraphBackend, {
       executeStatement(_query: CompiledStatementSql): Promise<void> {
         backend.calls.push("overlay:executeStatement");
         return Promise.resolve();
@@ -476,7 +513,7 @@ describe("backend overlay wrappers", () => {
     let backendCloseAttempts = 0;
     let teardownAttempts = 0;
     const closeError = new Error("backend close failed");
-    const failingCloseBackend = createBackendOverlay(
+    const failingCloseBackend = deriveBackend(
       backend as unknown as GraphBackend,
       {
         close(): Promise<void> {
@@ -579,6 +616,11 @@ describe("backend overlay wrappers", () => {
     const backend = new ClosureGraphBackend();
     const service = createRecordedReadService({
       graphId: "graph",
+      revisionOriginSession: () =>
+        Promise.resolve({
+          owner: { origin: "origin", namespace: "0".repeat(32) },
+          sharesSnapshot: false,
+        }),
       backend: backend as unknown as GraphBackend,
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
@@ -587,7 +629,11 @@ describe("backend overlay wrappers", () => {
     const recordedBackend = service.backendForCoordinate(
       {
         valid: { mode: "current" },
-        recorded: { asOf: asRecordedInstant("2026-01-01T00:00:00.000Z") },
+        recorded: {
+          asOf: asRecordedInstant(
+            "r2:origin:00000000000000000000000000000000:0000000000000001:2026-01-01T00:00:00.000Z",
+          ),
+        },
       },
       "test-recorded-read",
     );
@@ -612,6 +658,7 @@ describe("backend overlay wrappers", () => {
         assertedGraphIds.push(graphId);
         return Promise.resolve();
       },
+      () => Promise.reject(new Error("Unexpected unavailable fulltext")),
     );
 
     await gated.execute(asCompiledRowsSql(sql`SELECT 1`));
@@ -627,6 +674,88 @@ describe("backend overlay wrappers", () => {
       "hardDeleteNode:prototype:person-1",
     ]);
   });
+
+  it("routes every fulltext method failure through one refusal handler", async () => {
+    const rawError = new Error("raw fulltext failure");
+    const translatedError = new Error("typed fulltext failure");
+    const rejectRaw = vi.fn((): Promise<never> => Promise.reject(rawError));
+    const source = {
+      upsertFulltext: rejectRaw,
+      deleteFulltext: rejectRaw,
+      upsertFulltextBatch: rejectRaw,
+      deleteFulltextBatch: rejectRaw,
+      fulltextSearch: rejectRaw,
+      hardDeleteNode: rejectRaw,
+    } satisfies GatableFulltextBackend;
+    const assert = vi.fn((): Promise<void> => Promise.resolve());
+    const refuseUnavailable = vi.fn(
+      (_graphId: string, _error: unknown): Promise<never> =>
+        Promise.reject(translatedError),
+    );
+    const gated = gateFulltextMethods(source, assert, refuseUnavailable);
+
+    const calls: readonly (() => Promise<unknown>)[] = [
+      () =>
+        requireDefined(gated.upsertFulltext)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+          content: "Ada",
+          language: "english",
+        }),
+      () =>
+        requireDefined(gated.deleteFulltext)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeId: "person-1",
+        }),
+      () =>
+        requireDefined(gated.upsertFulltextBatch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          rows: [{ nodeId: "person-1", content: "Ada", language: "english" }],
+        }),
+      () =>
+        requireDefined(gated.deleteFulltextBatch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          nodeIds: ["person-1"],
+        }),
+      () =>
+        requireDefined(gated.fulltextSearch)({
+          graphId: "graph",
+          nodeKind: "Person",
+          query: "Ada",
+          limit: 10,
+        }),
+      () =>
+        requireDefined(gated.hardDeleteNode)({
+          graphId: "graph",
+          kind: "Person",
+          id: "person-1",
+        }),
+    ];
+
+    for (const call of calls) {
+      await expect(call()).rejects.toBe(translatedError);
+    }
+    expect(assert).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledWith("graph", rawError);
+
+    await requireDefined(gated.upsertFulltextBatch)({
+      graphId: "graph",
+      nodeKind: "Person",
+      rows: [],
+    });
+    await requireDefined(gated.deleteFulltextBatch)({
+      graphId: "graph",
+      nodeKind: "Person",
+      nodeIds: [],
+    });
+    expect(assert).toHaveBeenCalledTimes(calls.length);
+    expect(refuseUnavailable).toHaveBeenCalledTimes(calls.length);
+  });
 });
 
 describe("recorded capture helpers", () => {
@@ -634,7 +763,11 @@ describe("recorded capture helpers", () => {
     expect(() =>
       recordedBindParamBudget({
         capabilities: {
-          transactions: true,
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           maxBindParameters: 0,
         },

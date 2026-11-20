@@ -1,0 +1,68 @@
+User-agent: *
+Allow: /
+
+# Explicit rules for AI/answer-engine crawlers and their training-data
+# counterparts. Without an explicit User-agent block, several operators
+# treat a site as opted out by default; Bytespider (ByteDance) is
+# disallowed because it does not respect crawl-delay/robots conventions.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: GoogleOther
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Meta-ExternalAgent
+Allow: /
+
+User-agent: Meta-ExternalFetcher
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+User-agent: Diffbot
+Allow: /
+
+User-agent: xAI
+Allow: /
+
+User-agent: Grok
+Allow: /
+
+User-agent: Bytespider
+Disallow: /
+
+Sitemap: https://typegraph.dev/sitemap-index.xml

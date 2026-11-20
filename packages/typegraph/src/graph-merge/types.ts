@@ -12,10 +12,21 @@
  * runtime merge logic.
  */
 
+import type { RecordedInstant } from "../core/temporal";
+import type { IngestionImportTarget } from "../interchange/ingestion-import-target";
+import type { TransactionReceipt } from "../store/types";
+import type {
+  CandidateDiagnostics,
+  EntityRef,
+  MatchEvidence,
+  MatchSource,
+} from "./evidence";
 import type {
   EdgeId,
+  EngineRevision,
   GetNodeType,
   GraphDef,
+  IdentityAssertionWriteFacade,
   JsonValue,
   Node,
   NodeId,
@@ -39,6 +50,12 @@ export type BranchId = string & Readonly<{ readonly __brand: "BranchId" }>;
  */
 export type BaseVersion = string &
   Readonly<{ readonly __brand: "BaseVersion" }>;
+
+/** An attested source cut for a branch forked from a history-enabled graph. */
+export type RecordedForkPoint = Readonly<{
+  recorded: RecordedInstant;
+  base: BaseVersion;
+}>;
 
 /**
  * Mints a {@link BranchId} from a raw string. Centralizes the brand cast so the
@@ -64,7 +81,105 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
   id: BranchId;
   base: BaseVersion;
   store: Store<G>;
+  /**
+   * The branch store's committed schema row `(version, hash)` captured AT
+   * FORK. The merge requires the branch's CURRENT committed schema to still
+   * equal this anchor: any schema operation on the branch after forking —
+   * including a round-trip that restores the original document hash —
+   * advances the version and is refused, so its row side effects can never
+   * be projected into a merge as bare data changes. `undefined` inside the
+   * tuple-less field means the clone committed no schema row (unmanaged
+   * stores); absent entirely on hand-built branch objects, where the merge
+   * falls back to comparing the branch's hash against the fork source's.
+   */
+  schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
+  /**
+   * Releases the branch's working-copy backend — the composed close a
+   * {@link WorkingCopyStrategy} built (e.g. a forked working copy's
+   * connection AND its host-level fork, see `forkedWorkingCopyStrategy`).
+   * Idempotent the same way {@link IngestionBranch.close} is: both coalesce
+   * concurrent calls onto one release of the working copy's backend and make
+   * a completed release final, so a backend whose own `close` is not
+   * idempotent is still released exactly once; a release that FAILED is
+   * retried by the next call rather than cached. `branch()` sets this; a
+   * hand-built `GraphBranch` (the merge primitive's own committed-target
+   * stand-in, `tests/`-only fixtures) must supply one too — a no-op when the object does not own a disposable
+   * backend at all.
+   */
+  close: () => Promise<void>;
+  /**
+   * The engine revision the working copy's `lineage` source reported right
+   * after `branch()` cloned it, before any write — the baseline `state-diff.ts`'s
+   * `diffAgainstBase` and `staging.ts`'s `stageBranches` measure this branch's
+   * OWN changes against when pruning the merge diff (see `LineageDelta`). The
+   * key is PRESENT only when a lineage source answered at fork time; it is
+   * ABSENT both when the working copy resolved no `lineage` at all (no backend
+   * `lineage`, no `history: true` capture) and on a hand-built branch object —
+   * either way, the merge always diffs this branch in full.
+   */
+  forkRevision?: EngineRevision | undefined;
+  /**
+   * The source graph's recorded high-water mark at the fork cut, paired with
+   * the base token captured from that same source state. Present only when
+   * the source Store records history and had a captured write at fork time.
+   */
+  recordedForkPoint?: RecordedForkPoint;
 }>;
+
+declare const INGESTION_BRANCH_BRAND: unique symbol;
+
+/**
+ * Node collections exposed by an {@link IngestionBranch}. They retain normal
+ * validation, reads, and staging writes, but omit APIs that claim a declared
+ * uniqueness constraint exists on the relaxed physical working copy.
+ */
+export type IngestionNodeCollections<G extends GraphDef> = Readonly<{
+  [K in keyof Store<G>["nodes"]]-?: Pick<
+    Store<G>["nodes"][K],
+    | "create"
+    | "getById"
+    | "getByIds"
+    | "update"
+    | "updateWhere"
+    | "delete"
+    | "hardDelete"
+    | "find"
+    | "count"
+    | "createFromRecord"
+    | "upsertById"
+    | "upsertByIdFromRecord"
+    | "bulkCreate"
+    | "bulkUpsertById"
+    | "bulkInsert"
+    | "bulkDelete"
+    | "bulkFindByIndex"
+  >;
+}>;
+
+/**
+ * Opaque handle for an untrusted ingestion working copy.
+ *
+ * The ordinary {@link Store} is intentionally absent: callers may stage and
+ * inspect graph data through the typed collections, then pass this handle to
+ * merge planning, but cannot access schema evolution, transactions, or runtime
+ * internals. `close()` releases the private working-copy backend.
+ */
+export type IngestionBranch<G extends GraphDef> = IngestionImportTarget<G> &
+  Readonly<{
+    [INGESTION_BRANCH_BRAND]: true;
+    id: BranchId;
+    base: BaseVersion;
+    nodes: IngestionNodeCollections<G>;
+    edges: Store<G>["edges"];
+    close: () => Promise<void>;
+  }> &
+  ("identity" extends keyof Store<G> ?
+    Readonly<{ identity: IdentityAssertionWriteFacade<G> }>
+  : Readonly<Record<never, never>>);
+
+/** A normal branch or an opaque ingestion branch accepted by merge entrypoints. */
+export type MergeBranch<G extends GraphDef> =
+  GraphBranch<G> | IngestionBranch<G>;
 
 /**
  * Options for {@link GraphBranch} creation. `id` is optional — when omitted a
@@ -237,6 +352,16 @@ export type DeleteModifyPolicy = "deleteWins" | "modifyWins" | "flag";
 export type ComparisonCeilingPolicy = "error" | "mergeByIdOnly";
 
 /**
+ * Opt-in retention policy for candidate-level scoring diagnostics. The limit is
+ * a deterministic global ceiling over the canonically ordered scored pairs;
+ * planning still evaluates candidates according to the normal comparison
+ * ceiling, then retains at most this many accepted/rejected decisions.
+ */
+export type CandidateDiagnosticsOptions = Readonly<{
+  limit: number;
+}>;
+
+/**
  * Ontology type-reconciliation mode. `"off"` is a no-op (default); `"ontology"`
  * collapses compatible types to the most-specific via the public subClassOf
  * closure (T2a / T10).
@@ -313,6 +438,11 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
   /** Safety ceiling on candidate comparisons per kind. Default: unbounded. */
   maxComparisonsPerKind?: number;
   /**
+   * Retain bounded accepted/rejected scored-pair diagnostics. Omitted by
+   * default so ordinary plans and reports contain only decisive evidence.
+   */
+  candidateDiagnostics?: CandidateDiagnosticsOptions;
+  /**
    * Optional single-link diameter guard. When set, clusters whose pairwise
    * distance exceeds it are split by the deterministic drop-weakest rule (T8).
    */
@@ -329,9 +459,9 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
    * the value contributed by the highest-weight branch wins. Ties fall back to
    * {@link branchOrder} (then canonical value order); branches absent from the map
    * default to weight `0`. Ignored by every other policy. Keyed by
-   * {@link BranchId}, like {@link branchOrder}. Without this map,
-   * `"provenanceWeighted"` has no weights to consult and degrades to
-   * `"lastWriteWins"` semantics.
+   * {@link BranchId}, like {@link branchOrder}. A non-empty map is required when
+   * either property-conflict policy is `"provenanceWeighted"`; otherwise option
+   * validation refuses the merge rather than silently changing policy.
    */
   provenanceWeights?: ReadonlyMap<BranchId, number>;
 }>;
@@ -340,14 +470,14 @@ export type MergeOptions<G extends GraphDef = GraphDef> = Readonly<{
  * Object-form arguments for {@link mergeIncremental} (§6.6). The two same-typed
  * stores are NAMED so `forkPoint` (the frozen ancestor the branches forked from, the
  * diff reference) and `target` (the live committed graph that base lookups and the
- * commit land on) cannot be swapped. `options.target` is ignored — `target` is the
- * explicit arg.
+ * commit land on) cannot be swapped. The target is deliberately absent from the
+ * options type because the named `target` argument is authoritative.
  */
 export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
-  forkPoint: Store<G>;
+  forkPoint: Store<G> | RecordedForkPoint;
   target: Store<G>;
-  branches: readonly GraphBranch<G>[];
-  options?: MergeOptions<G>;
+  branches: readonly MergeBranch<G>[];
+  options?: Omit<MergeOptions<G>, "target">;
 }>;
 
 /**
@@ -356,8 +486,16 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
 export type EntityResolution = Readonly<{
   canonicalId: NodeId<NodeType>;
   memberIds: readonly NodeId<NodeType>[];
+  /**
+   * The kind the canonical survivor is written under: its staged kind, or,
+   * when `reconcileTypes: "ontology"` retypes the cluster, the reconciled
+   * kind {@link TypeReconciliation.toType} names — the same kind the committed
+   * row carries.
+   */
   kind: string;
   branchOrigins: readonly BranchId[];
+  /** Deterministic minimal accepted-edge witness for this resolution. */
+  decisiveEdges: readonly MatchEvidence[];
 }>;
 
 /**
@@ -406,17 +544,95 @@ export type TypeReconciliation = Readonly<{
   entityId: NodeId<NodeType>;
   fromTypes: readonly string[];
   toType: string;
+  /** Accepted ontology-retype witness, when emitted by graph merge. */
+  decisiveEdges?: readonly MatchEvidence[];
 }>;
 
 /**
  * An item omitted from the merged result (e.g. an edge whose endpoint was
- * deleted, or an incompatible-typed cluster member).
+ * deleted, an incompatible-typed cluster member, or an identity assertion that
+ * lost the survivor rule to an equivalent assertion from another branch).
+ *
+ * Discriminated on `kind` so each variant keeps its own id type: node and edge
+ * ids are branded, while an identity assertion is named by the ledger's plain
+ * assertion id (it is not a graph entity and carries no brand).
  */
-export type DroppedItem = Readonly<{
-  kind: "edge" | "node";
-  id: NodeId<NodeType> | EdgeId;
-  reason: string;
+export type DroppedItem =
+  | Readonly<{ kind: "node"; id: NodeId<NodeType>; reason: string }>
+  | Readonly<{ kind: "edge"; id: EdgeId; reason: string }>
+  | Readonly<{ kind: "identity"; id: string; reason: string }>;
+
+/**
+ * A candidate match the identity ledger vetoed, recorded on
+ * {@link MergeReport.identityConflicts} instead of silently dropped. A plan
+ * carrying one is still APPLICABLE: the vetoed match is simply not made, and
+ * both entities land as they were staged.
+ *
+ * Discriminated on `kind` so an exhaustive `switch` stays exhaustive.
+ */
+export type IdentityUnresolvedConflict = Readonly<{
+  /**
+   * A SCORED match between two entities whose identity classes a `different`
+   * assertion holds apart. `assertionIds` name the separating assertion.
+   */
+  kind: "separation";
+  a: EntityRef;
+  b: EntityRef;
+  assertionIds: readonly string[];
+  /**
+   * The recall path that proposed the vetoed match. Absent only for a
+   * candidate edge carrying no attribution at all, which no shipped source
+   * produces — modelled as optional rather than asserted so a future
+   * source cannot make this a crash.
+   */
+  source?: MatchSource | undefined;
 }>;
+
+/**
+ * The {@link ValidityEndResolution.precedence} of an entry the INCREMENTAL TARGET
+ * decided rather than the merge: the destination had already moved this row's end
+ * before the merge ran, so every branch claim was discarded and no write was staged.
+ */
+export const VALIDITY_END_TARGET_PRECEDENCE = "target" as const;
+
+/**
+ * One inherited row whose end-of-validity the merge RESOLVED: the explicit set or
+ * clear that stands and every branch that claimed a change for the row (including
+ * the ones whose claim lost arbitration).
+ *
+ * `id` is bare because `entity` + `kind` already disambiguate it — a node and an
+ * edge, or two kinds, that share an id string are distinct entries.
+ */
+export type ValidityEndResolution = Readonly<{
+  entity: "node" | "edge";
+  kind: string;
+  id: string;
+  /** Every branch that claimed a change, sorted; length > 1 means arbitration. */
+  claimedBy: readonly BranchId[];
+  /**
+   * Present only as {@link VALIDITY_END_TARGET_PRECEDENCE}, marking an entry the
+   * merge did NOT decide: the incremental target had already changed this end, so
+   * the set/clear fields describe the target's own committed state, every claim in
+   * `claimedBy` was discarded, and nothing was written or credited for the row.
+   *
+   * ABSENT means the merge decided the change — `validTo` or `clearValidTo` names
+   * what it wrote and `claimedBy` names the claims it arbitrated between. A consumer
+   * that ignores the field therefore keeps reading the entries it always read.
+   */
+  precedence?: typeof VALIDITY_END_TARGET_PRECEDENCE;
+}> &
+  (
+    | Readonly<{
+        /** The canonical instant the merge set, or the target already held. */
+        validTo: string;
+        clearValidTo?: never;
+      }>
+    | Readonly<{
+        /** Marks a resolution that reopened the row by clearing its upper bound. */
+        clearValidTo: true;
+        validTo?: never;
+      }>
+  );
 
 /**
  * A `(kind, id)` node identity as surfaced in the merge report. Node identity is the
@@ -481,16 +697,48 @@ export type ProvenanceRecord = Readonly<{
 }>;
 
 /**
- * The full result of a {@link merge}: counts, every resolution/conflict/
- * reconciliation/drop, and the report-only provenance index.
+ * What the merge actually wrote to the target: node and edge counts plus the
+ * identity-ledger effects. `identity.asserted` counts rows the applier
+ * CREATED — planned assertions the target already held (idempotent exact or
+ * semantic-pair matches, the normal incremental case) are excluded — and
+ * `identity.retracted` counts rows the applier ENDED, excluding already-ended
+ * or unknown ids. Assertions dropped by the survivor rule are enumerated in
+ * {@link MergeReport.dropped} rather than counted here.
  */
+export type MergedCounts = Readonly<{
+  nodes: number;
+  edges: number;
+  identity: Readonly<{ asserted: number; retracted: number }>;
+}>;
+
+/** Successful application through an owned transaction, with its terminal receipt. */
+export type AppliedMergeReport<G extends GraphDef = GraphDef> = MergeReport<G> &
+  Readonly<{ receipt: TransactionReceipt }>;
+
+/** Counts, resolutions, conflicts, and provenance for a merge; in-transaction reports do not claim a terminal receipt. */
 export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
-  merged: Readonly<{ nodes: number; edges: number }>;
+  merged: MergedCounts;
   resolutions: readonly EntityResolution[];
   conflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];
   typeReconciliations: readonly TypeReconciliation[];
   dropped: readonly DroppedItem[];
+  /**
+   * Every inherited row whose END-OF-VALIDITY the merge resolved, with the end
+   * update that stands and the branches that claimed it. A set carries `validTo`;
+   * a reopening carries `clearValidTo: true`.
+   *
+   * Reported because the resolution is silent by design: two branches ending the
+   * same row at different instants are not in conflict (an ending is a monotone
+   * claim, like a deletion), so the earliest end is taken without a
+   * `PropertyConflict`. This list is how a caller sees that arbitration happened.
+   * It includes the rows where the arbitration discarded EVERY claim because the
+   * incremental target had already moved the end — those carry
+   * `precedence: "target"` and staged no write. Window deltas the commit CANNOT
+   * apply appear in {@link MergeReport.dropped} instead, with reason
+   * `"window-not-applicable"`.
+   */
+  validityEnds: readonly ValidityEndResolution[];
   /**
    * Ambiguous new-vs-base matches (§6.4-A): components that bridged ≥2 committed
    * base entities. Empty on the staged-vs-staged snapshot path.
@@ -503,10 +751,17 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
    * graph still committed). Empty on a clean merge.
    */
   warnings: readonly string[];
+  /** Bounded accepted/rejected scored-pair diagnostics when explicitly enabled. */
+  candidateDiagnostics?: CandidateDiagnostics;
   /**
    * Present only when `persistProvenance` ran and SUCCEEDED: the sidecar provenance
    * graph id and how many `{branch, sourceId}` rows were upserted. Absent when
    * persistence was off or failed (a failure adds a {@link MergeReport.warnings}).
    */
   provenancePersisted?: Readonly<{ graphId: string; count: number }>;
+  /**
+   * Scored candidate matches the always-on identity separation veto dropped
+   * because a `different` assertion holds the two entities' classes apart.
+   */
+  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;

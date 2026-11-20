@@ -1,19 +1,27 @@
 import {
+  CardinalityError,
   createStoreWithSchema,
   defineGraph,
   defineNode,
-  generateId,
   TypeGraphError,
+  UniquenessError,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { generateId } from "@nicia-ai/typegraph/core";
+import { DatabaseOperationError } from "@nicia-ai/typegraph/errors";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   BaseVersionMismatchError,
   BranchError,
+  IdentityMergeConflictError,
+  InvalidMergeOptionsError,
   MergeConflictError,
+  MergeConstraintConflictError,
   MergeError,
   SimilarityUnavailableError,
+  StaleMergePlanError,
+  translateMergeCommitError,
 } from "../../src/graph-merge/errors";
 import type { Result } from "../../src/graph-merge/result";
 import { err, isErr, isOk, ok, unwrap } from "../../src/graph-merge/result";
@@ -37,6 +45,48 @@ const graph = defineGraph({
   id: "merge-test-utils",
   nodes: { Person: { type: Person } },
   edges: {},
+});
+
+describe("backend matrix selection", () => {
+  beforeEach(() => {
+    vi.stubEnv("POSTGRES_URL", undefined);
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps both local backends in the default lane", () => {
+    expect(backendMatrix().map((entry) => entry.name)).toEqual([
+      "SQLite",
+      "PGlite",
+    ]);
+  });
+  it("adds the server when a URL is supplied without a selector", () => {
+    vi.stubEnv("POSTGRES_URL", "postgresql://localhost/test");
+    expect(backendMatrix().map((entry) => entry.name)).toEqual([
+      "SQLite",
+      "PGlite",
+      "Postgres",
+    ]);
+  });
+  it("selects only the server for the dedicated lane", () => {
+    vi.stubEnv("POSTGRES_URL", "postgresql://localhost/test");
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "postgres");
+    expect(backendMatrix().map((entry) => entry.name)).toEqual(["Postgres"]);
+  });
+  it.each([undefined, ""])(
+    "refuses server selection without a URL (%s)",
+    (url) => {
+      vi.stubEnv("POSTGRES_URL", url);
+      vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "postgres");
+      expect(() => backendMatrix()).toThrow("requires POSTGRES_URL");
+    },
+  );
+  it("refuses an unknown selector", () => {
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "typo");
+    expect(() => backendMatrix()).toThrow("Unsupported TYPEGRAPH_TEST_BACKEND");
+  });
 });
 
 describe("graph-merge Result module", () => {
@@ -142,6 +192,66 @@ describe("MergeError hierarchy", () => {
     expect(error.details).toEqual({ entityId: "n1", property: "name" });
   });
 
+  it("translates deterministic commit constraints with actionable details and cause", () => {
+    const cardinality = new CardinalityError({
+      edgeKind: "primaryEncounter",
+      fromKind: "Patient",
+      fromId: "pat-1",
+      direction: "source",
+      toKind: "primaryEncounterTarget",
+      toId: "target-1",
+      cardinality: "oneActive",
+      existingCount: 1,
+    });
+    const translated = translateMergeCommitError(cardinality);
+
+    expect(translated).toBeInstanceOf(MergeConstraintConflictError);
+    const conflict = translated as MergeConstraintConflictError;
+    expect(conflict).toBeInstanceOf(MergeError);
+    expect(conflict.code).toBe("GRAPH_MERGE_CONSTRAINT_CONFLICT");
+    expect(conflict.category).toBe("constraint");
+    expect(conflict.cause).toBe(cardinality);
+    expect(conflict.details).toMatchObject({
+      constraintCode: "CARDINALITY_ERROR",
+      constraintErrorName: "CardinalityError",
+      edgeKind: "primaryEncounter",
+      fromId: "pat-1",
+      cardinality: "oneActive",
+      existingCount: 1,
+    });
+    expect(conflict.details.constraintDetails).toBe(cardinality.details);
+  });
+
+  it("covers uniqueness without reclassifying system or stale-plan failures", () => {
+    const uniqueness = new UniquenessError({
+      constraintName: "byMrn",
+      kind: "Patient",
+      existingId: "pat-1",
+      newId: "pat-2",
+      fields: ["mrn"],
+    });
+    const uniquenessConflict = translateMergeCommitError(
+      uniqueness,
+    ) as MergeConstraintConflictError;
+    expect(uniquenessConflict).toBeInstanceOf(MergeConstraintConflictError);
+    expect(uniquenessConflict.details["constraintName"]).toBe("byMrn");
+    expect(uniquenessConflict.details.constraintErrorName).toBe(
+      "UniquenessError",
+    );
+
+    const backendFailure = new DatabaseOperationError("offline", {
+      operation: "insert",
+      entity: "node",
+    });
+    const stale = new StaleMergePlanError("target moved");
+    const identityConflict = new IdentityMergeConflictError(
+      "identity truth conflicts",
+    );
+    expect(translateMergeCommitError(backendFailure)).toBe(backendFailure);
+    expect(translateMergeCommitError(stale)).toBe(stale);
+    expect(translateMergeCommitError(identityConflict)).toBe(identityConflict);
+  });
+
   it("BaseVersionMismatchError discriminates with its own code", () => {
     const error = new BaseVersionMismatchError(
       "branch base@V differs from target",
@@ -152,12 +262,33 @@ describe("MergeError hierarchy", () => {
     expect(error.suggestion).toContain("Re-branch");
   });
 
+  it("InvalidMergeOptionsError is a user error with a stable code", () => {
+    const error = new InvalidMergeOptionsError("invalid options");
+
+    expect(error).toBeInstanceOf(MergeError);
+    expect(error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+    expect(error.category).toBe("user");
+  });
+
   it("error codes are mutually distinct", () => {
     const codes = [
       new MergeError("a").code,
       new BranchError("b").code,
+      new InvalidMergeOptionsError("invalid").code,
       new SimilarityUnavailableError("c").code,
       new MergeConflictError("d").code,
+      new MergeConstraintConflictError(
+        new CardinalityError({
+          edgeKind: "e",
+          fromKind: "N",
+          fromId: "n",
+          direction: "source",
+          toKind: "eTarget",
+          toId: "target-1",
+          cardinality: "one",
+          existingCount: 1,
+        }),
+      ).code,
       new BaseVersionMismatchError("e").code,
     ];
     expect(new Set(codes).size).toBe(codes.length);

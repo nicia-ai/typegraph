@@ -1,0 +1,201 @@
+/**
+ * T9 — runtime witness for the pilot capability-bundle registry's totality
+ * and disjointness (I5).
+ *
+ * The compile-time proofs at the bottom of `bundle-registry.ts` guarantee
+ * this holds for the TYPE; this suite is the runtime witness over the DATA,
+ * so a drift between the type-level names and the actual `as const` values
+ * (which the type-level proofs cannot see, since they only see the inferred
+ * literal types) fails a test rather than only failing silently at the type
+ * level in some future edit.
+ */
+import { describe, expect, it } from "vitest";
+
+import {
+  CAPABILITY_BUNDLES,
+  UNBUNDLED_OPTIONAL_MEMBERS,
+  WS5B_SEED_BUNDLES,
+} from "../src/backend/capabilities/bundle-registry";
+
+function bundledMembers(): readonly string[] {
+  const members: string[] = [];
+  for (const bundle of CAPABILITY_BUNDLES) {
+    if ("core" in bundle) members.push(...bundle.core);
+    if ("extras" in bundle) {
+      for (const extra of bundle.extras) members.push(...extra.members);
+    }
+  }
+  return members;
+}
+
+describe("capability bundle totality (T9)", () => {
+  it("16 pilot + 94 unbundled = 110, with no member counted twice", () => {
+    const bundled = bundledMembers();
+    const bundledSet = new Set(bundled);
+    expect(bundled.length).toBe(bundledSet.size);
+    expect(bundledSet.size).toBe(16);
+
+    const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
+    // Node bulkHardDelete (#460) adds `hardDeleteNodesBatch` (deferred) and
+    // `findEdgesConnectedToNodes` (reasoned): 92 -> 94.
+    expect(unbundledNames.length).toBe(94);
+
+    const overlap = unbundledNames.filter((name) => bundledSet.has(name));
+    expect(overlap).toEqual([]);
+
+    expect(bundledSet.size + unbundledNames.length).toBe(110);
+  });
+
+  it("pairwise bundle member sets are disjoint", () => {
+    const seen = new Map<string, string>();
+    for (const bundle of CAPABILITY_BUNDLES) {
+      const members: string[] = [];
+      if ("core" in bundle) members.push(...bundle.core);
+      if ("extras" in bundle) {
+        for (const extra of bundle.extras) members.push(...extra.members);
+      }
+      for (const member of members) {
+        const owner = seen.get(member);
+        expect(
+          owner,
+          `"${member}" claimed by both "${owner}" and "${bundle.id}"`,
+        ).toBeUndefined();
+        seen.set(member, bundle.id);
+      }
+    }
+  });
+
+  it("every `reasoned` entry carries a non-empty reason", () => {
+    for (const [name, entry] of Object.entries(UNBUNDLED_OPTIONAL_MEMBERS)) {
+      if (entry.kind !== "reasoned") continue;
+      expect(
+        entry.reason.length,
+        `"${name}" has an empty reason`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it("every `deferred` entry carries a bundle and a ceiling", () => {
+    for (const [name, entry] of Object.entries(UNBUNDLED_OPTIONAL_MEMBERS)) {
+      if (entry.kind !== "deferred") continue;
+      expect(entry.workstream).toBe("WS5b");
+      expect(typeof entry.bundle, `"${name}" has no bundle`).toBe("string");
+      expect(
+        entry.ceiling,
+        `"${name}" has a negative ceiling`,
+      ).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("grouping `deferred` entries by bundle reproduces WS5B_SEED_BUNDLES exactly", () => {
+    const grouped = new Map<string, Set<string>>();
+    for (const [name, entry] of Object.entries(UNBUNDLED_OPTIONAL_MEMBERS)) {
+      if (entry.kind !== "deferred") continue;
+      const members = grouped.get(entry.bundle) ?? new Set<string>();
+      members.add(name);
+      grouped.set(entry.bundle, members);
+    }
+
+    const seedBundleIds = Object.keys(WS5B_SEED_BUNDLES);
+    expect([...grouped.keys()].toSorted()).toEqual(
+      [...seedBundleIds].toSorted(),
+    );
+
+    for (const [bundleId, members] of grouped) {
+      const seedMembers =
+        WS5B_SEED_BUNDLES[bundleId as keyof typeof WS5B_SEED_BUNDLES];
+      expect([...members].toSorted(), `bundle "${bundleId}"`).toEqual(
+        [...seedMembers].toSorted(),
+      );
+    }
+  });
+
+  it("43 reasoned entries sum to 133 accesses; 51 deferred entries sum to 250", () => {
+    const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
+    const reasoned = entries.filter((entry) => entry.kind === "reasoned");
+    const deferred = entries.filter((entry) => entry.kind === "deferred");
+    expect(reasoned.length).toBe(43);
+    expect(deferred.length).toBe(51);
+    // B9's scanner corrected two grep-tier undercounts with type-aware
+    // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
+    // on one physical line) and `ensureIdentityTables` 3->4
+    // (identity/schema-transition.ts:228 is a real access the grep
+    // receiver-name filter never matched). 58 -> 60; #520 then added the
+    // one live `recordedTableDdl` access. The required command port no longer
+    // belongs in this optional-member inventory. Durable identity adoption
+    // adds one empty-kind fence and one optional preflight selection. The
+    // set-based edge-delete fallback adds one batch write access, and atomic
+    // node-delete refusal diagnosis adds one heterogeneous endpoint-set read.
+    // Resolving the write-fence spelling through the fence plan then added
+    // `fenceSql`, a reasoned member with 2 live accesses: every lock site
+    // reads `fence.sql`, never `.fenceSql` itself, except the one dialect-
+    // gated isolation check that has no resolved plan to read a spelling
+    // through (see the registry's own entry) — 88 -> 90. The catalog-
+    // introspection bag then added `catalog`, a reasoned member whose own
+    // absence refusal lives in backend/capabilities/ — a directory the live
+    // scanner excludes wholesale — so its measured access count is 0 and
+    // the floor is unchanged. The forked working-copy strategy then reads
+    // the connected backend's `tableNames` to fence them against the base
+    // store's resolved schema — 90 -> 91. The lineage capability then added
+    // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
+    // two reads of the backend's own `lineage`, in
+    // `store/recorded-capture/lineage.ts`) — 91 -> 93. A prior fix round
+    // briefly grew this to 95 by re-deriving `resolveLineage(target)`'s
+    // resolution and comparing it against the transaction handle's own
+    // `lineage` by identity inside `assertTargetUnchanged` — a dead read
+    // (`LineageMembers` took no session argument, so the comparison never
+    // actually pinned anything to the transaction). Giving `revision`/
+    // `changesSince` a real `session` parameter made that comparison
+    // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
+    // `requireLineage(txBackend, …)`, which reads `.lineage` inside
+    // `backend/capabilities/`, outside the scanner's scope — back to 93.
+    // The clear lifecycle preservation capability adds one reasoned member with one Store.clear access: 104 -> 105. The engine-native recorded-time capability then added `recordedTime`,
+    // a reasoned member with zero measured accesses for the same reason as
+    // `catalog`: every current read is either inside `backend/capabilities/`
+    // or off `EngineProvisioning`, never off a `GraphBackend`/
+    // `TransactionBackend`-typed receiver — still 93.
+    // The checked-read schema binding adds one tableNames access: 93 -> 94.
+    // The optional durable identity owner lookup adds two bounded
+    // candidate-planning reads, increasing the active-only baseline from 115
+    // to 117. Custom backends without the method retain full-clone planning.
+    // Adopted evolution hands the identity DDL factory into the transaction
+    // and inspects its required storage on that session: 94 -> 96.
+    // The exact-session heterogeneous node upsert adds six guarded backend
+    // member accesses across Store dispatch and recorded wrappers: 96 -> 102.
+    // Revision-change storage resolution adds one tableNames access: 102 -> 103.
+    // Readiness-first journal installation adds one guarded access. The
+    // managed PostgreSQL copy adds six probes for table bindings and schema
+    // provisioning. Candidate one-active and durable edge identity planning
+    // add four accesses. The graph storage inventory resolves the
+    // graph-relation names through one tableNames access and reads the session
+    // isolation expression through one fenceSql access: 123 -> 125.
+    // `rollbackSchema` reads the optional preflight flip once to refuse a
+    // tightening on a backend without it, edge acyclicity adds three
+    // tableNames reads and composition tightening one more: 125 -> 130.
+    // The managed PostgreSQL copy's fixed-schema guard reads the optional
+    // preflight flip once to refuse it: 130 -> 131. Reopening a durable
+    // working copy below the current base schema checks and calls
+    // adoptBaseSchema (+2), and the tightening probe reads its acyclic and
+    // composition relations through one table-name read (-1): 131 -> 132.
+    // Recorded pruning adds one required base-schema assertion: 132 -> 133.
+    // Lineage source selection reads the backend's own `lineage` once: 133 -> 132.
+    // Node bulkHardDelete reads `findEdgesConnectedToNodes` once: 132 -> 133.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(133);
+    // Compiled projection/relation templates add four raw-statement reuse
+    // sites (row and scalar terminals), while import adds one heterogeneous
+    // endpoint-set prefetch: 218 -> 223.
+    // The resolved-node batch update adds one optional member with a ceiling
+    // of six live access sites: 223 -> 229.
+    // IVFFlat materialization drops an unrecorded leftover index before
+    // building it: dropVectorIndex 0 -> 1, 229 -> 230. Managed PostgreSQL
+    // copies add two owned DDL paths and one fulltext strategy probe: 230 -> 233.
+    // Vector lifecycle inventory adds one executeDdl, two upsertEmbedding,
+    // and five vectorStrategy access sites: 233 -> 241. The graph storage
+    // inventory and the namespace fork add one guarded strategy read each: 241 -> 243.
+    // The composition cascade and the unattached-part read each add one
+    // heterogeneous endpoint-set consumer: 243 -> 245.
+    // Node bulkHardDelete's `hardDeleteNodesBatch` has five live access
+    // sites: 245 -> 250.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(250);
+  });
+});

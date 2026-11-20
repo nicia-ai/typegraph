@@ -23,18 +23,74 @@ import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, embedding } from "../../../src";
+import { defineEdge, defineGraph, defineNode, embedding } from "../../../src";
 import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
-import { createPostgresBackend } from "../../../src/backend/postgres";
+import { PGLITE_MAX_BIND_PARAMETERS } from "../../../src/backend/drizzle/execution/postgres-execution";
+import {
+  createPostgresTables,
+  type PostgresTableNames,
+} from "../../../src/backend/drizzle/schema/postgres";
+import {
+  createPostgresBackend,
+  createPostgresTransactionBackend,
+} from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
-import { createStore, createStoreWithSchema } from "../../../src/store";
+import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
+import { type GraphBackend } from "../../../src/backend/types";
+import { asNodeId } from "../../../src/core/types";
+import { computeBaseVersion } from "../../../src/graph-merge/base-version";
+import { cloneWorkingCopyStrategy } from "../../../src/graph-merge/working-copy";
+import {
+  exportGraph,
+  exportGraphStream,
+  type GraphInterchangeChunk,
+  importGraphStream,
+  ImportOptionsSchema,
+} from "../../../src/interchange";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import {
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../../../src/schema/graph-templates";
+import {
+  createAdapterStoreWithSchema,
+  createStore,
+  createStoreWithSchema,
+  createVerifiedAdapterStore,
+  type Store,
+} from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  createGate,
+  type Gate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "../../concurrency-utils";
+import { createStatementCountingBackend } from "../../statement-counting-backend";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string().optional() }),
 });
 const peopleGraph = defineGraph({
   id: "pglite_people",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
+const knows = defineEdge("knows", { schema: z.object({}) });
+const connectedPeopleGraph = defineGraph({
+  id: "pglite_connected_people",
+  nodes: { Person: { type: Person } },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+});
+const peopleImportGraph = defineGraph({
+  id: "pglite_people_import",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
+/** A SECOND import target on that one client, for the import/import pairing. */
+const secondPeopleImportGraph = defineGraph({
+  id: "pglite_people_import_2",
   nodes: { Person: { type: Person } },
   edges: {},
 });
@@ -48,6 +104,224 @@ const documentsGraph = defineGraph({
   edges: {},
 });
 
+/**
+ * Prefixed relations for the branch working copy, so its "fresh, empty"
+ * backend can live on the SAME PGlite client as the base store — the exact
+ * shape the cloner's serialized-resource recovery exists for.
+ */
+const CLONE_TABLE_NAMES = {
+  nodes: "clone_nodes",
+  edges: "clone_edges",
+  recordedNodes: "clone_recorded_nodes",
+  recordedEdges: "clone_recorded_edges",
+  recordedClock: "clone_recorded_clock",
+  recordedAnchors: "clone_recorded_anchors",
+  storeOperations: "clone_store_operations",
+  revisionOrigins: "clone_revision_origins",
+  revisionChanges: "clone_revision_changes",
+  identityAssertions: "clone_identity_assertions",
+  recordedIdentityAssertions: "clone_recorded_identity_assertions",
+  identityClosure: "clone_identity_closure",
+  identitySeparation: "clone_identity_separation",
+  identityTransitions: "clone_identity_transitions",
+  identityTransitionRetention: "clone_identity_transition_retention",
+  uniques: "clone_node_uniques",
+  edgeClaims: "clone_edge_claims",
+  baseSchemaVersions: "clone_base_schema_versions",
+  schemaVersions: "clone_schema_versions",
+  fulltext: "clone_node_fulltext",
+  indexMaterializations: "clone_index_materializations",
+  contributionMaterializations: "clone_contribution_materializations",
+  kindRemovals: "clone_kind_removals",
+  reconciliationMarkers: "clone_reconciliation_markers",
+  graphTemplates: "clone_graph_templates",
+  fences: "clone_fences",
+} as const satisfies PostgresTableNames;
+
+/**
+ * Fails a guard test that regressed into a wedge instead of a refusal. Every
+ * scenario here pairs a snapshot export with a write through the SAME PGlite
+ * connection: without the guard the two wait on each other, so an unbounded
+ * await would hang the suite rather than report the regression.
+ */
+const GUARD_TIMEOUT_MS = 20_000;
+
+async function withGuardTimeout<T>(work: Promise<T>): Promise<T> {
+  const settled = await raceTimeout(work, GUARD_TIMEOUT_MS);
+  if (settled === TIMEOUT_SENTINEL) {
+    throw new Error(
+      `Serialized-connection guard did not settle within ${GUARD_TIMEOUT_MS}ms: the export and the import are waiting on one connection.`,
+    );
+  }
+  return settled;
+}
+
+/** A user wrapper around an export stream: it no longer identifies its source. */
+async function* relayChunks(
+  chunks: AsyncIterable<GraphInterchangeChunk>,
+): AsyncIterable<GraphInterchangeChunk> {
+  yield* chunks;
+}
+
+/** Replays already-collected chunks, so no export transaction is open. */
+async function* replayChunks(
+  chunks: readonly GraphInterchangeChunk[],
+): AsyncIterable<GraphInterchangeChunk> {
+  for (const chunk of chunks) {
+    yield await Promise.resolve(chunk);
+  }
+}
+
+/**
+ * Replays already-collected chunks, parking the consumer between two of them:
+ * `paused` opens once `pauseBefore` chunks have been delivered and the next one
+ * is being asked for, and nothing more is delivered until `resume` opens.
+ *
+ * That is the deterministic mid-import moment — chunks committed, chunks still
+ * to come, no export in sight — at which a snapshot export must be refused.
+ */
+async function* pausingChunks(
+  chunks: readonly GraphInterchangeChunk[],
+  pauseBefore: number,
+  paused: Gate,
+  resume: Gate,
+): AsyncIterable<GraphInterchangeChunk> {
+  let delivered = 0;
+  for (const chunk of chunks) {
+    if (delivered === pauseBefore) {
+      paused.open();
+      await resume.opened;
+    }
+    delivered++;
+    yield chunk;
+  }
+}
+
+/** Pulls an export stream to completion through the iterator already opened on it. */
+async function drainIterator(
+  iterator: AsyncIterator<GraphInterchangeChunk>,
+): Promise<void> {
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done === true) return;
+  }
+}
+
+/** Collects an export stream, releasing its snapshot registration on completion. */
+async function collectExportChunks(
+  store: Store<typeof peopleGraph>,
+): Promise<readonly GraphInterchangeChunk[]> {
+  const chunks: GraphInterchangeChunk[] = [];
+  for await (const chunk of exportGraphStream(store)) chunks.push(chunk);
+  return chunks;
+}
+
+/**
+ * A seeded source store and an import target that write through ONE PGlite
+ * client — the pairing the serialized-connection import guard exists for.
+ *
+ * Two distinct `createPostgresBackend` wrappers over the same client, two graph
+ * ids, and one seeded node so the export has a row to stream while its snapshot
+ * transaction is open.
+ */
+async function seedSharedClientImportScenario(
+  cleanups: (() => Promise<void>)[],
+  options: Readonly<{ history?: boolean }> = {},
+): Promise<
+  Readonly<{
+    /** Exposed so a test can add a THIRD wrapper on the same connection. */
+    client: PGlite;
+    source: Store<typeof peopleGraph>;
+    target: Store<typeof peopleImportGraph>;
+  }>
+> {
+  const client = await PGlite.create();
+  cleanups.push(() => client.close());
+  await client.exec(generatePostgresDDL().join("\n\n"));
+  const sourceBackend = createPostgresBackend(drizzle(client), {
+    vector: false,
+  });
+  const targetBackend = createPostgresBackend(drizzle(client), {
+    vector: false,
+  });
+  const [source] = await createStoreWithSchema(peopleGraph, sourceBackend, {
+    history: options.history ?? false,
+  });
+  const [target] = await createStoreWithSchema(
+    peopleImportGraph,
+    targetBackend,
+  );
+  await source.nodes.Person.create({ name: "Alice" });
+  return { client, source, target };
+}
+
+/**
+ * A seeded base store plus a factory for a fresh, EMPTY backend on the SAME
+ * PGlite client — the working-copy shape the cloner's serialized-resource
+ * recovery exists for. The clone gets its own relations so "empty" is true even
+ * though the connection is shared.
+ */
+async function seedCloneScenario(
+  history: boolean,
+  cleanups: (() => Promise<void>)[],
+): Promise<
+  Readonly<{
+    base: Store<typeof peopleGraph>;
+    makeCloneBackend: () => Promise<GraphBackend>;
+  }>
+> {
+  const client = await PGlite.create();
+  cleanups.push(() => client.close());
+  const cloneTables = createPostgresTables(CLONE_TABLE_NAMES);
+  await client.exec(generatePostgresDDL().join("\n\n"));
+  await client.exec(generatePostgresDDL(cloneTables).join("\n\n"));
+  const baseBackend = createPostgresBackend(drizzle(client), { vector: false });
+  const [base] = await createStoreWithSchema(peopleGraph, baseBackend, {
+    history,
+  });
+  await base.nodes.Person.create({ name: "Alice" }, { id: "clone-alice" });
+  await base.nodes.Person.create({ name: "Bob" }, { id: "clone-bob" });
+  return {
+    base,
+    makeCloneBackend: () =>
+      Promise.resolve(
+        createPostgresBackend(drizzle(client), {
+          vector: false,
+          tables: cloneTables,
+        }),
+      ),
+  };
+}
+
+async function expectClonedPeople(
+  workingCopy: Store<typeof peopleGraph>,
+): Promise<void> {
+  const people = await workingCopy.nodes.Person.find();
+  expect(
+    [...people]
+      .map((person) => person.id)
+      .toSorted((left, right) => left.localeCompare(right)),
+  ).toEqual(["clone-alice", "clone-bob"]);
+}
+
+const BatchNode = defineNode("BatchNode", {
+  schema: z.object({ name: z.string() }),
+});
+const batchRelation = defineEdge("batchRelation", {
+  schema: z.object({ index: z.number() }),
+});
+const batchGraph = defineGraph({
+  id: "pglite_bind_budget",
+  nodes: { BatchNode: { type: BatchNode } },
+  edges: {
+    batchRelation: {
+      type: batchRelation,
+      from: [BatchNode],
+      to: [BatchNode],
+    },
+  },
+});
+
 describe("PGlite backend", () => {
   // Each test registers its own teardown; closing a backend from
   // createLocalPgliteBackend disposes its PGlite engine, while the bare-client
@@ -56,6 +330,514 @@ describe("PGlite backend", () => {
 
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0)) await cleanup();
+  });
+
+  it.each([
+    {
+      algorithm: "pageRank",
+      joinMarker: " scoped_target",
+      run: (store: Store<typeof connectedPeopleGraph>) =>
+        store.algorithms.pageRank({ edges: ["knows"] }),
+    },
+    {
+      algorithm: "labelPropagation",
+      joinMarker: " scoped_neighbor",
+      run: (store: Store<typeof connectedPeopleGraph>) =>
+        store.algorithms.labelPropagation({
+          edges: ["knows"],
+          onMaxIterations: "return",
+        }),
+    },
+  ])(
+    "analyzes the populated working table before the first join of $algorithm",
+    async ({ joinMarker, run }) => {
+      const { backend } = await createLocalPgliteBackend({ vector: false });
+      cleanups.push(() => backend.close());
+      const [seedStore] = await createAdapterStoreWithSchema(
+        connectedPeopleGraph,
+        backend,
+      );
+      const people = await seedStore.nodes.Person.bulkCreate(
+        Array.from({ length: 32 }, (_, index) => ({
+          props: { name: `Ring ${index}` },
+        })),
+      );
+      await seedStore.edges.knows.bulkCreate(
+        people.map((person, index) => ({
+          from: person,
+          to: requireDefined(people[(index + 1) % people.length]),
+          props: {},
+        })),
+      );
+      const statements: string[] = [];
+      const observedStore = createStore(
+        connectedPeopleGraph,
+        createStatementCountingBackend(backend, statements),
+      );
+
+      await run(observedStore);
+
+      // The main working table is the first one a run creates.
+      const workingTable = requireDefined(
+        statements
+          .map((statement) =>
+            /CREATE TEMP TABLE ("typegraph_iterative_[^"]+")/u.exec(statement),
+          )
+          .find((match) => match !== null)?.[1],
+      );
+      const analyzeIndexes = statements.flatMap((statement, index) =>
+        statement === `ANALYZE ${workingTable}` ? [index] : [],
+      );
+      const firstJoin = statements.findIndex((statement) =>
+        statement.includes(joinMarker),
+      );
+      expect(firstJoin).toBeGreaterThanOrEqual(0);
+      expect(analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(analyzeIndexes[0])).toBeLessThan(firstJoin);
+    },
+  );
+
+  it("instantiates a durable graph template through the PostgreSQL dialect", async () => {
+    const { backend, db } = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(peopleGraph, backend);
+    const executeDdl = vi.spyOn(backend, "executeDdl");
+    const template = await registerGraphTemplate(backend, {
+      templateId: "pglite-people-v1",
+      reconciled: source.reconciledSchema,
+    });
+
+    const first = await instantiateGraphTemplate(backend, {
+      template,
+      graphId: "pglite-template-target",
+    });
+    const retry = await instantiateGraphTemplate(backend, {
+      template,
+      graphId: "pglite-template-target",
+    });
+
+    expect(first.status).toBe("ready");
+    expect(retry.schema).toStrictEqual(first.schema);
+    expect(first.reconciled).toMatchObject({
+      graph: { id: "pglite-template-target" },
+      version: 1,
+      hash: first.schema.schema_hash,
+    });
+    expect(executeDdl).not.toHaveBeenCalled();
+
+    const runtimeBackend = createPostgresBackend(db, {
+      vector: false,
+    });
+    const targetGraph = defineGraph({
+      id: "pglite-template-target",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+    await expect(
+      createVerifiedAdapterStore(targetGraph, runtimeBackend),
+    ).resolves.toBeDefined();
+  });
+
+  it("still refuses vector-enabled schema-only templates", async () => {
+    const { backend } = await createLocalPgliteBackend();
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(
+      documentsGraph,
+      backend,
+    );
+
+    await expect(
+      registerGraphTemplate(backend, {
+        templateId: "pglite-vector-template",
+        reconciled: source.reconciledSchema,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_TEMPLATE_VECTOR_UNSUPPORTED" },
+    });
+  });
+
+  it("registers and instantiates embedding templates when vector storage is disabled", async () => {
+    const { backend } = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(
+      documentsGraph,
+      backend,
+    );
+    const executeDdl = vi.spyOn(backend, "executeDdl");
+    const template = await registerGraphTemplate(backend, {
+      templateId: "pglite-vector-disabled-template",
+      reconciled: source.reconciledSchema,
+    });
+
+    await expect(
+      instantiateGraphTemplate(backend, {
+        template,
+        graphId: "pglite-vector-disabled-target",
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+    expect(executeDdl).not.toHaveBeenCalled();
+  });
+
+  describe("serialized transaction resource ownership", () => {
+    it("serializes overlapping statements on a caller-owned transaction", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      const db = drizzle(client);
+      const graphTables = createPostgresTables(CLONE_TABLE_NAMES);
+      await client.exec(generatePostgresDDL(graphTables).join("\n\n"));
+      const rootBackend = createPostgresBackend(db, {
+        tables: graphTables,
+        vector: false,
+      });
+      const [rootStore] = await createStoreWithSchema(peopleGraph, rootBackend);
+
+      await db.transaction(async (tx) => {
+        const backend = createPostgresTransactionBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const sibling = createPostgresTransactionBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const compatibleBackend = createPostgresBackend(tx, {
+          tables: graphTables,
+          vector: false,
+        });
+        const executeSpy = vi.spyOn(tx, "execute");
+
+        const first = backend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 1 AS value`),
+        );
+        const second = backend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 2 AS value`),
+        );
+        const third = compatibleBackend.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 3 AS value`),
+        );
+        const fourth = sibling.execute<{ value: number }>(
+          asCompiledRowsSql(sql`SELECT 4 AS value`),
+        );
+        await Promise.resolve();
+        expect(executeSpy).toHaveBeenCalledTimes(1);
+        expect(await Promise.all([first, second, third, fourth])).toEqual([
+          [{ value: 1 }],
+          [{ value: 2 }],
+          [{ value: 3 }],
+          [{ value: 4 }],
+        ]);
+        expect(executeSpy).toHaveBeenCalledTimes(4);
+        const transactionStore = createStore(peopleGraph, backend);
+        await transactionStore.nodes.Person.create(
+          { name: "Transaction owned" },
+          { id: "transaction-owned" },
+        );
+      });
+      expect(
+        await rootStore.nodes.Person.getById(asNodeId("transaction-owned")),
+      ).toMatchObject({ name: "Transaction owned" });
+    });
+
+    it("recognizes Drizzle wrappers over the same PGlite client", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+
+      const first = createPostgresBackend(drizzle(client), { vector: false });
+      const second = createPostgresBackend(drizzle(client), { vector: false });
+
+      expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+    });
+
+    it("preserves ownership through the managed local-backend wrapper", async () => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      cleanups.push(() => local.backend.close());
+      const sibling = createPostgresBackend(local.db, { vector: false });
+
+      expect(sharesSerializedTransactionResource(local.backend, sibling)).toBe(
+        true,
+      );
+    });
+
+    it("refuses snapshot import across wrappers sharing one PGlite client", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const sourceBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const targetBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const [source] = await createStoreWithSchema(peopleGraph, sourceBackend);
+      const [target] = await createStoreWithSchema(
+        peopleImportGraph,
+        targetBackend,
+      );
+
+      await expect(
+        importGraphStream(
+          target,
+          exportGraphStream(source),
+          ImportOptionsSchema.parse({ onConflict: "error" }),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+          graphId: peopleImportGraph.id,
+        },
+      });
+    });
+
+    it("refuses a snapshot import from a history-enabled store on that client", async () => {
+      // A `history: true` store does not run on the backend it was handed: it
+      // runs on an overlay over a PROJECTION of it. When the projection dropped
+      // the serialized-resource mark, this pairing evaded the guard entirely
+      // and the run wedged instead of being refused.
+      const { source, target } = await seedSharedClientImportScenario(
+        cleanups,
+        {
+          history: true,
+        },
+      );
+
+      await expect(
+        withGuardTimeout(
+          importGraphStream(
+            target,
+            exportGraphStream(source),
+            ImportOptionsSchema.parse({ onConflict: "error" }),
+          ),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+          graphId: peopleImportGraph.id,
+        },
+      });
+      expect(await target.nodes.Person.count()).toBe(0);
+    });
+
+    it("refuses a snapshot import through a wrapped export stream", async () => {
+      // The pre-flight check reads the association between the chunk iterable
+      // and its source backend, which any user wrapper erases. The export's
+      // OPEN snapshot transaction is the durable fact, so the refusal still
+      // lands — before this import writes anything.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+
+      await expect(
+        withGuardTimeout(
+          importGraphStream(
+            target,
+            relayChunks(exportGraphStream(source)),
+            ImportOptionsSchema.parse({ onConflict: "error" }),
+          ),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+          graphId: peopleImportGraph.id,
+        },
+      });
+      expect(await target.nodes.Person.count()).toBe(0);
+    });
+
+    it("refuses an export snapshot that opens between import chunks", async () => {
+      // The registry used to be read ONCE, before the first chunk's write. An
+      // export snapshot opening later in the stream was therefore invisible, and
+      // the import's next chunk waited on a read transaction that could not end
+      // until the import did. The import now holds a lease for its whole chunk
+      // loop, so the EXPORT — the stream that started second — is refused, and
+      // the import (whose earlier chunks are already committed) runs to
+      // completion.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const chunks = await collectExportChunks(source);
+      expect(chunks.length).toBeGreaterThan(1);
+      const paused = createGate();
+      const resume = createGate();
+
+      const importing = importGraphStream(
+        target,
+        // Parked after the header: the lease is held, the node chunk is still
+        // to come.
+        pausingChunks(chunks, 1, paused, resume),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      await paused.opened;
+
+      await expect(withGuardTimeout(exportGraph(source))).rejects.toMatchObject(
+        {
+          name: "ConfigurationError",
+          details: {
+            code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+            graphId: peopleGraph.id,
+          },
+        },
+      );
+
+      resume.open();
+      expect(await withGuardTimeout(importing)).toMatchObject({
+        success: true,
+      });
+      expect(await target.nodes.Person.count()).toBe(1);
+    });
+
+    it("refuses a second streaming import through one PGlite client", async () => {
+      // Postgres does not reject a nested BEGIN the way SQLite does — it warns
+      // and folds the statements into the transaction already in progress — so
+      // two imports over this one connection lose their chunk boundaries
+      // SILENTLY, and a chunk rollback takes the other import's committed work
+      // with it. The lease is what turns that into a refusal.
+      const { client, source, target } =
+        await seedSharedClientImportScenario(cleanups);
+      const secondTargetBackend = createPostgresBackend(drizzle(client), {
+        vector: false,
+      });
+      const [secondTarget] = await createStoreWithSchema(
+        secondPeopleImportGraph,
+        secondTargetBackend,
+      );
+      const chunks = await collectExportChunks(source);
+      const paused = createGate();
+      const resume = createGate();
+
+      const firstImport = importGraphStream(
+        target,
+        // Parked after the header: the lease is held, chunks are still to come.
+        pausingChunks(chunks, 1, paused, resume),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      await paused.opened;
+
+      await expect(
+        withGuardTimeout(
+          importGraphStream(
+            secondTarget,
+            replayChunks(chunks),
+            ImportOptionsSchema.parse({ onConflict: "error" }),
+          ),
+        ),
+      ).rejects.toMatchObject({
+        name: "ConfigurationError",
+        details: {
+          code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+          graphId: secondPeopleImportGraph.id,
+          requested: "import-stream",
+          heldBy: "import-stream",
+        },
+      });
+
+      resume.open();
+      expect(await withGuardTimeout(firstImport)).toMatchObject({
+        success: true,
+      });
+      expect(await target.nodes.Person.count()).toBe(1);
+      expect(await secondTarget.nodes.Person.count()).toBe(0);
+    });
+
+    it("refuses a second snapshot export from one PGlite client", async () => {
+      // Two EXPORTS were the other pairing neither side checked for. Pulling the
+      // header proves the first snapshot transaction is open — its producer is
+      // inside that transaction and pushed the chunk from there.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const stream = exportGraphStream(source)[Symbol.asyncIterator]();
+      const header = await withGuardTimeout(stream.next());
+      expect(header.done).toBe(false);
+
+      await expect(withGuardTimeout(exportGraph(target))).rejects.toMatchObject(
+        {
+          name: "ConfigurationError",
+          details: {
+            code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+            graphId: peopleImportGraph.id,
+            requested: "export-snapshot",
+            heldBy: "export-snapshot",
+          },
+        },
+      );
+
+      // The refused export took nothing: the first one runs to completion, and
+      // the connection is free for the next export once it does.
+      await withGuardTimeout(drainIterator(stream));
+      const reexported = await withGuardTimeout(exportGraph(source));
+      expect(reexported.nodes).toHaveLength(1);
+    });
+
+    it("allows an export once the import's lease is released", async () => {
+      // The refusal above must be scoped to a RUNNING import. A lease left
+      // behind would refuse every later export on that connection.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+      const chunks = await collectExportChunks(source);
+
+      const result = await importGraphStream(
+        target,
+        replayChunks(chunks),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+      expect(result.success).toBe(true);
+
+      const exported = await withGuardTimeout(exportGraph(source));
+      expect(exported.nodes.map((node) => node.properties["name"])).toEqual([
+        "Alice",
+      ]);
+    });
+
+    it("releases the export registration when the stream completes", async () => {
+      // The refusal above must be scoped to an OPEN export. A finished export
+      // that left its registration behind would refuse every later import into
+      // the same connection.
+      const { source, target } = await seedSharedClientImportScenario(cleanups);
+
+      const chunks: GraphInterchangeChunk[] = [];
+      for await (const chunk of exportGraphStream(source)) chunks.push(chunk);
+
+      const result = await importGraphStream(
+        target,
+        replayChunks(chunks),
+        ImportOptionsSchema.parse({ onConflict: "error" }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(await target.nodes.Person.count()).toBe(1);
+    });
+  });
+
+  describe("branch working copy on one PGlite client", () => {
+    // The clone strategy detects that its fresh backend writes through the
+    // base store's connection and materializes the export instead of streaming
+    // it. Nothing exercised that recovery, so streaming unconditionally used to
+    // pass every test; here it is refused by the import guard and fails.
+    it("clones a base store that shares its client with the fresh backend", async () => {
+      const { base, makeCloneBackend } = await seedCloneScenario(
+        false,
+        cleanups,
+      );
+
+      const workingCopy = await withGuardTimeout(
+        cloneWorkingCopyStrategy<typeof peopleGraph>(() =>
+          makeCloneBackend(),
+        ).create(base, await computeBaseVersion(base)),
+      );
+
+      await expectClonedPeople(workingCopy);
+    });
+
+    it("clones a history-enabled base store on that shared client", async () => {
+      const { base, makeCloneBackend } = await seedCloneScenario(
+        true,
+        cleanups,
+      );
+
+      const workingCopy = await withGuardTimeout(
+        cloneWorkingCopyStrategy<typeof peopleGraph>(() =>
+          makeCloneBackend(),
+        ).create(base, await computeBaseVersion(base)),
+      );
+
+      await expectClonedPeople(workingCopy);
+    });
   });
 
   describe("execution fast-path (blocker fix)", () => {
@@ -79,6 +861,58 @@ describe("PGlite backend", () => {
 
       expect(fetched).toBeDefined();
       expect(requireDefined(fetched).name).toBe("Alice");
+    });
+
+    it("chunks live edge inserts below PGlite's bind limit", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      cleanups.push(() => backend.close());
+      expect(backend.capabilities.maxBindParameters).toBe(
+        PGLITE_MAX_BIND_PARAMETERS,
+      );
+      const store = createStore(batchGraph, backend);
+      const from = await store.nodes.BatchNode.create({ name: "from" });
+      const to = await store.nodes.BatchNode.create({ name: "to" });
+
+      const created = await store.edges.batchRelation.bulkCreate(
+        Array.from({ length: 2979 }, (_, index) => ({
+          from,
+          props: { index },
+          to,
+        })),
+      );
+
+      expect(created).toHaveLength(2979);
+      expect(await store.edges.batchRelation.count()).toBe(2979);
+      await expect(client.query("SELECT 1 AS value")).resolves.toMatchObject({
+        rows: [{ value: 1 }],
+      });
+    });
+
+    it("chunks recorded edge inserts below PGlite's bind limit", async () => {
+      const { backend, client } = await createLocalPgliteBackend({
+        vector: false,
+      });
+      cleanups.push(() => backend.close());
+      const store = createStore(batchGraph, backend, { history: true });
+      const from = await store.nodes.BatchNode.create({ name: "from" });
+      const to = await store.nodes.BatchNode.create({ name: "to" });
+
+      const created = await store.edges.batchRelation.bulkCreate(
+        Array.from({ length: 2048 }, (_, index) => ({
+          from,
+          props: { index },
+          to,
+        })),
+      );
+
+      expect(created).toHaveLength(2048);
+      expect(await store.edges.batchRelation.count()).toBe(2048);
+      expect(await store.recordedNow()).toBeDefined();
+      await expect(client.query("SELECT 1 AS value")).resolves.toMatchObject({
+        rows: [{ value: 1 }],
+      });
     });
   });
 
@@ -144,6 +978,69 @@ describe("PGlite backend", () => {
 
       expect(await store.nodes.Person.getById(result.alice.id)).toBeDefined();
       expect(await store.nodes.Person.getById(result.bob.id)).toBeDefined();
+    });
+
+    it("leases the schema fence once for a TypeGraph-owned transaction", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const statements: string[] = [];
+      const backend = createPostgresBackend(
+        drizzle(client, {
+          logger: {
+            logQuery(query: string) {
+              statements.push(query);
+            },
+          },
+        }),
+        { vector: false },
+      );
+      const [store] = await createStoreWithSchema(peopleGraph, backend);
+
+      statements.length = 0;
+      await store.transaction((tx) => tx.nodes.Person.count());
+
+      // Merely opening a portable transaction stays read-only: eligibility is
+      // registered before the callback, but its schema fence is lazy.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(0);
+
+      statements.length = 0;
+      await store.transaction(async (tx) => {
+        await tx.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+        await tx.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      });
+
+      // Replacing the leased-fence fast path with the ordinary per-write
+      // fence makes this count 2.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
+
+      const [connectedStore] = await createStoreWithSchema(
+        connectedPeopleGraph,
+        backend,
+      );
+      statements.length = 0;
+      await connectedStore.transaction(async (tx) => {
+        const alice = await tx.nodes.Person.create(
+          { name: "Alice" },
+          { id: "connected-alice" },
+        );
+        const bob = await tx.nodes.Person.create(
+          { name: "Bob" },
+          { id: "connected-bob" },
+        );
+        await tx.edges.knows.create(alice, bob, {});
+      });
+
+      // The edge create is independently eligible for a fused schema fence.
+      // A leased transaction must make it reuse the lock acquired by the
+      // first node create instead of embedding a second fence in its INSERT.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
     });
 
     it("disables vector with vector: false (no extension, CRUD still works)", async () => {

@@ -10,7 +10,9 @@
  * committing.
  */
 import type { KindEntity } from "../core/types";
-import { canonicalEqual } from "../schema/canonical";
+import { EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS } from "../core/unique-constraint-options";
+import { uniqueConstraintEnforcementChange } from "../schema/unique-constraint-change";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type IncompatibleChange, IncompatibleChangeError } from "./errors";
 import {
@@ -103,8 +105,17 @@ export function classifyModifications(
     }
   };
 
+  // Own-key reads below: extension kind names match
+  // `/^[A-Za-z_][A-Za-z0-9_]*$/`, which admits `toString`, `constructor`, and
+  // `valueOf`. A raw read would answer such a name with the inherited
+  // `Object.prototype` member, so a brand-new kind would be classified as a
+  // MODIFICATION of an existing one and read its shape off a function.
   for (const [name, nextNode] of Object.entries(next.nodes ?? {})) {
-    const existingNode = existing.nodes?.[name];
+    const existingNodes = existing.nodes;
+    const existingNode =
+      existingNodes !== undefined && hasOwnKey(existingNodes, name) ?
+        existingNodes[name]
+      : undefined;
     if (existingNode === undefined) continue;
     classifyNode(name, existingNode, nextNode, {
       recordIncompatible,
@@ -114,7 +125,11 @@ export function classifyModifications(
     });
   }
   for (const [name, nextEdge] of Object.entries(next.edges ?? {})) {
-    const existingEdge = existing.edges?.[name];
+    const existingEdges = existing.edges;
+    const existingEdge =
+      existingEdges !== undefined && hasOwnKey(existingEdges, name) ?
+        existingEdges[name]
+      : undefined;
     if (existingEdge === undefined) continue;
     classifyEdge(name, existingEdge, nextEdge, {
       recordIncompatible,
@@ -194,37 +209,47 @@ function classifyEdge(
   classifyEdgeEndpoints(kind, existing, next, recorders);
 }
 
+function getExtensionEdgePairs(edge: ExtensionEdgeDef): ReadonlySet<string> {
+  const pairs = new Set<string>();
+  if (Array.isArray(edge.to)) {
+    for (const f of edge.from) {
+      for (const t of edge.to) {
+        pairs.add(`${f}\0${t}`);
+      }
+    }
+  } else {
+    for (const [sourceKind, targets] of Object.entries(edge.to)) {
+      for (const t of targets) {
+        pairs.add(`${sourceKind}\0${t}`);
+      }
+    }
+  }
+  return pairs;
+}
+
 function classifyEdgeEndpoints(
   kind: string,
   existing: ExtensionEdgeDef,
   next: ExtensionEdgeDef,
   recorders: Recorders,
 ): void {
-  // Adding kinds to from/to is broadening — always allowed.
-  // Removing kinds with no existing edges of that endpoint would be
+  // Adding pairs to from/to is broadening — always allowed.
+  // Removing endpoint pairs with no existing edges of that pair would be
   // allowed in the spec, but TypeGraph doesn't have a per-(edge,
   // endpoint-kind) row probe today; v1 stays conservative by treating
   // endpoint-kind removal as allowed-on-empty for the whole edge kind.
-  const fromExisting = new Set(existing.from);
-  const toExisting = new Set(existing.to);
-  const fromNext = new Set(next.from);
-  const toNext = new Set(next.to);
+  const existingPairs = getExtensionEdgePairs(existing);
+  const nextPairs = getExtensionEdgePairs(next);
 
-  for (const removed of [...fromExisting].filter(
-    (entry) => !fromNext.has(entry),
-  )) {
-    recorders.recordRequireEmpty({
-      kind,
-      type: "TIGHTEN_EDGE_ENDPOINTS",
-      detail: `removed "${removed}" from \`from\``,
-    });
-  }
-  for (const removed of [...toExisting].filter((entry) => !toNext.has(entry))) {
-    recorders.recordRequireEmpty({
-      kind,
-      type: "TIGHTEN_EDGE_ENDPOINTS",
-      detail: `removed "${removed}" from \`to\``,
-    });
+  for (const pairKey of existingPairs) {
+    if (!nextPairs.has(pairKey)) {
+      const [from, to] = pairKey.split("\0");
+      recorders.recordRequireEmpty({
+        kind,
+        type: "TIGHTEN_EDGE_ENDPOINTS",
+        detail: `removed endpoint pair "(${from} -> ${to})"`,
+      });
+    }
   }
 }
 
@@ -574,41 +599,24 @@ function classifyUnique(
   next: readonly ExtensionUniqueConstraint[],
   recorders: Recorders,
 ): void {
-  const existingByName = new Map(
-    existing.map((constraint) => [constraint.name, constraint]),
-  );
-  const nextByName = new Map(
-    next.map((constraint) => [constraint.name, constraint]),
-  );
-  for (const [name, constraint] of nextByName) {
-    if (!existingByName.has(name)) {
-      // ADD_UNIQUE — allowed-on-empty (existing rule, kept).
-      recorders.recordRequireEmpty({
-        kind,
-        type: "ADD_UNIQUE_ON_POPULATED",
-        detail: `unique constraint "${name}" on [${constraint.fields.join(", ")}]`,
-      });
-    }
-  }
-  // Dropped unique constraints — DROP_UNIQUE, allowed.
-  // Modified — DROP + ADD; the ADD is recorded above for any
-  // structurally-different constraint with a same name.
-  for (const [name, constraint] of existingByName) {
-    const newOne = nextByName.get(name);
-    if (newOne === undefined) continue;
-    // Different shape with same name → treat as modify; ADD half is
-    // allowed-on-empty. Use `canonicalEqual` so the comparison is
-    // key-order-stable; plain `JSON.stringify` would flag two
-    // structurally identical constraints with differently-ordered
-    // keys as reshaped.
-    const { name: _existingName, ...existingShape } = constraint;
-    const { name: _nextName, ...nextShape } = newOne;
-    if (!canonicalEqual(existingShape, nextShape)) {
-      recorders.recordRequireEmpty({
-        kind,
-        type: "ADD_UNIQUE_ON_POPULATED",
-        detail: `unique constraint "${name}" reshaped`,
-      });
-    }
+  // A dropped constraint is allowed. An added or reshaped one is
+  // allowed-on-empty: no existing row holds a claim for it. The decision is
+  // `uniqueConstraintEnforcementChange`'s, shared with the schema-commit
+  // preflight that gates the same change on compile-time kinds.
+  for (const constraint of next) {
+    const change = uniqueConstraintEnforcementChange(
+      existing,
+      constraint,
+      EXTENSION_UNIQUE_CONSTRAINT_DEFAULTS,
+    );
+    if (change === undefined) continue;
+    recorders.recordRequireEmpty({
+      kind,
+      type: "ADD_UNIQUE_ON_POPULATED",
+      detail:
+        change === "added" ?
+          `unique constraint "${constraint.name}" on [${constraint.fields.join(", ")}]`
+        : `unique constraint "${constraint.name}" reshaped`,
+    });
   }
 }

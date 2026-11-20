@@ -16,27 +16,86 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { bindExtra, bindExtraIfReachable } from "../backend/capabilities/bind";
+import type {
+  ENDPOINT_SET_READ,
+  RECORDED_REVISION_ORIGINS,
+  STATEMENT_EXECUTION,
+  UNIQUE_SIDECAR_BATCH,
+} from "../backend/capabilities/bundle-registry";
+import {
+  BATCH_POINT_READ,
+  CONTRIBUTION_HEALTH,
+} from "../backend/capabilities/bundle-registry";
+import {
+  type RecordedTimeSession,
+  requireRecordedTime,
+} from "../backend/capabilities/recorded-time";
+import {
+  capturesTypeGraphRecordedHistory,
+  isEngineNativeRecordedReadBinding,
+  type RecordedTimeOwnership,
+  resolveRecordedTimeOwnership,
+} from "../backend/capabilities/recorded-time-ownership";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+  contributionHealthVerdict,
+  createClaimsVerdictThunk,
+  endpointSetReadVerdict,
+  recordedRevisionOriginsVerdict,
+  requireExtras,
+  statementExecutionVerdict,
+  uniqueSidecarBatchVerdict,
+} from "../backend/capabilities/resolve";
+import {
+  type RetriedUnitAttempt,
+  runRetriedUnit,
+} from "../backend/capabilities/retried-unit";
+import {
+  refuseUnfencedClockAllocation,
+  refuseUnfencedOperationalIdentity,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
+import {
+  heterogeneousNodeUpsertBatchBindParameterCount,
+  heterogeneousNodeUpsertBatchFitsBindBudget,
+} from "../backend/heterogeneous-node-upsert-batch";
+import { installRevisionChangesJournal } from "../backend/revision-journal";
 import {
   createEdgeRowMapper,
   createNodeRowMapper,
   POSTGRES_ROW_MAPPER_CONFIG,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../backend/row-mappers";
+import { schemaKindHasRows } from "../backend/schema-kind-emptiness";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type ContributionDiagnostic,
+  type ContributionProbeResult,
+  type ContributionRebuildResult,
+  type ContributionRebuildScope,
+  type ContributionRepairResult,
   createTransactionReadBackend,
+  type EngineRevision,
+  type FindEdgesByHeterogeneousEndpointSetParams,
   type GraphBackend,
+  type LineageDelta,
+  type OptionalTransactionExecution,
   runOptionallyInTransaction,
+  type SchemaCommitPreflightBackend,
   type SchemaVersionRow,
   type TransactionBackend,
   type TransactionOptions,
 } from "../backend/types";
+import { type GraphAllocationOwner } from "../core/allocation-owner";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
+  type GraphIdentityConfig,
   isKnownKind,
   type NodeKinds,
 } from "../core/define-graph";
@@ -45,8 +104,19 @@ import {
   resolveGraphVectorSlots,
 } from "../core/embedding";
 import {
+  createRuntimeKindToken,
+  resolveRuntimeKindInput,
+  resolveRuntimeKindToken,
+  type RuntimeEdgeKind,
+  type RuntimeKindInput,
+  type RuntimeKindSchemaBinding,
+  type RuntimeNodeKind,
+} from "../core/runtime-kind";
+import {
   asRecordedInstant,
+  createEngineRecordedInstant,
   type ReadCoordinate,
+  recordedDiagonalCoordinate,
   type RecordedInstant,
   resolveReadCoordinate,
   withRecordedCoordinate,
@@ -60,53 +130,162 @@ import type {
 } from "../core/types";
 import {
   ConfigurationError,
+  ContributionRebuildUnsupportedError,
   EagerMaterializationError,
   KindNotFoundError,
+  MigrationError,
+  RuntimeKindTokenError,
+  UnsupportedBackendCapabilityError,
+  ValidationError,
 } from "../errors";
+import { validateNodeProps } from "../errors/validation";
 import {
   buildIncompatibleChangeError,
   classifyModifications,
-  type RequireEmptyEntry,
 } from "../graph-extension/classify";
 import { IncompatibleChangeError } from "../graph-extension/errors";
-import { type GraphExtension } from "../graph-extension/extension-types";
+import {
+  type ExtensionEdgeDef,
+  type ExtensionEdgeProperties,
+  type ExtensionNodeDef,
+  type ExtensionObjectSchema,
+  type GraphExtension,
+} from "../graph-extension/extension-types";
 import { mergeGraphExtension } from "../graph-extension/merge";
 import { planRemovals, stripGraphExtension } from "../graph-extension/remove";
+import { refuseEngineNativeRecordedIdentityRead } from "../identity/historical-sql";
+import {
+  identityKindCascadeNeeded,
+  identitySchemaCommitPreflight,
+  inspectAdoptedIdentityStorage,
+} from "../identity/schema-transition";
+import {
+  applyIdentityChangesForContext,
+  applyIdentityFold,
+  assertAffectedIdentityClassesConsistent,
+  assertIdentityFoldable,
+  createIdentityFacade,
+  createIdentityReadFacade,
+  detachIdentityForNode,
+  foldIdentityForCreatedNodes,
+  type IdentityFoldPlan,
+  type IdentityImportSummary,
+  type IdentityRebuildContext,
+  type IdentityServiceContext,
+  type IdentityTransferAssertion,
+  type IdentityTransitionCursor,
+  type IdentityTransitionTransfer,
+  importIdentityAssertionsIntoTarget,
+  importIdentityTransitionsIntoTarget,
+  isIdentityTransitionRestore,
+  liveNodeKindsSharingIds,
+  loadAssertionsByIds,
+  loadCurrentStructuralClasses,
+  lockIdentityGraph,
+  readIdentityAssertionPageAtTarget,
+  readIdentityAssertionsByIdsAtTarget,
+  readIdentityAssertionsForInterchange,
+  readIdentityAssertionsTouchingAtTarget,
+  readIdentityTransitionPageForInterchange,
+  readIdentityTransitionRetention,
+  rebuildIdentityClosureForContext,
+  refKey,
+  removeIdentityKindsForContext,
+  requireNodeValidityEndCompatible,
+  toTransferAssertion,
+  toTransitionTransfer,
+  validateIdentityForContext,
+} from "../identity/service";
+import { type IdentityTarget } from "../identity/sql-target";
+import {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionCut,
+  identityTransitionLogUnavailableError,
+  type IdentityTransitionRetention,
+} from "../identity/transition-log";
+import type {
+  IdentityFacade,
+  IdentityNode,
+  IdentityReadFacade,
+} from "../identity/types";
 import { type VectorIndexDeclaration } from "../indexes/types";
+import {
+  META_EDGE_DISJOINT_WITH,
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
+  META_EDGE_SUB_CLASS_OF,
+} from "../ontology/constants";
 import type { TraversalExpansion } from "../query/ast";
 import {
   type BatchableQuery,
   type BatchResults,
+  type CompiledOneStatementRead,
   createInternalQueryBuilder,
+  executeOneStatementBatch,
   type InitialQueryBuilder,
+  type OneStatementBatchReads,
+  type OneStatementBatchResults,
   type QueryCoordinateState,
 } from "../query/builder";
 import {
+  bindCompileTimeAliasTyping,
+  type DefaultAliasExpansionAxis,
+  resolveDefaultAliasExpansion,
+} from "../query/builder/alias-expansion";
+import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
+import {
+  createEngineRecordedReadBinding,
   createRecordedReadBinding,
   createSqlSchema,
   type RecordedReadBinding,
+  recordedReadSchemaFor,
   requireExternalRecordedReadSource,
   requireSqlSchema,
   type SqlSchema,
 } from "../query/compiler/schema";
+import { withPinnedReadInstant } from "../query/compiler/temporal";
 import { getDialect } from "../query/dialect";
 import type { SqlDialect } from "../query/dialect/types";
 import { type VectorSlot } from "../query/dialect/vector-strategy";
+import { renderSql } from "../query/sql-fragment";
+import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
+import { canonicalEqual } from "../schema/canonical";
 import {
+  type EvolutionPlan,
+  type EvolutionPlanRequirements,
+  getEvolutionPlanPayload,
+  prepareEvolutionPlan,
+} from "../schema/evolution-plan";
+import {
+  activeSchemaHash,
   applyDeprecatedKinds,
   commitNewSchemaVersion,
-  ensureSchema as ensureSchemaImpl,
+  commitNewSchemaVersionIfKindsEmpty,
+  commitNewSchemaVersionWithPreflight,
+  composeSchemaCommitPreflight,
+  ensureIdentityStorageOnAdoptedBaseSchema,
+  ensureSchemaInternal as ensureSchemaImpl,
+  getSchemaChanges,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
   parseSerializedSchema,
+  planSchemaCommitPreflight,
+  requiresMigration as requiresMigrationImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
+import { type SchemaDiff } from "../schema/migration";
+import {
+  serializeSchema,
+  serializeSchemaPreservingUnknownFields,
+} from "../schema/serializer";
+import { prepareStoreVerbSchemaTighteningPreflight } from "../schema/tightening-preflight";
 import { type SerializedSchema } from "../schema/types";
-import { nowIso } from "../utils/date";
+import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import {
   createGraphAlgorithms,
@@ -114,12 +293,40 @@ import {
   type InternalGraphAlgorithms,
 } from "./algorithms";
 import {
+  type GraphAllocationOwnerRead,
+  readGraphAllocationOwnerSession,
+  rotateGraphAllocationOwner,
+} from "./allocation-owner";
+import {
+  applyResolvedNodeClaims,
+  type ResolvedNodeRelease,
+  type ResolvedNodeUpsert,
+} from "./claims/resolved-node-claims";
+import {
+  type ConstraintFenceViolation,
+  verifyConstraintFences as verifyConstraintFencesImpl,
+} from "./claims/verify";
+import { resolveClearGraphCommand } from "./clear-graph-command";
+import {
   createEdgeCollectionsProxy,
   createNodeCollectionsProxy,
   type EdgeOperations,
   type NodeOperations,
 } from "./collection-factory";
 import { resolveTemporalReadParams } from "./collections/temporal-read-params";
+import {
+  assertEvolutionOptions,
+  assertEvolutionPlanBaseline,
+  type EvolvedTransactionOptions,
+  type EvolvedTransactionOutcome,
+  type PlanEvolutionOptions,
+  type RefreshSchemaOptions,
+  withAdoptedTransactionScope,
+} from "./evolution";
+import { scopeBackendExecution } from "./execution-lifetime";
+import { assertFixedSchemaWorkingCopyAllows } from "./fixed-schema-working-copy";
+import { repopulateFulltextInTransaction } from "./fulltext-rebuild";
+import { getSearchableFields } from "./fulltext-sync";
 import {
   createHistoryStoreBackendProjection,
   type HistoryStoreBackend,
@@ -141,7 +348,18 @@ import {
   type MaterializeRemovalsOptions,
   type MaterializeRemovalsResult,
 } from "./materialize-removals";
+import { ensureFocusedStatusTable } from "./materialize-shared";
 import {
+  countNeighbors as countNeighborsImpl,
+  createNeighborCountRead,
+  createNeighborRead,
+  type NeighborReadOptions,
+  type NeighborResult,
+  readNeighbors,
+} from "./neighbors";
+import { readNodeByReference } from "./node-reference-read";
+import {
+  applyIdentityWindowEnd,
   type EdgeOperationContext,
   edgeUpsertDirtyCheck,
   executeEdgeBulkGetOrCreateByEndpoints,
@@ -149,11 +367,14 @@ import {
   executeEdgeCreateBatch,
   executeEdgeCreateNoReturnBatch,
   executeEdgeDelete,
+  executeEdgeDeleteBatch,
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
+  executeEdgeHardDeleteBatch,
+  executeEdgeResolvedMutationSet,
   executeEdgeUpdate,
-  executeEdgeUpsertUpdate,
+  executeEdgeUpsertUpdateBatch,
   executeNodeBulkFindByConstraint,
   executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
@@ -161,28 +382,80 @@ import {
   executeNodeCreateBatch,
   executeNodeCreateNoReturnBatch,
   executeNodeDelete,
+  executeNodeDeleteBatch,
+  executeNodeDeletePlan,
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeHardDeleteBatch,
+  executeNodeReparent,
+  executeNodeReparentBatch,
+  executeNodeReplacementBatch,
+  executeNodeResolvedMutationSet,
+  executeNodeRevive,
+  executeNodeSetUpdate,
   executeNodeUpdate,
-  executeNodeUpsertUpdate,
+  executeNodeUpsertUpdateBatch,
+  type IdentityWindowEndContext,
+  lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
+  prepareNodeReplacement,
 } from "./operations";
+import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
+import { readIdentityParticipants } from "./operations/identity-participation";
+import {
+  acquireManagedWriteFences,
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  diagnoseFusedSchemaFenceNoRow,
+  refuseReadOnlyTransactionWrite,
+  resolveBatchWriteVerdict,
+  runInWriteTransaction,
+  withPreAcquiredTransactionSchemaFenceLease,
+  withWriteTransactionSession,
+  type WriteTransactionContext,
+} from "./operations/write-transaction";
+import { type ReadSetScope } from "./read-set";
+import {
+  assertReadSetUnchangedSince,
+  type ReadSetFenceContext,
+} from "./read-set-fence";
+import {
+  lookupRecordedAnchor,
+  pruneRecordedAnchors,
+  type PruneRecordedInstantsOptions,
+  type PruneRecordedInstantsResult,
+  type RecordedAnchorLogContext,
+} from "./recorded-anchor-log";
+import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
   advanceRevisionClock,
+  assertCurrentRecordedSchema,
   assertRecordedCaptureTransactionIsolation,
   assertRevisionTrackableBackend,
+  beginPreCommitHookAttempt,
+  changesSinceIncludingIdentity,
+  createMutationWitness,
   createRecordedBackend,
   createRecordedTransactionScope,
   ensureRevisionOrigin,
+  ensureRevisionOriginsRelation,
+  forceRecordedGraphRevision,
   lockRecordedGraphWrite,
+  mintsOriginNamespacedAnchor,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  registerRecordedIdentityMutationWitness,
+  resetRevisionOrigin,
+  resolveLineage,
+  settleTransactionPreCommitHook,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
+  transactionOwnsSqliteWriteLock,
   withRecordedFlushObserver,
+  withRecordedNodeMutationTarget,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture";
 import { assertNoRecordedCoordinate } from "./recorded-coordinate-guard";
@@ -190,45 +463,99 @@ import {
   createRecordedReadService,
   type RecordedReadService,
 } from "./recorded-read-service";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+  requireNodeRegistration,
+} from "./registered-kinds";
 import { rowToEdge, rowToNode } from "./row-mappers";
-import { STORE_RUNTIME, type StoreRuntime } from "./runtime-port";
+import {
+  bindEvolvedTransactionStore,
+  bindScopedTransactionRuntime,
+  bindTransactionStore,
+  runInTransactionContext,
+  STORE_RUNTIME,
+  type StoreRuntime,
+} from "./runtime-port";
+import {
+  publishSavepointEffect,
+  registerSavepointState,
+} from "./savepoint-state";
 import { StoreSearch } from "./search-facade";
+import {
+  describeStore,
+  type StoreDescription,
+  type StoreValidationPage,
+  validateStore as validateStoreImpl,
+  type ValidateStoreOptions,
+} from "./store-analysis";
 import {
   RecordedStoreView,
   StoreView,
   type StoreViewCoordinate,
 } from "./store-view";
 import {
+  createSubgraphRead,
+  executeSessionSubgraph,
   executeSubgraph,
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
   type SubgraphProject,
+  type SubgraphProjectFor,
+  type SubgraphRead,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
   createTransactionReceiptRecorder,
   type TransactionReceiptRecorder,
+  type TransactionWriteAccess,
   wrapTransactionCollections,
+  wrapTransactionIdentity,
 } from "./transaction-receipt";
 import {
   type AdapterTransactionContext,
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
+  type BulkFindRuntimeEdgesFromParams,
+  type BulkFindRuntimeEdgesFromResult,
+  type BulkOperationHookContext,
+  type CompositionCascadedPart,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
   type Edge,
+  type EdgeBulkFindEndpointOptions,
   type GraphEdgeCollections,
+  type GraphEdgeForKinds,
   type GraphNodeCollections,
+  type GraphNodeForKinds,
+  type GraphNodeReferenceInput,
+  type HeterogeneousNodeUpsertInput,
+  type HeterogeneousNodeUpsertResult,
   type HistoryStoreOptions,
+  type HistoryTransactionContext,
   type HookContext,
   type LiveStoreOptions,
   type MeasurableAdapterTransactionContext,
+  type MeasurableHistoryTransactionContext,
   type MeasurableTransactionContext,
   type Node,
+  type NodeReferenceLookup,
   type OperationHookContext,
+  type OperationOutcomeFacts,
+  type QueryHookContext,
   type QueryOptions,
+  type RecordedHeterogeneousNodeWriteBatch,
   type RecordedReadStoreOptions,
+  type RecordedRevisionRequest,
   type RecordedScanOptions,
   type RecordedScanPage,
+  type RuntimeEdgeCollection,
+  type RuntimeNodeCollection,
   type ScopedMeasure,
   type StoreHooks,
   type StoreOptions,
@@ -236,7 +563,9 @@ import {
   TRANSACTION_RUNTIME,
   type TransactionContext,
   type TransactionOutcome,
+  type TransactionRuntime,
   type UnboundLiveStoreOptions,
+  type WorkingCopyOptions,
 } from "./types";
 
 type StoreSchemaMetadata = Readonly<{
@@ -250,7 +579,14 @@ const UNKNOWN_SCHEMA_METADATA: StoreSchemaMetadata = Object.freeze({
 });
 
 type CaughtUpVerb =
-  "evolve" | "materialize" | "deprecate" | "undeprecate" | "remove" | "reembed";
+  | "evolve"
+  | "materialize"
+  | "deprecate"
+  | "undeprecate"
+  | "remove"
+  | "reembed"
+  | "repair"
+  | "rebuild";
 
 /** Default page size for the {@link Store.reembedVectorField} re-embed loop. */
 const DEFAULT_REEMBED_BATCH_SIZE = 200;
@@ -275,6 +611,14 @@ const CAUGHT_UP_VERB_DETAILS: Readonly<
   reembed: {
     phrase: "re-embed a vector field on",
     code: "REEMBED_BEFORE_INITIALIZE",
+  },
+  repair: {
+    phrase: "repair contributions for",
+    code: "REPAIR_CONTRIBUTIONS_BEFORE_INITIALIZE",
+  },
+  rebuild: {
+    phrase: "rebuild a contribution for",
+    code: "REBUILD_CONTRIBUTION_BEFORE_INITIALIZE",
   },
 };
 
@@ -358,6 +702,18 @@ export type ReembedVectorFieldResult = Readonly<{
   reembedded: number;
 }>;
 
+/** Options for {@link Store.rebuildContribution}. */
+export type RebuildContributionOptions = Readonly<{
+  /**
+   * Page size for the content reconstruction pass. Default 500.
+   *
+   * Every page runs inside the rebuild's single transaction, so this
+   * trades statement count against per-statement size rather than
+   * bounding how long the transaction is held — that is set by the graph.
+   */
+  pageSize?: number;
+}>;
+
 /** One place for the hooks' error normalization. */
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -367,17 +723,63 @@ function asError(error: unknown): Error {
 type OperationHookRunner = <T>(
   ctx: OperationHookContext,
   fn: () => Promise<T>,
+  didWrite?: (result: T) => boolean,
+  operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+) => Promise<T>;
+
+/**
+ * THE one place a start context becomes an end context: the facts the
+ * operation learned while it ran, folded on. `onOperationStart` always sees
+ * the bare context — the facts do not exist yet — so the immediate and
+ * buffered runners share this fold rather than each re-spelling the spread
+ * and drifting on which hook gets the enriched object.
+ */
+function operationEndContext<T>(
+  ctx: OperationHookContext,
+  result: T,
+  operationFacts:
+    ((result: T) => OperationOutcomeFacts | undefined) | undefined,
+): OperationHookContext {
+  const facts = operationFacts?.(result);
+  return facts === undefined ? ctx : { ...ctx, ...facts };
+}
+
+type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
+  ctx: BulkOperationHookContext,
+  fn: () => Promise<T>,
 ) => Promise<T>;
 
 /** A committed-inside-the-transaction operation awaiting the outer COMMIT. */
-type PendingOperationOutcome = Readonly<{
-  ctx: OperationHookContext;
-  durationMs: number;
-}>;
+type PendingOperationOutcome =
+  | Readonly<{
+      type: "operation";
+      ctx: OperationHookContext;
+      durationMs: number;
+      outcome: "written" | "unchanged" | "unknown";
+    }>
+  | Readonly<{
+      type: "bulkOperation";
+      ctx: BulkOperationHookContext;
+      affectedCount: number;
+      durationMs: number;
+    }>;
 
 type TransactionRunResult<T> = Readonly<{
   result: T;
   recordedByGraph: RecordedFlushInstants | undefined;
+  /** The committed attempt's own receipt recorder, when one was requested. */
+  recorder: TransactionReceiptRecorder | undefined;
+  /**
+   * The committed attempt's own buffered operation outcomes, awaiting the
+   * `onOperationEnd`/`onBulkOperationEnd` flush. Returned rather than
+   * flushed inside the attempt so that flush runs OUTSIDE `runRetriedUnit`:
+   * a hook it calls is user code that can throw for reasons that have
+   * nothing to do with the transaction, and by the time this value exists
+   * the backend has already committed — a throwing hook must propagate once,
+   * never be mistaken for a conflict and replay a transaction that already
+   * durably succeeded.
+   */
+  pending: readonly PendingOperationOutcome[];
 }>;
 
 /**
@@ -393,11 +795,14 @@ function transactionOutcome<T>(
   recordedByGraph: RecordedFlushInstants | undefined,
   graphId: string,
 ): TransactionOutcome<T> {
-  const recorded = recordedByGraph?.get(graphId);
+  const flushed = recordedByGraph?.get(graphId);
+  if (flushed !== undefined) {
+    recorder.recordIdentityTransitions(flushed.identityTransitions);
+  }
   return {
     result,
     receipt: recorder.snapshot(
-      recorded === undefined ? undefined : asRecordedInstant(recorded),
+      flushed === undefined ? undefined : asRecordedInstant(flushed.recordedAt),
     ),
   };
 }
@@ -422,6 +827,56 @@ function defineUnavailableSqlGuard(context: object, guard: () => never): void {
   });
 }
 
+/**
+ * The identity surface a store carries, present only when the graph declared
+ * `identity: { ... }`. Conditional *presence* (not a `never`-typed property) is
+ * the encoding used everywhere identity is exposed — `tx.identity` and the
+ * read-only views included — so an identity-disabled graph simply has no
+ * `identity` member to reach for.
+ */
+type StoreIdentityAccess<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>;
+
+/** The same conditional presence for the read-only pinned views. */
+export type ViewIdentityAccess<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityReadFacade<G> }>
+  : Readonly<Record<never, never>>;
+
+export type NodeCollectionLookup = <const K extends string>(
+  kind: K,
+) => DynamicNodeCollection<K> | undefined;
+
+export interface RequiredNodeCollectionLookup {
+  <T extends RuntimeNodeKind>(token: T): RuntimeNodeCollection<T>;
+  <const K extends string>(kind: K): DynamicNodeCollection<K>;
+}
+
+export interface EdgeCollectionLookup<G extends GraphDef = GraphDef> {
+  <K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]> | undefined;
+  (kind: string): DynamicEdgeCollection | undefined;
+}
+
+export interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
+  <T extends RuntimeEdgeKind>(token: T): RuntimeEdgeCollection<T>;
+  <K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]>;
+  (kind: string): DynamicEdgeCollection;
+}
+
+type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
+  query?: () => InitialQueryBuilder<G, "open">;
+}>;
+
+/** Read scope whose fluent-query executions all verify one schema version. */
+export type CheckedReadScope<G extends GraphDef> = CheckedReadScopeBoundary<G> &
+  Required<Pick<CheckedReadScopeBoundary<G>, "query">>;
+
 type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
@@ -430,27 +885,59 @@ type StoreCore<G extends GraphDef> = Readonly<{
   registry: KindRegistry;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
+  revisionJournalEnabled?: boolean;
   revisionSchema: SqlSchema;
   recordedReadBound: boolean;
+  recordedTimeOwnership: RecordedTimeOwnership;
+  workingCopyOptions: WorkingCopyOptions;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
   algorithms: GraphAlgorithms<G>;
   search: StoreSearch<G>;
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-  getNodeCollectionOrThrow: (kind: string) => DynamicNodeCollection;
-  getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
-  getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
+  runtimeNodeKind: <const K extends string, const D extends ExtensionNodeDef>(
+    kind: K,
+    definition: D,
+  ) => RuntimeNodeKind<K, ExtensionObjectSchema<D["properties"]>>;
+  runtimeEdgeKind: <const K extends string, const D extends ExtensionEdgeDef>(
+    kind: K,
+    definition: D,
+  ) => RuntimeEdgeKind<K, ExtensionObjectSchema<ExtensionEdgeProperties<D>>>;
+  getNodeCollection: NodeCollectionLookup;
+  getNodeCollectionOrThrow: RequiredNodeCollectionLookup;
+  getNodeByRef: NodeReferenceLookup<G>;
+  getEdgeCollection: EdgeCollectionLookup<G>;
+  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getNodePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   introspect: () => SchemaIntrospection;
+  /** Describe the schema and current population with bounded aggregate statements. */
+  describe: () => Promise<StoreDescription>;
+  /** Page declared-schema violations without treating undeclared fields as invalid. */
+  validateStore: (
+    options: ValidateStoreOptions,
+  ) => Promise<StoreValidationPage>;
+  schemaChanges: () => Promise<SchemaDiff | undefined>;
+  requiresMigration: () => Promise<boolean>;
   query: () => InitialQueryBuilder<G, "open">;
+  withCheckedReads?: <T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ) => Promise<T>;
   asOf: (asOf: string) => StoreView<G>;
   asOfRecorded: (recordedAsOf: RecordedInstant) => RecordedStoreView<G>;
   recordedNow: () => Promise<RecordedInstant | undefined>;
-  revisionNow: () => Promise<string | undefined>;
-  revisionOriginNow: () => Promise<string>;
+  /** Native write allocation, independent of external historical reads. */
+  allocationOwner?: () => Promise<GraphAllocationOwner>;
+  recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+  rotateAllocationOwner?: (
+    expectedOwner: GraphAllocationOwner,
+  ) => Promise<GraphAllocationOwner>;
+  resolveRecordedInstant?: (
+    wallTime: string,
+  ) => Promise<RecordedInstant | undefined>;
+  revisionNow: () => Promise<RecordedInstant | undefined>;
   view: (coordinate: StoreViewCoordinate) => StoreView<G>;
   snapshot: () => StoreView<G>;
   batch: <
@@ -462,15 +949,50 @@ type StoreCore<G extends GraphDef> = Readonly<{
   >(
     ...queries: Queries
   ) => Promise<BatchResults<Queries>>;
+  batchOnce?: <const Queries extends OneStatementBatchReads>(
+    build: (read: BatchReadBuilder<G>) => Queries,
+    options?: BatchOnceOptions,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
+  bulkFindEdgesFrom: <const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
+  bulkFindEdgesTo: <const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindEdgesToResult<G, K>[]>;
+  bulkFindRuntimeEdgesFrom: <
+    NT extends RuntimeNodeKind,
+    ET extends RuntimeEdgeKind,
+  >(
+    params: BulkFindRuntimeEdgesFromParams<NT, ET>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ) => Promise<SubgraphResult<G, NK, EK, P>>;
-  clear: () => Promise<void>;
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+  /** Explicit allocation-log retention; concrete Stores always provide it. */
+  pruneRecordedInstants?: (
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ) => Promise<PruneRecordedInstantsResult>;
+  clear: (
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => Promise<void>;
   refreshStatistics: () => Promise<void>;
   materializeIndexes: (
     options?: MaterializeIndexesOptions,
@@ -483,24 +1005,178 @@ type StoreCore<G extends GraphDef> = Readonly<{
     fieldPath: string,
     options?: ReembedVectorFieldOptions,
   ) => Promise<ReembedVectorFieldResult>;
+  verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
+  verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
+  repairContributions: () => Promise<ContributionRepairResult>;
+  probeContributions: () => Promise<ContributionProbeResult>;
+  rebuildContribution: (
+    scope: ContributionRebuildScope,
+    options?: RebuildContributionOptions,
+  ) => Promise<ContributionRebuildResult>;
   materializeRemovals: (
     options?: MaterializeRemovalsOptions,
   ) => Promise<MaterializeRemovalsResult>;
   close: () => Promise<void>;
-}>;
+}> &
+  StoreIdentityAccess<G>;
+
+/**
+ * Options for {@link Store.transaction} and {@link Store.transactionWithReceipt}.
+ * `retry` is TypeGraph's own option: it is read here and never forwarded to
+ * the backend, which only ever sees the {@link TransactionOptions} fields.
+ *
+ * Without `retry`, the callback runs once; a transaction conflict the backend
+ * reports (a serialization failure or deadlock) surfaces as
+ * `TransactionConflictError` with `attempts: 1` instead of the raw driver
+ * error. With `retry`, such a conflict re-runs the WHOLE callback from the
+ * top — up to `attempts` times total — so the callback must tolerate being
+ * invoked more than once: await all of its own work before returning, read
+ * and write only values it creates fresh on each call (never something a
+ * previous, rolled-back try left in memory), and perform no effect outside
+ * its own transaction. Every hook the callback's operations fire carries the
+ * 1-based attempt number that produced it; a rolled-back attempt's completed
+ * operations report no `onOperationEnd` and no `onError` of their own —
+ * only the attempt that actually commits (or the last one, once `attempts`
+ * is exhausted) is reported.
+ */
+export type StoreTransactionOptions = TransactionOptions &
+  Readonly<{
+    /**
+     * Opts the callback into replay on a transaction conflict. The total
+     * number of tries, including the first. Exhausting it throws
+     * `TransactionConflictError`.
+     */
+    retry?: Readonly<{ attempts: number }>;
+  }>;
 
 type StoreTransactions<G extends GraphDef> = Readonly<{
   transaction: <T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
-interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
+/** Builds cold reads that {@link Store.batchOnce} can compose in one statement. */
+export type BatchReadBuilder<G extends GraphDef> = Readonly<{
+  neighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => CompiledOneStatementRead<readonly NeighborResult<G, K>[]>;
+  countNeighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => CompiledOneStatementRead<number>;
+  subgraph: <
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P>,
+  ) => CompiledOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+}>;
+
+type TransactionReadMethods<G extends GraphDef> = Readonly<{
+  query: () => InitialQueryBuilder<G, "open">;
+  describe: () => Promise<StoreDescription>;
+  validateStore: (
+    options: ValidateStoreOptions,
+  ) => Promise<StoreValidationPage>;
+  batchOnce: <const Queries extends OneStatementBatchReads>(
+    build: (read: BatchReadBuilder<G>) => Queries,
+    options?: BatchOnceOptions,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
+  subgraph: <
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
+  >(
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+}>;
+
+type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+  allocationOwner?: () => Promise<GraphAllocationOwner>;
+  recordedReadOwner?: () => Promise<GraphAllocationOwner>;
+  resolveRecordedInstant?: (
+    wallTime: string,
+  ) => Promise<RecordedInstant | undefined>;
+  withCheckedReads?: <T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ) => Promise<T>;
+  batchOnce?: <const Queries extends OneStatementBatchReads>(
+    build: (read: BatchReadBuilder<G>) => Queries,
+    options?: BatchOnceOptions,
+  ) => Promise<OneStatementBatchResults<Queries>>;
+  neighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: NeighborReadOptions<G, K>,
+  ) => Promise<readonly NeighborResult<G, K>[]>;
+  countNeighbors?: <const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ) => Promise<number>;
+  lineageRevisionNow?: () => Promise<EngineRevision | undefined>;
+  /** Return changed node and edge keys since a lineage revision, or `unbounded` when complete keys are unavailable. */
+  changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
+}>;
+
+type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
+
+type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
+  Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
+
+/** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
+type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
+  AddedStoreReads<G> &
+  Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> &
+  Readonly<{
+    rotateAllocationOwner: (
+      expectedOwner: GraphAllocationOwner,
+    ) => Promise<GraphAllocationOwner>;
+  }>;
+
+/** Schema planning, reconciliation, and lifecycle operations shared by Stores. */
+export interface StoreEvolution<
+  G extends GraphDef,
+  TStore extends StoreCore<G>,
+> {
+  /**
+   * Prepares an immutable plan without acquiring a schema write fence.
+   * The default source reads the active schema; cached planning reuses this Store's snapshot.
+   * Apply the module-issued token through a compatible AdapterStore's withEvolvedTransaction().
+   */
+  readonly planEvolution: (
+    extension: GraphExtension,
+    options?: PlanEvolutionOptions,
+  ) => Promise<EvolutionPlan>;
+  /**
+   * Reconciles this Store with committed schema metadata without writes or provisioning.
+   * Call after outer commit. A cache matching minVersion skips SQL; otherwise a read
+   * accepts that version or newer. Updates ref when supplied and returns the reconciled Store.
+   */
+  readonly refreshSchema: <TRefStore extends StoreCore<G> = TStore>(
+    options?: RefreshSchemaOptions<
+      TStore extends TRefStore ? TRefStore : never
+    >,
+  ) => Promise<TStore>;
+
+  /** Commits an extension in a TypeGraph-owned transaction and returns the evolved Store. */
   readonly evolve: <TRefStore extends StoreCore<G> = TStore>(
     extension: GraphExtension,
     options?: Readonly<{
@@ -508,18 +1184,21 @@ interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
       eager?: MaterializeIndexesOptions;
     }>,
   ) => Promise<TStore>;
+  /** Marks kinds deprecated for introspection without restricting reads or writes; returns the updated Store. */
   readonly deprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{
       ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>,
   ) => Promise<TStore>;
+  /** Clears kind deprecation markers and returns the updated Store. */
   readonly undeprecateKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{
       ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>,
   ) => Promise<TStore>;
+  /** Removes runtime kinds from the schema, queues physical cleanup, and returns the updated Store. */
   readonly removeKinds: <TRefStore extends StoreCore<G> = TStore>(
     names: readonly string[],
     options?: Readonly<{
@@ -545,9 +1224,67 @@ function syncStoreReplacementRef<
  * graph-owned transactions while keeping adapter-native handles, backend
  * internals, and caller-owned transaction adoption out of the public surface.
  */
-export type Store<G extends GraphDef> = StoreCore<G> &
+export type Store<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreTransactions<G> &
   StoreEvolution<G, Store<G>>;
+
+/**
+ * An opaque, in-memory snapshot of a store's reconciled schema: the merged
+ * compile-time + runtime-committed graph plus the committed schema version and
+ * hash it reflects. Produced by {@link AdapterStore.reconciledSchema} after a
+ * verified open, cached once per isolate/process, and handed to
+ * {@link createAdapterStore} via `{ reconciled }` (or used implicitly by
+ * {@link AdapterStore.withBackend}) to build request-scoped stores against
+ * fresh connections with **zero** database round-trips. Reads and writes are
+ * validated against the reconciled graph, so runtime-committed kinds seen at
+ * the reconcile are honored without re-querying.
+ *
+ * Treat it as opaque and immutable — do not construct or mutate it. Its
+ * `version` is the value to compare against {@link getCommittedSchemaVersion}
+ * to detect a schema commit from another process and refresh the snapshot.
+ */
+export type ReconciledSchema<G extends GraphDef> = Readonly<{
+  graph: G;
+  version: number | undefined;
+  hash: string | undefined;
+}>;
+
+/** Construction option carrying a cached {@link ReconciledSchema}. */
+type ReconciledOption<G extends GraphDef> = Readonly<{
+  reconciled?: ReconciledSchema<G>;
+}>;
+
+/**
+ * The reconciliation surface shared by every adapter store flavor: read the
+ * cached {@link ReconciledSchema} and rebind to a fresh connection with no
+ * verify round-trip. `Self` is the receiver's own surface so `withBackend`
+ * preserves the store flavor (live / history / recorded-read).
+ *
+ * Declared as an `interface` (not a `type`): the surface aliases intersect it
+ * with `Self` bound to themselves, which a `type` alias rejects as a circular
+ * self-reference (TS2456) but an interface resolves lazily — the same idiom as
+ * {@link StoreEvolution}.
+ */
+interface AdapterStoreReconciliation<
+  G extends GraphDef,
+  TNativeTransaction,
+  Self,
+> {
+  /**
+   * An opaque snapshot of this store's reconciled schema. Cache it after a
+   * verified open and pass it to {@link createAdapterStore} `{ reconciled }`
+   * to build per-request stores with zero database round-trips.
+   */
+  readonly reconciledSchema: ReconciledSchema<G>;
+  /**
+   * Build an equivalent store bound to a fresh backend/connection, reusing
+   * this store's already-reconciled schema — no verify round-trip. The
+   * per-request primitive for serverless deployments that open a new
+   * connection per request; the returned store validates writes against the
+   * same reconciled graph as the receiver.
+   */
+  readonly withBackend: (backend: AdapterBackend<TNativeTransaction>) => Self;
+}
 
 /**
  * A Store with explicit adapter interoperability. Adapter entrypoints return
@@ -557,9 +1294,14 @@ export type Store<G extends GraphDef> = StoreCore<G> &
 export type AdapterStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterStore<G, TNativeTransaction>
+  > &
   Readonly<{ backend: GraphBackend }>;
 
 type AdapterStoreTransactions<
@@ -568,17 +1310,25 @@ type AdapterStoreTransactions<
 > = Readonly<{
   transaction: <T>(
     fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (
       tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
   withTransaction: (
     externalTransaction: TNativeTransaction,
   ) => AdapterTransactionContext<G, TNativeTransaction>;
+  withEvolvedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ) => Promise<EvolvedTransactionOutcome<T>>;
   withRecordedTransaction: <T>(
     externalTransaction: TNativeTransaction,
     fn: (
@@ -587,26 +1337,156 @@ type AdapterStoreTransactions<
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
+async function commitEvolvedSchemaWhenRequiredKindsAreEmpty<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+  classification: ReturnType<typeof classifyModifications>,
+  storedSchema: SerializedSchema,
+): Promise<SchemaVersionRow> {
+  const result = await commitNewSchemaVersionIfKindsEmpty(
+    backend,
+    graph,
+    currentVersion,
+    classification.requireEmpty.map((entry) => ({
+      entity: entry.entity,
+      kind: entry.kindName,
+      rows: "nonDeleted" as const,
+    })),
+    storedSchema,
+  );
+  if (result.status === "committed") return result.row;
+
+  const populatedKeys = new Set(
+    result.kinds.map((entry) => `${entry.entity}:${entry.kind}`),
+  );
+  const nonEmpty = new Set(
+    classification.requireEmpty.filter((entry) =>
+      populatedKeys.has(`${entry.entity}:${entry.kindName}`),
+    ),
+  );
+  const error = buildIncompatibleChangeError(
+    classification,
+    nonEmpty,
+    graph.id,
+  );
+  if (error !== undefined) throw error;
+
+  throw new ConfigurationError(
+    "Schema emptiness guard reported populated kinds that were not part of " +
+      "the compatibility classification.",
+    {
+      graphId: graph.id,
+      populatedKinds: result.kinds.map((entry) => entry.kind),
+    },
+  );
+}
+
+async function assertEvolvedSchemaRequiredKindsEmpty(
+  backend: GraphBackend | TransactionBackend,
+  graphId: string,
+  classification: ReturnType<typeof classifyModifications>,
+): Promise<void> {
+  const populated = await Promise.all(
+    classification.requireEmpty.map(async (entry) => ({
+      entry,
+      hasRows: await schemaKindHasRows(backend, graphId, {
+        entity: entry.entity,
+        kind: entry.kindName,
+        rows: "nonDeleted",
+      }),
+    })),
+  );
+  const nonEmpty = new Set(
+    populated.filter(({ hasRows }) => hasRows).map(({ entry }) => entry),
+  );
+  const error = buildIncompatibleChangeError(classification, nonEmpty, graphId);
+  if (error !== undefined) throw error;
+}
+
+const IDENTITY_FACADES = new WeakMap<object, unknown>();
+
+/**
+ * Keeps a live upsert patch to exactly the keys the caller supplied, while
+ * retaining field-level Zod normalization from the complete create parse.
+ * Defaults only exist in `parsedCreateProps` because a caller omitted a key,
+ * so they cannot leak into the live-row merge.
+ */
+function callerSuppliedParsedNodeProps(
+  inputProps: Readonly<Record<string, unknown>>,
+  parsedCreateProps: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const updateProps = createDataKeyedBag<unknown>();
+  for (const property of Object.keys(inputProps)) {
+    if (hasOwnKey(parsedCreateProps, property)) {
+      updateProps[property] = parsedCreateProps[property];
+    }
+  }
+  return updateProps;
+}
+
 class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly [STORE_RUNTIME]: StoreRuntime<G>;
   readonly #graph: G;
+  #evolutionPlanningSnapshot:
+    | Readonly<{
+        activeRow: SchemaVersionRow;
+        storedSchema: SerializedSchema;
+        baseline: G;
+      }>
+    | undefined;
   /**
    * Bare backend for DDL, vector-storage, and bulk-materialization work that must
    * bypass recorded capture. Graph-entity writes use `#backend` instead.
    */
   readonly #baseBackend: RawBackend;
   readonly #backend: GraphWriteBackend;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2), minted from `#backend` — the same object every claimed
+   * write actually executes through — once, here, and threaded into every
+   * node/edge operation context this Store builds. Never resolved eagerly:
+   * only the thunk's own first call may reach the bidirectional cross-check's
+   * throw.
+   */
+  readonly #claimsVerdict: ClaimsVerdictThunk;
+  /**
+   * Resolved EAGERLY, once, immediately after `#claimsVerdict` — unlike
+   * `claims`, no pilot bundle below has a `crossCheck`, so `resolveBundle`
+   * cannot throw on construction and the thunk's lazy-resolution rationale
+   * does not apply (ruling B8 spec item 2). `batchPointRead` and
+   * `uniqueSidecarBatch` resolve against `#backend`, the object every graph
+   * write and read actually executes through.
+   */
+  readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  readonly #endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
+  readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Root verdict minted once; transaction targets bind its member separately. */
+  readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+  /**
+   * The contribution-health methods and `ensureRevisionOrigin` read
+   * `#baseBackend`, not `#backend` (recorded capture never wraps them), so
+   * their verdicts are resolved against `#baseBackend` too.
+   */
+  readonly #contributionHealth: BundleVerdictOf<typeof CONTRIBUTION_HEALTH>;
+  readonly #recordedRevisionOrigins: BundleVerdictOf<
+    typeof RECORDED_REVISION_ORIGINS
+  >;
   readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
+  readonly #recordedTimeOwnership: RecordedTimeOwnership;
+  readonly #requestedHistory: boolean;
   readonly #captureEnabled: boolean;
+  readonly #engineNativeHistory: boolean;
   readonly #revisionTrackingEnabled: boolean;
-  #revisionOrigin: Promise<string> | undefined;
   readonly #recordedReadBinding: RecordedReadBinding | undefined;
   readonly #registry: KindRegistry;
   readonly #hooks: StoreHooks;
   readonly #schema: StoreOptions["schema"];
   readonly #recordedReads: RecordedReadService;
-  readonly #schemaMetadata: StoreSchemaMetadata;
+  #schemaMetadata: StoreSchemaMetadata;
+  readonly #runtimeKindOwner = Object.freeze({});
   readonly #defaultTraversalExpansion: TraversalExpansion;
+  readonly #defaultExpansion: DefaultAliasExpansionAxis;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
   // fields would silently drop any future StoreOptions field a
@@ -616,7 +1496,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #edgeCollections: GraphEdgeCollections<G> | undefined;
   #algorithms: GraphAlgorithms<G> | undefined;
   #search: StoreSearch<G> | undefined;
-
   constructor(
     graph: G,
     backend: GraphBackend,
@@ -625,12 +1504,119 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     adapterBackend?: AdapterBackend<TNativeTransaction>,
   ) {
     this.#graph = graph;
+    const statementExecution = statementExecutionVerdict(backend);
+    if (
+      graph.identity !== undefined &&
+      (!backend.capabilities.execution.interactiveTransactions ||
+        !statementExecution.supported)
+    ) {
+      const identityVerdict = resolveBatchWriteVerdict(backend, {
+        needs: "identity",
+      });
+      throw new ConfigurationError(
+        "Operational Identity requires an atomic transactional backend with statement execution support." +
+          batchRefusalSuffix(identityVerdict),
+        {
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          interactiveTransactions:
+            backend.capabilities.execution.interactiveTransactions,
+          statementExecution: statementExecution.supported,
+          ...batchRefusalDetails(identityVerdict),
+        },
+        {
+          suggestion:
+            "Use a transactional SQLite or PostgreSQL driver; Cloudflare D1 and neon-http cannot host identity closure maintenance.",
+        },
+      );
+    }
+    // A separate throw, not a widened condition on the gate above, so the
+    // message can be the migration guide (OQ-B) rather than a generic
+    // "atomic backend" refusal.
+    if (graph.identity !== undefined) {
+      const identityFencePlan = resolveWriteFencePlan(backend);
+      if (identityFencePlan.kind === "unfenced") {
+        refuseUnfencedOperationalIdentity(backend.dialect);
+      }
+    }
     this.#baseBackend = asRawBackend(backend);
     this.#adapterBackend = adapterBackend;
-    this.#captureEnabled = options?.history === true;
+    this.#recordedTimeOwnership = resolveRecordedTimeOwnership(backend);
+    const requestedHistory = options?.history === true;
+    const requestedRevisionTracking = options?.revisionTracking === true;
+    if (
+      this.#recordedTimeOwnership === "engine-native" &&
+      requestedRevisionTracking
+    ) {
+      // Engine-native has no TypeGraph clock for `revisionTracking: true` to
+      // advance — the engine's own revision IS the tracking, and it only
+      // ever surfaces through `history: true`, whether or not `history` was
+      // also requested. Refusing only the without-history combination once
+      // let `{ history: true, revisionTracking: true }` construct
+      // successfully while silently forcing `revisionTrackingEnabled` back
+      // to false — an accepted option this backend cannot honor at all, not
+      // one it can honor only some of the time.
+      throw new ConfigurationError(
+        "revisionTracking: true is not supported under engine-native recorded time.",
+        { code: "ENGINE_NATIVE_REVISION_TRACKING_UNSUPPORTED" },
+        {
+          suggestion:
+            "Pass { history: true } instead — the engine's own recordedTime.revisionNow is the only revision this backend can track, and it is available under history: true whether or not revisionTracking is also requested.",
+        },
+      );
+    }
+    if (
+      this.#recordedTimeOwnership === "engine-native" &&
+      options?.recordedRead !== undefined
+    ) {
+      // An externally bound recorded relation is a TypeGraph-relations
+      // concept: engine-native has no recorded relation of its own for a
+      // caller to populate, and its own recorded reads are sourced from
+      // `recordedTime.source` instead.
+      throw new ConfigurationError(
+        "recordedRead is not supported under engine-native recorded time.",
+        { code: "ENGINE_NATIVE_RECORDED_READ_UNSUPPORTED" },
+        {
+          suggestion:
+            "Use { history: true } to read this backend's own engine-native recorded time, or omit recordedRead.",
+        },
+      );
+    }
+    // `#requestedHistory` is the caller's own request — `options.history ===
+    // true` — regardless of which ownership form honors it; the public
+    // `historyEnabled` getter answers this, matching `HistoryStore<G>`'s
+    // static `historyEnabled: true` for either ownership. `#captureEnabled`
+    // means TypeGraph itself performs capture — recorded relations, a
+    // TypeGraph clock, the write-fence/schema-lock machinery capture needs —
+    // and stays scoped to `typegraph-relations` ownership: it is the flag a
+    // reader of a recorded relation's own columns must consult instead
+    // (`storeCaptureEnabled`, `src/store/runtime-port.ts`), never the public
+    // getter, or an engine-native store fools it into reading relations the
+    // engine never populates. Engine-native `history: true` gets NONE of
+    // TypeGraph's capture: the engine tracks history on its own, so
+    // `#engineNativeHistory` is a parallel, much narrower flag consulted only
+    // where the receipt/read wiring genuinely differs from TypeGraph-owned
+    // capture (construction below, recordedNow/revisionNow, and the two
+    // transaction-commit sites).
+    this.#requestedHistory = requestedHistory;
+    this.#captureEnabled = capturesTypeGraphRecordedHistory(
+      requestedHistory,
+      backend,
+    );
+    this.#engineNativeHistory =
+      requestedHistory && this.#recordedTimeOwnership === "engine-native";
     this.#revisionTrackingEnabled =
-      this.#captureEnabled || options?.revisionTracking === true;
+      this.#recordedTimeOwnership === "engine-native" ?
+        false
+      : this.#captureEnabled || requestedRevisionTracking;
     if (this.#revisionTrackingEnabled) {
+      // Keyed on the resource `lockRecordedClock` fences: the
+      // TypeGraph-owned clock row, which `history` and `revisionTracking`
+      // both reach here — unreachable under engine-native, whose
+      // `#revisionTrackingEnabled` is forced false above.
+      const clockFencePlan = resolveWriteFencePlan(backend);
+      if (clockFencePlan.kind === "unfenced") {
+        refuseUnfencedClockAllocation(backend.dialect);
+      }
       assertRevisionTrackableBackend(backend);
     }
     // Resolve the schema before wrapping so recorded-time capture targets the
@@ -658,30 +1644,61 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       options?.recordedRead,
     );
     this.#recordedReadBinding =
-      this.#captureEnabled ?
-        createRecordedReadBinding(readSchema)
+      this.#captureEnabled ? createRecordedReadBinding(readSchema)
+      : this.#engineNativeHistory ?
+        createEngineRecordedReadBinding(
+          requireRecordedTime(backend, "store construction"),
+          readSchema,
+        )
       : externalRecordedRead;
     this.#backend =
       this.#captureEnabled ?
         asGraphWriteBackend(createRecordedBackend(backend, resolvedSchema))
       : asGraphWriteBackend(backend);
+    this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
+    this.#batchPointRead = batchPointReadVerdict(this.#backend);
+    this.#endpointSetRead = endpointSetReadVerdict(this.#backend);
+    this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
+    this.#statementExecution = statementExecution;
+    this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
+    this.#recordedRevisionOrigins = recordedRevisionOriginsVerdict(
+      this.#baseBackend,
+    );
     this.#schema = resolvedSchema;
     const rowMapperConfig = rowMapperConfigFor(this.#backend);
     this.#recordedReads = createRecordedReadService({
       graphId: graph.id,
       backend: this.#backend,
       recordedReadBinding: this.#recordedReadBinding,
+      revisionOriginSession: (target, execution) =>
+        this.#readRecordedReadOwner(target, execution),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
     });
     this.#registry = buildKindRegistry(graph);
+    bindCompileTimeAliasTyping(this.#registry, stripGraphExtension(graph));
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
+    this.#defaultExpansion = resolveDefaultAliasExpansion(
+      options?.queryDefaults?.expansion,
+      "queryDefaults",
+    );
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
+      captureEnabled: this.#captureEnabled,
+      recordedReadBinding: this.#recordedReadBinding,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      batchPointRead: this.#batchPointRead,
+      endpointSetRead: this.#endpointSetRead,
+      // The query path's own construction, not a second spelling of it: a
+      // caller that could only rebuild this object could not observe the one
+      // the queries actually run on.
+      queryBackend: (target) =>
+        this.#createHookedQueryBackend(target ?? this[STORE_RUNTIME].backend),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
         this.recordedNodeGetById(kind, id, coordinate),
@@ -693,12 +1710,155 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.recordedEdgeGetById(kind, id, coordinate),
       recordedEdgeGetByIds: (kind, ids, coordinate) =>
         this.recordedEdgeGetByIds(kind, ids, coordinate),
+      recordedAdjacency: (root, coordinate, edgeKinds, options) =>
+        this.#recordedReads.adjacency(root, coordinate, edgeKinds, options),
       recordedEdgeScan: (kind, coordinate, options) =>
         this.recordedEdgeScan(kind, coordinate, options),
-      subgraphAtCoordinate: (rootId, subgraphOptions) =>
-        this.subgraphAtCoordinate(rootId, subgraphOptions),
+      subgraphAtCoordinate: (root, subgraphOptions) =>
+        this.subgraphAtCoordinate(root, subgraphOptions),
       algorithmsAtCoordinate: (coordinate) =>
         this.algorithmsAtCoordinate(coordinate),
+      identityAtCoordinate: (coordinate) =>
+        this.identityAtCoordinate(coordinate),
+      identityContext: () => {
+        this.#requireIdentityEnabled();
+        return this.#identityContext(this.#backend);
+      },
+      rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
+      validateIdentity: () => this.validateIdentity(),
+      deleteNodeWithPolicy: (target, work, policy) =>
+        executeNodeDelete(
+          this.#createNodeOperationContext(),
+          work.kind,
+          work.id,
+          target,
+          { policy },
+        ),
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
+        if (
+          upserts.every((upsert) => upsert.constraints.length === 0) &&
+          releases.length === 0
+        ) {
+          // Nothing is cleared, so nothing needs rebuilding, so the write set
+          // owes no set-wide preflight either. A kind with no uniqueness
+          // declaration may still owe DISJOINTNESS claims, and those are taken
+          // and released by the individual writes inside `apply()` exactly as
+          // they are outside a merge — this branch is what keeps that true.
+          return apply();
+        }
+        // The per-graph write lock, before any claim or sidecar work: the
+        // rebuild below writes claim rows, and the lock is what the claim
+        // discipline requires ahead of them. It is reentrant and memoized per
+        // transaction, so a merge that already took it pays no round trip.
+        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        return applyResolvedNodeClaims(
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            lock,
+            claimsVerdict: this.#claimsVerdict,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
+          },
+          target,
+          upserts,
+          releases,
+          apply,
+        );
+      },
+      liveNodesSharingIds: async (ids, target) => {
+        const backend = target ?? this.#baseBackend;
+        const liveKindsById = await liveNodeKindsSharingIds(
+          this.#identityContext(backend),
+          backend,
+          ids,
+        );
+        const peers: Readonly<{ kind: string; id: string }>[] = [];
+        for (const [id, kinds] of liveKindsById) {
+          for (const kind of kinds) peers.push({ kind, id });
+        }
+        return peers;
+      },
+      identityAssertionRowsByIds: async (ids, target) => {
+        // An identity-disabled graph has no assertions table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        const rows = await loadAssertionsByIds(
+          backend,
+          ctx.schema,
+          this.graphId,
+          ids,
+        );
+        return new Map(
+          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
+        );
+      },
+      structuralIdentityClasses: async (references, target) => {
+        // An identity-disabled graph has no closure table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        return loadCurrentStructuralClasses(
+          backend,
+          ctx.schema,
+          this.graphId,
+          references,
+        );
+      },
+      readCurrentIdentityAssertions: (mode, options) =>
+        this.readCurrentIdentityAssertions(mode, options),
+      identityAssertionsAtTarget: (target, mode) =>
+        this.identityAssertionsAtTarget(target, mode),
+      identityAssertionsTouchingAtTarget: (target, references, mode, options) =>
+        this.identityAssertionsTouchingAtTarget(
+          target,
+          references,
+          mode,
+          options,
+        ),
+      interchangeIdentityAssertionsByIdsAtTarget: async (
+        target,
+        ids,
+        mode,
+        options,
+      ) => {
+        if (this.#graph.identity === undefined || ids.length === 0) return [];
+        return readIdentityAssertionsByIdsAtTarget(
+          this.#identityContext(target),
+          target,
+          ids,
+          mode,
+          options,
+        );
+      },
+      readIdentityAssertionPageAtTarget: (target, mode, options) =>
+        this.readIdentityAssertionPageAtTarget(target, mode, options),
+      lockIdentityImportTarget: (target) =>
+        this.lockIdentityImportTarget(target),
+      foldImportedIdentityNodes: (target, references) =>
+        this.foldImportedIdentityNodes(target, references),
+      applyImportedNodeWindowEnd: (target, input) =>
+        applyIdentityWindowEnd(this.#identityWindowEndContext(), target, input),
+      detachDeletedImportedIdentityNode: (target, reference) =>
+        this.detachDeletedImportedIdentityNode(target, reference),
+      importIdentityAssertionsAtTarget: (target, assertions, mode) =>
+        this.importIdentityAssertionsAtTarget(target, assertions, mode),
+      readIdentityTransitionPageAtTarget: (target, options) =>
+        this.readIdentityTransitionPageAtTarget(target, options),
+      identityTransitionRetentionAtTarget: (target) =>
+        this.identityTransitionRetentionAtTarget(target),
+      importIdentityTransitionsAtTarget: (target, transitions, carriedCut) =>
+        this.importIdentityTransitionsAtTarget(target, transitions, carriedCut),
+      applyIdentityMergeAtTarget: (target, retractions, assertions, decision) =>
+        this.applyIdentityMergeAtTarget(
+          target,
+          retractions,
+          assertions,
+          decision,
+        ),
+      assertIdentityClassesConsistentAtTarget: (target, seeds) =>
+        this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
     Object.defineProperty(this, STORE_RUNTIME, {
       configurable: false,
@@ -730,12 +1890,534 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Whether recorded-time capture is enabled for this store.
+   * The TypeGraph Identity Profile facade. Reachable through the public
+   * {@link Store} surface only on graphs that declared `identity: { ... }`;
+   * the runtime guard below catches widened or JavaScript callers.
+   *
+   * The facade is memoized per store, so it must not close over any state a
+   * lifecycle operation can move — see `#identityContext`.
+   */
+  get identity(): IdentityFacade<G> {
+    this.#requireIdentityEnabled(
+      'Add identity: { sameIdAcrossKinds: "fold" } to defineGraph(...).',
+    );
+    const existing = IDENTITY_FACADES.get(this);
+    if (existing !== undefined) return existing as IdentityFacade<G>;
+    const facade = createIdentityFacade(this.#identityContext(this.#backend));
+    IDENTITY_FACADES.set(this, facade);
+    return facade;
+  }
+
+  /**
+   * Refuses an identity operation on a graph that never declared
+   * `identity: { ... }`, where none of the identity tables exist.
+   */
+  #requireIdentityEnabled(suggestion?: string): void {
+    if (this.#graph.identity !== undefined) return;
+    throw new ConfigurationError(
+      "Identity is not enabled for this graph.",
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.graphId },
+      suggestion === undefined ? undefined : { suggestion },
+    );
+  }
+
+  /**
+   * The resolved write set as the claim layer reads it: every upsert carrying
+   * its kind's registered unique constraints, and the releases narrowed to the
+   * kinds whose declarations produce a key another node could take.
+   */
+  #resolvedNodeClaimWrites(
+    writes: Readonly<{
+      upserts: readonly Readonly<{
+        kind: string;
+        id: string;
+        props: Readonly<Record<string, unknown>>;
+      }>[];
+      releases: readonly Readonly<{ kind: string; id: string }>[];
+    }>,
+  ): Readonly<{
+    upserts: readonly ResolvedNodeUpsert[];
+    releases: readonly ResolvedNodeRelease[];
+  }> {
+    const upserts = writes.upserts.map((upsert) => ({
+      ...upsert,
+      constraints:
+        requireNodeRegistration(this.#graph, upsert.kind).unique ?? [],
+    }));
+    // Which kinds a release is worth CLEARING for: the clear exists so the
+    // set's upserts can take keys the set is giving back, and only a
+    // uniqueness declaration produces a key another node could take.
+    const constrainedKinds = new Set(
+      Object.entries(this.#graph.nodes)
+        .filter(([, registration]) => (registration.unique ?? []).length > 0)
+        .map(([kind]) => kind),
+    );
+    const releases = writes.releases.filter((release) => {
+      assertRegisteredNodeKinds(this.#graph, [release.kind]);
+      return constrainedKinds.has(release.kind);
+    });
+    return { upserts, releases };
+  }
+
+  /** @internal Builds the identity read facade for a pinned StoreView. */
+  identityAtCoordinate(coordinate: ReadCoordinate): IdentityReadFacade<G> {
+    this.#requireIdentityEnabled();
+    // A recorded-time identity read must reconstruct from the SAME recorded
+    // relation the coordinate's node/edge reads use — binding-aware, so an
+    // externally bound recorded relation with divergent table names resolves
+    // its recorded identity assertions instead of TypeGraph's default-named
+    // (empty) tables. Mirror the node recorded-read routing: the
+    // relations-precondition backend overlay plus the recorded schema view.
+    const recordedAsOf = coordinate.recorded?.asOf;
+    if (
+      recordedAsOf !== undefined &&
+      isEngineNativeRecordedReadBinding(this.#recordedReadBinding)
+    ) {
+      refuseEngineNativeRecordedIdentityRead("identityAtCoordinate");
+    }
+    const backend =
+      recordedAsOf === undefined ?
+        this.#backend
+      : this.#recordedReads.backendForCoordinate(
+          coordinate,
+          "recorded-identity",
+        );
+    const schema = recordedReadSchemaFor(
+      this.#sqlSchema(),
+      recordedAsOf,
+      this.#recordedReadBinding,
+      "recorded-identity",
+    );
+    return createIdentityReadFacade({
+      ...this.#identityContext(backend),
+      schema,
+      coordinate,
+    });
+  }
+
+  /** Rebuilds derived current identity closure without advancing revision. */
+  async rebuildIdentityClosure(): Promise<void> {
+    this.#requireIdentityEnabled();
+    await rebuildIdentityClosureWithSchemaFence(
+      this.#identityContext(this.#baseBackend),
+      {
+        graphId: this.graphId,
+        schemaVersion: this.#schemaMetadata.schemaVersion,
+        historyEnabled: this.#captureEnabled,
+        revisionTrackingEnabled: this.#revisionTrackingEnabled,
+        revisionSchema: this.#sqlSchema(),
+        statementExecution: this.#statementExecution,
+      },
+    );
+  }
+
+  /**
+   * @internal Validates/rebuilds identity under schema-transition locks.
+   *
+   * `provisionDerivedRelations` carries the DDL `ensureIdentitySchemaStorage`
+   * deliberately did not run outside this transaction, so an evolution that
+   * fails leaves no half-published derived relation behind.
+   */
+  async identitySchemaPreflight(
+    target: SchemaCommitPreflightBackend,
+    provisionDerivedRelations: readonly string[],
+  ): Promise<void> {
+    await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
+      enablement: false,
+      provisionDerivedRelations,
+      // The schema-commit target is a raw transaction no capture session is
+      // bound to yet, so a history store binds one for the preflight's own
+      // ledger touches and transition notes.
+      ...(this.#captureEnabled ?
+        { capture: { source: "store", batchPointRead: this.#batchPointRead } }
+      : {}),
+    })(target);
+  }
+
+  /** @internal Read-only startup integrity verification. */
+  async validateIdentity(): Promise<void> {
+    if (this.#graph.identity === undefined) return;
+    // Assertion/disjointness integrity AND closure-vs-components agreement are
+    // both enforced here: validateIdentityForContext now also asserts the
+    // materialized closure matches the computed components (throws
+    // IDENTITY_SCHEMA_CONTRADICTION with a rebuildIdentityClosure suggestion).
+    await validateIdentityForContext(this.#identityContext(this.#baseBackend));
+  }
+
+  /** @internal Cascades removed kinds in the schema-commit transaction. */
+  async removeIdentityKindsInSchemaPreflight(
+    target: TransactionBackend,
+    kinds: readonly string[],
+    options?: Readonly<{ repairClosure?: boolean }>,
+  ): Promise<void> {
+    if (!this.#captureEnabled) {
+      await removeIdentityKindsForContext(
+        this.#identityContext(target),
+        kinds,
+        options,
+      );
+      return;
+    }
+    const scope = createRecordedTransactionScope(
+      target,
+      this.#batchPointRead,
+      this.#sqlSchema(),
+      transactionOwnsSqliteWriteLock(target),
+    );
+    await removeIdentityKindsForContext(
+      this.#identityContext(scope.backend),
+      kinds,
+      options,
+    );
+    await scope.flush();
+  }
+
+  /**
+   * @internal Reads the graph's identity assertions in transfer shape, honoring
+   * this store's SQL binding. Used by interchange export, base-version
+   * fingerprinting, and merge staging/diff.
+   */
+  readCurrentIdentityAssertions(
+    mode: "state" | "archival",
+    options?: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+    }>,
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined) return Promise.resolve([]);
+    return readIdentityAssertionsForInterchange(
+      this.#identityContext(this.#baseBackend),
+      mode,
+      options,
+    );
+  }
+
+  /** @internal Reads identity truth through an already-bound transaction. */
+  identityAssertionsAtTarget(
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival" = "state",
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined) return Promise.resolve([]);
+    return readIdentityAssertionsForInterchange(
+      this.#identityContext(target),
+      mode,
+    );
+  }
+
+  /** @internal Reads current or archival identity truth incident to endpoints. */
+  identityAssertionsTouchingAtTarget(
+    target: GraphBackend | TransactionBackend,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    mode: "state" | "archival" = "state",
+    options?: Readonly<{ includeDeleted?: boolean }>,
+  ): Promise<readonly IdentityTransferAssertion[]> {
+    if (this.#graph.identity === undefined || references.length === 0) {
+      return Promise.resolve([]);
+    }
+    return readIdentityAssertionsTouchingAtTarget(
+      this.#identityContext(target),
+      target,
+      references,
+      mode,
+      options,
+    );
+  }
+
+  /** @internal Reads one bounded identity-assertion page at a bound target. */
+  readIdentityAssertionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    mode: "state" | "archival",
+    options: Readonly<{
+      nodeKinds?: readonly string[];
+      includeDeleted?: boolean;
+      after?: string;
+      limit: number;
+    }>,
+  ): ReturnType<typeof readIdentityAssertionPageAtTarget> {
+    if (this.#graph.identity === undefined) {
+      return Promise.resolve({ assertions: [], done: true });
+    }
+    return readIdentityAssertionPageAtTarget(
+      this.#identityContext(target),
+      target,
+      mode,
+      options,
+    );
+  }
+
+  /** @internal Acquires the enabled graph's identity lock for an import. */
+  lockIdentityImportTarget(target: IdentityTarget): Promise<void> {
+    return this.#graph.identity === undefined ?
+        Promise.resolve()
+      : lockIdentityGraph(target, this.graphId);
+  }
+
+  /**
+   * @internal Restores same-id folding after the ops-layer import bypass.
+   *
+   * Always `"fold"`: import never resurrects a tombstone (a soft-deleted node
+   * is not updatable through it — see `src/interchange/import.ts`), so every
+   * reference this reaches is a genuine first materialization, never a
+   * restore.
+   */
+  foldImportedIdentityNodes(
+    target: IdentityTarget,
+    references: readonly Readonly<{ kind: string; id: string }>[],
+  ): Promise<void> {
+    if (this.#graph.identity === undefined || references.length === 0) {
+      return Promise.resolve();
+    }
+    return foldIdentityForCreatedNodes(
+      {
+        graphId: this.graphId,
+        registry: this.#registry,
+        sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
+        schema: this.#sqlSchema(),
+      },
+      target,
+      references,
+      "fold",
+    );
+  }
+
+  /**
+   * @internal Detaches a node import purges after folding it into
+   * identity — a required composition part `assertImportedRequiredPartsAttached`
+   * (`src/interchange/import.ts`) refuses AFTER `foldImportedIdentityNodes`
+   * already ran for this attempt's batch. Always `"hard"`: the row this
+   * reaches was created and purged within the SAME import, exactly the
+   * `executeNodeHardDelete` shape (`src/store/operations/node-operations.ts`)
+   * `identity.detachDeleted` already serves for the ordinary write path.
+   */
+  detachDeletedImportedIdentityNode(
+    target: IdentityTarget,
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<void> {
+    if (this.#graph.identity === undefined) return Promise.resolve();
+    return detachIdentityForNode(
+      {
+        graphId: this.graphId,
+        sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
+        schema: this.#sqlSchema(),
+      },
+      target,
+      reference,
+      "hard",
+    );
+  }
+
+  /** @internal Applies identity interchange rows inside an import transaction. */
+  importIdentityAssertionsAtTarget(
+    target: IdentityTarget,
+    assertions: readonly IdentityTransferAssertion[],
+    mode: "state" | "archival",
+  ): Promise<IdentityImportSummary> {
+    if (assertions.length === 0) {
+      return Promise.resolve({ created: 0, skipped: 0 });
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot import identity assertions into an identity-disabled graph.",
+        { code: "IDENTITY_IMPORT_REQUIRES_PROFILE", graphId: this.graphId },
+      );
+    }
+    return importIdentityAssertionsIntoTarget(
+      // The slice the coordinator reads — graph, registry, schema, folding
+      // mode — none of which depend on the target. The target it writes
+      // through is the parameter beside it, which is why this method can take
+      // the narrow statement projection an import frame is able to offer.
+      this.#identityContext(this.#baseBackend),
+      target,
+      assertions,
+      mode,
+    );
+  }
+
+  /** @internal Reads one bounded page of a graph's ARCHIVAL identity transitions, oldest first. */
+  async readIdentityTransitionPageAtTarget(
+    target: GraphBackend | TransactionBackend,
+    options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
+  ): Promise<
+    Readonly<{
+      transitions: readonly IdentityTransitionTransfer[];
+      nextAfter?: IdentityTransitionCursor;
+      done: boolean;
+    }>
+  > {
+    if (this.#graph.identity === undefined) {
+      return { transitions: [], done: true };
+    }
+    const page = await readIdentityTransitionPageForInterchange(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+      options,
+    );
+    return {
+      transitions: page.transitions.map((row) => toTransitionTransfer(row)),
+      ...(page.nextAfter === undefined ? {} : { nextAfter: page.nextAfter }),
+      done: page.done,
+    };
+  }
+
+  /** @internal Reads a graph's identity transition retention for archival export. */
+  identityTransitionRetentionAtTarget(
+    target: GraphBackend | TransactionBackend,
+  ): Promise<IdentityTransitionRetention> {
+    if (this.#graph.identity === undefined) return Promise.resolve({});
+    return readIdentityTransitionRetention(
+      target,
+      this.#sqlSchema(),
+      this.graphId,
+    );
+  }
+
+  /**
+   * Refuses an archival transition restore this graph cannot hold: an
+   * identity-disabled graph has no transition log, and a history-off graph
+   * has nowhere for `transitionsOf` / `replay` to read restored rows back
+   * from, so restoring them would write data the store's own API can never
+   * surface. `importGraph` / `importGraphStream` (`interchange/import.ts`)
+   * already refuse this UPFRONT, before any node or edge write; this is the
+   * BACKSTOP every port method of the restore passes through.
+   */
+  #requireIdentityTransitionRestore(): void {
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot import identity transitions into an identity-disabled graph.",
+        {
+          code: "IDENTITY_IMPORT_REQUIRES_PROFILE",
+          graphId: this.graphId,
+        },
+      );
+    }
+    if (!this.#captureEnabled) {
+      throw identityTransitionLogUnavailableError(
+        this.graphId,
+        this.#recordedTimeOwnership,
+        "archival transition restore",
+      );
+    }
+  }
+
+  /** @internal Restores archival identity transitions inside an import transaction. */
+  importIdentityTransitionsAtTarget(
+    target: IdentityTarget,
+    transitions: readonly IdentityTransitionTransfer[],
+    carriedCut: IdentityTransitionCut | undefined,
+  ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
+    if (
+      !isIdentityTransitionRestore(transitions.length > 0, carriedCut?.revision)
+    ) {
+      return Promise.resolve({ created: 0 });
+    }
+    this.#requireIdentityTransitionRestore();
+    return importIdentityTransitionsIntoTarget(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      transitions,
+      carriedCut,
+    );
+  }
+
+  /**
+   * @internal Post-write identity validation for a graph-merge commit: proves
+   * the identity classes the merge touched carry no contradiction in the state
+   * the merge just wrote, inside the merge's own transaction.
+   */
+  assertIdentityClassesConsistentAtTarget(
+    target: GraphBackend | TransactionBackend,
+    seeds: readonly Readonly<{ kind: string; id: string }>[],
+  ): Promise<void> {
+    if (this.#graph.identity === undefined || seeds.length === 0) {
+      return Promise.resolve();
+    }
+    return assertAffectedIdentityClassesConsistent(
+      this.#identityContext(target),
+      target,
+      seeds,
+    );
+  }
+
+  /** @internal Mechanical graph-merge apply through the mutation coordinator. */
+  applyIdentityMergeAtTarget(
+    target: GraphBackend | TransactionBackend,
+    retractions: readonly IdentityTransferAssertion[],
+    assertions: readonly IdentityTransferAssertion[],
+    decision?: IdentityDecisionProvenance,
+  ): Promise<Readonly<{ created: number; retracted: number }>> {
+    if (retractions.length === 0 && assertions.length === 0) {
+      return Promise.resolve({ created: 0, retracted: 0 });
+    }
+    if (this.#graph.identity === undefined) {
+      throw new ConfigurationError(
+        "Cannot apply identity merge changes to an identity-disabled graph.",
+        { code: "IDENTITY_MERGE_REQUIRES_PROFILE", graphId: this.graphId },
+      );
+    }
+    return applyIdentityChangesForContext(
+      this.#identityContext(target),
+      retractions,
+      assertions,
+      decision,
+    );
+  }
+
+  /**
+   * An opaque, in-memory snapshot of this store's reconciled schema — the
+   * merged compile-time + runtime-committed graph plus the committed version
+   * it reflects. Cache it after a verified open and hand it to
+   * {@link createAdapterStore} via `{ reconciled }` (or call
+   * {@link AdapterStoreImplementation.withBackend}) to build request-scoped
+   * stores against fresh connections with zero database round-trips. Refresh
+   * it when {@link getCommittedSchemaVersion} reports a moved version.
+   */
+  get reconciledSchema(): ReconciledSchema<G> {
+    return Object.freeze({
+      graph: this.#graph,
+      version: this.#schemaMetadata.schemaVersion,
+      hash: this.#schemaMetadata.schemaHash,
+    });
+  }
+
+  /**
+   * Reconstruction inputs for a connection rebind: the merged graph, the
+   * verbatim construction options, and the reconciled schema metadata. Lets an
+   * adapter subclass rebuild an equivalent store against a fresh backend
+   * without a verify round-trip.
+   *
+   * @internal
+   */
+  protected reconstructionState(): Readonly<{
+    graph: G;
+    options: StoreOptions | undefined;
+    schemaMetadata: StoreSchemaMetadata;
+  }> {
+    return {
+      graph: this.#graph,
+      options: this.#options,
+      schemaMetadata: this.#schemaMetadata,
+    };
+  }
+
+  /**
+   * Whether this store was constructed with `history: true` — under EITHER
+   * recorded-time ownership form. Matches `HistoryStore<G>`'s static
+   * `historyEnabled: true`: a store this is true for always answers
+   * `asOfRecorded` and stamps recorded receipts, whether TypeGraph's own
+   * capture runs underneath (`typegraph-relations` ownership) or the
+   * engine tracks history on its own (`engine-native` ownership, where
+   * TypeGraph's recorded relations are never populated). A decision that
+   * specifically needs "does TypeGraph's own capture run" — a reader of a
+   * recorded relation's own columns — must consult `storeCaptureEnabled`
+   * (`src/store/runtime-port.ts`) instead; this getter would answer `true`
+   * for an engine-native store too and lead it to read relations the engine
+   * never populates.
    *
    * @internal
    */
   get historyEnabled(): boolean {
-    return this.#captureEnabled;
+    return this.#requestedHistory;
   }
 
   /**
@@ -745,6 +2427,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get revisionTrackingEnabled(): boolean {
     return this.#revisionTrackingEnabled;
+  }
+
+  /** Whether this store may use journal-backed changed-key lineage. */
+  get revisionJournalEnabled(): boolean {
+    return this.#options?.revisionJournal !== false;
   }
 
   /**
@@ -763,6 +2450,43 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get recordedReadBound(): boolean {
     return this.#recordedReadBinding !== undefined;
+  }
+
+  /**
+   * Who allocates recorded-time revisions for this store: TypeGraph's own
+   * capture relations and clock, or this backend's engine through
+   * `recordedTime`. See {@link resolveRecordedTimeOwnership}.
+   *
+   * @internal
+   */
+  get recordedTimeOwnership(): RecordedTimeOwnership {
+    return this.#recordedTimeOwnership;
+  }
+
+  /**
+   * The behavioral subset of this store's construction options a
+   * working-copy strategy inherits: hooks, upsert coalescing, the SQL
+   * schema, the auto-refresh-statistics threshold, query defaults, and an
+   * externally-bound recorded-read relation. Read off the verbatim options
+   * this store was constructed with (the same field `evolve()` reconstructs
+   * from), never re-derived from private state, so this is the one place a
+   * strategy reaches for them.
+   *
+   * Excludes `history`/`revisionTracking` — those are the working-copy
+   * strategy's own decision, not something to inherit blindly.
+   *
+   * Public: this is the getter a custom `WorkingCopyStrategy` author is meant
+   * to call (see `forkedWorkingCopyStrategy` in `graph-merge`), not an
+   * internal implementation detail like its `historyEnabled`/
+   * `revisionTrackingEnabled`/`revisionSchema` siblings.
+   */
+  get workingCopyOptions(): WorkingCopyOptions {
+    const {
+      history: _history,
+      revisionTracking: _revisionTracking,
+      ...rest
+    } = this.#options ?? {};
+    return Object.freeze(rest);
   }
 
   // === Collections ===
@@ -789,6 +2513,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
         this.#registry,
         this.#backend,
+        this.#batchPointRead,
         this.#nodeOperations,
       );
     }
@@ -819,6 +2544,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
         this.#registry,
         this.#backend,
+        this.#batchPointRead,
+        this.#endpointSetRead,
         this.#edgeOperations,
       );
     }
@@ -867,6 +2594,79 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Dynamic Collection Access ===
 
+  #runtimeKindBinding(): RuntimeKindSchemaBinding {
+    return {
+      graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
+      schemaHash: this.#schemaMetadata.schemaHash,
+    };
+  }
+
+  #assertRuntimeKindDefinition(
+    entity: KindEntity,
+    kind: string,
+    evidence: ExtensionNodeDef | ExtensionEdgeDef,
+  ): void {
+    if (
+      this.#schemaMetadata.schemaVersion === undefined ||
+      this.#schemaMetadata.schemaHash === undefined
+    ) {
+      throw new RuntimeKindTokenError("unreconciled", entity, {
+        graphId: this.graphId,
+        kind,
+      });
+    }
+    const registered =
+      entity === "node" ?
+        this.#graph.extension?.nodes?.[kind]
+      : this.#graph.extension?.edges?.[kind];
+    if (registered === undefined || !canonicalEqual(registered, evidence)) {
+      throw new RuntimeKindTokenError("schema-mismatch", entity, {
+        graphId: this.graphId,
+        kind,
+      });
+    }
+  }
+
+  runtimeNodeKind<const K extends string, const D extends ExtensionNodeDef>(
+    kind: K,
+    definition: D,
+  ): RuntimeNodeKind<K, ExtensionObjectSchema<D["properties"]>> {
+    this.#assertRuntimeKindDefinition("node", kind, definition);
+    return createRuntimeKindToken<K, ExtensionObjectSchema<D["properties"]>>(
+      this.#runtimeKindOwner,
+      this.#runtimeKindBinding(),
+      "node",
+      kind,
+    );
+  }
+
+  runtimeEdgeKind<const K extends string, const D extends ExtensionEdgeDef>(
+    kind: K,
+    definition: D,
+  ): RuntimeEdgeKind<K, ExtensionObjectSchema<ExtensionEdgeProperties<D>>> {
+    this.#assertRuntimeKindDefinition("edge", kind, definition);
+    return createRuntimeKindToken<
+      K,
+      ExtensionObjectSchema<ExtensionEdgeProperties<D>>
+    >(this.#runtimeKindOwner, this.#runtimeKindBinding(), "edge", kind);
+  }
+
+  #resolveRuntimeKind(input: RuntimeKindInput, entity: KindEntity): string {
+    return resolveRuntimeKindInput(input, entity, (token, expectedEntity) =>
+      this.#resolveRuntimeKindToken(token, expectedEntity),
+    );
+  }
+
+  #resolveRuntimeKindToken(token: unknown, entity: KindEntity): string {
+    return resolveRuntimeKindToken(
+      token,
+      entity,
+      this.#runtimeKindOwner,
+      this.#runtimeKindBinding(),
+    );
+  }
+
   /**
    * Resolves `kind` against `collections` (either `this.nodes` or a
    * transaction-scoped — and possibly receipt-wrapped — node collection map),
@@ -876,14 +2676,37 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * lookup exactly like `this.#graph.nodes` membership is checked everywhere
    * else.
    */
-  #resolveDynamicNodeCollection(
+  #resolveDynamicNodeCollection<const K extends string>(
     collections: GraphNodeCollections<G>,
-    kind: string,
-  ): DynamicNodeCollection | undefined {
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     if (!Object.hasOwn(this.#graph.nodes, kind)) return undefined;
     return collections[
       kind as keyof G["nodes"] & string
-    ] as unknown as DynamicNodeCollection;
+    ] as unknown as DynamicNodeCollection<K>;
+  }
+
+  /** Resolve node lookups through the supplied context's collections, as {@link #edgeCollectionAccess} does for edges. */
+  #nodeCollectionAccess(collections: GraphNodeCollections<G>): Readonly<{
+    getNodeCollection: NodeCollectionLookup;
+    getNodeByRef: NodeReferenceLookup<G>;
+  }> {
+    const getNodeCollection = <const K extends string>(
+      kind: K,
+    ): DynamicNodeCollection<K> | undefined =>
+      this.#resolveDynamicNodeCollection(collections, kind);
+    const getNodeByRef = (
+      reference: Readonly<{ kind: string; id: string }>,
+    ): Promise<unknown> =>
+      readNodeByReference(
+        this.#graph,
+        (kind) => getNodeCollection(kind),
+        reference,
+      );
+    return {
+      getNodeCollection,
+      getNodeByRef: getNodeByRef as NodeReferenceLookup<G>,
+    };
   }
 
   /**
@@ -896,7 +2719,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * me the collection" pattern, prefer `getNodeCollectionOrThrow` — it
    * throws `KindNotFoundError` instead of forcing a null-check.
    */
-  getNodeCollection(kind: string): DynamicNodeCollection | undefined {
+  getNodeCollection<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K> | undefined {
     return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
@@ -905,17 +2730,38 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `KindNotFoundError` when the kind is not registered.
    *
    * The dominant graph-extension-kind access pattern: `await store.evolve(...)`
-   * returns a new store, the caller immediately operates on the new
-   * kind, and the null-check the optional variant requires is busywork.
+   * returns the Store for the resulting schema, the caller immediately
+   * operates on the new kind, and the null-check the optional variant requires
+   * is busywork.
    */
-  getNodeCollectionOrThrow(kind: string): DynamicNodeCollection {
-    const collection = this.getNodeCollection(kind);
-    if (collection === undefined) {
-      throw new KindNotFoundError(kind, "node", {
-        graphId: this.graphId,
-      });
-    }
-    return collection;
+  getNodeCollectionOrThrow<T extends RuntimeNodeKind>(
+    token: T,
+  ): RuntimeNodeCollection<T>;
+  getNodeCollectionOrThrow<const K extends string>(
+    kind: K,
+  ): DynamicNodeCollection<K>;
+  getNodeCollectionOrThrow(kindOrToken: string | RuntimeNodeKind): unknown {
+    const kind = this.#resolveRuntimeKind(kindOrToken, "node");
+    assertRegisteredNodeKinds(this.#graph, [kind]);
+    return this.#resolveDynamicNodeCollection(this.nodes, kind);
+  }
+
+  /**
+   * Reads the node a `{ kind, id }` reference names, such as an edge's
+   * `{ kind: edge.fromKind, id: edge.fromId }`; see {@link NodeReferenceLookup}
+   * for the result typing. Returns `undefined` when the node does not exist
+   * under that kind and throws `KindNotFoundError` for an unregistered kind.
+   */
+  getNodeByRef<const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<unknown> {
+    return this.#nodeCollectionAccess(this.nodes).getNodeByRef(reference);
   }
 
   /**
@@ -925,25 +2771,67 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time. For post-evolve access, prefer `getEdgeCollectionOrThrow`.
    */
-  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
+  getEdgeCollection<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]> | undefined;
+  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined;
+  getEdgeCollection(kind: string): unknown {
+    return this.#resolveDynamicEdgeCollection(this.edges, kind);
+  }
+
+  /** Returns a runtime-validated collection; throws when the kind is absent. */
+  getEdgeCollectionOrThrow<T extends RuntimeEdgeKind>(
+    token: T,
+  ): RuntimeEdgeCollection<T>;
+  getEdgeCollectionOrThrow<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]>;
+  getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection;
+  getEdgeCollectionOrThrow(kindOrToken: string | RuntimeEdgeKind): unknown {
+    return this.#requireDynamicEdgeCollection(this.edges, kindOrToken);
+  }
+
+  #requireDynamicEdgeCollection(
+    collections: GraphEdgeCollections<G>,
+    kindOrToken: string | RuntimeEdgeKind,
+  ): DynamicEdgeCollection {
+    const kind = this.#resolveRuntimeKind(kindOrToken, "edge");
+    const collection = this.#resolveDynamicEdgeCollection(collections, kind);
+    if (collection === undefined) {
+      throw new KindNotFoundError(kind, "edge", { graphId: this.graphId });
+    }
+    return collection;
+  }
+
+  #resolveDynamicEdgeCollection(
+    collections: GraphEdgeCollections<G>,
+    kind: string,
+  ): DynamicEdgeCollection | undefined {
     if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
-    return this.edges[
-      kind as keyof G["edges"] & string
+    return collections[
+      kind as EdgeKinds<G>
     ] as unknown as DynamicEdgeCollection;
   }
 
-  /**
-   * Returns the edge collection for the given kind. Throws
-   * `KindNotFoundError` when the kind is not registered.
-   */
-  getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection {
-    const collection = this.getEdgeCollection(kind);
-    if (collection === undefined) {
-      throw new KindNotFoundError(kind, "edge", {
-        graphId: this.graphId,
-      });
-    }
-    return collection;
+  /** Resolve through the supplied context's wrappers, preserving transaction and receipt ownership. */
+  #edgeCollectionAccess(collections: GraphEdgeCollections<G>): Readonly<{
+    getEdgeCollection: EdgeCollectionLookup<G>;
+    getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
+  }> {
+    const getEdgeCollection = (
+      kind: string,
+    ): DynamicEdgeCollection | undefined =>
+      this.#resolveDynamicEdgeCollection(collections, kind);
+    const getEdgeCollectionOrThrow = (
+      kindOrToken: string | RuntimeEdgeKind,
+    ): DynamicEdgeCollection =>
+      this.#requireDynamicEdgeCollection(collections, kindOrToken);
+    // Lookup erases endpoint evidence, not the selected edge's property schema.
+    return {
+      getEdgeCollection: getEdgeCollection as EdgeCollectionLookup<G>,
+      getEdgeCollectionOrThrow:
+        getEdgeCollectionOrThrow as RequiredEdgeCollectionLookup<G>,
+    };
   }
 
   // === Dynamic Props Schema Access ===
@@ -1017,9 +2905,70 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   introspect(): SchemaIntrospection {
     return introspectSchema(this.#graph, {
       graphId: this.graphId,
+      registry: this.#registry,
       schemaVersion: this.#schemaMetadata.schemaVersion,
       schemaHash: this.#schemaMetadata.schemaHash,
     });
+  }
+
+  /**
+   * Describes the merged schema and current population statistics. Bounded SQL
+   * aggregates compute the data observation, bracketed by active-schema reads.
+   */
+  async describe(): Promise<StoreDescription> {
+    return describeStore(this.#analysisContext());
+  }
+
+  /**
+   * Keyset-pages current records and reports rules they violate under the
+   * current kind schema. Undeclared properties remain valid semi-structured
+   * state. Cursors are schema-fenced; data changes remain live between pages.
+   */
+  async validateStore(
+    options: ValidateStoreOptions,
+  ): Promise<StoreValidationPage> {
+    return validateStoreImpl(this.#analysisContext(), options);
+  }
+
+  #analysisContext(
+    backend: Pick<
+      GraphBackend,
+      "dialect" | "execute" | "getActiveSchema"
+    > = this.#baseBackend,
+  ) {
+    return {
+      graph: this.#graph,
+      graphId: this.graphId,
+      backend,
+      schema: this.#sqlSchema(),
+      introspect: () => this.introspect(),
+    };
+  }
+
+  /**
+   * Pre-flights this store's graph against the committed schema — one SELECT,
+   * no DDL, no writes. Returns the structured diff, or `undefined` when no
+   * schema has been committed for this graph yet.
+   *
+   * Pass the diff to `classifySchemaChanges` for the
+   * `identical | additive | incompatible` decision, so a caller can choose
+   * between "proceed" and "ask the user" *before* attempting a commit.
+   */
+  async schemaChanges(): Promise<SchemaDiff | undefined> {
+    return getSchemaChanges(this.#backend, this.#graph);
+  }
+
+  /**
+   * Whether committing this store's graph would require a schema migration —
+   * a SELECT-only pre-flight. Also `true` when no schema has been committed
+   * yet, since that needs the privileged bootstrap too.
+   *
+   * Lets a least-privilege runtime detect "this needs the privileged path"
+   * and route accordingly, instead of discovering the migration wall partway
+   * through a user's request.
+   */
+  async requiresMigration(): Promise<boolean> {
+    return requiresMigrationImpl(this.#backend, this.#graph);
   }
 
   /**
@@ -1057,28 +3006,63 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend) =>
-        executeNodeCreateBatch(ctx, inputs, backend),
+      executeCreateBatch: (inputs, backend, options) =>
+        executeNodeCreateBatch(ctx, inputs, backend, options),
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
-      executeUpsertUpdate: (input, backend, options) =>
-        executeNodeUpsertUpdate(
+      executeNodeSetUpdate: (
+        kind,
+        patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+        options,
+      ) =>
+        executeNodeSetUpdate(
           ctx,
-          { ...input, id: input.id },
+          kind,
+          patch,
+          candidateIds,
+          candidateIdColumn,
           backend,
           options,
         ),
+      executeUpsertUpdateBatch: (entries, backend) =>
+        executeNodeUpsertUpdateBatch(ctx, entries, backend),
+      executeResolvedMutationSet: (creates, updates, backend) =>
+        executeNodeResolvedMutationSet(ctx, creates, updates, backend),
+      prepareReplacement: (kind, props) =>
+        prepareNodeReplacement(ctx, kind, props),
+      executeReplacementBatch: (kind, items, backend) =>
+        executeNodeReplacementBatch(ctx, kind, items, backend),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           nodeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
-      executeDelete: (kind, id, backend) =>
-        executeNodeDelete(ctx, kind, id, backend),
+      // `nodes.<Kind>.reparent(...)` is THE surface that moves a part, so it
+      // is the one that states `onIncumbent: "replace"`; every get-or-create
+      // path reaches the same write plan with `"refuse"`.
+      executeReparent: (kind, id, options, backend) =>
+        executeNodeReparent(ctx, kind, id, options, backend, {
+          onIncumbent: "replace",
+        }),
+      executeReparentBatch: (kind, items, backend) =>
+        executeNodeReparentBatch(ctx, kind, items, backend, {
+          onIncumbent: "replace",
+        }),
+      executeDelete: (kind, id, backend, expect) =>
+        executeNodeDelete(ctx, kind, id, backend, { expect }),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeNodeDeleteBatch(ctx, kind, ids, backend),
       executeHardDelete: (kind, id, backend) =>
         executeNodeHardDelete(ctx, kind, id, backend),
+      executeHardDeleteBatch: (kind, ids, backend) =>
+        executeNodeHardDeleteBatch(ctx, kind, ids, backend),
+      executeDeletePlan: (kind, id, backend) =>
+        executeNodeDeletePlan(ctx, kind, id, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByConstraint: (
@@ -1147,21 +3131,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend) =>
-        executeEdgeCreateBatch(ctx, inputs, backend),
+      executeCreateBatch: (inputs, backend, options) =>
+        executeEdgeCreateBatch(ctx, inputs, backend, options),
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
-      executeUpsertUpdate: (input, backend, options) =>
-        executeEdgeUpsertUpdate(ctx, input, backend, options),
+      executeUpsertUpdateBatch: (entries, backend) =>
+        executeEdgeUpsertUpdateBatch(ctx, entries, backend),
+      executeResolvedMutationSet: (creates, updates, backend) =>
+        executeEdgeResolvedMutationSet(ctx, creates, updates, backend),
       // Present only when opted in; its absence is the coalesce off switch.
-      ...(this.#options?.coalesceUnchangedUpserts === true && {
+      ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
-      executeDelete: (id, backend) => executeEdgeDelete(ctx, id, backend),
-      executeHardDelete: (id, backend) =>
-        executeEdgeHardDelete(ctx, id, backend),
+      executeDelete: (kind, id, backend) =>
+        executeEdgeDelete(ctx, kind, id, backend),
+      executeDeleteBatch: (kind, ids, backend) =>
+        executeEdgeDeleteBatch(ctx, kind, ids, backend),
+      executeHardDelete: (kind, id, backend) =>
+        executeEdgeHardDelete(ctx, kind, id, backend),
+      executeHardDeleteBatch: (kind, ids, backend) =>
+        executeEdgeHardDeleteBatch(ctx, kind, ids, backend),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (
@@ -1231,6 +3222,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   query(): InitialQueryBuilder<G, "open"> {
     return this.#createQueryForBackend(this.#backend);
+  }
+
+  /**
+   * Runs a read block whose fluent queries automatically use
+   * `executeChecked(expectedSchemaVersion)` when `.execute()` is called.
+   * A schema mismatch aborts the block with `SchemaChangedError`, so callers
+   * can put one reload-and-retry boundary around the whole block.
+   */
+  withCheckedReads<T>(
+    expectedSchemaVersion: number | undefined,
+    fn: (reads: CheckedReadScope<G>) => Promise<T>,
+  ): Promise<T> {
+    const reads: CheckedReadScope<G> = {
+      query: () =>
+        this.#createQueryForBackend(this.#backend, undefined, 1, {
+          value: expectedSchemaVersion,
+        }),
+    };
+    return fn(reads);
   }
 
   /**
@@ -1357,37 +3367,71 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns a narrow read-only view pinned to a recorded/system-time instant.
    *
    * Direct `store.asOfRecorded(T)` is diagonal bitemporal sugar: it reads the
-   * recorded-time relation as of `T` and uses the same `T` for the valid-time
-   * axis. Use `store.asOf(validT).asOfRecorded(recordedT)` when the valid and
-   * recorded axes should differ.
+   * recorded-time relation at the anchor's logical revision and uses the
+   * anchor's wall-time component for the valid-time axis. Use
+   * `store.asOf(validT).asOfRecorded(recordedT)` when the valid and recorded
+   * axes should differ.
    *
    * The returned view exposes only reconstructing-safe reads: query,
    * subgraph, graph algorithms, and collection point reads.
    *
-   * Prefer `await store.recordedNow()` as the anchor over a wall-clock
-   * timestamp: recorded instants are monotonic and can run briefly ahead of the
-   * wall clock under bursty writes, so a `new Date().toISOString()` passed here
-   * may sort before the most recent commits and silently omit them.
+   * Prefer `await store.recordedNow()` over a wall-clock timestamp. The anchor
+   * carries both the graph's strict logical revision and a non-decreasing
+   * physical wall-time high-water mark, so several commits in one millisecond
+   * remain independently addressable without manufacturing timestamp
+   * increments.
    */
   asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G> {
-    const validCoordinate = resolveReadCoordinate(
-      "asOf",
-      recordedAsOf,
-      "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
-    );
     return new RecordedStoreView(
       this,
-      withRecordedCoordinate(validCoordinate, recordedAsOf),
+      recordedDiagonalCoordinate(
+        recordedAsOf,
+        "Use await store.recordedNow() as the anchor, or asRecordedInstant(value) only for an instant previously read from recordedNow().",
+      ),
     );
+  }
+
+  /**
+   * Resolves recorded allocation time with one indexed lookup. Equal timestamps
+   * choose the highest revision. A future time returns the latest retained cut;
+   * a cut before the first allocation returns undefined only when complete coverage is known.
+   * Earlier unlogged or pruned cuts refuse rather than implying an empty graph.
+   */
+  async resolveRecordedInstant(
+    wallTime: string,
+  ): Promise<RecordedInstant | undefined> {
+    return lookupRecordedAnchor(this.#recordedAnchorLogContext(), wallTime);
+  }
+
+  /** Retire allocation coverage and delete at most one bounded batch per call. */
+  async pruneRecordedInstants(
+    before: string,
+    options?: PruneRecordedInstantsOptions,
+  ): Promise<PruneRecordedInstantsResult> {
+    return pruneRecordedAnchors(
+      this.#recordedAnchorLogContext(),
+      before,
+      options,
+    );
+  }
+
+  #recordedAnchorLogContext(): RecordedAnchorLogContext {
+    return {
+      backend: this.#baseBackend,
+      schema: this.#sqlSchema(),
+      graphId: this.graphId,
+      captureEnabled: this.#captureEnabled,
+    };
   }
 
   /**
    * Returns the latest recorded-time instant captured for this graph — the
    * recorded high-water mark. After guarding the `undefined` case,
    * `store.asOfRecorded(checkpoint)` reconstructs everything committed so far, a
-   * deterministic anchor that avoids guessing with the wall clock (recorded
-   * instants are monotonic and can run briefly ahead of wall-clock time under
-   * bursty writes). Capture each anchor right after the writes it should cover.
+   * deterministic anchor that avoids guessing with the wall clock. Its logical
+   * revision is strictly monotonic per graph while its timestamp is a
+   * non-decreasing physical wall-time high-water mark. Capture each anchor right
+   * after the writes it should cover.
    *
    * Returns `undefined` until the first write has been captured, so on a
    * brand-new graph guard the composition — `asOfRecorded(undefined)` rejects
@@ -1405,6 +3449,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * success), not the global clock.
    */
   async recordedNow(): Promise<RecordedInstant | undefined> {
+    if (this.#engineNativeHistory) {
+      return this.#engineRecordedInstant(this.#backend);
+    }
     if (!this.#captureEnabled) {
       throw new ConfigurationError(
         "recordedNow() requires a store created with { history: true }.",
@@ -1415,6 +3462,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    await this.#ensureAllocationOrigin();
     const recordedAt = await withRecordedRelationsPrecondition(
       readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId),
       { dialect: this.#backend.dialect, surface: "recorded-now" },
@@ -1425,14 +3473,73 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Reads `session`'s own recorded-time revision and mints the `e1:`
+   * {@link RecordedInstant} for it — the ONE place that calls
+   * `recordedTime.revisionNow`, consulted by {@link recordedNow} and
+   * {@link revisionNow} (both on the root backend, so they read the current
+   * COMMITTED revision) and by the two transaction-commit sites that stamp
+   * `TransactionReceipt.recorded` (on the still-open committing transaction
+   * handle, so they read that transaction's PENDING revision — see
+   * `EngineRecordedTimeMembers.revisionNow`'s own doc comment for why that
+   * is the correct value to stamp into a receipt). One owner for "what
+   * instant does this transaction get," beside `flush()`'s own
+   * TypeGraph-capture answer.
+   */
+  async #engineRecordedInstant(
+    session: RecordedTimeSession,
+  ): Promise<RecordedInstant> {
+    const recordedTime = requireRecordedTime(
+      this.#baseBackend,
+      "engine-native recorded time",
+    );
+    const revision = await recordedTime.revisionNow(session);
+    return createEngineRecordedInstant(revision.revision, revision.recordedAt);
+  }
+
+  /**
+   * The engine-native counterpart to a capture flush's
+   * {@link RecordedFlushInstants}: one entry, for this store's one graph.
+   * The ONE owner of that shape on this path, called by both transaction
+   * sites that stamp `TransactionReceipt.recorded` under engine-native
+   * ownership, so neither can spell the map differently from the other.
+   * `identityTransitions` is a measured `0`: the identity transition log is
+   * written only by a TypeGraph capture session's flush, and engine-native
+   * ownership runs none.
+   */
+  async #engineRecordedFlushInstants(
+    session: RecordedTimeSession,
+  ): Promise<RecordedFlushInstants> {
+    return new Map([
+      [
+        this.graphId,
+        {
+          recordedAt: await this.#engineRecordedInstant(session),
+          identityTransitions: 0,
+        },
+      ],
+    ]);
+  }
+
+  /**
    * Returns the durable graph revision used by graph branching. It is undefined
    * until the first successful tracked write, which is itself a stable initial
    * anchor. Unlike {@link recordedNow}, this is also available on a live Store
    * created with `{ revisionTracking: true }`.
    *
+   * Under engine-native ownership, `revisionTrackingEnabled` is always
+   * false (graph-merge uses a content fingerprint instead), but a `history: true` store
+   * still answers from `recordedTime.revisionNow` on the root backend —
+   * the same source `recordedNow()` uses — so this and `recordedNow()`
+   * report the same value there, unlike under TypeGraph-owned tracking
+   * where `revisionTracking: true` without `history` gives this a value
+   * `recordedNow()` refuses to give.
+   *
    * @internal
    */
-  async revisionNow(): Promise<string | undefined> {
+  async revisionNow(): Promise<RecordedInstant | undefined> {
+    if (this.#engineNativeHistory) {
+      return this.#engineRecordedInstant(this.#backend);
+    }
     if (!this.#revisionTrackingEnabled) return undefined;
     return readRecordedClock(this.#backend, this.#sqlSchema(), this.graphId);
   }
@@ -1443,30 +3550,112 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * branch from one independent store from matching a coincident timestamp in
    * another store.
    *
+   * Reads the origin row fresh on every call rather than caching it on this
+   * `Store` instance: two `Store` objects can legitimately observe the same
+   * graph (a second live `Store` opened over the same backend/graphId), and
+   * only one of them runs `clear()`'s origin rotation at a time. A cached
+   * copy on the OTHER instance would keep answering with the pre-rotation
+   * nonce until that instance happened to be recreated — `computeBaseVersion`
+   * would then mint a stale anchor from it, and every merge into that
+   * instance would fail at commit for no reason visible to the caller.
+   * `ensureRevisionOrigin`'s own `INSERT … ON CONFLICT DO NOTHING` already
+   * makes concurrent first-time minting safe without a per-Store memo.
+   *
    * @internal
    */
-  async revisionOriginNow(): Promise<string> {
+  async #ensureAllocationOrigin(): Promise<string> {
     if (!this.#revisionTrackingEnabled) {
       throw new ConfigurationError(
-        "revisionOriginNow() requires revisionTracking: true or history: true.",
-        { code: "REVISION_ORIGIN_REQUIRES_TRACKING" },
+        "allocationOwner() requires revisionTracking: true or history: true.",
+        { code: "ALLOCATION_OWNER_REQUIRES_TRACKING", graphId: this.graphId },
       );
     }
-    const pendingOrigin =
-      this.#revisionOrigin ??
-      ensureRevisionOrigin(this.#baseBackend, this.#sqlSchema(), this.graphId);
-    this.#revisionOrigin = pendingOrigin;
-    try {
-      return await pendingOrigin;
-    } catch (error) {
-      // A transient DDL/connection failure must not permanently poison this
-      // Store's cached initialization promise. Preserve a newer in-flight
-      // attempt if another caller replaced it before this rejection arrived.
-      if (this.#revisionOrigin === pendingOrigin) {
-        this.#revisionOrigin = undefined;
-      }
-      throw error;
+    return ensureRevisionOrigin(
+      this.#baseBackend,
+      this.#recordedRevisionOrigins,
+      this.#sqlSchema(),
+      this.graphId,
+    );
+  }
+
+  async #readRecordedReadOwner(
+    target: TransactionBackend,
+    execution?: OptionalTransactionExecution,
+  ): Promise<GraphAllocationOwnerRead> {
+    const binding = this.#recordedReadBinding;
+    if (binding?.kind === "external" && binding.owner !== undefined)
+      return { owner: await binding.owner(target), sharesSnapshot: false };
+    return withRecordedRelationsPrecondition(
+      readGraphAllocationOwnerSession(
+        target,
+        binding?.schema ?? this.#sqlSchema(),
+        this.graphId,
+        execution ?? { mode: "sequential" },
+      ),
+      { dialect: this.#backend.dialect, surface: "allocation-owner" },
+    );
+  }
+
+  /** Captures the owner of recorded reads, including externally managed relations. */
+  async recordedReadOwner(): Promise<GraphAllocationOwner> {
+    if (this.#recordedReadBinding?.kind === "external") {
+      const { owner } = await this.#readRecordedReadOwner(this.#backend);
+      if (owner === undefined)
+        throw new ConfigurationError(
+          "External recorded relations have no allocation owner.",
+          { code: "EXTERNAL_RECORDED_OWNER_REQUIRED", graphId: this.graphId },
+        );
+      return owner;
     }
+    return this.allocationOwner();
+  }
+
+  /** Captures the native write allocation, including on an empty tracked graph. */
+  async allocationOwner(): Promise<GraphAllocationOwner> {
+    return recordedAnchorOwner(
+      this.#sqlSchema(),
+      await this.#ensureAllocationOrigin(),
+    );
+  }
+
+  /** Rotate an unpublished physical fork before independent writes; restored backups retain their owner. */
+  async rotateAllocationOwner(
+    expectedOwner: GraphAllocationOwner,
+  ): Promise<GraphAllocationOwner> {
+    if (
+      !this.revisionTrackingEnabled ||
+      this.#recordedTimeOwnership === "engine-native"
+    )
+      throw new ConfigurationError(
+        "rotateAllocationOwner() requires native revisionTracking: true or history: true.",
+        { code: "ALLOCATION_OWNER_REQUIRES_TRACKING", graphId: this.graphId },
+      );
+    return rotateGraphAllocationOwner(
+      this.#baseBackend,
+      this.#sqlSchema(),
+      this.graphId,
+      this.introspect().schemaVersion,
+      expectedOwner,
+    );
+  }
+
+  /** Mint a token usable with {@link Store.changesSince}, when lineage is available. */
+  async lineageRevisionNow(): Promise<EngineRevision | undefined> {
+    const lineage = resolveLineage(this);
+    if (lineage === undefined) return undefined;
+    return lineage.revision(this.#backend);
+  }
+
+  /**
+   * Lists entity keys changed since a lineage revision. History-enabled
+   * stores use recorded relations; bundled SQLite and PostgreSQL live stores
+   * with revision tracking use the entity-key journal. Unknown backends, a
+   * span in which an identity assertion changed, and revisions with
+   * incomplete evidence return `unbounded`: the keys name nodes and edges
+   * only, so an identity write is never reported as an exact delta.
+   */
+  async changesSince(revision: EngineRevision): Promise<LineageDelta> {
+    return changesSinceIncludingIdentity(this, this.#backend, revision);
   }
 
   /**
@@ -1544,6 +3733,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: this.#backend,
         registry: this.#registry,
         createQuery: () => this.query(),
+        batchPointRead: this.#batchPointRead,
       });
     }
     return this.#search;
@@ -1552,19 +3742,51 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Batch Query Execution ===
 
   /**
-   * Executes multiple queries and returns a typed tuple of results.
+   * Runs several queries in sequence, returning a typed tuple. The portable
+   * guarantee is N serialized query executions — never one round trip.
    *
-   * Each query preserves its own result type, projection, filtering, sorting,
-   * and pagination.
+   * **Cost.** At least one statement per query, sometimes two: a query whose
+   * selective-field mapping falls back re-runs as a full fetch, and that
+   * fallback is detected *after* the selective statement has already
+   * executed. It clears the fast path, so a reused query instance pays the
+   * double only once — but the builder is immutable, so a query rebuilt per
+   * request pays it every request.
    *
-   * **Snapshot consistency is conditional.** When
-   * `backend.capabilities.transactions` is `true`, queries run sequentially
-   * on a single connection inside an implicit transaction and observe the
-   * same database snapshot. When transactions are unavailable
-   * (Cloudflare D1, `drizzle-orm/neon-http`), queries run sequentially over
-   * independent connections and may observe writes that landed between them.
-   * Branch on `backend.capabilities.transactions` if you need a guaranteed
-   * snapshot.
+   * With `backend.capabilities.execution.interactiveTransactions` the queries share one
+   * transaction; how that reaches the wire is the adapter's business. A SQL
+   * backend frames them with `begin`/`commit`, putting a networked one at
+   * N+2 round trips *at best*, while Durable Objects use an ambient storage
+   * transaction with no framing statements. Without transactions there is no
+   * framing. Connection reuse is a separate question from transaction
+   * support: the no-transaction path passes the same backend object, so an
+   * adapter may reuse one client there too. The portable guarantee is only
+   * that at most one query is in flight at a time.
+   *
+   * **Not a snapshot by default.** PostgreSQL defaults to read-committed
+   * isolation, so a later query can observe a commit the earlier ones did not.
+   * When multiple reads need one stable snapshot, use `tx.query()` or the
+   * transaction's set-oriented reads inside `store.transaction(fn, {
+   * isolationLevel: "repeatable_read" })`. `tx.batchOnce()` is one statement
+   * regardless of isolation level. Transaction reads require a backend with
+   * interactive transactions, and a history-enabled store on PostgreSQL
+   * additionally requires `accessMode: "read_only"` for a read-only transaction.
+   *
+   * **Will not fix an N+1.** Serializing N queries does not reduce their
+   * number. The alternatives are set-oriented or chunked rather than
+   * fixed-cost: `.traverse()` compiles a whole chain to one statement;
+   * `store.subgraph()` costs 2 statements on SQLite and 3 on PostgreSQL
+   * however large the result; `getByIds()` issues one statement per
+   * bind-limit chunk, falling back to one per distinct id where the backend
+   * exposes no batch read; `bulkFindByIndex()` costs one probe plus that same
+   * chunked hydration.
+   *
+   * **Versus `Promise.all`.** Workload- and adapter-dependent in both
+   * directions. `Promise.all` overlaps its queries against a pool with idle
+   * capacity, but it does not necessarily hold N connections, and against a
+   * single client or a saturated pool it queues. `batch()` keeps at most one
+   * query in flight, so it pays the sum of their latencies — but it can still
+   * come out ahead where connection acquisition dominates. Measure rather
+   * than assume.
    *
    * Read-only — use `bulkCreate`, `bulkInsert`, etc. for write batching.
    *
@@ -1599,13 +3821,272 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // scope — which demands executeStatement on the transaction target — for a
     // path that performs no writes and needs no capture.
     return runOptionallyInTransaction(this.#baseBackend, async (target) => {
+      const queryBackend = this.#createHookedQueryBackend(target);
       const results: unknown[] = [];
       for (const query of queries) {
-        const result = await query.executeOn(target);
+        const result = await query.executeOn(queryBackend);
         results.push(result);
       }
       return results as BatchResults<Queries>;
     });
+  }
+
+  /**
+   * Executes independent relational queries as exactly one SQL statement and
+   * returns their typed results in input order. An empty input executes zero
+   * statements.
+   *
+   * Each read is embedded as a CTE and its rows are returned through a JSON
+   * envelope. Unlike {@link batch}, this method opens no transaction and has
+   * no sequential fallback: one call means one statement on every supported
+   * backend. Fluent queries and the reads built by the callback are composable
+   * here.
+   */
+  async batchOnce<const Queries extends OneStatementBatchReads>(
+    build: (read: BatchReadBuilder<G>) => Queries,
+    options?: BatchOnceOptions,
+  ): Promise<OneStatementBatchResults<Queries>> {
+    return this.#batchOnceForBackend(this.#baseBackend, 1, build, options);
+  }
+
+  #createBatchReadBuilder(
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+  ): BatchReadBuilder<G> {
+    return {
+      neighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return createNeighborRead(
+          this.#neighborContext(backend, attempt),
+          source,
+          options,
+        );
+      },
+      countNeighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return createNeighborCountRead(
+          this.#neighborContext(backend, attempt),
+          source,
+          options,
+        );
+      },
+      subgraph: (root, options) =>
+        this.#createSubgraphRead(root, options, backend, attempt),
+    };
+  }
+
+  async #batchOnceForBackend<const Queries extends OneStatementBatchReads>(
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+    build: (read: BatchReadBuilder<G>) => Queries,
+    options?: BatchOnceOptions,
+  ): Promise<OneStatementBatchResults<Queries>> {
+    return withPinnedReadInstant(() =>
+      executeOneStatementBatch(
+        this.#createHookedQueryBackend(backend, attempt),
+        this.graphId,
+        build(this.#createBatchReadBuilder(backend, attempt)),
+        options,
+      ),
+    );
+  }
+
+  /** Reads hydrated adjacent nodes and their connecting edges in one statement. */
+  async neighbors<const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: NeighborReadOptions<G, K>,
+  ): Promise<readonly NeighborResult<G, K>[]> {
+    this.#assertNeighborKinds(source, options.edges);
+    return readNeighbors(this.#neighborContext(), source, options);
+  }
+
+  /** Counts visible relationships to adjacent nodes without hydrating them. */
+  async countNeighbors<const K extends EdgeKinds<G>>(
+    source: GraphNodeReferenceInput<G>,
+    options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+  ): Promise<number> {
+    this.#assertNeighborKinds(source, options.edges);
+    return countNeighborsImpl(this.#neighborContext(), source, options);
+  }
+
+  #neighborContext(
+    backend: GraphBackend | TransactionBackend = this.#backend,
+    attempt = 1,
+  ): Parameters<typeof readNeighbors<G, EdgeKinds<G>>>[0] {
+    return {
+      graphId: this.graphId,
+      backend: this.#createHookedQueryBackend(backend, attempt),
+      schema: this.#sqlSchema(),
+      defaultTemporalMode: this.#graph.defaults.temporalMode,
+      registry: this.#registry,
+    };
+  }
+
+  #assertNeighborKinds(
+    source: GraphNodeReferenceInput<G>,
+    edgeKinds: readonly EdgeKinds<G>[],
+  ): void {
+    assertRegisteredNodeKinds(this.#graph, [source.kind]);
+    assertRegisteredEdgeKinds(this.#graph, edgeKinds);
+  }
+
+  /**
+   * Reads several edge kinds from heterogeneous source nodes with round trips
+   * independent of the number of licensed edge/source-kind combinations.
+   *
+   * Results are flattened in source-group/id order. Repeated sources receive
+   * independent edge arrays, and sources with no matching edges remain present
+   * with an empty array. Inputs that exceed the backend bind budget are split
+   * into source chunks without splitting one source across statements.
+   */
+  async bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    return this.#bulkFindEdgesByEndpoint("from", params, options);
+  }
+
+  /** Reverse-direction mirror of bulkFindEdgesFrom, grouped by target. */
+  async bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
+    const results = await this.#bulkFindEdgesByEndpoint(
+      "to",
+      { sources: params.targets, edgeKinds: params.edgeKinds },
+      options,
+    );
+    return results.map(({ source, edges }) => ({ target: source, edges }));
+  }
+
+  async #bulkFindEdgesByEndpoint<const K extends EdgeKinds<G>>(
+    side: "from" | "to",
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    const operation = side === "from" ? "bulkFindEdgesFrom" : "bulkFindEdgesTo";
+    assertRegisteredNodeKinds(
+      this.#graph,
+      params.sources.map((group) => group.kind),
+    );
+    assertRegisteredEdgeKinds(this.#graph, params.edgeKinds);
+    // The kinds are registered (asserted above); each id is the caller's own
+    // pairing, echoed back as the result's reference.
+    const sources = params.sources.flatMap((group) =>
+      group.ids.map((id) => ({ kind: group.kind, id })),
+    ) as readonly GraphNodeReferenceInput<G>[];
+
+    if (sources.length === 0 || params.edgeKinds.length === 0) {
+      return sources.map((source) => ({ source, edges: [] }));
+    }
+
+    const readEndpointSet =
+      this.#baseBackend.findEdgesByHeterogeneousEndpointSet;
+    if (readEndpointSet === undefined) {
+      throw new ConfigurationError(
+        `store.${operation}() requires a backend that can read heterogeneous endpoint and edge-kind sets in set-oriented statements.`,
+        {
+          backend: this.#baseBackend.dialect,
+          capability: "findEdgesByHeterogeneousEndpointSet",
+          operation,
+        },
+        {
+          suggestion: `Use per-edge-kind ${side === "from" ? "bulkFindFrom" : "bulkFindTo"} calls explicitly if that round-trip tradeoff is acceptable.`,
+        },
+      );
+    }
+
+    const limitPerInput = options?.limitPerInput;
+    if (
+      limitPerInput !== undefined &&
+      (!Number.isInteger(limitPerInput) || limitPerInput <= 0)
+    ) {
+      throw new ValidationError(
+        "bulk endpoint reads require limitPerInput to be a positive integer",
+        {
+          entityType: "edge",
+          kind: params.edgeKinds.join(","),
+          issues: [
+            {
+              path: "limitPerInput",
+              message: `Expected a positive integer, received ${String(limitPerInput)}`,
+              code: "invalid_value",
+            },
+          ],
+        },
+      );
+    }
+
+    const temporal = resolveTemporalReadParams(
+      options,
+      this.#graph.defaults.temporalMode,
+    );
+    const endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"] =
+      sources;
+    const rows = await readEndpointSet({
+      graphId: this.graphId,
+      side,
+      endpoints,
+      edgeKinds: params.edgeKinds,
+      ...(limitPerInput !== undefined &&
+        this.#baseBackend.capabilities.windowFunctions && {
+          limitPerEndpoint: limitPerInput,
+        }),
+      ...temporal,
+    });
+
+    const edgesBySource = new Map<string, GraphEdgeForKinds<G, K>[]>();
+    for (const row of rows) {
+      const edge = rowToEdge(row) as GraphEdgeForKinds<G, K>;
+      const key =
+        side === "from" ?
+          `${edge.fromKind}\0${edge.fromId}`
+        : `${edge.toKind}\0${edge.toId}`;
+      const bucket = edgesBySource.get(key);
+      if (bucket === undefined) edgesBySource.set(key, [edge]);
+      else bucket.push(edge);
+    }
+
+    return sources.map((source) => {
+      const bucket = edgesBySource.get(`${source.kind}\0${source.id}`) ?? [];
+      const edges =
+        limitPerInput === undefined ?
+          [...bucket]
+        : bucket.slice(0, limitPerInput);
+      return { source, edges };
+    });
+  }
+
+  /**
+   * Token-validated sibling of `bulkFindEdgesFrom` for persisted runtime kinds.
+   * Validation and type recovery happen here; execution delegates to the same
+   * set-oriented backend path as the compile-time API.
+   */
+  async bulkFindRuntimeEdgesFrom<
+    NT extends RuntimeNodeKind,
+    ET extends RuntimeEdgeKind,
+  >(
+    params: BulkFindRuntimeEdgesFromParams<NT, ET>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]> {
+    const sources = params.sources.map((group) => ({
+      kind: this.#resolveRuntimeKind(group.kind, "node"),
+      ids: group.ids,
+    }));
+    const edgeKinds = params.edgeKinds.map((token) =>
+      this.#resolveRuntimeKind(token, "edge"),
+    );
+    const result = await this.bulkFindEdgesFrom(
+      {
+        sources,
+        edgeKinds,
+      } as unknown as BulkFindEdgesFromParams<G, EdgeKinds<G>>,
+      options,
+    );
+    return result as unknown as readonly BulkFindRuntimeEdgesFromResult<
+      NT,
+      ET
+    >[];
   }
 
   // === Subgraph Extraction ===
@@ -1613,51 +4094,122 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Extracts a typed subgraph by traversing from a root node.
    *
-   * Performs a BFS traversal from `rootId` following the specified edge kinds,
-   * returning an indexed result with adjacency maps for immediate traversal.
+   * Performs a BFS traversal from `root` following the specified edge kinds,
+   * returning the reached nodes and edges as plain data; `indexSubgraph`
+   * builds (kind, id) lookups over them.
+   *
+   * `root` is a `{ kind, id }` reference. Node rows are keyed by (kind, id),
+   * so two nodes of different kinds may share an id; every lookup takes both,
+   * and a walk that reaches both returns both.
    *
    * @example
    * ```typescript
-   * const sg = await store.subgraph(run.id, {
+   * const sg = await store.subgraph(run, {
    *   edges: ["has_task", "runs_agent", "uses_skill"],
    *   maxDepth: 4,
    * });
+   * const { node, outgoing, incoming } = indexSubgraph(sg);
    *
    * // Root node (the traversal starting point)
    * console.log(sg.root?.kind);
    *
-   * // Lookup by ID
-   * const task = sg.nodes.get(taskId);
+   * // Lookup by kind and id
+   * const task = node({ kind: "Task", id: taskId });
    *
-   * // Forward adjacency: edges of a kind from a node
-   * const taskEdges = sg.adjacency.get(run.id)?.get("has_task") ?? [];
+   * // Outgoing edges of a kind from a node, and the nodes they reach
+   * const taskEdges = outgoing(run, "has_task");
+   * const tasks = taskEdges.map((edge) =>
+   *   node({ kind: edge.toKind, id: edge.toId }),
+   * );
    *
-   * // Reverse adjacency: edges of a kind pointing to a node
-   * const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
+   * // Incoming edges of a kind pointing to a node
+   * const parentEdges = incoming({ kind: "Task", id: taskId }, "has_task");
    * ```
    */
   async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
-    options: SubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     // The public surface is valid-time only (`recordedAsOf` is typed `never`).
     // Guard JS callers who bypass the type so a leaked recorded pin can't
     // silently switch this read onto the recorded relation; recorded subgraph
     // reads come through subgraphAtCoordinate (store.asOfRecorded(...).subgraph).
+    this.#assertPublicSubgraphOptions(options);
+    // After the guard, the public read is just the coordinate path with no
+    // recorded pin — delegate so the executeSubgraph wiring lives in one place.
+    return this.subgraphAtCoordinate(root, options);
+  }
+
+  #createSubgraphRead<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  >(
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P>,
+    backend: GraphBackend | TransactionBackend,
+    attempt: number,
+  ): SubgraphRead<G, NK, EK, P> {
+    this.#assertPublicSubgraphOptions(options);
+    return createSubgraphRead(
+      this.#sessionSubgraphParams(root, options, backend, attempt),
+    );
+  }
+
+  #executeSessionSubgraph<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G> = NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
+  >(
+    root: GraphNodeReferenceInput<G>,
+    options: SubgraphOptions<G, EK, NK, P, C>,
+    txBackend: TransactionBackend,
+    attempt: number,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+    this.#assertPublicSubgraphOptions(options);
+    return executeSessionSubgraph(
+      this.#sessionSubgraphParams(root, options, txBackend, attempt),
+    );
+  }
+
+  #sessionSubgraphParams<
+    const EK extends EdgeKinds<G>,
+    const NK extends NodeKinds<G>,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+    const C extends SubgraphCompositionSelection | undefined,
+  >(
+    root: GraphNodeReferenceInput<G>,
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+    backend: GraphBackend | TransactionBackend,
+    attempt?: number,
+  ) {
+    return {
+      graph: this.#graph,
+      graphId: this.graphId,
+      root,
+      backend: this.#createHookedQueryBackend(backend, attempt),
+      dialect: getDialect(backend.dialect),
+      schema: this.#schema,
+      recordedReadBinding: this.#recordedReadBinding,
+      registry: this.#registry,
+      options,
+    };
+  }
+
+  #assertPublicSubgraphOptions(options: unknown): void {
     assertNoRecordedCoordinate(options, {
       code: "SUBGRAPH_RECORDED_ASOF_INTERNAL_ONLY",
       message:
         "recordedAsOf is only available through store.asOfRecorded(...).subgraph(...).",
       suggestion:
-        "Use store.asOfRecorded(recordedAt).subgraph(rootId, options) instead of passing recordedAsOf directly.",
+        "Use store.asOfRecorded(recordedAt).subgraph(root, options) instead of passing recordedAsOf directly.",
     });
-    // After the guard, the public read is just the coordinate path with no
-    // recorded pin — delegate so the executeSubgraph wiring lives in one place.
-    return this.subgraphAtCoordinate(rootId, options);
   }
 
   /**
@@ -1671,11 +4223,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   subgraphAtCoordinate<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
-    options: InternalSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
+    root: GraphNodeReferenceInput<G>,
+    options: InternalSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     const coordinate = resolveReadCoordinate(
       options.temporalMode ?? this.#graph.defaults.temporalMode,
       options.asOf,
@@ -1684,19 +4237,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       options.recordedAsOf === undefined ?
         coordinate
       : withRecordedCoordinate(coordinate, options.recordedAsOf);
-    return executeSubgraph({
-      graph: this.#graph,
-      graphId: this.graphId,
-      rootId,
-      backend: this.#recordedReads.backendForCoordinate(
-        readCoordinate,
-        "recorded-subgraph",
+    return executeSubgraph(
+      this.#sessionSubgraphParams(
+        root,
+        options,
+        this.#recordedReads.backendForCoordinate(
+          readCoordinate,
+          "recorded-subgraph",
+        ),
       ),
-      dialect: getDialect(this.#backend.dialect),
-      schema: this.#schema,
-      recordedReadBinding: this.#recordedReadBinding,
-      options,
-    });
+    );
   }
 
   /**
@@ -1777,40 +4327,44 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot police this: it never sees the raw handle's traffic, so it also
    * cannot drain a raw statement still in flight when the transaction commits.
    *
-   * **Backends without transactions.** When `backend.capabilities.transactions`
-   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method runs the
-   * callback against the same backend used outside `transaction()` — writes
-   * are applied as they happen and a thrown error does **not** roll back
-   * earlier writes inside the callback. Branch on
-   * `backend.capabilities.transactions` if you require atomicity:
+   * **Backends without transactions.** When `backend.capabilities.execution.interactiveTransactions`
+   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method refuses
+   * before invoking the callback. A callback-shaped API that silently applies
+   * writes one by one is not a transaction and would make the atomicity
+   * contract depend on backend selection. Use the Store's ordinary write
+   * methods for deliberately non-atomic work, or provide a backend with real
+   * transaction support:
    *
    * ```typescript
-   * if (backend.capabilities.transactions) {
+   * if (backend.capabilities.execution.interactiveTransactions) {
    *   await store.transaction(async (tx) => { ... });
-   * } else {
-   *   // sequential, non-atomic — handle partial-failure recovery yourself
    * }
    * ```
    *
-   * @param fn The callback run inside the transaction boundary.
-   * @param options Optional {@link TransactionOptions} forwarded to the
-   *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
-   *   without isolation-level support ignore it; the non-transactional
-   *   fallback ignores it entirely. Stores created with `{ history: true }`
-   *   require read-committed semantics for PostgreSQL recorded-clock capture and
-   *   reject stronger snapshot isolation levels.
+   * @param fn The callback run inside the transaction boundary. See
+   *   {@link StoreTransactionOptions} for what `options.retry` requires of it.
+   * @param options Optional {@link StoreTransactionOptions}. Every field but
+   *   `retry` is forwarded to the backend verbatim (e.g.
+   *   `isolationLevel: "serializable"` on Postgres — backends without
+   *   isolation-level support ignore it). On non-transactional backends, the
+   *   method refuses before invoking `fn`. A concurrent schema commit can make
+   *   a snapshot-isolated PostgreSQL write fail with the database's normal
+   *   serialization error; without `retry` that surfaces as
+   *   `TransactionConflictError` after one try. Stores created with
+   *   `{ history: true }` require read-committed semantics for recorded-clock
+   *   capture.
    */
   transaction<T>(
     this: AdapterHistoryStore<G, TNativeTransaction>,
     fn: (
       tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T>;
 
   transaction<T>(
     fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T>;
 
   async transaction<T>(
@@ -1819,12 +4373,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       | ((
           tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
         ) => Promise<T>),
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const { result } = await this.#runTransaction(invoke, options, undefined);
+    const { result } = await this.#runTransaction(
+      invoke,
+      options,
+      undefined,
+      "store.transaction()",
+    );
     return result;
   }
 
@@ -1844,14 +4403,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
-   * non-transactional backends, the receipt is still returned, but it describes
-   * operations that individually committed rather than one atomic commit; if the
-   * callback rejects on such a backend, no receipt is returned even though
-   * earlier operations committed individually.
+   * non-transactional backends, this method refuses before invoking the
+   * callback, so it cannot produce a receipt. Use ordinary Store writes when
+   * deliberately performing non-atomic work.
    *
    * For stores created with `{ history: true }`, `receipt.recorded` is the
    * recorded commit instant this transaction allocated for the store's
-   * graph, or `undefined` when nothing was captured.
+   * graph, or `undefined` when nothing was captured or requested.
    *
    * The callback receives a {@link MeasurableTransactionContext}: call
    * `tx.measure((scoped) => ...)` to scope a sub-receipt to the writes made
@@ -1874,14 +4432,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     fn: (
       tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   transactionWithReceipt<T>(
     fn: (
       tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   async transactionWithReceipt<T>(
@@ -1892,20 +4450,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       | ((
           tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
         ) => Promise<T>),
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const receiptRecorder = createTransactionReceiptRecorder();
-    const { result, recordedByGraph } = await this.#runTransaction(
+    // The receipt recorder is attempt-scoped (a rolled-back attempt's counts
+    // must never survive into the one that commits), so `#runTransaction`
+    // builds a fresh one per attempt from this factory and hands back the
+    // committed attempt's own recorder.
+    const { result, recordedByGraph, recorder } = await this.#runTransaction(
       invoke,
       options,
-      receiptRecorder,
+      createTransactionReceiptRecorder,
+      "store.transactionWithReceipt()",
     );
     return transactionOutcome(
       result,
-      receiptRecorder,
+      requireDefined(
+        recorder,
+        "store.transactionWithReceipt(): the committed attempt produced no receipt recorder",
+      ),
       recordedByGraph,
       this.graphId,
     );
@@ -1915,119 +4480,259 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     invoke: (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    backendOptions: TransactionOptions | undefined,
-    receiptRecorder: TransactionReceiptRecorder | undefined,
+    options: StoreTransactionOptions | undefined,
+    createReceiptRecorder:
+      | ((access: TransactionWriteAccess) => TransactionReceiptRecorder)
+      | undefined,
+    operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
-    // Without a real transaction the tx-scoped collections would be
-    // bound to the same backend as this.nodes/this.edges and exposing
-    // the cached versions avoids rebuilding the proxies on every call.
-    // An isolation-level request in the options is equally meaningless here.
-    if (!this.#backend.capabilities.transactions) {
-      let nodes = this.nodes;
-      let edges = this.edges;
-      if (receiptRecorder !== undefined) {
-        ({ nodes, edges } = wrapTransactionCollections(
-          nodes,
-          edges,
-          receiptRecorder,
-        ));
-      }
-      const fallbackContext: AdapterTransactionContext<G, TNativeTransaction> =
-        {
-          nodes,
-          edges,
-          // No real transaction: `tx.sql` is absent and there is no atomicity.
-          sqlAvailability: "unavailable",
-          backend: createTransactionReadBackend(this.#backend),
-          [TRANSACTION_RUNTIME]: {
-            backend: this.#backend,
-            runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
-              this.#withOperationHooks(
-                this.#createOperationContext(operation, "node", kind, id),
-                hookedFunction,
-              ),
-          },
-          getNodeCollection: (kind: string) =>
-            this.#resolveDynamicNodeCollection(nodes, kind),
-        };
-      Object.defineProperty(fallbackContext, TRANSACTION_RUNTIME, {
-        configurable: false,
-        enumerable: false,
-        writable: false,
+    if (!this.#backend.capabilities.execution.interactiveTransactions) {
+      const transactionVerdict = resolveBatchWriteVerdict(this.#backend, {
+        needs: "interactive-callback",
       });
-      // `measure` on this non-transactional fallback scopes writes that
-      // individually committed rather than one atomic commit, mirroring the
-      // receipt caveat.
-      const result = await invoke(
-        receiptRecorder === undefined ? fallbackContext : (
-          this.#attachMeasure(fallbackContext)
-        ),
+      throw new UnsupportedBackendCapabilityError(
+        operation,
+        "execution.interactiveTransactions",
+        {
+          graphId: this.graphId,
+          dialect: this.#backend.dialect,
+          ...batchRefusalDetails(transactionVerdict),
+        },
+        "Use a backend with transaction support, or call ordinary Store " +
+          "write methods when non-atomic work is intentional.",
+        batchRefusalSuffix(transactionVerdict),
       );
-      return { result, recordedByGraph: undefined };
     }
+
+    // `retry` is TypeGraph's own option and is never part of what the
+    // backend sees; every other field forwards verbatim. This is the one
+    // place that strips it.
+    const { retry, ...backendOptions } = options ?? {};
+    // THE read-only fact of this transaction: the receipt recorder's write
+    // gate refuses every write the context offers with it, and the context's
+    // fence and preview paths read the same value.
+    const writeAccess: TransactionWriteAccess =
+      backendOptions.accessMode === "read_only" ?
+        { readOnly: true, graphId: this.graphId }
+      : { readOnly: false };
+    const attempts = retry?.attempts ?? 1;
 
     // #134/#135: no gate here. The backend's transaction() wraps the
     // tx-scoped fulltext methods so the durable-marker assert fires at
     // point of use (a cached SELECT, never DDL). A transaction that
     // never touches fulltext requires no fulltext initialization.
     //
-    // No per-graph write lock here either: under history capture the lock is
-    // taken at each write boundary (runInWriteTransaction before any row work;
-    // the recorded overlay before each row write), so a transaction whose
-    // callback only reads never serializes against writers. Callers that need
-    // read-before-write serialization across the whole callback (provenance
-    // transitions) acquire the lock explicitly at callback start.
+    // A schema-version fence is acquired and validated at every managed write
+    // when this Store came from schema reconciliation. A TypeGraph-owned Store
+    // transaction on a bundled backend whose callback receives no `tx.sql` is
+    // the narrow exception: its first managed write acquires the fence and
+    // leases that success to later managed writes. Such a callback has
+    // neither a nested transaction runner nor a raw SQL handle, so no
+    // savepoint can predate that acquisition; a callback holding `tx.sql`, and
+    // a caller-adopted transaction, retain the per-write check because their
+    // raw SQL can roll back a savepoint and release a PostgreSQL row lock
+    // acquired after it.
+    // Snapshot-isolated transactions retain their normal serialization-failure
+    // semantics rather than validating a stale version after a concurrent
+    // commit. The separate recorded graph lock is still taken at each write
+    // boundary; callers that need read-before-write serialization for graph
+    // data acquire that lock explicitly.
     //
     // Operation hooks inside the callback run BUFFERED: an operation nested
     // in this transaction completes only when the transaction commits, so its
     // onOperationEnd is held back until after COMMIT — and converted into
     // onError when the transaction fails — keeping "success" synonymous with
     // "durable" even for tx-scoped collection operations.
-    const pending: PendingOperationOutcome[] = [];
-    const runHooks = this.#createBufferedHookRunner(pending);
-    let recordedByGraph: RecordedFlushInstants | undefined;
-    const transactionOptions =
-      receiptRecorder !== undefined && this.#captureEnabled ?
-        withRecordedFlushObserver(backendOptions, (instants) => {
-          recordedByGraph = instants;
-        })
-      : backendOptions;
-    try {
-      const run = async (
-        txBackend: TransactionBackend,
-        nativeTransaction: TNativeTransaction | undefined,
-      ): Promise<T> =>
-        invoke(
-          this.#buildTransactionContext(
-            txBackend,
-            nativeTransaction,
-            runHooks,
-            receiptRecorder,
-          ),
-        );
-      const result =
-        this.#captureEnabled || this.#adapterBackend === undefined ?
-          await this.#backend.transaction(
-            (txBackend) => run(txBackend, undefined),
-            transactionOptions,
-          )
-        : await this.#adapterBackend.transactionWithNative(
-            (txBackend, nativeTransaction) => run(txBackend, nativeTransaction),
-            transactionOptions,
+    //
+    // Everything below is the ATTEMPT: `runRetriedUnit` may invoke it more
+    // than once, and every value it touches — the pending buffer, the hook
+    // runners, the receipt recorder, the flush observer — is built fresh on
+    // each call, so a rolled-back attempt leaves nothing for the next one to
+    // read. A retryable failure with attempts left discards this attempt's
+    // buffer without reporting it; a final failure (exhausted budget, or a
+    // failure the retry owner does not recognize) reports it through
+    // `onError` exactly as a non-retried transaction always has, using the
+    // same object `runRetriedUnit` itself will raise. The committed attempt's
+    // buffer is returned rather than flushed here — the flush runs once the
+    // backend transaction has already committed, so it belongs to the caller
+    // of `runRetriedUnit`, past any point a hook's own failure could be
+    // mistaken for a conflict on the transaction that just succeeded.
+    const runAttempt: RetriedUnitAttempt<TransactionRunResult<T>> = async (
+      frame,
+    ) => {
+      const pending: PendingOperationOutcome[] = [];
+      // Every attempt owns a recorder so the handle's write lifetime ends
+      // when the callback settles, receipt requested or not; only a requested
+      // receipt is reported, counted by the mutation witness, and measurable.
+      const receiptRequested = createReceiptRecorder !== undefined;
+      const receiptRecorder = (
+        createReceiptRecorder ?? createTransactionReceiptRecorder
+      )(writeAccess);
+      let recordedByGraph: RecordedFlushInstants | undefined;
+      const transactionOptions = beginPreCommitHookAttempt(
+        receiptRequested && this.#captureEnabled ?
+          withRecordedFlushObserver(backendOptions, (instants) => {
+            recordedByGraph = instants;
+          })
+        : backendOptions,
+      );
+      try {
+        const run = async (
+          txBackend: TransactionBackend,
+          nativeTransaction: TNativeTransaction | undefined,
+        ): Promise<T> => {
+          // A receipt was requested AND this store is engine-native: wrap the
+          // committing session so every write member this transaction body
+          // calls is observed at the point it either changed a row or did
+          // not (`write-touch.ts`'s per-member decision — the same one
+          // TypeGraph-owned capture reads, not a second guess at it), rather
+          // than inferring "did this transaction write" from a
+          // collection-level write-INTENT count — that counts a call, not
+          // its effect, so a delete of a missing row or a coalesced no-op
+          // upsert would otherwise still stamp `recorded`. No receipt
+          // requested, or not engine-native: nothing to observe, so no
+          // wrapping. `writeTarget` is the single object
+          // every write in this attempt runs through — capture's decorator
+          // installs the same way, and the schema-fence lease / write-session
+          // maps below key on object identity, so leasing and wrapping must
+          // share the identical target or a write issued through the wrapper
+          // resolves a session/lease the raw `txBackend` registered under.
+          const mutationWitness =
+            this.#engineNativeHistory && receiptRequested ?
+              createMutationWitness()
+            : undefined;
+          const writeTarget =
+            mutationWitness === undefined ? txBackend : (
+              mutationWitness.wrap(txBackend)
+            );
+          if (mutationWitness !== undefined) {
+            // Identity assertions run through a wholly separate seam
+            // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+            // does not cover — register the witness's sink against both
+            // object identities `writeTarget` can be reached through, the
+            // same binding capture uses for its own session-backed sink.
+            registerRecordedIdentityMutationWitness(
+              writeTarget,
+              txBackend,
+              mutationWitness.sink,
+            );
+          }
+          const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
+          const runBulkHooks = this.#createBufferedBulkHookRunner(
+            pending,
+            writeTarget,
           );
-      for (const outcome of pending) {
-        this.#hooks.onOperationEnd?.(outcome.ctx, {
+          const invokeTransaction = (): Promise<T> =>
+            runInTransactionContext(
+              this.#buildTransactionContext(
+                writeTarget,
+                nativeTransaction,
+                runHooks,
+                receiptRecorder,
+                runBulkHooks,
+                frame.attempt,
+                writeAccess.readOnly,
+                receiptRequested,
+              ),
+              async (activeContext) => {
+                try {
+                  return await invoke(activeContext);
+                } finally {
+                  receiptRecorder.seal();
+                }
+              },
+            );
+          const output = await withWriteTransactionSession(
+            writeTarget,
+            {
+              graphId: this.graphId,
+              schemaVersion: this.#schemaMetadata.schemaVersion,
+              historyEnabled: this.#captureEnabled,
+              revisionTrackingEnabled: this.#revisionTrackingEnabled,
+              revisionSchema: this.#sqlSchema(),
+            },
+            this.#exposedTransactionSql(nativeTransaction) === undefined ?
+              "reusable"
+            : "per-write",
+            invokeTransaction,
+          );
+          // Fires the pre-commit hook here, once the write session has advanced
+          // the revision clock, unless the recorded-capture backend claimed it
+          // to fire after its own flush.
+          await settleTransactionPreCommitHook(transactionOptions, txBackend);
+          // The engine-native counterpart to capture's flush observer: read
+          // inside the transaction (before its outer COMMIT), on the SAME
+          // committing session `txBackend` is, so `recordedTime.revisionNow`
+          // answers with the PENDING revision this transaction's writes will
+          // land at once it commits, not the last one already committed
+          // before it opened. Exactly once — never once per graph, since an
+          // engine-native store answers for exactly one. Only when the
+          // mutation witness actually saw a write — `TransactionReceipt.recorded`
+          // is undefined for a read-only or no-op engine-native transaction.
+          // TypeGraph-owned capture can instead stamp an explicitly requested
+          // revision without an entity mutation, so a plain `store.transaction()`
+          // or an empty-body `transactionWithReceipt()` neither takes the
+          // extra round trip nor stamps an instant nothing earned.
+          if (mutationWitness?.mutated === true) {
+            recordedByGraph =
+              await this.#engineRecordedFlushInstants(txBackend);
+          }
+          return output;
+        };
+        const result =
+          this.#captureEnabled || this.#adapterBackend === undefined ?
+            await this.#backend.transaction(
+              (txBackend) => run(txBackend, undefined),
+              transactionOptions,
+            )
+          : await this.#adapterBackend.transactionWithNative(
+              (txBackend, nativeTransaction) =>
+                run(txBackend, nativeTransaction),
+              transactionOptions,
+            );
+        // The COMMIT above already succeeded: flushing `onOperationEnd` is
+        // done by the caller of `runRetriedUnit`, not here, so a hook that
+        // throws can never be mistaken for a conflict on an attempt that
+        // already durably committed. See `TransactionRunResult.pending`.
+        return {
+          result,
+          recordedByGraph,
+          recorder: receiptRequested ? receiptRecorder : undefined,
+          pending,
+        };
+      } catch (error) {
+        // `frame.willRetry`/`frame.reportedFailure` are the same decision
+        // `runRetriedUnit` itself will apply to this very error — never a
+        // second, independently computed verdict — so the object reported to
+        // `onError` here is always the one the eventual caller also sees.
+        if (!frame.willRetry(error)) {
+          const failure = asError(frame.reportedFailure(error));
+          for (const outcome of pending) {
+            this.#reportError(outcome.ctx, failure);
+          }
+        }
+        throw error;
+      }
+    };
+
+    const runResult = await runRetriedUnit(
+      { operation, attempts, target: this.#backend },
+      runAttempt,
+    );
+    for (const outcome of runResult.pending) {
+      if (outcome.type === "bulkOperation") {
+        this.#hooks.onBulkOperationEnd?.(outcome.ctx, {
+          affectedCount: outcome.affectedCount,
           durationMs: outcome.durationMs,
         });
+      } else {
+        this.#hooks.onOperationEnd?.(outcome.ctx, {
+          durationMs: outcome.durationMs,
+          outcome: outcome.outcome,
+        });
       }
-      return { result, recordedByGraph };
-    } catch (error) {
-      const failure = asError(error);
-      for (const outcome of pending) {
-        this.#hooks.onError?.(outcome.ctx, failure);
-      }
-      throw error;
     }
+    return runResult;
   }
 
   /**
@@ -2040,6 +4745,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * on the *same* connection. Unlike {@link transaction}, this opens no
    * transaction — the caller's transaction is the single commit/rollback
    * boundary.
+   *
+   * Do not call a managed write on this root Store from inside the caller's
+   * `db.transaction(...)` callback. On a single-connection PostgreSQL handle,
+   * a root-store write opens its own `BEGIN` / `COMMIT`; PostgreSQL accepts the
+   * nested `BEGIN` with a warning, then that `COMMIT` closes the caller's
+   * transaction. Build this adopted context from the callback's `externalTx`
+   * and use its collections for every graph write instead. History-enabled
+   * stores use {@link withRecordedTransaction}, which adopts the same handle
+   * and flushes capture before the caller commits.
    *
    * `withTransaction` is driver-agnostic; how the caller opens the
    * transaction is not. **Async drivers** (node-postgres,
@@ -2093,7 +4807,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {ConfigurationError} when the store has history capture enabled
    *   (use {@link AdapterStore.withRecordedTransaction} instead), or when the backend
    *   cannot adopt an external transaction — either it is not a Drizzle
-   *   Postgres/SQLite backend, or `backend.capabilities.transactions` is `false`
+   *   Postgres/SQLite backend, or `backend.capabilities.execution.interactiveTransactions` is `false`
    *   (`drizzle-orm/neon-http`, Cloudflare D1, SQLite
    *   `transactionMode: "none"`). A non-atomic fallback is deliberately
    *   not offered here: the caller's relational write *would* still
@@ -2116,7 +4830,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         "This backend cannot adopt an external transaction for cross-store " +
           "atomicity. adoptTransaction is provided only by the Drizzle " +
           "Postgres/SQLite backends with transaction support. Check " +
-          "backend.capabilities.transactions, or run the relational and " +
+          "backend.capabilities.execution.interactiveTransactions, or run the relational and " +
           "graph writes as separate transactions with manual compensation.",
         { capability: "adoptTransaction" },
       );
@@ -2156,9 +4870,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * `receipt.recorded` is the recorded commit instant this transaction allocated
    * for the store's graph at the flush point (when `fn` resolved), and is
-   * `undefined` when nothing was captured — a read-only `fn`, or a non-history
-   * store (where the receipt still counts write intents but there is no recorded
-   * time). To attribute writes when `fn` invokes user code that also
+   * `undefined` when nothing was captured or requested — a read-only `fn`, or a
+   * non-history store (where the receipt still counts write intents but there is
+   * no recorded time). To attribute writes when `fn` invokes user code that also
    * bookkeeps, use `tx.measure((scoped) => ...)` and have that code write
    * through the `scoped` context (see {@link MeasurableTransactionContext}).
    *
@@ -2216,20 +4930,47 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { capability: "adoptTransaction" },
         {
           suggestion:
-            "Use a Drizzle PostgreSQL/SQLite backend with transaction support, or run writes through store.transaction(...).",
+            "Use a Drizzle PostgreSQL/SQLite backend that can adopt this transaction, use store.transaction(...) on a backend with transaction support, or call ordinary Store writes when non-atomic work is intentional.",
         },
       );
     }
-    const txBackend = adopt(externalTx);
+    return withAdoptedTransactionScope(externalTx, () =>
+      this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
+    );
+  }
+
+  async #runAdoptedRecordedTransaction<T>(
+    txBackend: TransactionBackend,
+    externalTx: TNativeTransaction,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    originalStore?: StoreImplementation<G, TNativeTransaction>,
+  ): Promise<TransactionOutcome<T>> {
     if (this.#captureEnabled) {
       await assertRecordedCaptureTransactionIsolation(txBackend);
+      await lockSchemaVersionForStoreWrite(
+        {
+          graphId: this.graphId,
+          schemaVersion: this.#schemaMetadata.schemaVersion,
+        },
+        txBackend,
+      );
     }
     // A uniform `flush → RecordedFlushInstants` shape on both branches keeps the
     // outcome-building path identical; the non-history branch has no recorded
     // rows to close, so it flushes to an empty instant map.
     const scope =
       this.#captureEnabled ?
-        createRecordedTransactionScope(txBackend, this.#sqlSchema())
+        createRecordedTransactionScope(
+          txBackend,
+          this.#batchPointRead,
+          this.#sqlSchema(),
+        )
       : {
           backend: txBackend,
           flush: (): Promise<RecordedFlushInstants> =>
@@ -2239,78 +4980,427 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await lockRecordedGraphWrite(scope.backend, this.graphId);
     }
     const receiptRecorder = createTransactionReceiptRecorder();
+    // See the matching comment at the other engine-native receipt site
+    // (`runAttempt` above): the witness observes real per-member mutations
+    // on the adopted session, not write intents, so a delete of a missing
+    // row or a coalesced no-op upsert through this context leaves
+    // `receipt.recorded` undefined.
+    const mutationWitness =
+      this.#engineNativeHistory ? createMutationWitness() : undefined;
+    const writeTarget =
+      mutationWitness === undefined ?
+        scope.backend
+      : mutationWitness.wrap(scope.backend);
+    if (mutationWitness !== undefined) {
+      // Same registration as the other engine-native receipt site: identity
+      // assertions bypass `wrap`'s overlay entirely, so the witness's sink
+      // needs its own binding to see one.
+      registerRecordedIdentityMutationWitness(
+        writeTarget,
+        scope.backend,
+        mutationWitness.sink,
+      );
+    }
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const result = await invoke(
-      this.#buildTransactionContext(
-        scope.backend,
-        externalTx,
-        undefined,
-        receiptRecorder,
-      ),
-    );
-    // Flush allocates the recorded commit instant for this transaction's graph;
-    // `transactionOutcome` reads this store's instant out of the returned map
-    // (undefined when nothing was captured) into `receipt.recorded`.
-    const recordedByGraph = await scope.flush();
-    // Seal the context so a write through a retained `tx` after this returns
-    // fails loud instead of persisting a row the snapshotted receipt can't
-    // count. Under history capture the capture session already sealed on flush
-    // (its guard throws before the live write); this covers the non-history
-    // path, which has no capture session.
-    if (!this.#captureEnabled) receiptRecorder.seal();
-    return transactionOutcome(
-      result,
+    const executionScope =
+      originalStore === undefined ? undefined : (
+        scopeBackendExecution(writeTarget)
+      );
+    const contextBackend = executionScope?.backend ?? writeTarget;
+    const context = this.#buildTransactionContext(
+      contextBackend,
+      externalTx,
+      undefined,
       receiptRecorder,
-      recordedByGraph,
-      this.graphId,
     );
+    if (originalStore !== undefined) {
+      bindEvolvedTransactionStore(context, originalStore, this);
+    }
+    const finish = async (): Promise<TransactionOutcome<T>> => {
+      const result = await runInTransactionContext(
+        context,
+        async (activeContext) => {
+          try {
+            return await invoke(activeContext);
+          } finally {
+            executionScope?.seal();
+            // Under history capture the capture session owns the refusal (it
+            // seals on flush and its guard throws before the live write).
+            if (!this.#captureEnabled) receiptRecorder.seal();
+          }
+        },
+      );
+      // Flush allocates the recorded commit instant for this transaction's graph
+      // under TypeGraph-owned capture; under engine-native it is
+      // `recordedTime.revisionNow` read on this SAME adopted session, still
+      // inside the caller's transaction — so it answers with the PENDING
+      // revision this transaction's writes will land at once it commits, not
+      // the last one already committed before it opened. The engine-native
+      // counterpart to `flush()`, called once for this store's one graph, and
+      // only when the mutation witness actually saw a write (TypeGraph-owned
+      // capture may also answer an explicit revision request without a touched
+      // entity. Either way
+      // `transactionOutcome` reads this store's instant out of the returned map
+      // (undefined when nothing was captured or requested) into `receipt.recorded`.
+      const recordedByGraph =
+        mutationWitness?.mutated === true ?
+          await this.#engineRecordedFlushInstants(txBackend)
+        : await scope.flush();
+      return transactionOutcome(
+        result,
+        receiptRecorder,
+        recordedByGraph,
+        this.graphId,
+      );
+    };
+    // The schema fence above was acquired before the caller callback. That
+    // makes reuse safe for this history-capture scope: a callback-created
+    // savepoint is necessarily later than the lock, so rolling back to it
+    // cannot release the lock. Seed the lease on the actual derived capture
+    // target, which is what collection writes receive. A savepoint created
+    // before entering this method through the raw external handle is outside
+    // the recorded-capture callback contract and is not covered by this
+    // lease. Seed every exact target a managed mutation can resolve to,
+    // including the raw identity target and the evolved execution-lifetime
+    // target. Adapter/native and non-history adopted paths retain their
+    // per-write fence behavior.
+    return this.#captureEnabled ?
+        withPreAcquiredTransactionSchemaFenceLease(
+          {
+            graphId: this.graphId,
+            schemaVersion: this.#schemaMetadata.schemaVersion,
+          },
+          [txBackend, scope.backend, writeTarget, contextBackend],
+          finish,
+        )
+      : finish();
   }
 
   /**
    * Decorates a receipt-enabled transaction `context` with `measure`.
-   * Attribution is structural: `measure` wraps the context's *own* (already
-   * outer-recording) collections a second time with a fresh scope recorder, so a
-   * write through the scoped context counts in the scope and — via the inner
-   * wrapper it delegates to — the outer receipt, while a write through the outer
-   * `context` never reaches the scope recorder. This makes overlapping/concurrent
-   * measures safe by construction (each holds its own scope recorder) and lets
-   * scopes nest: the scoped context is itself decorated, so `scoped.measure(...)`
-   * chains one more wrapper. The scoped context's `getNodeCollection` resolves
-   * against the scope-wrapped map too, so dynamic-kind writes are attributed like
-   * `scoped.nodes.<Kind>`. The scope receipt's `recorded` is always undefined —
-   * the recorded instant is a whole-transaction flush concern.
+   *
+   * Attribution is structural: a scope is one more RECORDER, and the scoped
+   * context's write surface is rebuilt against the whole recorder CHAIN (every
+   * recorder already covering `context`, plus the scope's), then wrapped once
+   * per recorder in it. A write through the scoped context therefore counts in
+   * the scope and in every receipt enclosing it, while a write through the
+   * outer `context` never reaches the scope recorder. Overlapping and
+   * concurrent measures are safe by construction — each holds its own
+   * recorder, and no dynamic "currently measuring" state exists to leak
+   * between them — and scopes nest: the scoped context is itself decorated, so
+   * `scoped.measure(...)` extends the chain by one. The scoped context's
+   * dynamic collection lookups resolve against the scope's own map too, so
+   * dynamic-kind writes are attributed like `scoped.nodes.<Kind>`. The scope
+   * receipt's `recorded` is always undefined — the recorded instant is a
+   * whole-transaction flush concern.
+   *
+   * Rebuilding the surface rather than wrapping the outer collections a second
+   * time is what carries the chain to facts a collection wrapper cannot see
+   * from outside: a node delete's composition `cascadedParts` exist only
+   * inside the operation, and reach their receipts through the OPERATION
+   * CONTEXT the collection's operations were bound to
+   * (`NodeOperationContext.recordCascadedParts`). Wrapping alone would count a
+   * measured delete in the scope's write counters while leaving the parts it
+   * cascaded out of that scope's receipt. `TRANSACTION_RUNTIME`'s internal
+   * delete port is rebound to the scope's context for the same reason — it
+   * reaches `executeNodeDelete` directly, so inheriting the outer port would
+   * reopen exactly that hole for the one caller that uses it.
    */
   #attachMeasure(
     context: AdapterTransactionContext<G, TNativeTransaction>,
+    buildSurface: (
+      recorders: readonly TransactionReceiptRecorder[],
+    ) => TransactionWriteSurface<G>,
+    recorders: readonly TransactionReceiptRecorder[],
   ): MeasurableAdapterTransactionContext<G, TNativeTransaction> {
     const measure: ScopedMeasure<
       MeasurableAdapterTransactionContext<G, TNativeTransaction>
     > = async (fn) => {
       const scopeRecorder = createTransactionReceiptRecorder();
-      const { nodes, edges } = wrapTransactionCollections(
-        context.nodes,
-        context.edges,
-        scopeRecorder,
+      const chain = [...recorders, scopeRecorder];
+      const surface = buildSurface(chain);
+      const {
+        nodes: scopedNodes,
+        edges: scopedEdges,
+        identity,
+      } = wrapSurfaceForRecorders(surface, chain);
+      // The internal delete port travels with the surface too. It runs
+      // `executeNodeDelete` against a node operation context directly and
+      // never touches `surface.nodes` — the collection wrappers just above
+      // are the only thing that increments a receipt's `writes` counters, so
+      // this delete counts toward NEITHER this scope's nor any enclosing
+      // scope's `writes`, rebound or not. What rebinding decides is
+      // `cascadedParts` alone: a scope that inherited the OUTER context's
+      // port would run the delete against the OUTER surface's node operation
+      // context, attributing its `cascadedParts` to the outer chain's
+      // recorders and leaving THIS scope's own (freshly created) receipt
+      // without them. Taken from the scope's own surface, so
+      // `cascadedParts` reaches this scope's receipt too — the same
+      // attribution-follows-the-context reasoning as the collections above,
+      // for a write those collections cannot see at all. The receipt this
+      // yields is therefore a receipt shape callers must expect: a delete
+      // reported here carries `cascadedParts` while its own `writes` stay at
+      // zero, since no collection ever counted it.
+      const scopedContext = overlayPropertyDescriptors(context, {
+        nodes: scopedNodes,
+        edges: scopedEdges,
+        ...(identity === undefined ? {} : { identity }),
+        ...this.#edgeCollectionAccess(scopedEdges),
+        ...this.#nodeCollectionAccess(scopedNodes),
+        [TRANSACTION_RUNTIME]: surface.runtime,
+      });
+      // Non-enumerable, matching the outer context's own definition, so the
+      // symbol port never leaks into a caller's spread of `tx`.
+      Object.defineProperty(scopedContext, TRANSACTION_RUNTIME, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+      bindScopedTransactionRuntime(scopedContext, context);
+      const scoped = this.#attachMeasure(scopedContext, buildSurface, chain);
+      const unregister = registerSavepointState(
+        surface.runtime.backend,
+        scopeRecorder.checkpoint,
       );
-      const scoped = this.#attachMeasure(
-        overlayPropertyDescriptors(context, {
-          nodes,
-          edges,
-          getNodeCollection: (kind: string) =>
-            this.#resolveDynamicNodeCollection(nodes, kind),
-        }),
-      );
-      const result = await fn(scoped);
-      return { result, receipt: scopeRecorder.snapshot() };
+      try {
+        const result = await fn(scoped);
+        return { result, receipt: scopeRecorder.snapshot() };
+      } finally {
+        unregister();
+      }
     };
     return overlayPropertyDescriptors(context, { measure });
   }
 
+  /** What `tx.assertUnchangedSince()` needs to know about this store. */
+  #readSetFenceContext(readOnly: boolean): ReadSetFenceContext<G> {
+    return {
+      graph: this.#graph,
+      lineageStore: this,
+      writers: {
+        historyEnabled: this.#captureEnabled,
+        revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      },
+      schemaVersion: this.#schemaMetadata.schemaVersion,
+      readOnly,
+    };
+  }
+
+  /** Builds graph reads that execute through one already-open transaction. */
+  #createTransactionReadSurface(
+    txBackend: TransactionBackend,
+    attempt: number,
+  ): TransactionReadMethods<G> {
+    return {
+      query: () => this.#createQueryForBackend(txBackend, undefined, attempt),
+      describe: () => describeStore(this.#analysisContext(txBackend)),
+      validateStore: (options) =>
+        validateStoreImpl(this.#analysisContext(txBackend), options),
+      batchOnce: (build, options) =>
+        this.#batchOnceForBackend(txBackend, attempt, build, options),
+      neighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return readNeighbors(
+          this.#neighborContext(txBackend, attempt),
+          source,
+          options,
+        );
+      },
+      countNeighbors: (source, options) => {
+        this.#assertNeighborKinds(source, options.edges);
+        return countNeighborsImpl(
+          this.#neighborContext(txBackend, attempt),
+          source,
+          options,
+        );
+      },
+      subgraph: (root, options) =>
+        this.#executeSessionSubgraph(root, options, txBackend, attempt),
+    };
+  }
+
+  /** One CTE-backed upsert envelope for plain history-store node kinds. */
+  async #writeNodeUpsertBatch<
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    txBackend: TransactionBackend,
+    entries: Entries,
+    receiptRecorder: TransactionReceiptRecorder | undefined,
+  ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    // The transaction's write gate first, as every collection write passes it.
+    receiptRecorder?.assertWritable("tx.writeNodeUpsertBatch()");
+    if (entries.length === 0)
+      return [] as HeterogeneousNodeUpsertResult<G, Entries>;
+    if (!this.#captureEnabled) {
+      throw new UnsupportedBackendCapabilityError(
+        "tx.writeNodeUpsertBatch()",
+        "recorded heterogeneous node upserts",
+        { history: this.#captureEnabled },
+      );
+    }
+    if (this.#coalescesUnchangedUpserts()) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch does not support coalesceUnchangedUpserts.",
+        { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_COALESCING" },
+      );
+    }
+    if (this.#graph.identity !== undefined) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch does not support graphs with operational identity.",
+        { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_IDENTITY" },
+      );
+    }
+    const schemaVersion = this.#schemaMetadata.schemaVersion;
+    if (schemaVersion === undefined) {
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch requires an initialized schema-fenced Store.",
+        { code: "HETEROGENEOUS_NODE_BATCH_SCHEMA_UNAVAILABLE" },
+      );
+    }
+    const seen = new Set<string>();
+    const validated = entries.map((entry) => {
+      if (
+        "validFrom" in entry ||
+        "validTo" in entry ||
+        "clearValidTo" in entry ||
+        "onImmutableLowerBound" in entry
+      ) {
+        throw new ConfigurationError(
+          "writeNodeUpsertBatch does not support temporal write options.",
+          { code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_TEMPORAL_OPTIONS" },
+        );
+      }
+      const registration = requireNodeRegistration(this.#graph, entry.kind);
+      if (
+        (registration.unique?.length ?? 0) > 0 ||
+        this.#registry.getDisjointKinds(entry.kind).length > 0 ||
+        nodeKindOwesCompositionEdge(this.#registry, entry.kind) ||
+        resolveEmbeddingFields(registration.type.schema).length > 0 ||
+        getSearchableFields(registration.type.schema).length > 0
+      ) {
+        throw new ConfigurationError(
+          "writeNodeUpsertBatch only supports plain node kinds without identity claims, required composition, or projections.",
+          {
+            code: "HETEROGENEOUS_NODE_BATCH_UNSUPPORTED_KIND",
+            kind: entry.kind,
+          },
+        );
+      }
+      const key = `${entry.kind}\u0000${entry.id}`;
+      if (seen.has(key)) {
+        throw new ValidationError(
+          `writeNodeUpsertBatch received duplicate node id "${entry.id}" for kind "${entry.kind}".`,
+          { entityType: "node", kind: entry.kind, id: entry.id, issues: [] },
+        );
+      }
+      seen.add(key);
+      const props = validateNodeProps(registration.type.schema, entry.props, {
+        kind: entry.kind,
+        id: entry.id,
+        operation: "create",
+      });
+      return {
+        kind: entry.kind,
+        id: entry.id,
+        props,
+        updateProps: callerSuppliedParsedNodeProps(entry.props, props),
+      };
+    });
+    if (
+      !heterogeneousNodeUpsertBatchFitsBindBudget(
+        validated.length,
+        txBackend.capabilities.maxBindParameters,
+      )
+    ) {
+      const maxBindParameters = txBackend.capabilities.maxBindParameters;
+      const parameterCount = heterogeneousNodeUpsertBatchBindParameterCount(
+        validated.length,
+      );
+      throw new ConfigurationError(
+        `writeNodeUpsertBatch uses ${parameterCount} bound parameters, exceeding this backend's limit of ${maxBindParameters}.`,
+        {
+          capability: "maxBindParameters",
+          maxBindParameters,
+          parameterCount,
+        },
+        {
+          suggestion:
+            "Split the operation into smaller batches before retrying.",
+        },
+      );
+    }
+    if (txBackend.upsertHeterogeneousNodes === undefined) {
+      throw new UnsupportedBackendCapabilityError(
+        "tx.writeNodeUpsertBatch()",
+        "exact-session heterogeneous node upsert program",
+        { dialect: txBackend.dialect },
+      );
+    }
+    const rows = await withRecordedNodeMutationTarget(
+      txBackend,
+      this.graphId,
+      (target) => {
+        const upsert = target.upsertHeterogeneousNodes;
+        if (upsert === undefined) {
+          throw new UnsupportedBackendCapabilityError(
+            "tx.writeNodeUpsertBatch()",
+            "exact-session heterogeneous node upsert program",
+            { dialect: target.dialect },
+          );
+        }
+        return upsert({
+          entries: validated,
+          schemaFence: {
+            graphId: this.graphId,
+            expectedVersion: schemaVersion,
+          },
+        });
+      },
+    );
+    if (rows.length !== validated.length) {
+      await diagnoseFusedSchemaFenceNoRow(
+        { graphId: this.graphId, schemaVersion },
+        txBackend,
+      );
+      throw new ConfigurationError(
+        "writeNodeUpsertBatch did not observe its active schema fence.",
+        { code: "HETEROGENEOUS_NODE_BATCH_STALE_SCHEMA" },
+      );
+    }
+    for (const row of rows) receiptRecorder?.recordNode(row.kind, 1);
+    return rows.map((row) =>
+      rowToNode(row),
+    ) as unknown as HeterogeneousNodeUpsertResult<G, Entries>;
+  }
+
   /**
-   * Builds the `{ nodes, edges, sql }` projection bound to a
-   * transaction-scoped backend. Shared verbatim by {@link transaction}
+   * The raw SQL handle a transaction callback receives as `tx.sql`, or
+   * `undefined` when it receives none: history capture and revision tracking
+   * withhold the handle, and a backend without a native transaction has none
+   * to give. THE one owner of that decision — the context builder exposes
+   * exactly this handle, and the write session reuses fence evidence across
+   * writes (the per-graph write fence and the schema-fence lease) only when
+   * it is absent. A history store always withholds it, which is what lets its
+   * capture overlay's graph-lock memo reuse the same evidence. It is the only
+   * raw SQL a transaction context carries:
+   * `tx.backend` is a projection with no statement execution
+   * (`createTransactionReadBackend`), so no other handle can issue the
+   * `ROLLBACK TO SAVEPOINT` that would release evidence a later write reuses.
+   */
+  #exposedTransactionSql(
+    sql: TNativeTransaction | undefined,
+  ): TNativeTransaction | undefined {
+    return this.#captureEnabled || this.#revisionTrackingEnabled ?
+        undefined
+      : sql;
+  }
+
+  /**
+   * Builds the transaction context bound to a transaction-scoped backend.
+   * Collections, fluent queries, and set-oriented reads all use that same
+   * backend. Shared verbatim by {@link transaction}
    * (TypeGraph opens the tx) and {@link withTransaction} (#134 — the
    * caller opened it) so both surfaces resolve collections, query
    * factories, and the reused graph/registry identically. When history capture
@@ -2321,59 +5411,127 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #buildTransactionContext(
     txBackend: TransactionBackend,
     sql?: TNativeTransaction,
-    runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    runHooks: OperationHookRunner = this.#immediateHookRunner(txBackend),
     receiptRecorder?: TransactionReceiptRecorder,
+    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(
+      txBackend,
+    ),
+    // 1 outside a retried `store.transaction`; the retry owner's attempt
+    // factory is the only caller that supplies anything else.
+    attempt = 1,
+    // The transaction was opened with `accessMode: "read_only"`.
+    readOnly = false,
+    measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
+    if (receiptRecorder !== undefined) {
+      registerSavepointState(txBackend, receiptRecorder.checkpoint);
+    }
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
-    const txNodeOperations: NodeOperations = {
-      ...this.#buildNodeOperations(this.#createNodeOperationContext(runHooks)),
-      createQuery: () => this.#createQueryForBackend(txBackend),
-      maybeRefreshStatisticsAfterBulk: undefined,
+    // THE one builder of this transaction's write surface, parameterized by
+    // the receipt chain the surface's writes belong to: the transaction itself
+    // builds one with its own recorder (or none, untracked), and every
+    // `tx.measure(...)` scope builds another with the scope's recorder added
+    // (`#attachMeasure`). One builder is why a scoped write reaches the same
+    // operations — and therefore the same composition cascade reporting — as
+    // an unscoped one.
+    const buildSurface = (
+      receiptRecorders: readonly TransactionReceiptRecorder[],
+    ): TransactionWriteSurface<G> => {
+      const nodeOperationContext = this.#createNodeOperationContext(
+        runHooks,
+        runBulkHooks,
+        attempt,
+        receiptRecorders,
+        readOnly,
+      );
+      const nodeOperations: NodeOperations = {
+        ...this.#buildNodeOperations(nodeOperationContext),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      const edgeOperations: EdgeOperations = {
+        ...this.#buildEdgeOperations(
+          this.#createEdgeOperationContext(runHooks, attempt),
+        ),
+        createQuery: () =>
+          this.#createQueryForBackend(txBackend, undefined, attempt),
+        maybeRefreshStatisticsAfterBulk: undefined,
+      };
+      return {
+        runtime: {
+          backend: txBackend,
+          deleteNodeWithPolicy: (work, policy) =>
+            executeNodeDelete(
+              nodeOperationContext,
+              work.kind,
+              work.id,
+              txBackend,
+              { policy },
+            ),
+          reviveNode: (work) =>
+            executeNodeRevive(
+              nodeOperationContext,
+              work.kind,
+              work.id,
+              txBackend,
+            ),
+          acquireWriteFences: async (refusal) => {
+            if (readOnly) {
+              refuseReadOnlyTransactionWrite(
+                refusal.operation,
+                this.graphId,
+                refusal.suggestion,
+              );
+            }
+            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
+          acquireReadFences: async () => {
+            if (readOnly) {
+              await lockRecordedGraphWrite(txBackend, this.graphId);
+              return;
+            }
+            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+          },
+          assertWritable: (operation) => {
+            for (const recorder of receiptRecorders) {
+              recorder.assertWritable(operation);
+            }
+          },
+        },
+        nodes: createNodeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          nodeOperations,
+        ),
+        edges: createEdgeCollectionsProxy(
+          this.#graph,
+          this.graphId,
+          this.#registry,
+          txBackend,
+          this.#batchPointRead,
+          this.#endpointSetRead,
+          edgeOperations,
+        ),
+        ...(this.#graph.identity === undefined ?
+          {}
+        : { identity: createIdentityFacade(this.#identityContext(txBackend)) }),
+      };
     };
-    const txEdgeOperations: EdgeOperations = {
-      ...this.#buildEdgeOperations(this.#createEdgeOperationContext(runHooks)),
-      createQuery: () => this.#createQueryForBackend(txBackend),
-      maybeRefreshStatisticsAfterBulk: undefined,
-    };
 
-    const runNodeOperationHooks = <T>(
-      operation: "create" | "update" | "delete",
-      kind: string,
-      id: string,
-      fn: () => Promise<T>,
-    ): Promise<T> =>
-      runHooks(this.#createOperationContext(operation, "node", kind, id), fn);
-
-    let nodes = createNodeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      txNodeOperations,
-    );
-
-    let edges = createEdgeCollectionsProxy(
-      this.#graph,
-      this.graphId,
-      this.#registry,
-      txBackend,
-      txEdgeOperations,
-    );
-
-    if (receiptRecorder !== undefined) {
-      ({ nodes, edges } = wrapTransactionCollections(
-        nodes,
-        edges,
-        receiptRecorder,
-      ));
-    }
-
-    const getNodeCollection = (
-      kind: string,
-    ): DynamicNodeCollection | undefined =>
-      this.#resolveDynamicNodeCollection(nodes, kind);
+    const outerRecorders =
+      receiptRecorder === undefined ? [] : [receiptRecorder];
+    const outerSurface = buildSurface(outerRecorders);
+    const {
+      nodes,
+      edges,
+      identity: receiptIdentity,
+    } = wrapSurfaceForRecorders(outerSurface, outerRecorders);
 
     // Honest capability discriminant for `tx.sql`. Capture/revision tracking
     // take precedence because they replace `tx.sql` with a fail-loud guard even
@@ -2383,9 +5541,54 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const base = {
       nodes,
       edges,
+      writeNodeUpsertBatch: <
+        const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+      >(
+        entries: Entries,
+      ) => this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
+      ...this.#createTransactionReadSurface(txBackend, attempt),
+      assertUnchangedSince: (
+        anchor: EngineRevision,
+        scopes: readonly ReadSetScope<G>[],
+      ) =>
+        assertReadSetUnchangedSince(
+          this.#readSetFenceContext(readOnly),
+          txBackend,
+          anchor,
+          scopes,
+        ),
+      ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
       backend: createTransactionReadBackend(txBackend),
-      [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
-      getNodeCollection,
+      [TRANSACTION_RUNTIME]: outerSurface.runtime,
+      ...this.#nodeCollectionAccess(nodes),
+      ...this.#edgeCollectionAccess(edges),
+      ...(this.#captureEnabled || this.#engineNativeHistory ?
+        {
+          requestRecordedRevision: (): void => {
+            if (readOnly) {
+              refuseReadOnlyTransactionWrite(
+                "tx.requestRecordedRevision()",
+                this.graphId,
+                'Remove accessMode: "read_only" when the transaction must allocate a recorded revision.',
+              );
+            }
+            if (this.#engineNativeHistory) {
+              throw new UnsupportedBackendCapabilityError(
+                "tx.requestRecordedRevision()",
+                "TypeGraph-owned recorded-time capture",
+                { graphId: this.graphId, dialect: this.#backend.dialect },
+                "Use a backend with TypeGraph-owned history capture; engine-native revision allocation is controlled by the database engine.",
+              );
+            }
+            if (!forceRecordedGraphRevision(txBackend, this.graphId)) {
+              throw new ConfigurationError(
+                "The history transaction is not bound to a recorded-time capture session.",
+                { graphId: this.graphId },
+              );
+            }
+          },
+        }
+      : {}),
     };
 
     let withSql: AdapterTransactionContext<G, TNativeTransaction>;
@@ -2403,10 +5606,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       defineUnavailableSqlGuard(withSql, () =>
         throwRevisionTrackingUnsafeSqlAccess(),
       );
-    } else if (sql === undefined) {
-      withSql = { ...base, sqlAvailability: "unavailable" };
     } else {
-      withSql = { ...base, sql, sqlAvailability: "available" };
+      const exposedSql = this.#exposedTransactionSql(sql);
+      withSql =
+        exposedSql === undefined ?
+          { ...base, sqlAvailability: "unavailable" }
+        : { ...base, sql: exposedSql, sqlAvailability: "available" };
     }
     Object.defineProperty(withSql, TRANSACTION_RUNTIME, {
       configurable: false,
@@ -2414,12 +5619,103 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       writable: false,
     });
 
+    bindTransactionStore(withSql, this);
+
     // Scoped write measurement (`tx.measure`) is only meaningful with a recorder
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
-    return receiptRecorder === undefined ? withSql : (
-        this.#attachMeasure(withSql)
-      );
+    return measurable && receiptRecorder !== undefined ?
+        this.#attachMeasure(withSql, buildSurface, [receiptRecorder])
+      : withSql;
+  }
+
+  #identityContext(
+    backend: GraphBackend | TransactionBackend,
+  ): IdentityServiceContext<G> {
+    // `store.identity` memoizes its facade for the life of the store, so the
+    // context it captures must resolve the schema version at mutation time
+    // rather than snapshotting it here: `clear()` resets this store to the
+    // unversioned lifecycle, and a captured version would make every later
+    // identity write fail as stale against active version 0.
+    const currentSchemaVersion = (): number | undefined =>
+      this.#schemaMetadata.schemaVersion;
+    return {
+      graph: this.#graph,
+      graphId: this.graphId,
+      get schemaVersion(): number | undefined {
+        return currentSchemaVersion();
+      },
+      registry: this.#registry,
+      backend,
+      schema: this.#sqlSchema(),
+      historyEnabled: this.#captureEnabled,
+      recordedTimeOwnership: this.#recordedTimeOwnership,
+      revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      sameIdAcrossKinds: this.#graph.identity?.sameIdAcrossKinds ?? "ignore",
+      loadNodes: async (references, coordinate) => {
+        const idsByKind = new Map<string, Set<string>>();
+        for (const reference of references) {
+          const ids = idsByKind.get(reference.kind) ?? new Set<string>();
+          ids.add(reference.id);
+          idsByKind.set(reference.kind, ids);
+        }
+        const loadedByReference = new Map<string, IdentityNode<G>>();
+        await Promise.all(
+          [...idsByKind].map(async ([kind, idSet]) => {
+            const ids = [...idSet];
+            // Only a recorded pin needs the recorded relation. Valid-time
+            // views also carry a coordinate, but their members were already
+            // selected as coordinate-visible, and valid time is a lens over
+            // the live rows — hydrating through the recorded reader would
+            // throw RECORDED_POINT_READ_MISSING_COORDINATE.
+            if (coordinate?.recorded !== undefined) {
+              const nodes = await this.recordedNodeGetByIds(
+                kind,
+                ids.map((id) => id as NodeId<NodeType>),
+                coordinate,
+              );
+              for (const [index, node] of nodes.entries()) {
+                if (node !== undefined) {
+                  loadedByReference.set(
+                    refKey({ kind, id: requireDefined(ids[index]) }),
+                    node as IdentityNode<G>,
+                  );
+                }
+              }
+              return;
+            }
+            const boundGetNodes = bindExtraIfReachable(
+              backend,
+              this.#batchPointRead.extras.getNodes,
+              BATCH_POINT_READ.id,
+            );
+            const rows =
+              boundGetNodes === undefined ?
+                await Promise.all(
+                  ids.map((id) => backend.getNode(this.graphId, kind, id)),
+                )
+              : await boundGetNodes.getNodes(this.graphId, kind, ids);
+            // Identity visibility treats every row as visible under
+            // includeTombstones, so a soft-deleted member the coordinate
+            // surfaced must hydrate rather than silently vanish between
+            // membersOf and nodesOf.
+            const includeTombstoned =
+              coordinate?.valid.mode === "includeTombstones";
+            for (const row of rows) {
+              if (row === undefined) continue;
+              if (!includeTombstoned && row.deleted_at !== undefined) continue;
+              loadedByReference.set(
+                refKey({ kind, id: row.id }),
+                rowToNode(row) as IdentityNode<G>,
+              );
+            }
+          }),
+        );
+        return references.map((reference) =>
+          loadedByReference.get(refKey(reference)),
+        );
+      },
+    };
   }
 
   // === Graph Lifecycle ===
@@ -2427,49 +5723,116 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * Hard-deletes all data for this graph from the database.
    *
-   * Removes all nodes, edges, uniqueness entries, embeddings, and schema versions
-   * for this graph's ID. No hooks, no per-row logic. Wrapped in a transaction
-   * when the backend supports it.
+   * Removes nodes, edges, uniqueness entries, embeddings, and schema versions
+   * for this graph's ID. Contribution materialization markers remain by default;
+   * pass `preserveContributionMaterializations: false` to remove those too.
+   * No hooks or per-row logic. Wrapped in a transaction when the backend
+   * supports it.
+   *
+   * Preserving the markers needs the backend's optional
+   * `clearGraphPreservingContributionMaterializations` member, which every
+   * bundled backend provides. On a custom backend without it, an omitted
+   * option clears through `clearGraph` and so follows whatever that backend's
+   * `clearGraph` does with the markers, while a stated
+   * `preserveContributionMaterializations: true` is refused with
+   * `UnsupportedBackendCapabilityError` before anything is deleted.
    *
    * The store is usable after clearing — new data can be created immediately.
    */
-  async clear(): Promise<void> {
+  async clear(
+    options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
+  ): Promise<void> {
+    // Tracked tokens and content fingerprints from lineage-capable stores
+    // can carry the graph's durable origin; clear rotates that namespace.
+    const mintsAnchorOrigin = mintsOriginNamespacedAnchor(
+      this,
+      this.#recordedRevisionOrigins.supported,
+    );
+    if (mintsAnchorOrigin) {
+      // `ensureRevisionOriginsTable` is schema DDL, never projected onto an
+      // open `transaction()` handle (unlike ordinary row writes) — it must
+      // run on the ROOT backend, before `doClear` opens its transaction, so
+      // the row-only `resetRevisionOrigin` below can rely on the table
+      // already existing inside it. Idempotent (`CREATE TABLE IF NOT
+      // EXISTS`, issued once per backend object). On every bundled backend
+      // the table is already part of the full base-schema DDL a fresh
+      // backend installs at construction, so the statement is idempotent and
+      // never provisions anything new there; it exists for a backend whose
+      // `ensureRevisionOriginsTable` provisions the relation lazily instead.
+      await ensureRevisionOriginsRelation(
+        this.#baseBackend,
+        this.#recordedRevisionOrigins,
+      );
+    }
     const doClear = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
+      // Resolved before the first lock so a refusal has touched nothing.
+      const clearGraphData = resolveClearGraphCommand(
+        target,
+        options.preserveContributionMaterializations,
+      );
       if (this.#revisionTrackingEnabled) {
         await lockRecordedGraphWrite(target, this.graphId);
+      }
+      if (this.#graph.identity !== undefined) {
+        await lockIdentityGraph(target, this.graphId);
       }
       const previousRevision =
         this.#revisionTrackingEnabled && !this.#captureEnabled ?
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
-      await target.clearGraph(this.graphId);
-      // `clearGraph` deletes the recorded-clock row alongside graph data.
-      // Live revision tracking immediately seeds a fresh anchor so a pre-clear
-      // branch cannot match a now-empty graph. History capture intentionally
-      // preserves its long-standing `recordedNow() === undefined` clear
-      // contract; a pre-clear history branch already carries a non-empty clock
-      // value and therefore still fails the base-version precondition.
+      await clearGraphData(this.graphId);
+      if (mintsAnchorOrigin) {
+        // Rotate the durable per-graph revision-origin nonce in the SAME
+        // transaction as `clearGraph` for revision-tracked tokens and
+        // origin-namespaced content fingerprints. The bundled `clearGraph`
+        // already deletes the origin row with the rest of the graph's
+        // relations; this delete owns the guarantee for a backend whose own
+        // `clearGraph` does not, since without it a graph repopulated after
+        // clear() could restore the old token and pass the base-version
+        // precondition again. See `resetRevisionOrigin`'s own doc for why
+        // this must be the origin row, not the revision, that fences the
+        // epoch.
+        await resetRevisionOrigin(target, this.#sqlSchema(), this.graphId);
+      }
+      // Live (non-capturing) revision tracking immediately reseeds the
+      // clock so a pre-clear branch cannot match a now-empty graph purely
+      // by revision number, ahead of the origin rotation above ever being
+      // exercised for a token minted from this exact clock value. History
+      // capture intentionally preserves its long-standing
+      // `recordedNow() === undefined` clear contract and leaves the clock
+      // unseeded; the rotated origin above is what fences a pre-clear
+      // history branch once the graph is repopulated, not the clock value.
       if (this.#revisionTrackingEnabled && !this.#captureEnabled) {
         await advanceRevisionClock(
           target,
           this.#sqlSchema(),
           this.graphId,
-          this.#baseBackend.capabilities.transactions,
+          this.#baseBackend.capabilities.execution.interactiveTransactions,
           previousRevision,
         );
       }
     };
 
-    await (this.#baseBackend.capabilities.transactions ?
+    await (this.#baseBackend.capabilities.execution.interactiveTransactions ?
       this.#baseBackend.transaction(async (tx) => doClear(tx))
     : doClear(this.#baseBackend));
+
+    // `allocationOwner()` and `computeBaseVersion` both read the origin
+    // row fresh on every call (no per-Store memo survives this method), so
+    // there is nothing here to invalidate.
 
     // `clearGraph` is graph-agnostic and can't reach the strategy-owned
     // per-`(kind, field)` vector tables, so reset them here — otherwise cleared
     // embeddings leak and a reused node id would resurface a stale vector.
     await this.#clearVectorStorage();
+
+    // The committed schema rows were deleted with the graph. This Store now
+    // has the same raw, unversioned lifecycle semantics as `createStore(...)`;
+    // retaining the old version would make its documented post-clear writes
+    // fail as stale against active version 0.
+    this.#schemaMetadata = UNKNOWN_SCHEMA_METADATA;
 
     // Reset lazy-initialized collection caches
     this.#nodeCollections = undefined;
@@ -2545,15 +5908,377 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await this.#backend.refreshStatistics();
   }
 
+  #evolutionPlanningTarget(
+    plan: EvolutionPlan,
+  ): StoreImplementation<G, TNativeTransaction> {
+    const payload = getEvolutionPlanPayload<G>(plan);
+    if (payload === undefined || plan.graphId !== this.graphId) {
+      throw new ConfigurationError(
+        "Evolution plans must be created by this module for the same graph.",
+        {
+          code: "EVOLUTION_PLAN_OWNER_MISMATCH",
+          graphId: this.graphId,
+        },
+      );
+    }
+    return this.#cloneWithGraph(payload.mergedGraph, undefined, {
+      schemaVersion: plan.result.version,
+      schemaHash: plan.result.hash,
+    });
+  }
+
+  async withEvolvedTransaction<T>(
+    this: AdapterHistoryStore<G, TNativeTransaction>,
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>>;
+  async withEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>>;
+  async withEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>> {
+    assertFixedSchemaWorkingCopyAllows(
+      this.#baseBackend,
+      "withEvolvedTransaction",
+    );
+    return withAdoptedTransactionScope(
+      externalTx,
+      () => this.#applyEvolvedTransaction(externalTx, plan, fn, options),
+      true,
+    );
+  }
+
+  async #applyEvolvedTransaction<T>(
+    externalTx: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn:
+      | ((
+          tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>)
+      | ((
+          tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+        ) => Promise<T>),
+    options?: EvolvedTransactionOptions,
+  ): Promise<EvolvedTransactionOutcome<T>> {
+    const candidate = this.#evolutionPlanningTarget(plan);
+    const payload = requireDefined(getEvolutionPlanPayload<G>(plan));
+    assertEvolutionOptions(options, ["waitBudgetMs"]);
+    const waitBudgetMs = options?.waitBudgetMs ?? 5000;
+    if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs <= 0) {
+      throw new ConfigurationError(
+        "waitBudgetMs must be a positive safe integer.",
+        {
+          code: "INVALID_SCHEMA_FENCE_BUDGET",
+          waitBudgetMs,
+        },
+      );
+    }
+    if (plan.status === "noop") {
+      if (options?.waitBudgetMs !== undefined) {
+        throw new ConfigurationError(
+          "No-op plans use ordinary adoption and do not acquire an exclusive schema fence.",
+          { code: "EVOLUTION_NOOP_FENCE_BUDGET_UNSUPPORTED" },
+        );
+      }
+      const adopt = this.#adapterBackend?.adoptTransaction;
+      if (adopt === undefined)
+        throw new UnsupportedBackendCapabilityError(
+          "store.withEvolvedTransaction()",
+          "adoptTransaction",
+          { graphId: this.graphId },
+        );
+      const target = adopt(externalTx);
+      await lockSchemaVersionForStoreWrite(
+        {
+          graphId: this.graphId,
+          schemaVersion: plan.baseline.version,
+        },
+        target,
+      );
+      await assertEvolutionPlanBaseline(
+        plan,
+        await target.getActiveSchema(this.graphId),
+      );
+      const outcome = await candidate.#runAdoptedRecordedTransaction(
+        target,
+        externalTx,
+        fn,
+        this,
+      );
+      return {
+        ...outcome,
+        receipt: {
+          ...outcome.receipt,
+          schema: {
+            version: plan.baseline.version,
+            hash: plan.baseline.hash,
+          },
+        },
+      };
+    }
+    const requirements: EvolutionPlanRequirements = requireDefined(
+      payload.requirements,
+    );
+    // Permission policy is explicit and checked before the mutating fence.
+    // Database permissions remain authoritative on opted-in connections.
+    if (
+      (requirements.vectorSlots.length > 0 ||
+        requirements.identityAffectedKinds.length > 0) &&
+      this.#adapterBackend?.schemaProvisioning !== "transactional"
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional schema provisioning",
+        { graphId: this.graphId, requirements: plan.requirements },
+        "Use an adapter configured with schemaProvisioning: 'transactional' on a privileged connection, or apply the extension through bootstrap and replan.",
+      );
+    }
+    if (
+      requirements.vectorSlots.length > 0 &&
+      (this.#backend.capabilities.vector?.supported !== true ||
+        this.#backend.ensureVectorSlotContributions === undefined)
+    ) {
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "transactional vector provisioning",
+        {
+          graphId: this.graphId,
+          slots: requirements.vectorSlots,
+        },
+      );
+    }
+    const adopt = this.#adapterBackend?.adoptSchemaWriteTransaction;
+    if (adopt === undefined)
+      throw new UnsupportedBackendCapabilityError(
+        "store.withEvolvedTransaction()",
+        "adoptSchemaWriteTransaction",
+        { graphId: this.graphId },
+      );
+    // Live evolution needs the same session-observed isolation as recorded
+    // capture: its emptiness and freshness decisions cannot use an old snapshot.
+    const ordinaryAdopt = requireDefined(
+      this.#adapterBackend?.adoptTransaction,
+    );
+    await assertRecordedCaptureTransactionIsolation(ordinaryAdopt(externalTx));
+    const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
+    const active = adopted.activeSchema;
+    await assertEvolutionPlanBaseline(plan, active);
+    await this.#assertNoPendingRemovalFor(
+      payload.mergedGraph,
+      payload.baselineGraph,
+      adopted.backend,
+    );
+    // Ordering — and the "ontology before identity" reasoning — is spelled
+    // once, at `composeSchemaCommitPreflight` in `../schema/manager`.
+    await composeSchemaCommitPreflight({
+      structural: (target) =>
+        assertEvolvedSchemaRequiredKindsEmpty(
+          target,
+          this.graphId,
+          requireDefined(payload.classification),
+        ),
+      edgeMatchIdentity: undefined,
+      tightening: requirements.schemaTightening,
+      identity:
+        requirements.identityAffectedKinds.length === 0 ?
+          undefined
+        : async (target: SchemaCommitPreflightBackend) => {
+            const storage = await inspectAdoptedIdentityStorage(
+              adopted.backend,
+              this.#sqlSchema(),
+              {
+                graphId: this.graphId,
+                identityTableDdl: this.#baseBackend.identityTableDdl,
+              },
+            );
+            await candidate.identitySchemaPreflight(
+              target,
+              storage.provisionInCommit,
+            );
+          },
+    })(adopted.backend);
+    if (requirements.vectorSlots.length > 0) {
+      const provision = adopted.backend.ensureVectorSlotContributions;
+      if (provision === undefined) {
+        throw new UnsupportedBackendCapabilityError(
+          "store.withEvolvedTransaction()",
+          "transactional vector provisioning",
+          { graphId: this.graphId },
+        );
+      }
+      await provision(requireDefined(payload.vectorSlots), {
+        onDrift: "throw",
+      });
+    }
+    const committed = await adopted.backend.commitSchemaVersion({
+      graphId: this.graphId,
+      expected: { kind: "active", version: plan.baseline.version },
+      version: plan.result.version,
+      schemaHash: plan.result.hash,
+      schemaDoc: requireDefined(payload.schemaDocument),
+    });
+    const outcome = await candidate.#runAdoptedRecordedTransaction(
+      adopted.backend,
+      externalTx,
+      fn,
+      this,
+    );
+    return {
+      ...outcome,
+      receipt: {
+        ...outcome.receipt,
+        schema: {
+          version: committed.version,
+          hash: await activeSchemaHash(committed),
+        },
+      },
+    };
+  }
+
+  /**
+   * Prepares immutable schema instructions without acquiring a write fence.
+   *
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when the
+   *   plan would drop a stored custom-meta-edge relation, as `evolve()` does.
+   */
+  async planEvolution(
+    extension: GraphExtension,
+    options?: PlanEvolutionOptions,
+  ): Promise<EvolutionPlan> {
+    assertEvolutionOptions(options, ["source"]);
+    if (
+      options?.source !== undefined &&
+      !["database", "cached"].includes(options.source)
+    ) {
+      throw new ConfigurationError("Unknown evolution planning source.", {
+        code: "INVALID_EVOLUTION_PLANNING_SOURCE",
+        source: options.source,
+      });
+    }
+    if (options?.source !== "cached") {
+      const activeRow = await this.#backend.getActiveSchema(this.graphId);
+      if (activeRow === undefined) {
+        throw new ConfigurationError(
+          "Planning requires an initialized schema.",
+          {
+            code: "EVOLUTION_SCHEMA_REQUIRED",
+            graphId: this.graphId,
+          },
+        );
+      }
+      const storedSchema = parseSerializedSchema(activeRow.schema_doc);
+      this.#evolutionPlanningSnapshot = {
+        activeRow,
+        storedSchema,
+        baseline: this.#catchUpToStored(storedSchema),
+      };
+    }
+    const snapshot = this.#evolutionPlanningSnapshot;
+    if (snapshot === undefined) {
+      throw new ConfigurationError(
+        "No schema planning snapshot is cached. Plan from the database first.",
+        {
+          code: "EVOLUTION_SNAPSHOT_REQUIRED",
+          graphId: this.graphId,
+        },
+      );
+    }
+    const plan = await prepareEvolutionPlan({
+      baselineGraph: snapshot.baseline,
+      baselineVersion: snapshot.activeRow.version,
+      baselineHash: await activeSchemaHash(snapshot.activeRow),
+      storedSchema: snapshot.storedSchema,
+      extension,
+    });
+    return plan;
+  }
+
+  /** Reloads schema metadata after outer commit without applying or provisioning it. */
+  async refreshSchema<TRefStore extends StoreCore<G>>(
+    options?: RefreshSchemaOptions<TRefStore>,
+  ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertEvolutionOptions(options, ["ref", "minVersion"]);
+    const minVersion = options?.minVersion;
+    if (
+      minVersion !== undefined &&
+      (!Number.isSafeInteger(minVersion) || minVersion < 1)
+    ) {
+      throw new ConfigurationError(
+        "minVersion must be a positive safe integer.",
+        {
+          code: "INVALID_MIN_SCHEMA_VERSION",
+          minVersion,
+        },
+      );
+    }
+    if (
+      minVersion !== undefined &&
+      this.#schemaMetadata.schemaVersion === minVersion
+    ) {
+      syncStoreReplacementRef(options?.ref, this);
+      return this;
+    }
+    // Reconciliation is read-only: missing bootstrap storage must never cause DDL.
+    const active = await this.#backend.getActiveSchema(this.graphId);
+    if (
+      active === undefined ||
+      (minVersion !== undefined && active.version < minVersion)
+    ) {
+      throw new ConfigurationError(
+        "The minimum committed schema version is not visible.",
+        {
+          code: "SCHEMA_REFRESH_VERSION_UNAVAILABLE",
+          graphId: this.graphId,
+          minVersion,
+          actualVersion: active?.version,
+        },
+      );
+    }
+    if (
+      active.version === this.#schemaMetadata.schemaVersion &&
+      (await activeSchemaHash(active)) === this.#schemaMetadata.schemaHash
+    ) {
+      syncStoreReplacementRef(options?.ref, this);
+      return this;
+    }
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "refreshSchema");
+    return this.#cloneWithGraph(
+      this.#catchUpToStored(parseSerializedSchema(active.schema_doc)),
+      options?.ref,
+      await schemaMetadataFromRow(active),
+    );
+  }
+
   /**
    * Evolves the graph at runtime by merging a graph extension into the
    * current schema, atomically committing a new schema version, and
-   * returning a fresh `Store` constructed against the merged graph.
+   * returning the `Store` for the merged graph.
    *
    * The `Store` is immutable — its registry, collections, and operation
-   * contexts close over the graph at construction time — so callers
-   * must use the returned store (or pass a `ref` to be re-pointed) for
-   * any work involving the new kinds.
+   * contexts close over the graph at construction time. After `evolve()`
+   * resolves, callers must use the returned Store (or the re-pointed
+   * `ref.current`) for every subsequent operation in the same request. A
+   * Store captured before the schema commit remains pinned to the old version,
+   * and its next managed write is rejected by the schema fence.
    *
    * **Cost for purely additive extensions is proportional to schema
    * document size, not row count.** The commit is a single CAS write.
@@ -2571,10 +6296,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @param extension - Graph extension produced by
    *   `defineGraphExtension(...)`.
-   * @param options.ref - Optional handle whose `current` is overwritten
-   *   atomically with the schema commit. Long-lived consumers
-   *   (request handlers, background workers) that dereference through
-   *   the ref see the new kinds on the *next* call.
+   * @param options.ref - Optional handle whose `current` is overwritten with
+   *   the replacement before a successful call resolves. Code awaiting this
+   *   call can use the returned Store or `ref.current` immediately. A
+   *   previously captured Store is not mutated.
    *
    * @throws {GraphExtensionValidationError} when the extension is
    *   structurally invalid.
@@ -2583,6 +6308,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {IncompatibleChangeError} when a redeclared kind narrows
    *   in a way the existing rows can't satisfy
    *   (code `INCOMPATIBLE_CHANGE`).
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when
+   *   the stored schema holds a relation whose meta-edge is not built in:
+   *   the evolved schema would drop its last copy, which only an explicit
+   *   `migrateSchema()` may do.
    * @throws {GraphExtensionUnresolvedEndpointError} when an edge
    *   endpoint references a kind that exists in neither the extension
    *   nor the host graph
@@ -2612,6 +6341,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "evolve");
     // Catch up to the persisted state first (extension AND deprecated
     // set). Without this, a stale store applying an extension on top
     // of an out-of-date baseline would make ensureSchema diff against
@@ -2623,7 +6353,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // different shape, classifyModifications throws
     // IncompatibleChangeError here — surfacing the divergence rather
     // than overwriting.
-    const { activeRow, baseline } = await this.#loadCaughtUp("evolve");
+    const { activeRow, storedSchema, baseline } =
+      await this.#loadCaughtUp("evolve");
 
     // Merge first so the "I evolved with the same extension again"
     // hot path short-circuits before we walk every property in
@@ -2658,7 +6389,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const caughtUp = this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
       if (options?.eager !== undefined) {
         await this.#runEagerOrThrow(caughtUp, options.eager);
@@ -2673,6 +6404,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // promote to incompatible only when the kind has rows; genuinely
     // incompatible changes (REMOVE_PROPERTY, TYPE_CHANGE) are
     // rejected unconditionally.
+    // A kind cannot be re-added while its cleanup is still queued. The rows
+    // of the previous incarnation are still in the base relations, and reads
+    // filter only by (graph_id, kind) — there is no schema-generation
+    // boundary — so re-adding makes them visible again alongside whatever the
+    // new incarnation writes. Worse, `materializeRemovals` then declines the
+    // queued row (the kind is live), so those rows are never reclaimed.
+    //
+    // The documented cycle is remove -> materializeRemovals -> re-add, which
+    // this leaves untouched. Blocking here rather than at cleanup time keeps
+    // the diagnosis where the caller can act on it.
+    await this.#assertNoPendingRemovalFor(merged, baseline);
+
     const baselineDocument = baseline.extension ?? Object.freeze({});
     const classification = classifyModifications(baselineDocument, extension);
     if (classification.incompatible.length > 0) {
@@ -2681,15 +6424,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
       );
     }
-    if (classification.requireEmpty.length > 0) {
-      const nonEmpty = await this.#probeEmptyKinds(classification.requireEmpty);
-      const error = buildIncompatibleChangeError(
-        classification,
-        nonEmpty,
-        this.graphId,
-      );
-      if (error !== undefined) throw error;
-    }
+    // Extension `evolve()` used to pass ontology through `classifyModifications`
+    // unclassified — that function's own docblock explains why (ontology is out
+    // of its scope by design). The ontology half is classified here instead,
+    // against the exact after-document the commit is about to publish.
+    const schemaTighteningPreflight = prepareStoreVerbSchemaTighteningPreflight(
+      {
+        verb: "store.evolve()",
+        graphId: this.graphId,
+        fromVersion: activeRow.version,
+        toVersion: activeRow.version + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          merged,
+          activeRow.version + 1,
+          storedSchema,
+        ),
+      },
+    );
+    const identityCandidate =
+      merged.identity === undefined ?
+        undefined
+      : this.#cloneWithGraph(merged, undefined);
 
     // Commit via `commitNewSchemaVersion` directly (the row-returning
     // sibling of `migrateSchema`). The classification step above is the
@@ -2697,11 +6453,69 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // `isBackwardsCompatible` check would over-restrict ADD-required-
     // on-empty / TIGHTEN-on-empty modifications that the classifier
     // already approved.
-    const committed = await commitNewSchemaVersion(
-      this.#backend,
-      merged,
-      activeRow.version,
-    );
+    // Check the identity relations BEFORE the schema-commit transaction: a
+    // missing ledger is refused here rather than surfacing as a raw "no such
+    // table" from inside the commit. Any DERIVED relation the transition still
+    // owes comes back as DDL and is issued inside the commit transaction
+    // below, so an evolution that fails or is refused leaves nothing behind.
+    const identityProvisioning =
+      identityCandidate === undefined ? undefined : (
+        await ensureIdentityStorageOnAdoptedBaseSchema(
+          this.#baseBackend,
+          this.#sqlSchema(),
+          {
+            graphId: this.graphId,
+            enablement: false,
+            // The evolved graph's registry — the one the candidate's own
+            // preflight rebuilds through, so the predicate and the fill agree
+            // on which assertions count.
+            registry: buildKindRegistry(merged),
+          },
+        )
+      );
+    // Ordering — and the "ontology before identity" reasoning — is spelled
+    // once, at `composeSchemaCommitPreflight` in `../schema/manager`.
+    const preflight = planSchemaCommitPreflight({
+      structural: (target) =>
+        assertEvolvedSchemaRequiredKindsEmpty(
+          target,
+          this.graphId,
+          classification,
+        ),
+      edgeMatchIdentity: undefined,
+      tightening: schemaTighteningPreflight,
+      identity:
+        identityCandidate === undefined ? undefined : (
+          (target: SchemaCommitPreflightBackend) =>
+            identityCandidate.identitySchemaPreflight(
+              target,
+              identityProvisioning?.provisionInCommit ?? [],
+            )
+        ),
+    });
+    const committed =
+      preflight === undefined ?
+        classification.requireEmpty.length > 0 ?
+          await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
+            this.#backend,
+            merged,
+            activeRow.version,
+            classification,
+            storedSchema,
+          )
+        : await commitNewSchemaVersion(
+            this.#backend,
+            merged,
+            activeRow.version,
+            storedSchema,
+          )
+      : await commitNewSchemaVersionWithPreflight(
+          this.#backend,
+          merged,
+          activeRow.version,
+          preflight,
+          storedSchema,
+        );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
     // existed). `evolve()` is a privileged migrator path — it commits schema
@@ -2714,7 +6528,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const evolved = this.#cloneWithGraph(
       merged,
       options?.ref,
-      schemaMetadataFromRow(committed),
+      await schemaMetadataFromRow(committed),
     );
     if (options?.eager !== undefined) {
       await this.#runEagerOrThrow(evolved, options.eager);
@@ -2745,8 +6559,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * kind that's already marked is a no-op (no version bump).
    *
    * @param names - Node or edge kind names to mark as deprecated.
-   * @param options.ref - Optional handle to be re-pointed atomically
-   *   with the schema commit, mirroring `evolve()`.
+   * @param options.ref - Optional handle to be re-pointed to the replacement
+   *   Store before a successful call resolves, mirroring `evolve()`.
    *
    * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE` (no
    *   schema yet) or `DEPRECATE_UNKNOWN_KIND` (name not on the graph).
@@ -2771,8 +6585,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * @param names - Node or edge kind names to remove from the
    *   deprecated set.
-   * @param options.ref - Optional handle to be re-pointed atomically
-   *   with the schema commit.
+   * @param options.ref - Optional handle to be re-pointed to the replacement
+   *   Store before a successful call resolves.
    *
    * @throws {ConfigurationError} on `DEPRECATE_BEFORE_INITIALIZE`.
    * @throws {StaleVersionError} on a CAS race with another writer.
@@ -3051,6 +6865,373 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Diagnostic: compare each contribution currently expected by this graph
+   * and the backend strategies with its durable marker and the physical
+   * catalog. Reports detected unusable contributions, including a recorded
+   * failed materialization whose absent table agrees with the marker.
+   * Contributions with neither marker nor table and retired marker rows are
+   * omitted, so an empty array is not proof that storage was initialized.
+   *
+   * Opening a store never probes the catalog — `ensureRuntimeContributions`
+   * and the runtime asserts short-circuit on a per-instance signature cache
+   * and then on the marker row alone, which is the right default for a hot
+   * path. The cost is that a database whose contribution tables were dropped
+   * out of band (a partial restore, a hand-run `DROP`, a schema-scoped
+   * restore that missed them) opens completely clean and then fails at the
+   * first read or write that depends on the affected slot. This is the
+   * explicit, operator-invoked check for that state; it is not, and should not
+   * become, a boot step.
+   *
+   * Purely read-only: one existence query per distinct contribution table
+   * plus one marker read per graph, no DDL and no writes, so it is safe to
+   * run under a least-privilege runtime role and safe to run on a live
+   * store. Each entry carries identity resolved from the active contribution
+   * declaration and matching the marker contract, so callers can route to a
+   * repair without reconstructing any internal naming contract.
+   *
+   * Route on `state`, NOT on whether the entry is a vector slot: the
+   * repairs differ per state and the wrong one destroys data.
+   * {@link Store.reembedVectorField} drops and recreates storage, so
+   * applying it to a `missing-marker` — table intact, only the marker
+   * wrong — discards every embedding to fix bookkeeping. See
+   * {@link ContributionDiagnostic} and the per-state repair tables in the
+   * troubleshooting guide.
+   *
+   * Vector slots are enumerated from the graph's declared embedding fields
+   * and are considered only when the backend advertises vector support; a
+   * backend without it never materialized them, so there is nothing to
+   * compare. Current fulltext contributions are always considered. For a
+   * readiness check, first construct the Store through a verified attach so
+   * initialization is established independently.
+   *
+   * @throws {ConfigurationError} when the backend cannot probe its own
+   *   catalog. Reporting "no problems found" on a backend that never
+   *   looked would be the one answer this diagnostic must never give.
+   */
+  async verifyContributions(): Promise<readonly ContributionDiagnostic[]> {
+    const backend = this.#baseBackend;
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution verify",
+      () => {
+        throw new ConfigurationError(
+          "verifyContributions requires a backend that can probe its catalog " +
+            "for contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "verify",
+          },
+        );
+      },
+    );
+    const { verifyContributions: verify } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.verifyContributions,
+      CONTRIBUTION_HEALTH.id,
+    );
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    return verify(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Read-only diagnostic: every claim axis this graph's data ALREADY contends
+   * for — a scoped unique key two live nodes hold, an id live under both kinds
+   * of a `disjointWith` pair, or a declared edge cardinality two live edges
+   * exceed.
+   *
+   * The claim relations refuse a second claimant from the first write after
+   * upgrade onward, but they repair nothing that predates them: a database that
+   * carried a violation keeps carrying it until a write touches that axis, and
+   * is then refused with the ordinary typed error naming the incumbent. This is
+   * how an operator sees that state before a user does.
+   *
+   * Reports; never repairs. Which of two live claimants keeps the axis is a
+   * data-loss decision that belongs to the operator.
+   *
+   * Declarations are resolved from the active persisted schema, not this
+   * Store's construction-time graph snapshot. A Store left stale by another
+   * instance's `evolve()` therefore audits the constraints that currently
+   * govern the database instead of returning a false clean report.
+   *
+   * @throws {ConfigurationError} `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` when the
+   *   backend cannot run the audit — an empty report from a backend that never
+   *   looked is indistinguishable from a clean database.
+   */
+  async verifyConstraintFences(): Promise<readonly ConstraintFenceViolation[]> {
+    const activeRow = await this.#baseBackend.getActiveSchema(this.graphId);
+    const graph =
+      activeRow === undefined ?
+        this.#graph
+      : this.#catchUpToStored(parseSerializedSchema(activeRow.schema_doc));
+    const registry =
+      graph === this.#graph ? this.#registry : buildKindRegistry(graph);
+    return verifyConstraintFencesImpl({
+      graph,
+      registry,
+      graphId: this.graphId,
+      backend: this.#baseBackend,
+      batchPointRead: this.#batchPointRead,
+    });
+  }
+
+  /**
+   * Non-destructively repairs contribution states whose physical storage can
+   * be preserved: `missing-marker` and `failed-materialization`.
+   * `orphaned-marker` and `stale` findings are returned as
+   * `requires-rebuild`; this method never drops contribution tables or
+   * fabricates the data needed to rebuild them.
+   *
+   * The repair re-audits inside the backend and resolves every declaration
+   * from the committed schema. Callers do not supply diagnostics, physical
+   * names, or DDL. A stale Store is caught up to the active persisted graph
+   * before its vector slots are enumerated, so repair does not use declarations
+   * from the Store's stale in-memory graph snapshot.
+   *
+   * @throws {ConfigurationError} when no schema has been initialized or the
+   *   backend cannot probe and repair strategy-owned contributions.
+   */
+  async repairContributions(): Promise<ContributionRepairResult> {
+    const backend = this.#baseBackend;
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution repair",
+      () => {
+        throw new ConfigurationError(
+          "repairContributions requires a backend that can probe and repair " +
+            "strategy-owned contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "repair",
+          },
+        );
+      },
+    );
+    const { repairContributions: repair } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.repairContributions,
+      CONTRIBUTION_HEALTH.id,
+    );
+
+    const { baseline } = await this.#loadCaughtUp("repair");
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(baseline)
+      : [];
+    return repair(this.graphId, vectorSlots);
+  }
+
+  /**
+   * Read-only readiness check for the search projections: are dependent reads
+   * and writes coherent with the graph right now, or are they about to hit a
+   * degraded index?
+   *
+   * The read-only half of {@link Store.repairContributions}, and the
+   * bottom rung of the contribution health ladder — probe (read) →
+   * `repairContributions()` (incremental, non-destructive) →
+   * {@link Store.rebuildContribution} (destructive full reset). It shares
+   * the detection logic of the other two exactly: a second implementation
+   * would be free to disagree with the one the hot-path gate consults,
+   * and a health check that disagrees with the gate is worse than none.
+   *
+   * Writes nothing — no DDL, no marker writes, no effect on the
+   * per-instance caches the hot path relies on — so it is safe on a read
+   * path, on a replica, and under a least-privilege role. That is the
+   * whole reason it exists: the alternative for a caller who wants to
+   * know whether search is ready was to run `repairContributions()`, a
+   * write with repair side effects, and hope.
+   *
+   * One entry per search projection that this graph actually declares
+   * contributions for. A projection with none is omitted rather than
+   * reported `ready`, so an empty `entries` array means "nothing to
+   * assess" — never "assessed and healthy". Use
+   * {@link Store.verifyContributions} for the structured per-table
+   * diagnostics behind a `degraded` entry.
+   *
+   * @throws {ConfigurationError} when the backend provisions
+   *   contributions but cannot probe its own catalog. Answering `ready`
+   *   without having looked is the one answer this method must never
+   *   give. A backend with no contribution machinery at all has nothing
+   *   to assess and resolves to empty entries instead.
+   */
+  async probeContributions(): Promise<ContributionProbeResult> {
+    const backend = this.#baseBackend;
+    const probeVerdict = this.#contributionHealth.extras.probeContributions;
+    if (!probeVerdict.present) {
+      if (backend.capabilities.contributions?.supported !== true) {
+        return { entries: [] };
+      }
+      throw new ConfigurationError(
+        "probeContributions requires a backend that can probe its catalog " +
+          "for contribution tables.",
+        {
+          backend: backend.dialect,
+          capability: "contributions",
+          operation: "probe",
+        },
+      );
+    }
+    const { probeContributions: probe } = bindExtra(
+      backend,
+      probeVerdict,
+      CONTRIBUTION_HEALTH.id,
+    );
+
+    // The graph snapshot this Store holds, deliberately not a catch-up
+    // read: the probe must stay read-only, and `#loadCaughtUp` commits
+    // schema work. A Store whose in-memory graph has fallen behind
+    // reports on the slots it believes are declared, which is the same
+    // set its own reads and writes will use.
+    const vectorSlots =
+      backend.capabilities.vector?.supported === true ?
+        resolveGraphVectorSlots(this.#graph)
+      : [];
+    const entries = await probe(this.graphId, vectorSlots);
+    const revision = await this.revisionNow();
+    return {
+      ...(revision === undefined ? {} : { graphRevision: revision }),
+      entries,
+    };
+  }
+
+  /**
+   * Destructively rebuilds one search projection for THIS graph: clears the
+   * graph's rows from the projection's storage, recreates that storage from
+   * the current DDL when recreating it is safe, reconstructs the content
+   * from the node rows, and stamps the durable marker at the current
+   * signature.
+   *
+   * **Scoped to this graph.** The fulltext table is one physical table
+   * holding every graph's rows, keyed by `graph_id`, and this method is
+   * fenced per graph — so it removes only this graph's rows
+   * (`DELETE ... WHERE graph_id`, the same statement `clear()` uses) and
+   * escalates to dropping and recreating the table only when no other graph
+   * has rows in it. That drop is the one repair for storage provisioned at a
+   * shape the current DDL no longer produces; when another graph's content
+   * is in the way it is refused
+   * ({@link ContributionRebuildUnsupportedError}, reason
+   * `shared-storage-in-use`) rather than taken, because fulltext content is
+   * reconstructed from a graph's own nodes through its own schema and no
+   * other process can put back what the drop would destroy.
+   *
+   * The top rung of the health ladder, and the repair
+   * {@link Store.repairContributions} deliberately refuses to perform.
+   * Never reachable from that method — a `stale` contribution's table
+   * exists at the *old* shape, so the ordinary ensure path's idempotent
+   * `CREATE ... IF NOT EXISTS` no-ops and re-stamping the marker there
+   * would leave it blessing a table whose shape is wrong, which is
+   * exactly what the drift guard exists to prevent. Only a recreate makes
+   * the ensure meaningful, and destroying content is a decision stated at
+   * the call site rather than reached through a flag named `force`.
+   *
+   * **This destroys this graph's index content.** For `"fulltext"` nothing
+   * is permanently lost: the searchable content is derived from node
+   * properties TypeGraph already stores, so the refill reconstructs it in
+   * the same transaction. Nodes whose stored `props` cannot be read as an
+   * object are counted in `skipped` and are absent from the rebuilt index —
+   * `store.search.rebuildFulltext()` reports their ids individually.
+   *
+   * Atomic: the clear (or drop), recreate, refill, and stamp all run inside
+   * one transaction under the same per-graph fence as a schema commit, plus
+   * a database-scoped advisory lock serializing this contribution's DDL
+   * across graphs, so an interrupted rebuild leaves the contribution exactly
+   * as it was rather than attested-but-empty.
+   *
+   * The cost differs by path, and only one of them is a maintenance-window
+   * operation. A rebuild that drops and recreates the shared table takes
+   * `ACCESS EXCLUSIVE` on it before deciding to — the verdict "no other
+   * graph has rows here" is only sound under the exclusion the drop needs —
+   * so on PostgreSQL every graph's fulltext writers wait for the whole
+   * refill. That was already true of the drop itself, which holds the same
+   * lock to commit; the exclusion now merely starts a few statements
+   * earlier. The graph-scoped path takes no table lock at all: its
+   * `DELETE ... WHERE graph_id` is transactional and touches only this
+   * graph's rows, so it never makes another graph's writers wait.
+   * `store.search.rebuildFulltext()` remains the incremental, resumable way
+   * to refresh content when the storage shape is fine.
+   *
+   * @throws {ContributionRebuildUnsupportedError} for `"vector"`, always:
+   *   TypeGraph stores the vectors callers supply and never the inputs
+   *   that produced them, so embeddings exist only in the storage a
+   *   rebuild would drop and there is nothing to reconstruct them from.
+   *   `store.reembedVectorField(kind, fieldPath, { embed })` is the
+   *   sanctioned destructive path — it takes the callback that can
+   *   regenerate what the drop destroys. Also thrown when the active
+   *   strategy declares no teardown DDL, when the backend has no
+   *   transactional schema fence to make the sequence atomic, and when the
+   *   recorded shape is stale but the storage that would have to be
+   *   recreated holds another graph's rows (`shared-storage-in-use`). Every
+   *   one of these refuses before anything is dropped or deleted.
+   * @throws {ConfigurationError} when the backend cannot rebuild
+   *   strategy-owned contributions at all.
+   */
+  async rebuildContribution(
+    scope: ContributionRebuildScope,
+    options?: RebuildContributionOptions,
+  ): Promise<ContributionRebuildResult> {
+    const backend = this.#baseBackend;
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution rebuild",
+      () => {
+        throw new ConfigurationError(
+          "rebuildContribution requires a backend that can drop, recreate, " +
+            "and re-stamp strategy-owned contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "rebuild",
+          },
+        );
+      },
+    );
+    const { rebuildContribution: rebuild } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.rebuildContribution,
+      CONTRIBUTION_HEALTH.id,
+    );
+
+    // Catch up first: a rebuild recreates storage from the CURRENT
+    // declarations, so running it against a stale in-memory graph would
+    // provision the shape this Store remembers rather than the one the
+    // committed schema asks for.
+    await this.#loadCaughtUp("rebuild");
+    const registry = this.#registry;
+    const graphId = this.graphId;
+    return rebuild(graphId, scope, async (target) => {
+      // This callback only knows how to reconstruct fulltext content, and
+      // the port's contract is that implementations refuse `"vector"`
+      // before reaching it. Restate that here rather than trusting it: a
+      // backend that accepted the scope anyway would have this write
+      // fulltext rows over storage it had just dropped for another
+      // projection, which is worse than the refusal it skipped.
+      if (scope !== "fulltext") {
+        throw new ContributionRebuildUnsupportedError(
+          "vector-source-unavailable",
+          { graphId, contribution: scope, backend: backend.dialect },
+        );
+      }
+      const result = await repopulateFulltextInTransaction(
+        { graphId, registry },
+        target,
+        options?.pageSize === undefined ? {} : { pageSize: options.pageSize },
+      );
+      return {
+        processed: result.processed,
+        repopulated: result.upserted,
+        skipped: result.skipped,
+      };
+    });
+  }
+
+  /**
    * Removes extension kinds from the schema with cascading edge and
    * ontology cleanup. Two-phase by design:
    *
@@ -3076,6 +7257,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   compile-time kind.
    * @throws {KindHasReferentsError} when an extension kind being
    *   removed is referenced by a compile-time declaration.
+   * @throws {MigrationError} (`reason: "ontology-tightening-violated"`)
+   *   when a surviving kind was assignable to an edge endpoint only through
+   *   a removed kind and a live edge still relies on it.
+   * @throws {MigrationError} (`reason: "custom-relation-removal"`) when
+   *   the stored schema holds a relation whose meta-edge is not built in,
+   *   as `evolve()` does.
+   * @throws {MigrationError} (`reason: "unique-constraint-requires-empty-kind"`)
+   *   when a removed kind that sorts before a surviving, populated kind
+   *   leaves its `kindWithSubClasses` subclass component, where its uniqueness
+   *   claims may sit.
    * @throws {StaleVersionError} on a CAS race with another writer.
    * @throws {SchemaContentConflictError} on a same-version content
    *   conflict.
@@ -3087,7 +7278,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    const { activeRow, baseline } = await this.#loadCaughtUp("remove");
+    assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "removeKinds");
+    const { activeRow, storedSchema, baseline } =
+      await this.#loadCaughtUp("remove");
     const plan = planRemovals(baseline, names);
 
     // True no-op: every name was either absent or already removed.
@@ -3103,7 +7296,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
     }
 
@@ -3125,11 +7318,52 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // destructive by design; that's why removeKinds is a separate
     // verb. Concurrent commits surface as `StaleVersionError` from
     // `commitSchemaVersion` (CAS check).
-    const committedRow = await commitNewSchemaVersion(
-      this.#backend,
+    const identityCascade = await this.#identityRemovalPreflight(
       finalGraph,
-      activeRow.version,
+      plan.removedNodeKinds,
     );
+    // A removal usually only drops declarations, but removing a kind from
+    // the middle of a subclass chain cuts its surviving descendants off from
+    // every edge kind that admitted them through it. The preflight decides,
+    // from the same before/after documents every commit path hands it.
+    const schemaTighteningPreflight = prepareStoreVerbSchemaTighteningPreflight(
+      {
+        verb: "store.removeKinds()",
+        graphId: this.graphId,
+        fromVersion: activeRow.version,
+        toVersion: activeRow.version + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          finalGraph,
+          activeRow.version + 1,
+          storedSchema,
+        ),
+      },
+    );
+    // No structural gate: dropping kinds that still hold rows is this verb's
+    // purpose (materializeRemovals reclaims them). No edge match identity
+    // step: a removal declares no new durable key.
+    const preflight = planSchemaCommitPreflight({
+      structural: undefined,
+      edgeMatchIdentity: undefined,
+      tightening: schemaTighteningPreflight,
+      identity: identityCascade,
+    });
+    const committedRow =
+      preflight === undefined ?
+        await commitNewSchemaVersion(
+          this.#backend,
+          finalGraph,
+          activeRow.version,
+          storedSchema,
+        )
+      : await commitNewSchemaVersionWithPreflight(
+          this.#backend,
+          finalGraph,
+          activeRow.version,
+          preflight,
+          storedSchema,
+        );
 
     // Queue per-deployment data-cleanup status — one row per removed
     // kind. The status table is best-effort: if recordKindRemoval
@@ -3138,9 +7372,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // store). Operators reconcile via materializeRemovals later.
     const recordKindRemoval = this.#backend.recordKindRemoval;
     if (recordKindRemoval !== undefined) {
-      if (this.#backend.ensureKindRemovalsTable !== undefined) {
-        await this.#backend.ensureKindRemovalsTable();
-      }
+      await ensureFocusedStatusTable(
+        this.#backend,
+        this.#backend.ensureKindRemovalsTable,
+      );
       const attemptedAt = nowIso();
       const newSchemaVersion = committedRow.version;
       const queue = (kindName: string, entity: KindEntity): Promise<void> =>
@@ -3165,7 +7400,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const evolved = this.#cloneWithGraph(
       finalGraph,
       options?.ref,
-      schemaMetadataFromRow(committedRow),
+      await schemaMetadataFromRow(committedRow),
     );
     if (options?.eager !== undefined) {
       // Scope to just the kinds removed by THIS call (other pending
@@ -3177,6 +7412,43 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
     }
     return evolved;
+  }
+
+  /**
+   * The identity cascade `removeKinds()` commits with, or `undefined` when the
+   * removal cannot touch the assertion ledger.
+   *
+   * Identity being switched OFF is not that case: disabling identity retains
+   * the assertion rows, so a graph with no profile can still hold assertions
+   * naming the kinds being removed. Those rows are cascaded too — otherwise
+   * they survive as current orphans that a later re-enablement filters out of
+   * the closure while raw ledger reads and merge staging still see them. What
+   * the profile's absence does remove is the closure contract, so the repair
+   * pass is skipped and the ledger cleanup runs alone — and a graph that has no
+   * such rows keeps committing through the plain schema-commit primitive.
+   */
+  async #identityRemovalPreflight(
+    finalGraph: G,
+    removedNodeKinds: readonly string[],
+  ): Promise<((target: TransactionBackend) => Promise<void>) | undefined> {
+    if (removedNodeKinds.length === 0) return undefined;
+    const repairClosure = finalGraph.identity !== undefined;
+    if (
+      !repairClosure &&
+      !(await identityKindCascadeNeeded(
+        this.#backend,
+        this.#sqlSchema(),
+        this.graphId,
+        removedNodeKinds,
+      ))
+    ) {
+      return undefined;
+    }
+    const candidate = this.#cloneWithGraph(finalGraph, undefined);
+    return async (target: TransactionBackend) =>
+      candidate.removeIdentityKindsInSchemaPreflight(target, removedNodeKinds, {
+        repairClosure,
+      });
   }
 
   /**
@@ -3203,6 +7475,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options: Readonly<{ ref?: StoreRef<TRefStore> }> | undefined,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    assertFixedSchemaWorkingCopyAllows(
+      this.#baseBackend,
+      direction === "add" ? "deprecateKinds" : "undeprecateKinds",
+    );
     const verb = direction === "add" ? "deprecate" : "undeprecate";
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp(verb);
@@ -3244,7 +7520,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return this.#cloneWithGraph(
         baseline,
         options?.ref,
-        schemaMetadataFromRow(activeRow),
+        await schemaMetadataFromRow(activeRow),
       );
     }
 
@@ -3252,15 +7528,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const result = await ensureSchemaImpl(this.#backend, merged, {
       preloaded: { activeRow, storedSchema },
       autoMigrate: true,
+      historyEnabled: this.#captureEnabled,
     });
     // Use the committed row from the migration result when available,
     // skipping the post-commit `getActiveSchema` round-trip. The
     // `unchanged` / `pending` / `breaking` branches don't write a new
     // version, so the existing `activeRow` metadata is still authoritative.
-    const metadata =
-      result.status === "migrated" || result.status === "initialized" ?
-        schemaMetadataFromRow(result.committedRow)
-      : schemaMetadataFromRow(activeRow);
+    const metadata = await schemaMetadataForResult(activeRow, result);
     return this.#cloneWithGraph(merged, options?.ref, metadata);
   }
 
@@ -3317,47 +7591,61 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Probes each `requireEmpty` entry for any rows. Returns the set of
-   * composite keys (`${entity}:${kindName}`) that have at least one
-   * row — those entries need to be promoted from "allowed-on-empty"
-   * to incompatible. Dispatches to `countNodesByKind` for `node`
-   * entries and `countEdgesByKind` for `edge` entries (a single-
-   * primitive probe would always return 0 for the wrong-entity case
-   * and silently bypass the gate).
+   * Refuses an evolve that re-adds a kind whose data cleanup is still pending.
    *
-   * Probes run in parallel; each entry is independent. Race window
-   * (probe → CAS commit): another writer can insert a row into a
-   * previously-empty kind. The schema commit still succeeds (CAS
-   * guards on schema version, not row count); the new schema rejects
-   * the inserted row at next read, which the operator inspects and
-   * either deletes or reverts. Rare in practice; tighter elimination
-   * would require `SELECT FOR UPDATE` on the rows table, too
-   * heavyweight for a millisecond-budget operation.
+   * Returns silently on backends without the removal queue: they cannot have
+   * a pending row, so there is nothing to conflict with.
    */
-  async #probeEmptyKinds(
-    requireEmpty: readonly RequireEmptyEntry[],
-  ): Promise<Set<RequireEmptyEntry>> {
-    const probes = requireEmpty.map(
-      async (entry): Promise<readonly [RequireEmptyEntry, number]> => {
-        const count =
-          entry.entity === "node" ?
-            await this.#backend.countNodesByKind({
-              graphId: this.graphId,
-              kind: entry.kindName,
-            })
-          : await this.#backend.countEdgesByKind({
-              graphId: this.graphId,
-              kind: entry.kindName,
-            });
-        return [entry, count];
+  async #assertNoPendingRemovalFor(
+    merged: G,
+    baseline: G,
+    target?: TransactionBackend,
+  ): Promise<void> {
+    const backend = target ?? this.#backend;
+    const getPendingKindRemovals = backend.getPendingKindRemovals;
+    if (getPendingKindRemovals === undefined) return;
+
+    // Own keys only: `baseline` is rebuilt from the PARSED stored schema, so a kind
+    // named after an `Object.prototype` member would otherwise always look
+    // still-present and skip the pending-removal refusal this guard exists for.
+    const addedNodes = Object.keys(merged.nodes).filter(
+      (kind) => !hasOwnKey(baseline.nodes, kind),
+    );
+    const addedEdges = Object.keys(merged.edges).filter(
+      (kind) => !hasOwnKey(baseline.edges, kind),
+    );
+    if (addedNodes.length === 0 && addedEdges.length === 0) return;
+
+    if (target === undefined) {
+      await ensureFocusedStatusTable(
+        this.#backend,
+        this.#backend.ensureKindRemovalsTable,
+      );
+    }
+    const pending = await getPendingKindRemovals(this.graphId);
+    if (pending.length === 0) return;
+
+    const blocked = pending.filter((row) =>
+      row.entity === "node" ?
+        addedNodes.includes(row.kindName)
+      : addedEdges.includes(row.kindName),
+    );
+    if (blocked.length === 0) return;
+
+    const named = blocked
+      .map((row) => `${row.entity} "${row.kindName}"`)
+      .join(", ");
+    throw new ConfigurationError(
+      `Cannot re-add ${named} for graph "${this.graphId}": the previous ` +
+        `removal's data cleanup has not run, so the old rows are still in ` +
+        `the database and would become visible again alongside the new ` +
+        `ones. Run store.materializeRemovals() first, then evolve.`,
+      {
+        code: "KIND_READD_BLOCKED_BY_PENDING_REMOVAL",
+        graphId: this.graphId,
+        kinds: blocked.map((row) => row.kindName),
       },
     );
-    const results = await Promise.all(probes);
-    const nonEmpty = new Set<RequireEmptyEntry>();
-    for (const [entry, count] of results) {
-      if (count > 0) nonEmpty.add(entry);
-    }
-    return nonEmpty;
   }
 
   #cloneWithGraph<TRefStore extends StoreCore<G>>(
@@ -3397,50 +7685,301 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Internal: Operation Contexts ===
 
-  #immediateHookRunner(): OperationHookRunner {
-    return <T>(ctx: OperationHookContext, fn: () => Promise<T>) =>
-      this.#withOperationHooks(ctx, fn);
+  #immediateHookRunner(target?: TransactionBackend): OperationHookRunner {
+    return <T>(
+      ctx: OperationHookContext,
+      fn: () => Promise<T>,
+      didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+    ) => this.#withOperationHooks(ctx, fn, didWrite, operationFacts, target);
   }
 
+  #immediateBulkHookRunner(
+    target?: TransactionBackend,
+  ): BulkOperationHookRunner {
+    return <T extends Readonly<{ affectedCount: number }>>(
+      ctx: BulkOperationHookContext,
+      fn: () => Promise<T>,
+    ) => this.#withBulkOperationHooks(ctx, fn, target);
+  }
+
+  /** The one binding of the node window-end identity hook to this graph. */
+  readonly #requireValidityEndCompatible = (
+    target: IdentityTarget,
+    ref: Readonly<{ kind: string; id: string }>,
+    validTo: string | undefined,
+  ): Promise<void> =>
+    requireNodeValidityEndCompatible(
+      { graphId: this.graphId, schema: this.#sqlSchema() },
+      target,
+      ref,
+      validTo,
+    );
+
+  /**
+   * The slice of a node operation context `applyIdentityWindowEnd` reads, for
+   * the import update leg, which holds no operation context of its own.
+   */
+  #identityWindowEndContext(): IdentityWindowEndContext {
+    return this.#graph.identity === undefined ?
+        {}
+      : {
+          identity: {
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
+          },
+        };
+  }
+
+  /**
+   * `receiptRecorders` is the CHAIN of receipts a write through the
+   * collections built from this context belongs to: the enclosing
+   * transaction's recorder, plus one per `tx.measure(...)` scope the
+   * collections were built for (see {@link #attachMeasure}). Empty outside a
+   * receipt-tracked transaction, which is what leaves `recordCascadedParts`
+   * absent there.
+   */
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
+    attempt = 1,
+    receiptRecorders: readonly TransactionReceiptRecorder[] = [],
+    readOnlyTransaction = false,
   ): NodeOperationContext<G> {
+    const identityConfig = this.#graph.identity;
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      readOnlyTransaction,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
+      statementExecution: this.#statementExecution,
       registry: this.#registry,
+      claimsVerdict: this.#claimsVerdict,
+      batchPointRead: this.#batchPointRead,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      ...(identityConfig === undefined ?
+        {}
+      : {
+          identity: {
+            lock: (target: IdentityTarget) =>
+              lockIdentityGraph(target, this.graphId),
+            assertFoldable: (
+              target: IdentityTarget,
+              references: readonly Readonly<{ kind: string; id: string }>[],
+            ) =>
+              assertIdentityFoldable(
+                {
+                  graphId: this.graphId,
+                  registry: this.#registry,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                references,
+              ),
+            applyFold: (
+              target: IdentityTarget,
+              plan: IdentityFoldPlan,
+              cause: "fold" | "restore",
+            ) =>
+              applyIdentityFold(
+                {
+                  graphId: this.graphId,
+                  registry: this.#registry,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                plan,
+                cause,
+              ),
+            detachDeleted: (
+              target: IdentityTarget,
+              ref: Readonly<{ kind: string; id: string }>,
+              mode: "soft" | "hard",
+              assertionEnds: ReadonlyMap<string, string> | undefined,
+            ) =>
+              detachIdentityForNode(
+                {
+                  graphId: this.graphId,
+                  sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
+                  schema: this.#sqlSchema(),
+                },
+                target,
+                ref,
+                mode,
+                assertionEnds,
+              ),
+            participants: (
+              target: IdentityTarget,
+              kind: string,
+              ids: readonly string[],
+            ) =>
+              readIdentityParticipants(
+                { graphId: this.graphId, schema: this.#sqlSchema() },
+                target,
+                kind,
+                ids,
+              ),
+            requireValidityEndCompatible: this.#requireValidityEndCompatible,
+          },
+        }),
       createOperationContext: (operation, entity, kind, id) =>
-        this.#createOperationContext(operation, entity, kind, id),
+        this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
+      // Present only inside a receipt-tracked transaction; its absence is
+      // why a top-level delete records nothing (there is no receipt to
+      // record into). Fans out to the whole chain: a delete issued through a
+      // `tx.measure(...)` scope's collections populates that scope's receipt
+      // AND every receipt enclosing it, while one issued through the outer
+      // context reaches only the recorders that context was built with.
+      ...(receiptRecorders.length === 0 ?
+        {}
+      : {
+          recordCascadedParts: (parts: readonly CompositionCascadedPart[]) => {
+            for (const recorder of receiptRecorders) {
+              recorder.recordCascadedParts(parts);
+            }
+          },
+        }),
+      createBulkOperationContext: (operation, kind) => ({
+        ...this.#createHookContext(attempt),
+        operation,
+        entity: "node",
+        kind,
+      }),
+      withBulkOperationHooks: runBulkHooks,
     };
   }
 
   #createEdgeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    attempt = 1,
   ): EdgeOperationContext<G> {
     return {
       graph: this.#graph,
       graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
+      coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
+      claimsVerdict: this.#claimsVerdict,
+      batchPointRead: this.#batchPointRead,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      statementExecution: this.#statementExecution,
       createOperationContext: (operation, entity, kind, id) =>
-        this.#createOperationContext(operation, entity, kind, id),
+        this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
     };
   }
 
+  /** The single owner of the store-wide unchanged-upsert enablement decision. */
+  #coalescesUnchangedUpserts(): boolean {
+    return this.#options?.coalesceUnchangedUpserts === true;
+  }
+
   // === Internal: Hook Helpers ===
 
-  #createHookContext(): HookContext {
+  /**
+   * Decorates the query execution port so hooks observe each statement the
+   * query builder submits to the backend. A selective-projection retry
+   * therefore emits two independent start/end pairs with their actual SQL.
+   *
+   * Decoration goes through {@link deriveBackend}, which carries the
+   * projection's serialized-resource ownership: the hooked backend still
+   * executes on the source's connection, so it must answer the same "shares one
+   * serialized connection" question as its source.
+   */
+  #createHookedQueryBackend(
+    backend: GraphBackend | TransactionBackend,
+    attempt = 1,
+  ): GraphBackend {
+    if (
+      this.#hooks.onQueryStart === undefined &&
+      this.#hooks.onQueryEnd === undefined &&
+      this.#hooks.onError === undefined
+    ) {
+      return backend as GraphBackend;
+    }
+
+    const executeRaw = backend.executeRaw;
+    const compileSql = backend.compileSql;
+    // Store backends may be frozen. Decorate an allowlist projection so
+    // execute/executeRaw can be replaced without mutating the source.
+    const projected = projectGraphBackend(backend as GraphBackend);
+
+    return deriveBackend(projected, {
+      execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+        const compiled =
+          compileSql === undefined ?
+            renderSql(query, backend.dialect)
+          : compileSql(query);
+        return this.#withQueryHooks(
+          compiled.sql,
+          compiled.params,
+          () => backend.execute<T>(query),
+          attempt,
+        );
+      },
+      ...(executeRaw === undefined ?
+        {}
+      : {
+          executeRaw: <T>(
+            sqlText: string,
+            params: readonly unknown[],
+          ): Promise<readonly T[]> =>
+            this.#withQueryHooks(
+              sqlText,
+              params,
+              () => executeRaw<T>(sqlText, params),
+              attempt,
+            ),
+        }),
+    });
+  }
+
+  async #withQueryHooks<T>(
+    sql: string,
+    params: readonly unknown[],
+    execute: () => Promise<readonly T[]>,
+    attempt = 1,
+  ): Promise<readonly T[]> {
+    const ctx: QueryHookContext = {
+      ...this.#createHookContext(attempt),
+      sql,
+      params,
+    };
+    this.#hooks.onQueryStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const rows = await execute();
+      this.#hooks.onQueryEnd?.(ctx, {
+        rowCount: rows.length,
+        durationMs: Date.now() - startTime,
+      });
+      return rows;
+    } catch (error) {
+      this.#reportError(ctx, asError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * `attempt` is 1 everywhere outside a retried `store.transaction`; its
+   * attempt factory is the only caller that threads its own attempt number
+   * through, so a listener can tell a replay from a fresh operation.
+   */
+  #createHookContext(attempt = 1): HookContext {
     return {
       operationId: generateId(),
       graphId: this.graphId,
       startedAt: new Date(),
+      attempt,
     };
   }
 
@@ -3449,9 +7988,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     entity: KindEntity,
     kind: string,
     id: string,
+    attempt = 1,
   ): OperationHookContext {
     return {
-      ...this.#createHookContext(),
+      ...this.#createHookContext(attempt),
       operation,
       entity,
       kind,
@@ -3462,18 +8002,74 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #withOperationHooks<T>(
     ctx: OperationHookContext,
     fn: () => Promise<T>,
+    didWrite?: (result: T) => boolean,
+    operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
+    target?: TransactionBackend,
   ): Promise<T> {
     this.#hooks.onOperationStart?.(ctx);
     const startTime = Date.now();
     try {
       const result = await fn();
-      this.#hooks.onOperationEnd?.(ctx, {
-        durationMs: Date.now() - startTime,
-      });
+      const durationMs = Date.now() - startTime;
+      const endContext = operationEndContext(ctx, result, operationFacts);
+      const outcome =
+        didWrite === undefined ? "unknown"
+        : didWrite(result) ? "written"
+        : "unchanged";
+      publishSavepointEffect(
+        target,
+        () => this.#hooks.onOperationEnd?.(endContext, { durationMs, outcome }),
+        (cause) => {
+          this.#reportError(endContext, asError(cause));
+        },
+      );
       return result;
     } catch (error) {
-      this.#hooks.onError?.(ctx, asError(error));
+      this.#reportError(ctx, asError(error));
       throw error;
+    }
+  }
+
+  async #withBulkOperationHooks<T extends Readonly<{ affectedCount: number }>>(
+    ctx: BulkOperationHookContext,
+    fn: () => Promise<T>,
+    target?: TransactionBackend,
+  ): Promise<T> {
+    this.#hooks.onBulkOperationStart?.(ctx);
+    const startTime = Date.now();
+    try {
+      const result = await fn();
+      const durationMs = Date.now() - startTime;
+      publishSavepointEffect(
+        target,
+        () =>
+          this.#hooks.onBulkOperationEnd?.(ctx, {
+            affectedCount: result.affectedCount,
+            durationMs,
+          }),
+        (cause) => {
+          this.#reportError(ctx, asError(cause));
+        },
+      );
+      return result;
+    } catch (error) {
+      this.#reportError(ctx, asError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * THE one caller of `hooks.onError`. A hook that throws while being told
+   * about a failure must not replace that failure: the error being reported
+   * is what the caller — and, for a unit nested in a retried transaction,
+   * the retry owner classifying it — receives, so the hook's own exception
+   * is discarded here (see `StoreHooks.onError`).
+   */
+  #reportError(ctx: HookContext, error: Error): void {
+    try {
+      this.#hooks.onError?.(ctx, error);
+    } catch {
+      // Discarded on purpose; see `StoreHooks.onError`.
     }
   }
 
@@ -3489,19 +8085,76 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   #createBufferedHookRunner(
     pending: PendingOperationOutcome[],
+    target: TransactionBackend,
   ): OperationHookRunner {
     return async <T>(
       ctx: OperationHookContext,
       fn: () => Promise<T>,
+      didWrite?: (result: T) => boolean,
+      operationFacts?: (result: T) => OperationOutcomeFacts | undefined,
     ): Promise<T> => {
       this.#hooks.onOperationStart?.(ctx);
       const startTime = Date.now();
       try {
         const result = await fn();
-        pending.push({ ctx, durationMs: Date.now() - startTime });
+        const endContext = operationEndContext(ctx, result, operationFacts);
+        const outcome = {
+          type: "operation",
+          ctx: endContext,
+          durationMs: Date.now() - startTime,
+          outcome:
+            didWrite === undefined ? "unknown"
+            : didWrite(result) ? "written"
+            : "unchanged",
+        } satisfies PendingOperationOutcome;
+        publishSavepointEffect(
+          target,
+          () => {
+            pending.push(outcome);
+          },
+          (cause) => {
+            this.#reportError(endContext, asError(cause));
+          },
+        );
         return result;
       } catch (error) {
-        this.#hooks.onError?.(ctx, asError(error));
+        this.#reportError(ctx, asError(error));
+        throw error;
+      }
+    };
+  }
+
+  /** Buffered counterpart for set-based operations inside `transaction()`. */
+  #createBufferedBulkHookRunner(
+    pending: PendingOperationOutcome[],
+    target: TransactionBackend,
+  ): BulkOperationHookRunner {
+    return async <T extends Readonly<{ affectedCount: number }>>(
+      ctx: BulkOperationHookContext,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      this.#hooks.onBulkOperationStart?.(ctx);
+      const startTime = Date.now();
+      try {
+        const result = await fn();
+        const outcome = {
+          type: "bulkOperation",
+          ctx,
+          affectedCount: result.affectedCount,
+          durationMs: Date.now() - startTime,
+        } satisfies PendingOperationOutcome;
+        publishSavepointEffect(
+          target,
+          () => {
+            pending.push(outcome);
+          },
+          (cause) => {
+            this.#reportError(ctx, asError(cause));
+          },
+        );
+        return result;
+      } catch (error) {
+        this.#reportError(ctx, asError(error));
         throw error;
       }
     };
@@ -3531,12 +8184,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         case "current":
         case "asOf": {
           // resolveTemporalReadParams always resolves an instant for these modes.
-          if (row.deleted_at) return false;
-          if (asOf !== undefined && row.valid_from && asOf < row.valid_from)
-            return false;
-          if (asOf !== undefined && row.valid_to && asOf >= row.valid_to)
-            return false;
-          return true;
+          if (row.deleted_at || asOf === undefined) return false;
+          return validityWindowContainsInstant(
+            row.valid_from,
+            row.valid_to,
+            asOf,
+          );
         }
         case "includeEnded": {
           return !row.deleted_at;
@@ -3551,21 +8204,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #createQueryForBackend<CoordinateState extends QueryCoordinateState = "open">(
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
+    attempt = 1,
+    expectedSchemaVersion?: Readonly<{ value: number | undefined }>,
   ): InitialQueryBuilder<G, CoordinateState> {
+    const queryBackend = this.#createHookedQueryBackend(backend, attempt);
     return createInternalQueryBuilder<G, CoordinateState>(
       this.graphId,
       this.#registry,
       {
         // TransactionBackend omits transaction/close, but query execution only needs
         // the read-path/query capabilities shared with GraphBackend.
-        backend: backend as GraphBackend,
+        backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        defaultExpansion: this.#defaultExpansion,
+        runtimeKindTokenResolver: (token, entity) =>
+          this.#resolveRuntimeKindToken(token, entity),
         ...(this.#schema !== undefined && { schema: this.#schema }),
         ...(this.#recordedReadBinding !== undefined && {
           recordedReadBinding: this.#recordedReadBinding,
         }),
         ...(sealedCoordinate !== undefined && { sealedCoordinate }),
+        ...(expectedSchemaVersion !== undefined && { expectedSchemaVersion }),
       },
     );
   }
@@ -3590,9 +8250,27 @@ class AdapterStoreImplementation<
     this.backend =
       options?.history === true ?
         createHistoryStoreBackendProjection(this[STORE_RUNTIME].backend)
-      : Object.freeze(
-          createGraphBackendProjection(this[STORE_RUNTIME].backend),
-        );
+      : Object.freeze(projectGraphBackend(this[STORE_RUNTIME].backend));
+  }
+
+  /**
+   * Rebind this store's already-reconciled schema onto a fresh backend/
+   * connection, returning a new equivalent store with **no** verify round-trip.
+   * The connection is captured at construction and never mutated, so this
+   * returns a new instance rather than rebinding in place — the serverless
+   * per-request primitive: verify once per isolate, then `withBackend` the
+   * per-request connection.
+   */
+  withBackend(
+    backend: AdapterBackend<TNativeTransaction>,
+  ): AdapterStoreImplementation<G, TNativeTransaction> {
+    const state = this.reconstructionState();
+    return new AdapterStoreImplementation(
+      state.graph,
+      backend,
+      state.options,
+      state.schemaMetadata,
+    );
   }
 
   override async evolve<TRefStore extends StoreCore<G>>(
@@ -3757,6 +8435,8 @@ export type AdapterHistoryTransactionContext<
   AdapterTransactionContext<G, TNativeTransaction>,
   "sql" | "sqlAvailability"
 > &
+  RecordedRevisionRequest &
+  RecordedHeterogeneousNodeWriteBatch<G> &
   Readonly<{
     sqlAvailability: "history";
   }>;
@@ -3779,26 +8459,82 @@ export type MeasurableAdapterHistoryTransactionContext<
     >;
   }>;
 
+/**
+ * One transaction write surface, built for one receipt chain: the node/edge
+ * collection maps and the identity facade a caller writes through, UNWRAPPED
+ * (the receipt counters' wrapping is applied per recorder by the builder's
+ * caller), plus the node operation context those collections are bound to.
+ *
+ * The context travels with the surface because it is what carries facts no
+ * collection wrapper can observe — a node delete's composition
+ * `cascadedParts` — to the receipts the surface belongs to, and because
+ * `TRANSACTION_RUNTIME`'s delete port must run against the same one.
+ */
+type TransactionWriteSurface<G extends GraphDef> = Readonly<{
+  /** The internal delete/revive port, bound to this surface's own node operation context. */
+  runtime: TransactionRuntime;
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  identity?: IdentityFacade<G>;
+}>;
+
+/**
+ * Wraps a write surface's collections and identity facade once per recorder,
+ * innermost first, so every recorder in the chain counts each write.
+ */
+function wrapSurfaceForRecorders<G extends GraphDef>(
+  surface: TransactionWriteSurface<G>,
+  recorders: readonly TransactionReceiptRecorder[],
+): Readonly<{
+  nodes: GraphNodeCollections<G>;
+  edges: GraphEdgeCollections<G>;
+  identity: IdentityFacade<G> | undefined;
+}> {
+  let nodes = surface.nodes;
+  let edges = surface.edges;
+  let identity = surface.identity;
+  for (const recorder of recorders) {
+    ({ nodes, edges } = wrapTransactionCollections(nodes, edges, recorder));
+    identity =
+      identity === undefined ? undefined : (
+        wrapTransactionIdentity(identity, recorder)
+      );
+  }
+  return { nodes, edges, identity };
+}
+
 export type AdapterRecordedReadStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterRecordedReadStore<G, TNativeTransaction>> &
   AdapterStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterRecordedReadStore<G, TNativeTransaction>
+  > &
   Readonly<{
     backend: GraphBackend;
     recordedReadBound: true;
   }>;
 
-export type RecordedReadStore<G extends GraphDef> = StoreCore<G> &
+export type RecordedReadStore<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreTransactions<G> &
   StoreEvolution<G, RecordedReadStore<G>> &
   Readonly<{ recordedReadBound: true }>;
 
-export type HistoryStore<G extends GraphDef> = StoreCore<G> &
-  StoreTransactions<G> &
+export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> &
   StoreEvolution<G, HistoryStore<G>> &
   Readonly<{
+    transaction: <T>(
+      fn: (tx: HistoryTransactionContext<G>) => Promise<T>,
+      options?: StoreTransactionOptions,
+    ) => Promise<T>;
+    transactionWithReceipt: <T>(
+      fn: (tx: MeasurableHistoryTransactionContext<G>) => Promise<T>,
+      options?: StoreTransactionOptions,
+    ) => Promise<TransactionOutcome<T>>;
     historyEnabled: true;
     recordedReadBound: true;
   }>;
@@ -3806,9 +8542,14 @@ export type HistoryStore<G extends GraphDef> = StoreCore<G> &
 export type AdapterHistoryStore<
   G extends GraphDef,
   TNativeTransaction,
-> = StoreCore<G> &
+> = ResolvedStoreCore<G> &
   StoreEvolution<G, AdapterHistoryStore<G, TNativeTransaction>> &
   AdapterHistoryStoreTransactions<G, TNativeTransaction> &
+  AdapterStoreReconciliation<
+    G,
+    TNativeTransaction,
+    AdapterHistoryStore<G, TNativeTransaction>
+  > &
   Readonly<{
     backend: HistoryStoreBackend;
     historyEnabled: true;
@@ -3823,14 +8564,22 @@ type AdapterHistoryStoreTransactions<
     fn: (
       tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (
       tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
+  withEvolvedTransaction: <T>(
+    externalTransaction: TNativeTransaction,
+    plan: EvolutionPlan,
+    fn: (
+      tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
+    ) => Promise<T>,
+    options?: EvolvedTransactionOptions,
+  ) => Promise<EvolvedTransactionOutcome<T>>;
   withRecordedTransaction: <T>(
     externalTransaction: TNativeTransaction,
     fn: (
@@ -3904,29 +8653,29 @@ export function createStore<G extends GraphDef>(
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: HistoryStoreOptions,
+  options: HistoryStoreOptions & ReconciledOption<G>,
 ): AdapterHistoryStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: RecordedReadStoreOptions,
+  options: RecordedReadStoreOptions & ReconciledOption<G>,
 ): AdapterRecordedReadStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options?: UnboundLiveStoreOptions,
+  options?: UnboundLiveStoreOptions & ReconciledOption<G>,
 ): AdapterStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: LiveStoreOptions | undefined,
+  options: (LiveStoreOptions & ReconciledOption<G>) | undefined,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterRecordedReadStore<G, TNativeTransaction>;
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options: StoreOptions | undefined,
+  options: (StoreOptions & ReconciledOption<G>) | undefined,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterHistoryStore<G, TNativeTransaction>
@@ -3934,13 +8683,40 @@ export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
 export function createAdapterStore<G extends GraphDef, TNativeTransaction>(
   graph: G,
   backend: AdapterBackend<TNativeTransaction>,
-  options?: StoreOptions,
+  options?: StoreOptions & ReconciledOption<G>,
 ):
   | AdapterStore<G, TNativeTransaction>
   | AdapterHistoryStore<G, TNativeTransaction>
   | AdapterRecordedReadStore<G, TNativeTransaction> {
+  const reconciled = options?.reconciled;
+  if (reconciled !== undefined && reconciled.graph.id !== graph.id) {
+    // Same-shaped graphs are structurally interchangeable to TypeScript, so a
+    // snapshot from a different graph would silently reroute reads/writes to
+    // the wrong graph ID. Reject it — this is a zero-query check.
+    throw new ConfigurationError(
+      `Reconciled snapshot is for graph "${reconciled.graph.id}", not "${graph.id}".`,
+      { code: "RECONCILED_GRAPH_MISMATCH" },
+      {
+        suggestion:
+          "Pass the ReconciledSchema produced from the same graph you are building the store with; snapshots are not interchangeable across graphs.",
+      },
+    );
+  }
+  const storeOptions = stripReconciledOption(options);
+  // A reconciled snapshot is a pre-computed (graph, schemaMetadata) — the
+  // zero-round-trip equivalent of `prepareVerifiedStore`. Resolve the inputs,
+  // then take the single construction path. The merged graph is a superset of
+  // the compile-time `graph`, so runtime-committed kinds validate.
+  const resolvedGraph = reconciled?.graph ?? graph;
+  const schemaMetadata =
+    reconciled === undefined ? undefined : reconciledSchemaMetadata(reconciled);
   return asAdapterStoreSurface(
-    new AdapterStoreImplementation(graph, backend, options),
+    new AdapterStoreImplementation(
+      resolvedGraph,
+      backend,
+      storeOptions,
+      schemaMetadata,
+    ),
   );
 }
 
@@ -3954,20 +8730,43 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
-function schemaMetadataFromRow(
+async function schemaMetadataFromRow(
   row: SchemaVersionRow | undefined,
-): StoreSchemaMetadata {
+): Promise<StoreSchemaMetadata> {
   if (row === undefined) return UNKNOWN_SCHEMA_METADATA;
   return Object.freeze({
     schemaVersion: row.version,
-    schemaHash: row.schema_hash,
+    schemaHash: await activeSchemaHash(row),
   });
+}
+
+function reconciledSchemaMetadata(
+  reconciled: ReconciledSchema<GraphDef>,
+): StoreSchemaMetadata {
+  return Object.freeze({
+    schemaVersion: reconciled.version,
+    schemaHash: reconciled.hash,
+  });
+}
+
+/**
+ * Splits the construction-time `reconciled` snapshot off the persisted store
+ * options. The store keeps its options verbatim to reconstruct the next store
+ * on `evolve()`, so the snapshot — a one-shot construction source — must never
+ * be carried forward.
+ */
+function stripReconciledOption<G extends GraphDef>(
+  options: (StoreOptions & ReconciledOption<G>) | undefined,
+): StoreOptions | undefined {
+  if (options === undefined || !("reconciled" in options)) return options;
+  const { reconciled: _reconciled, ...rest } = options;
+  return rest;
 }
 
 function schemaMetadataForResult(
   activeRow: SchemaVersionRow | undefined,
   result: SchemaValidationResult,
-): StoreSchemaMetadata {
+): Promise<StoreSchemaMetadata> {
   if (result.status === "initialized" || result.status === "migrated") {
     return schemaMetadataFromRow(result.committedRow);
   }
@@ -4047,6 +8846,10 @@ export type {
  * - Initializes the schema on first run (version 1)
  * - Auto-migrates safe changes (additive changes)
  * - Throws MigrationError for breaking changes
+ * - Fences managed writes against concurrent schema-version commits; a stale Store
+ *   fails before writing instead of landing rows against a replaced schema
+ *   (official transactional backends only; unsupported custom backends fail
+ *   closed on their first managed write)
  *
  * @param graph - The graph definition
  * @param backend - The database backend
@@ -4118,6 +8921,146 @@ type PreparedStore<G extends GraphDef> = Readonly<{
   schemaMetadata: StoreSchemaMetadata;
 }>;
 
+async function assertHistorySchemaOnOpen(
+  backend: GraphBackend,
+  graph: GraphDef,
+  options: StoreOptions | undefined,
+): Promise<void> {
+  if (options?.history !== true) return;
+  // Only a TypeGraph-owned store reads or writes the recorded relations
+  // this check verifies; an engine-native backend has none, and gating on
+  // `history` alone would refuse it with RECORDED_SCHEMA_INCOMPATIBLE for a
+  // table shape it was never going to touch.
+  if (resolveRecordedTimeOwnership(backend) !== "typegraph-relations") return;
+  const schema =
+    options.schema === undefined ?
+      createSqlSchema(backend.tableNames)
+    : requireSqlSchema(options.schema, "store schema");
+  await assertCurrentRecordedSchema(
+    backend,
+    schema,
+    graph.identity !== undefined,
+  );
+}
+
+const IDENTITY_ONTOLOGY_META_EDGES: ReadonlySet<string> = new Set([
+  META_EDGE_DISJOINT_WITH,
+  META_EDGE_EQUIVALENT_TO,
+  META_EDGE_SAME_AS,
+  META_EDGE_SUB_CLASS_OF,
+]);
+
+function identityOntologyChanged(
+  before: SerializedSchema,
+  after: SerializedSchema,
+): boolean {
+  function relevantRelations(schema: SerializedSchema): readonly string[] {
+    return schema.ontology.relations
+      .filter((relation) => IDENTITY_ONTOLOGY_META_EDGES.has(relation.metaEdge))
+      .map((relation) =>
+        JSON.stringify([relation.metaEdge, relation.from, relation.to]),
+      )
+      .toSorted();
+  }
+  return (
+    JSON.stringify(relevantRelations(before)) !==
+    JSON.stringify(relevantRelations(after))
+  );
+}
+
+/** Which identity semantic change is waiting on an unapplied migration. */
+type IdentitySchemaGate = "enablement" | "profile" | "ontology";
+
+const IDENTITY_GATE_CODES = {
+  enablement: "IDENTITY_ENABLEMENT_PENDING",
+  profile: "IDENTITY_PROFILE_MIGRATION_PENDING",
+  ontology: "IDENTITY_SCHEMA_MIGRATION_PENDING",
+} as const;
+
+/**
+ * Runs the schema gate, but lets the identity-specific refusal win over the
+ * generic `MigrationError` when the identity change is the *only* breaking
+ * change in the diff.
+ *
+ * A `sameIdAcrossKinds` flip is classified breaking (it rewrites every
+ * `areSame` / `membersOf` answer), so the generic gate would otherwise be the
+ * only thing a caller ever sees and the documented `IDENTITY_*` codes would be
+ * unreachable. When the diff carries other breaking changes too, the generic
+ * error wins: it enumerates all of them, which the identity error cannot.
+ */
+async function ensureSchemaWithIdentityPrecedence<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  options: StoreOptions & SchemaManagerOptions,
+  gate: IdentitySchemaGate | undefined,
+): Promise<SchemaValidationResult> {
+  try {
+    return await ensureSchemaImpl(backend, graph, options);
+  } catch (error) {
+    if (gate === undefined || !isIdentityOnlyBreakingChange(error)) throw error;
+    throw identityMigrationRequiredError(graph.id, gate, {
+      blockedBy: "breaking-change",
+      cause: error,
+    });
+  }
+}
+
+function isIdentityOnlyBreakingChange(error: unknown): boolean {
+  if (!(error instanceof MigrationError)) return false;
+  const diff = "diff" in error.details ? error.details.diff : undefined;
+  if (diff?.identity?.severity !== "breaking") return false;
+  return ![
+    ...diff.nodes,
+    ...diff.edges,
+    ...diff.ontology,
+    ...diff.indexes,
+  ].some((change) => change.severity === "breaking");
+}
+
+function identityMigrationRequiredError(
+  graphId: string,
+  gate: IdentitySchemaGate,
+  context: Readonly<{
+    blockedBy: "breaking-change" | "auto-migrate-disabled";
+    pendingVersion?: number;
+    cause?: unknown;
+  }>,
+): ConfigurationError {
+  const blocker =
+    context.blockedBy === "breaking-change" ?
+      "but the change is breaking and has not been applied."
+    : "but autoMigrate is disabled and the change is pending.";
+  return new ConfigurationError(
+    `Changing Operational Identity semantics requires the schema migration to commit, ${blocker}`,
+    {
+      code: IDENTITY_GATE_CODES[gate],
+      graphId,
+      ...(context.pendingVersion === undefined ?
+        {}
+      : { pendingVersion: context.pendingVersion }),
+    },
+    {
+      cause: context.cause,
+      suggestion:
+        "Apply the migration explicitly with migrateSchema(backend, graph, activeVersion) — it commits the new version and rebuilds the identity closure in the same transaction — or, for a change that is not breaking, enable autoMigrate.",
+    },
+  );
+}
+
+/** One fenced, revision-neutral entry for public and startup identity repair. */
+function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
+  identityContext: IdentityRebuildContext<G>,
+  writeContext: WriteTransactionContext,
+): Promise<void> {
+  return runInWriteTransaction(
+    writeContext,
+    identityContext.backend,
+    async (target) =>
+      rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
+    { didWrite: () => false },
+  );
+}
+
 async function prepareStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -4135,10 +9078,186 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     storedSchema,
   } = await loadAndMergeGraphExtensionDocument(backend, graph);
 
-  const result = await ensureSchemaImpl(backend, merged, {
-    ...options,
+  const identityProfileChanged =
+    activeRow !== undefined &&
+    storedSchema?.identity?.sameIdAcrossKinds !==
+      merged.identity?.sameIdAcrossKinds;
+  // The very first schema commit is an enablement too: a legacy database
+  // populated through an unmanaged `createStore` can already hold same-id
+  // peers and assertions, so initialization must run the same fold scan,
+  // contradiction validation, and closure build as a later enablement
+  // migration — an empty database just makes them cheap no-ops.
+  const identityInitialization =
+    activeRow === undefined && merged.identity !== undefined;
+  const identityEnablement =
+    identityInitialization ||
+    (identityProfileChanged &&
+      storedSchema?.identity === undefined &&
+      merged.identity !== undefined);
+  const identitySemanticsChanged =
+    identityProfileChanged ||
+    (activeRow !== undefined &&
+      storedSchema !== undefined &&
+      merged.identity !== undefined &&
+      identityOntologyChanged(
+        storedSchema,
+        serializeSchema(merged, activeRow.version + 1),
+      ));
+
+  // Resolved before the provisioning below, which asks whether a schema commit
+  // is already going to rebuild the derived identity relations.
+  const identityGate: IdentitySchemaGate | undefined =
+    identitySemanticsChanged ?
+      identityEnablement ? "enablement"
+      : identityProfileChanged ? "profile"
+      : "ontology"
+    : undefined;
+
+  // First enablement over an existing populated database: createStore /
+  // createSqliteBackend / createPostgresBackend ran no DDL, so the identity
+  // relations the enablement preflight reads/writes may not exist yet.
+  // Ensure them BEFORE the schema-commit transaction — running enablement DDL
+  // inside the preflight would re-enter the backend's per-graph write lock the
+  // commit already holds. Idempotent (CREATE TABLE / CREATE INDEX IF NOT
+  // EXISTS), so it is a harmless no-op when the schema turns out to be pending
+  // (finding: enablement requires an applied migration) or the tables already
+  // exist.
+  const identityProfile = merged.identity;
+  if (identityProfile !== undefined) {
+    // Brand-validate BEFORE the DDL: a counterfeit schema-shaped object must
+    // reject with INVALID_SQL_SCHEMA and leave no tables behind — and must
+    // not surface as IDENTITY_STORAGE_MISSING on an already enabled graph.
+    const resolvedIdentitySchema =
+      options?.schema === undefined ?
+        createSqlSchema(backend.tableNames)
+      : requireSqlSchema(options.schema, "store schema");
+    // One registry for the decision and the derivation it predicts: the
+    // predicate must scope the ledger by exactly the kinds the rebuild below
+    // derives through, or it asks for a rebuild that cannot converge.
+    const identityRegistry = buildKindRegistry(merged);
+    // THE RETURNED OBLIGATION IS DISCARDED HERE, DELIBERATELY. It is non-empty
+    // only on the gated path below (recompute withheld), and it names DDL that
+    // must be issued INSIDE the schema-commit transaction — which this call
+    // site does not own. `prepareIdentitySchemaCommit` re-derives it by calling
+    // `ensureIdentitySchemaStorage` again, from the same backend, schema,
+    // registry and enablement flag, and hands it to the commit preflight that
+    // can honor it. What keeps that safe is the equality of those four inputs,
+    // so a change that lets this site resolve the schema or build the registry
+    // differently from `prepareIdentitySchemaCommit` breaks it — silently, by
+    // provisioning for one shape and filling for another. The call is still
+    // load-bearing for its EFFECT: it runs the idempotent identity DDL before
+    // the commit takes the per-graph write lock.
+    await ensureIdentityStorageOnAdoptedBaseSchema(
+      backend,
+      resolvedIdentitySchema,
+      {
+        graphId: merged.id,
+        enablement: identityEnablement,
+        registry: identityRegistry,
+        // A derived relation this library version added, absent from (or left
+        // empty in) a database that predates it, is created and FILLED as one
+        // unit here — never created now and filled at the end of boot. Between
+        // those two points sit the schema commit, the history assertion, three
+        // materialization steps and an index build, and for that whole window an
+        // empty separation relation would answer "not separated" to every
+        // concurrent `assertSame`. See `ensureIdentitySchemaStorage`.
+        //
+        // Withheld when a schema commit is gated on an identity SEMANTICS
+        // change: that commit's own preflight creates AND rebuilds inside the
+        // commit transaction, under the semantics being committed. Filling here
+        // would instead derive classes from semantics this database has not
+        // accepted yet — and would keep them if the commit were then refused.
+        // Nothing is provisioned on that path either, so a refused commit leaves
+        // the relation absent rather than readable-empty, and the next open of a
+        // graph whose semantics ARE committed heals it here.
+        ...(identityGate === undefined ?
+          {
+            // The registry was resolved before this transaction. Pin its schema
+            // version before taking the identity lock: a concurrent migration
+            // may already have rebuilt under different semantics, and a stale
+            // startup must not overwrite that closure even if boot later fails.
+            recomputeDerivedRelations: (target) =>
+              rebuildIdentityClosureWithSchemaFence(
+                {
+                  backend: target,
+                  graphId: merged.id,
+                  registry: identityRegistry,
+                  schema: resolvedIdentitySchema,
+                  sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
+                },
+                {
+                  graphId: merged.id,
+                  schemaVersion: activeRow?.version,
+                  historyEnabled: false,
+                  revisionTrackingEnabled: false,
+                  revisionSchema: resolvedIdentitySchema,
+                },
+              ),
+          }
+        : {}),
+      },
+    );
+  }
+
+  // No identity preflight is passed here — the schema manager derives the
+  // mandatory one itself (from `options.schema` when supplied), so no public
+  // caller can substitute or suppress the closure rebuild.
+  const ensureOptions = {
+    // The fallback is not useless: spreading `options` while it is possibly
+    // undefined makes TypeScript distribute the StoreOptions union through
+    // the literal and reject the call below.
+    // eslint-disable-next-line unicorn/no-useless-fallback-in-spread
+    ...(options ?? {}),
     preloaded: { activeRow, storedSchema },
-  });
+    // This IS the first point a capture session could exist for this graph —
+    // `StoreImplementation`'s constructor, which normally wraps the backend
+    // with `createRecordedBackend`, has not run yet. Threaded so the identity
+    // preflight can bind its OWN transaction target to a capture session
+    // instead of silently dropping every ledger touch and transition note.
+    // Engine-native `history: true` captures nothing TypeGraph-owned, exactly
+    // as the Store it opens will not.
+    historyEnabled: capturesTypeGraphRecordedHistory(
+      options?.history === true,
+      backend,
+    ),
+  };
+
+  // An identity semantic change reaches the store only after the preflight
+  // (closure materialization + same-id fold) has COMMITTED with the schema
+  // version; otherwise `store.identity` would answer from an empty or stale
+  // closure — silently wrong reads. Two blockers stop that commit, and each
+  // must surface the identity-specific code rather than a generic failure:
+  // an unapplied breaking change (a `sameIdAcrossKinds` flip or a disable),
+  // and `autoMigrate: false` leaving a safe change pending.
+  const result = await ensureSchemaWithIdentityPrecedence(
+    backend,
+    merged,
+    ensureOptions,
+    identityGate,
+  );
+
+  if (identityGate !== undefined && result.status === "pending") {
+    throw identityMigrationRequiredError(merged.id, identityGate, {
+      blockedBy: "auto-migrate-disabled",
+      pendingVersion: result.version,
+    });
+  }
+
+  await assertHistorySchemaOnOpen(backend, merged, options);
+
+  // This path runs under the schema owner. Runtime store construction and
+  // lineage reads only verify the journal, so a DML-only role never creates it.
+  if (
+    result.status !== "breaking" &&
+    result.status !== "pending" &&
+    options?.revisionTracking === true &&
+    options.history !== true &&
+    options.revisionJournal !== false &&
+    backend.lineage === undefined &&
+    backend.ensureRevisionChangesJournal !== undefined
+  ) {
+    await installRevisionChangesJournal(backend);
+  }
 
   // #135/#143: this is the single durable-marker writer, and it MUST
   // run after ensureSchemaImpl so the breaking-change gate is reached
@@ -4159,10 +9278,19 @@ async function prepareStoreWithSchema<G extends GraphDef>(
     await materializeSystemIndexesOnBoot(backend, merged.id, result);
   }
 
+  // No late derived-relation fill runs here, and that absence is the point.
+  // Boot has exactly two provisioning sites now, each of which publishes a
+  // CREATE and its fill as one transaction: the fence above (no identity
+  // semantics change) and the schema commit's own preflight (there is one).
+  // A fill deferred to this point would have spent the whole commit + history
+  // + materialization + index-build sequence answering "not separated" for
+  // every pair — and would have been skipped entirely whenever the commit it
+  // belonged to was refused, leaving that answer permanent.
+
   return {
     graph: merged,
     result,
-    schemaMetadata: schemaMetadataForResult(activeRow, result),
+    schemaMetadata: await schemaMetadataForResult(activeRow, result),
   };
 }
 
@@ -4326,6 +9454,11 @@ async function materializeSystemIndexesOnBoot(
  *   initialized, or `StoreNotInitializedError` when the schema is
  *   current but the runtime-contribution markers are missing/stale.
  *   The runtime can use a least-privilege, DML-only database role.
+ *   Managed writes are fenced against concurrent schema-version commits just like
+ *   `createStoreWithSchema`; a stale verified Store fails before writing.
+ *   Runtime backends must support transactions and the schema-write fence;
+ *   unsupported custom or HTTP backends attach for reads but fail closed on a
+ *   managed write.
  * - **`createStore(graph, backend)`** is the same zero-DDL attach
  *   *without* the verification gate — fastest, but schema drift goes
  *   undetected until a hot-path operation trips.
@@ -4385,31 +9518,32 @@ export async function createVerifiedStore<G extends GraphDef>(
 ): Promise<
   [Store<G> | HistoryStore<G> | RecordedReadStore<G>, SchemaValidationResult]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
-  return [
-    new StoreImplementation(
-      prepared.graph,
-      backend,
-      options,
-      prepared.schemaMetadata,
-    ),
-    prepared.result,
-  ];
+  const prepared = await prepareVerifiedStore(graph, backend, options);
+  const store = new StoreImplementation(
+    prepared.graph,
+    backend,
+    options,
+    prepared.schemaMetadata,
+  );
+  await store.validateIdentity();
+  return [store, prepared.result];
 }
 
 async function prepareVerifiedStore<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
+  options: StoreOptions | undefined,
 ): Promise<PreparedStore<G>> {
   const {
     graph: merged,
     activeRow,
     result,
   } = await loadAndVerifyGraph(backend, graph);
+  await assertHistorySchemaOnOpen(backend, merged, options);
   return {
     graph: merged,
     result,
-    schemaMetadata: schemaMetadataFromRow(activeRow),
+    schemaMetadata: await schemaMetadataFromRow(activeRow),
   };
 }
 
@@ -4491,16 +9625,13 @@ export async function createVerifiedAdapterStore<
     SchemaValidationResult,
   ]
 > {
-  const prepared = await prepareVerifiedStore(graph, backend);
-  return [
-    asAdapterStoreSurface(
-      new AdapterStoreImplementation(
-        prepared.graph,
-        backend,
-        options,
-        prepared.schemaMetadata,
-      ),
-    ),
-    prepared.result,
-  ];
+  const prepared = await prepareVerifiedStore(graph, backend, options);
+  const store = new AdapterStoreImplementation(
+    prepared.graph,
+    backend,
+    options,
+    prepared.schemaMetadata,
+  );
+  await store.validateIdentity();
+  return [asAdapterStoreSurface(store), prepared.result];
 }

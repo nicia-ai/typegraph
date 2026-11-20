@@ -1,4 +1,4 @@
-import { type SQL as DrizzleSql } from "drizzle-orm";
+import { entityKind, type SQL as DrizzleSql } from "drizzle-orm";
 import {
   type PgDatabase,
   type PgQueryResultHKT,
@@ -6,6 +6,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { type ExtractTablesWithRelations } from "drizzle-orm/relations";
 
+import { ConfigurationError } from "../../../errors";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import { shouldForceCustomPlan } from "../../../query/sql-intent";
 import { getOrCreateLru } from "./lru";
@@ -85,6 +86,16 @@ type PostgresJsClient = ((...args: readonly unknown[]) => unknown) &
     ) => PromiseLike<readonly unknown[]>;
   }>;
 
+type NeonHttpBatchClient = Readonly<{
+  query: (
+    sqlText: string,
+    params?: readonly unknown[],
+  ) => PromiseLike<readonly unknown[]>;
+  transaction: (
+    queries: readonly PromiseLike<readonly unknown[]>[],
+  ) => Promise<readonly unknown[]>;
+}>;
+
 type PgSessionCarrier = Readonly<{
   client?: unknown;
   constructor?: Readonly<{ name?: string }>;
@@ -99,6 +110,24 @@ type PgClientCarrier = Readonly<{
     session?: PgSessionCarrier;
   }>;
 }>;
+
+const INTERACTIVE_POSTGRES_DATABASE_KINDS = new Set([
+  "NeonServerlessDatabase",
+  "NodePgDatabase",
+  "PgliteDatabase",
+  "PostgresJsDatabase",
+]);
+
+function isRecognizedInteractivePostgresDatabase(db: AnyPgDatabase): boolean {
+  const constructor = (
+    db as unknown as Readonly<{
+      constructor?: Readonly<Record<PropertyKey, unknown>>;
+    }>
+  ).constructor;
+  return INTERACTIVE_POSTGRES_DATABASE_KINDS.has(
+    String(constructor?.[entityKind]),
+  );
+}
 
 export type AnyPgDatabase = PgDatabase<
   PgQueryResultHKT,
@@ -120,7 +149,12 @@ export type AnyPgTransaction = PgTransaction<
 
 export type PostgresExecutionAdapter = SqlExecutionAdapter;
 
-function hasFunctionProperty<K extends string>(
+/**
+ * Duck-typing primitive for the client-shape predicates: `value` carries a
+ * callable `property`. Shared with the serialized-resource detection in
+ * `../postgres.ts` so both spell "has this method" the same way.
+ */
+export function hasFunctionProperty<K extends string>(
   value: unknown,
   property: K,
 ): value is Readonly<Record<K, (...args: readonly unknown[]) => unknown>> {
@@ -158,17 +192,58 @@ function isPgliteClient(candidate: unknown): candidate is NodePgClient {
   );
 }
 
+/**
+ * PGlite 0.5.x serializes the wire-protocol parameter count as a signed
+ * 16-bit integer. At 32,768 binds it silently returns no rows and leaves the
+ * client returning false-empty results, so the advertised budget must stay at
+ * the largest signed 16-bit value.
+ */
+export const PGLITE_MAX_BIND_PARAMETERS = 32_767;
+
+/** Returns the PGlite client that owns a root Drizzle database, if present. */
+export function getPgliteClient(db: AnyPgDatabase): object | undefined {
+  const client = (db as PgClientCarrier).$client;
+  return isPgliteClient(client) ? client : undefined;
+}
+
+/** Detects a root Drizzle database backed by PGlite without importing it. */
+export function isPgliteDatabase(db: AnyPgDatabase): boolean {
+  return getPgliteClient(db) !== undefined;
+}
+
 function transactionSession(
   carrier: PgClientCarrier,
 ): PgSessionCarrier | undefined {
   return carrier.session ?? carrier._?.session;
 }
 
+/** The driver client pinned by this Drizzle transaction, when inspectable. */
+export function getPinnedPostgresTransactionClient(
+  db: AnyPgDatabase,
+): object | undefined {
+  const client = transactionSession(db as PgClientCarrier)?.client;
+  if (
+    (typeof client !== "object" || client === null) &&
+    typeof client !== "function"
+  ) {
+    return undefined;
+  }
+  return client;
+}
+
 function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
 }
 
-function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
+/**
+ * Single owner of "this callable client is postgres-js". Shared with the
+ * serialized-resource detection in `../postgres.ts`, which reads `options.max`
+ * off the same client shape, so the fast path and the marking predicate cannot
+ * drift about which callables are postgres-js.
+ */
+export function isPostgresJsClient(
+  candidate: unknown,
+): candidate is PostgresJsClient {
   // postgres-js's tagged-template Sql is callable, has `.unsafe` (raw
   // parameterized executor), and has `.begin` (transaction starter). The
   // transaction-scoped `TransactionSql` replaces `.begin` with `.savepoint`;
@@ -192,9 +267,8 @@ function isPostgresJsClient(candidate: unknown): candidate is PostgresJsClient {
  * the fast path can't drive them safely — Drizzle's neon-http session
  * handles them correctly via the `db.execute` slow path.
  *
- * Exported so the backend factory can auto-disable the `transactions`
- * capability when this driver is detected (HTTP can't hold a session,
- * so multi-statement transactions are not available regardless).
+ * Exported so the backend factory can refuse interactive transactions when
+ * this driver is detected (HTTP cannot hold a multi-statement session).
  */
 export function isNeonHttpClient(db: AnyPgDatabase): boolean {
   const candidate = (db as PgClientCarrier).$client;
@@ -206,13 +280,36 @@ export function isNeonHttpClient(db: AnyPgDatabase): boolean {
 }
 
 /**
+ * Returns the Neon HTTP client only when its current query method is present.
+ * Older Neon HTTP releases expose `transaction()` but not `query()`; those
+ * clients remain correctly classified as Neon HTTP (and therefore avoid the
+ * node-postgres fast path), but cannot safely provide this batch surface.
+ */
+function resolveNeonHttpBatchClient(
+  db: AnyPgDatabase,
+): NeonHttpBatchClient | undefined {
+  if (!isNeonHttpClient(db)) return undefined;
+  const candidate = (db as PgClientCarrier).$client;
+  if (
+    typeof candidate !== "function" ||
+    !hasFunctionProperty(candidate, "query") ||
+    !hasFunctionProperty(candidate, "transaction")
+  ) {
+    return undefined;
+  }
+  return candidate as unknown as NeonHttpBatchClient;
+}
+
+/**
  * Default cap on the number of distinct SQL strings tracked for
  * server-side prepared statements. Mirrors the SQLite adapter's
  * `DEFAULT_PREPARED_STATEMENT_CACHE_MAX`. High-cardinality SQL text —
  * variable-length IN-list expansions, generated aliases, custom
  * `backend.execute()` calls — would otherwise grow this map (and the
  * matching per-session prepared-statement memory inside PostgreSQL)
- * without bound.
+ * without bound. The LRU bounds only TypeGraph's in-process SQL-to-name
+ * lookup; safe names are never recycled, so it cannot bound prepared
+ * statements retained by a live PostgreSQL connection.
  */
 const DEFAULT_POSTGRES_STATEMENT_CACHE_MAX = 256;
 
@@ -437,7 +534,7 @@ function resolvePgClient(
   // outer pool while a transaction is open.
   const client =
     carrier.$client ??
-    (useTransactionClient ? transactionSession(carrier)?.client : undefined);
+    (useTransactionClient ? getPinnedPostgresTransactionClient(db) : undefined);
   // Must precede `isPgNativeClient`: PGlite matches it too (object with
   // `.query`), but only the unnamed wrapper is safe for it (see
   // `isPgliteClient`).
@@ -489,9 +586,11 @@ async function executeDrizzleQuery<TRow>(
 function createPgPreparedStatement(
   pgClient: PgQueryClient,
   sqlText: string,
+  maxBindParameters: number | undefined,
 ): PreparedSqlStatement {
   return {
     async execute<TRow>(params: readonly unknown[]): Promise<readonly TRow[]> {
+      assertWithinBindParameterLimit(params.length, maxBindParameters);
       const result = await pgClient.query(sqlText, params);
       return result.rows as readonly TRow[];
     },
@@ -508,12 +607,11 @@ function createPgPreparedStatement(
  *   `prepareStatements: false`. Named statements registered on one
  *   pooled backend connection aren't visible to the next, so the
  *   server-side prepared-statement cache must be off.
- * - **High-cardinality SQL text.** If the application emits many
- *   distinct compiled SQL strings (variable-length IN-list expansions,
- *   custom `backend.execute()` calls, generated aliases), tune
- *   `preparedStatementCacheMax` down to bound per-session memory more
- *   aggressively, or up if memory is plentiful and you want fewer
- *   re-PREPAREs.
+ * - **High-cardinality SQL text.** If the application emits many distinct
+ *   compiled SQL strings (variable-length IN-list expansions, custom
+ *   `backend.execute()` calls, generated aliases), set
+ *   `prepareStatements: false` to avoid retaining one prepared statement per
+ *   distinct SQL text on every live connection.
  */
 export type PostgresExecutionAdapterOptions = Readonly<{
   /**
@@ -525,11 +623,24 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   prepareStatements?: boolean;
   /**
-   * Maximum number of distinct SQL strings tracked for prepared-
-   * statement naming. Defaults to `DEFAULT_POSTGRES_STATEMENT_CACHE_MAX`
-   * (256). Ignored when `prepareStatements` is `false`.
+   * Maximum number of distinct SQL strings retained in TypeGraph's in-process
+   * SQL-to-name lookup. Defaults to `DEFAULT_POSTGRES_STATEMENT_CACHE_MAX`
+   * (256). Eviction never reuses a name, so it does not deallocate or bound
+   * prepared statements retained by live PostgreSQL connections. Ignored when
+   * `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
+  /**
+   * Maximum parameters that one statement may dispatch. Backend factories
+   * pass their normalized capability here so every execution surface has a
+   * final fail-loud guard after batch sizing.
+   */
+  maxBindParameters?: number;
+  /**
+   * @internal Affirmative factory authorization for a root interactive atomic
+   * program. The adapter must not infer transaction isolation from methods.
+   */
+  interactiveAtomicBatch?: boolean;
   /**
    * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
    * this on its private adapter; ordinary transaction backends deliberately do
@@ -545,26 +656,113 @@ export function createPostgresExecutionAdapter(
   const prepareStatements = options.prepareStatements ?? true;
   const cacheMax =
     options.preparedStatementCacheMax ?? DEFAULT_POSTGRES_STATEMENT_CACHE_MAX;
+  const maxBindParameters = options.maxBindParameters;
+  const neonHttpClient = resolveNeonHttpBatchClient(db);
   const pgClient = resolvePgClient(
     db,
     prepareStatements,
     cacheMax,
     options.useTransactionClient ?? false,
   );
+  const canOpenInteractiveAtomicBatch =
+    options.interactiveAtomicBatch === true &&
+    neonHttpClient === undefined &&
+    pgClient !== undefined &&
+    options.useTransactionClient !== true &&
+    isRecognizedInteractivePostgresDatabase(db) &&
+    hasFunctionProperty(db, "transaction");
 
   function compile(query: ExecutableSql): CompiledSqlQuery {
     return compileQueryWithDialect(db, query, "PostgreSQL");
   }
 
+  function assertCompiledWithinBindParameterLimit(
+    compiledQuery: CompiledSqlQuery,
+  ): void {
+    assertWithinBindParameterLimit(
+      compiledQuery.params.length,
+      maxBindParameters,
+    );
+  }
+
+  const executeNeonAtomicBatch =
+    neonHttpClient === undefined ? undefined : (
+      async function executeNeonAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertCompiledWithinBindParameterLimit(statement);
+        }
+        if (statements.length === 0) return [];
+        const queries = statements.map((statement) =>
+          neonHttpClient.query(statement.sql, statement.params),
+        );
+        const results = await neonHttpClient.transaction(queries);
+        return results.map((result) => {
+          if (
+            typeof result === "object" &&
+            result !== null &&
+            "rows" in result &&
+            Array.isArray((result as { rows?: unknown }).rows)
+          ) {
+            return normalizeRows(
+              (result as { rows: readonly unknown[] }).rows,
+            ) as readonly TRow[];
+          }
+          return Array.isArray(result) ?
+              (normalizeRows(result) as readonly TRow[])
+            : [];
+        });
+      }
+    );
+
+  const executeInteractiveAtomicBatch =
+    canOpenInteractiveAtomicBatch ?
+      async function executeInteractiveAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertCompiledWithinBindParameterLimit(statement);
+        }
+        if (statements.length === 0) return [];
+        return db.transaction(async (tx) => {
+          const transactionAdapter = createPostgresExecutionAdapter(tx, {
+            ...options,
+            useTransactionClient: true,
+          });
+          const executeCompiled = transactionAdapter.executeCompiled;
+          if (executeCompiled === undefined) {
+            throw new ConfigurationError(
+              "PostgreSQL atomic batch execution could not bind to its transaction client.",
+              {
+                capability: "execution.atomicBatch",
+                driver: transactionSession(tx as PgClientCarrier)?.constructor
+                  ?.name,
+              },
+            );
+          }
+          const results: (readonly TRow[])[] = [];
+          for (const statement of statements) {
+            results.push(await executeCompiled<TRow>(statement));
+          }
+          return results;
+        });
+      }
+    : undefined;
+  const executeAtomicBatch =
+    executeNeonAtomicBatch ?? executeInteractiveAtomicBatch;
+
   if (pgClient === undefined) {
     return {
       compile,
       async execute<TRow>(query: ExecutableSql): Promise<readonly TRow[]> {
+        assertCompiledWithinBindParameterLimit(compile(query));
         return executeDrizzleQuery<TRow>(
           db,
           isSqlFragment(query) ? toDrizzleSql(query, "postgres") : query,
         );
       },
+      ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     };
   }
 
@@ -573,6 +771,7 @@ export function createPostgresExecutionAdapter(
   async function executeCompiled<TRow>(
     compiledQuery: CompiledSqlQuery,
   ): Promise<readonly TRow[]> {
+    assertCompiledWithinBindParameterLimit(compiledQuery);
     const result = await pgQueryClient.query(
       compiledQuery.sql,
       compiledQuery.params,
@@ -590,6 +789,7 @@ export function createPostgresExecutionAdapter(
       // the server-side prepared-statement path because the wrapped
       // client assigns each unique SQL a stable statement name.
       const compiled = compile(query);
+      assertCompiledWithinBindParameterLimit(compiled);
       if (isSqlFragment(query) && shouldForceCustomPlan(query)) {
         const result = await pgQueryClient.queryUnnamed(
           compiled.sql,
@@ -600,8 +800,35 @@ export function createPostgresExecutionAdapter(
       return executeCompiled<TRow>(compiled);
     },
     executeCompiled,
+    ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     prepare(sqlText: string): PreparedSqlStatement {
-      return createPgPreparedStatement(pgQueryClient, sqlText);
+      return createPgPreparedStatement(
+        pgQueryClient,
+        sqlText,
+        maxBindParameters,
+      );
     },
   };
+}
+
+function assertWithinBindParameterLimit(
+  parameterCount: number,
+  maxBindParameters: number | undefined,
+): void {
+  if (maxBindParameters === undefined || parameterCount <= maxBindParameters) {
+    return;
+  }
+  throw new ConfigurationError(
+    `PostgreSQL statement uses ${parameterCount} bound parameters, exceeding ` +
+      `this backend's limit of ${maxBindParameters}.`,
+    {
+      capability: "maxBindParameters",
+      maxBindParameters,
+      parameterCount,
+    },
+    {
+      suggestion:
+        "Split the operation into smaller batches or lower the batch size before retrying.",
+    },
+  );
 }

@@ -53,8 +53,10 @@ export const POSTGRES_INDEX_MAT_TIMESTAMPS: IndexMaterializationTimestampAdapter
  * `typegraph_index_materializations` table. The caller has already
  * narrowed via the typed table query; this type just spells out the
  * dialect-shared field set so `mapMaterializationRow` can decode it.
+ * Exported so `engine/members/index-materialization-members.ts` can type
+ * the row-access closures each dialect binds to its own table object.
  */
-type RawIndexMaterializationRow = Readonly<{
+export type RawIndexMaterializationRow = Readonly<{
   indexName: string;
   graphId: string;
   entity: string;

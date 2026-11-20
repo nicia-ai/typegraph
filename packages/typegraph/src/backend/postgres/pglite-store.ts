@@ -5,9 +5,9 @@
  * TypeGraph Store surface rather than the adapter-native Drizzle handle.
  */
 import { type GraphDef } from "../../core/define-graph";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { type SchemaManagerOptions } from "../../schema/manager";
 import {
-  createStoreWithSchema,
   type HistoryStore,
   type RecordedReadStore,
   type Store,
@@ -19,9 +19,27 @@ import {
   type StoreOptions,
   type UnboundLiveStoreOptions,
 } from "../../store/types";
-import { createPostgresTables } from "../drizzle/schema/postgres";
-import { closeAfterFailure } from "../types";
-import { createLocalPgliteBackend } from "./pglite";
+import { loadDrizzleBackedModule } from "../missing-peer-ledger";
+
+export type { GraphIdentityConfig } from "../../core/define-graph";
+export type {
+  IdentityAssertion,
+  IdentityAssertionId,
+  IdentityAssertionResult,
+  IdentityFacade,
+  IdentityNode,
+  IdentityNodeRefInput,
+  IdentityPair,
+  IdentityReadFacade,
+  IdentityRelation,
+  IdentityWriteSummary,
+} from "../../identity";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+} from "../types";
 
 export type LocalPgliteStoreOptions<
   TStoreOptions extends StoreOptions = StoreOptions,
@@ -30,10 +48,22 @@ export type LocalPgliteStoreOptions<
   dataDir?: string;
   /** Whether to load pgvector. Defaults to true. */
   vector?: boolean;
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table.
+   */
+  fulltext?: FulltextStrategy | false;
   /** Store behavior, including hooks, history, and custom table names. */
   store?: TStoreOptions;
-  /** Schema initialization and migration policy. */
-  schemaManagement?: SchemaManagerOptions;
+  /**
+   * Schema initialization and migration policy. `schema` is excluded here:
+   * the effective SqlSchema has exactly one source — `store.schema` — which
+   * this constructor also uses to provision the physical tables, so a
+   * second schema could name tables that were never created.
+   */
+  schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
 
 /** Creates, provisions, and returns a full typed local PGlite Store. */
@@ -63,22 +93,9 @@ export async function createLocalPgliteStore<G extends GraphDef>(
   graph: G,
   options: LocalPgliteStoreOptions = {},
 ): Promise<Store<G> | HistoryStore<G> | RecordedReadStore<G>> {
-  const tables =
-    options.store?.schema === undefined ?
-      undefined
-    : createPostgresTables(options.store.schema.tables);
-  const { backend } = await createLocalPgliteBackend({
-    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
-    ...(options.vector === false ? { vector: false as const } : {}),
-    ...(tables === undefined ? {} : { tables }),
-  });
-  try {
-    const [store] = await createStoreWithSchema(graph, backend, {
-      ...options.store,
-      ...options.schemaManagement,
-    });
-    return store;
-  } catch (error) {
-    return closeAfterFailure(backend, error);
-  }
+  const impl = await loadDrizzleBackedModule(
+    "./postgres/pglite",
+    () => import("./pglite-store-impl"),
+  );
+  return impl.createLocalPgliteStoreImpl(graph, options);
 }

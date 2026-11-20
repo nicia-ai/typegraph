@@ -1,31 +1,63 @@
 /**
  * QueryBuilder - The fluent query builder.
  */
-import { type GraphDef } from "../../core/define-graph";
+import { backendDerivationRoot } from "../../backend/derive-backend";
+import {
+  type GraphDef,
+  type GraphIdentityConfig,
+} from "../../core/define-graph";
+import {
+  resolveRuntimeKindInput,
+  type RuntimeEdgeKind,
+  type RuntimeEdgeTypeFor,
+  type RuntimeNodeKind,
+  type RuntimeNodeTypeFor,
+} from "../../core/runtime-kind";
 import {
   coordinateContext,
   describeCoordinate,
   resolveReadCoordinate,
 } from "../../core/temporal";
 import {
+  type AnyEdgeType,
   type EdgeType,
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError, KindNotFoundError } from "../../errors";
+import {
+  CompositionConfigurationError,
+  ConfigurationError,
+  KindNotFoundError,
+  ValidationError,
+} from "../../errors";
+import { unrecognizedOptionKeyIssues } from "../../errors/validation";
+import { type PolymorphicNodeType } from "../../ontology/types";
+import {
+  compositionEdgeKindMembers,
+  compositionReadersTowards,
+  compositionViaKind,
+  compositionViaReach,
+  type CompositionViaRef,
+  partitionCompositionEdgeKindsByDirection,
+} from "../../registry/composition-relation";
+import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
   type FieldRef,
   type GroupBySpec,
   type HybridFusionOptions,
   mergeEdgeKinds,
-  type OrderSpec,
   type PredicateExpression,
   type ProjectedField,
   type SortDirection,
   type TraversalDirection,
   type TraversalExpansion,
 } from "../ast";
+import { validateAggregateOperand } from "../compiler/aggregate-validation";
+import {
+  createOuterReferenceExpression,
+  type DatabaseExpression,
+} from "../expressions";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
   buildFieldBuilderForTypeInfo,
@@ -34,38 +66,261 @@ import {
   type Predicate,
   stringField,
 } from "../predicates";
-import { type FieldTypeInfo } from "../schema-introspector";
+import {
+  type FieldTypeInfo,
+  type SchemaIntrospector,
+} from "../schema-introspector";
+import {
+  type AliasExpansionOptions,
+  aliasOverloadTyping,
+  expandKindsForAxis,
+  INDEPENDENT_ALIAS_TYPING,
+  resolveAliasKinds,
+} from "./alias-expansion";
+import { buildQueryAst } from "./ast-builder";
 import {
   createDynamicFieldBuilder,
   type DynamicEdgeType,
   type DynamicNodeType,
 } from "./dynamic";
 import { ExecutableAggregateQuery } from "./executable-aggregate-query";
+import {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+} from "./executable-projection-query";
 import { ExecutableQuery } from "./executable-query";
+import {
+  createExpressionAliasContext,
+  type ExpressionAliasContext,
+  type QueryExpressionContext,
+} from "./expression-context";
+import {
+  assertExpressionScope,
+  getExpressionScope,
+  isDatabaseExpression,
+} from "./expression-scope";
+import { createExpressionSubqueryHelpers } from "./expression-subqueries";
+import { registerQueryBuilderInternalContext } from "./internal-context";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { TraversalBuilder } from "./traversal-builder";
+import { createMetadataAccessor } from "./metadata-accessor";
+import { assertSharedNodeField, resolveAliasOrderSpec } from "./order-by-field";
+import { withRecursiveStopExpansion } from "./recursive-stop";
+import { executeQueryTerminal } from "./terminal-query";
+import {
+  EXHAUSTIVE_VARIABLE_LENGTH_STATE,
+  TraversalBuilder,
+} from "./traversal-builder";
 import {
   type AliasMap,
+  type AliasNodeType,
+  type AliasOrderField,
   type BaseFieldAccessor,
+  type BuildRecursiveAliases,
   type EdgeAccessor,
   type EdgeAlias,
   type EdgeAliasMap,
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ExpansionAliasNodeType,
+  type ForwardedExpansionAxes,
+  type ListAliasNodeType,
+  type ListPolymorphicNodeType,
   type NodeAccessor,
   type NodeAlias,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
   type RecursiveAliasMap,
+  type RecursiveTraversalOptions,
   type SelectContext,
   type UniqueAlias,
 } from "./types";
 import {
+  hasQuerySource,
   validateHybridFusionOptions,
+  validateQueryRange,
+  validateQuerySource,
+  validateQueryState,
+  validateSortDirection,
   validateSqlIdentifier,
+  validateTraversalOptions,
 } from "./validation";
+
+function resolveAggregateFieldTypeInfo(
+  introspector: SchemaIntrospector,
+  nodeKindNames: readonly string[] | undefined,
+  edgeKindNames: readonly string[] | undefined,
+  path: readonly string[],
+): FieldTypeInfo | undefined {
+  const [propertyName, ...nestedPath] = path;
+  if (propertyName === undefined) return undefined;
+
+  const rootTypeInfo =
+    nodeKindNames === undefined ?
+      edgeKindNames === undefined ?
+        undefined
+      : introspector.getSharedEdgeFieldTypeInfo(edgeKindNames, propertyName)
+    : introspector.getSharedFieldTypeInfo(nodeKindNames, propertyName);
+
+  function resolveNested(
+    current: FieldTypeInfo | undefined,
+    index: number,
+  ): FieldTypeInfo | undefined {
+    const segment = nestedPath[index];
+    return segment === undefined ? current : (
+        resolveNested(current?.shape?.[segment], index + 1)
+      );
+  }
+
+  return resolveNested(rootTypeInfo, 0);
+}
+
+/**
+ * Identity-aware traversal option, available only on a graph that declares an
+ * identity configuration. On any other graph the property is typed `never`, so
+ * setting it is a compile error (and a runtime guard rejects it as well).
+ *
+ * When `includeIdentityMembers` is true, the traversal's source hop matches an
+ * edge attached to *any* coordinate-visible member of the source node's
+ * identity class, not just the source node itself. Semantics:
+ *
+ * - Results are physical rows: the nodes and edges returned are the ones
+ *   actually stored, never a synthesized merge of the class.
+ * - Identity-class membership is resolved at the query's own coordinate, so a
+ *   traversal under `asOf`/`asOfRecorded` follows only the assertions that were
+ *   in force at that instant; a retracted assertion stops conducting.
+ * - Within a step, physical edge ids are deduplicated. The one exception is a
+ *   self-inverse edge between two folded peers (same id, different kind), which
+ *   legitimately matches in both directions and is kept.
+ * - Under recursion, cycle detection keys on (kind, id) rather than id alone,
+ *   so passing through two folded peers is not mistaken for a revisit. Path
+ *   output is unaffected: it remains an array of bare node ids.
+ */
+export type IdentityTraversalOption<G extends GraphDef> =
+  G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ includeIdentityMembers?: boolean }>
+  : Readonly<{ includeIdentityMembers?: never }>;
+
+type DynamicNodeTypeFor<T> =
+  T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
+
+/** A nonempty list of compile-time node kinds, as `from()` accepts it. */
+type SourceKindList<G extends GraphDef> = readonly [
+  keyof G["nodes"] & string,
+  ...(keyof G["nodes"] & string)[],
+];
+
+/**
+ * Options shared by `parts()` and `wholes()`. There is deliberately no
+ * `expand`: `expand` means "same relation, more members" (ontology
+ * implying/inverse expansion), and the composition edge-kind set these
+ * two steps traverse is derived from the registry's composition relation,
+ * not from an expansion mode.
+ */
+export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
+  /** Alias to navigate from (defaults to current/last traversal target). */
+  from?: keyof Aliases & string;
+  /**
+   * Maximum recursion depth, applied exactly as stated (`1` reaches only the
+   * direct level). Omitted, the walk reaches the complete closure at any depth.
+   */
+  maxHops?: number;
+  /**
+   * Include recursion depth in output, as `.recursive({ depth })` takes it:
+   * `true` for the default alias or a string to customize it.
+   */
+  depth?: RecursiveTraversalOptions["depth"];
+  /**
+   * Include the traversal path in output, as `.recursive({ path })` takes it:
+   * `true` or an alias string for node ids, or `{ format: "qualified" }` for
+   * node and edge references with each hop's direction.
+   */
+  path?: RecursiveTraversalOptions["path"];
+  /**
+   * Realize the walk through this edge only, reaching the kinds this edge
+   * alone reaches from the source alias. An edge TYPE is checked at compile
+   * time; a kind string is checked at runtime. A kind that realizes no
+   * composition pair at the source alias itself is refused
+   * (`COMPOSITION_VIA_NOT_DECLARED`), never silently dropped.
+   */
+  via?: CompositionViaRef;
+}>;
+
+/** Every key {@link CompositionNavigationOptions} accepts. */
+const COMPOSITION_NAVIGATION_OPTION_KEYS = [
+  "from",
+  "maxHops",
+  "depth",
+  "path",
+  "via",
+] as const satisfies readonly (keyof CompositionNavigationOptions<AliasMap>)[];
+
+/**
+ * Refuses an option `parts()` / `wholes()` does not accept — `expand`, or a
+ * misspelled `maxHops` — rather than walking as if it were absent: a dropped
+ * `maxHop: 1` would silently run the unbounded closure.
+ */
+function assertCompositionNavigationOptionKeys(
+  relation: "parts" | "wholes",
+  nodeAlias: string,
+  options: Readonly<Record<string, unknown>> | undefined,
+): void {
+  if (options === undefined) return;
+  const issues = unrecognizedOptionKeyIssues(
+    options,
+    "options",
+    COMPOSITION_NAVIGATION_OPTION_KEYS,
+  );
+  if (issues.length === 0) return;
+  throw new ValidationError(
+    `.${relation}("${nodeAlias}") does not accept ${issues.map((issue) => issue.path).join(", ")}.`,
+    { issues },
+    {
+      suggestion: `Pass only these keys: ${COMPOSITION_NAVIGATION_OPTION_KEYS.join(", ")}. The composition edge kinds are derived from the registry, so \`expand\` is not accepted.`,
+    },
+  );
+}
+
+type DynamicEdgeTypeFor<T> =
+  T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
+
+/** The edge type `via` narrows the edge alias to, else `DynamicEdgeType`. */
+type CompositionNavigationEdge<O> =
+  O extends { via: infer V extends AnyEdgeType } ? V : DynamicEdgeType;
+
+/**
+ * The `QueryBuilder` shape `parts()`/`wholes()` return: one alias definition
+ * consumed by both methods' public signatures and their internal casts, so
+ * the same generic expansion is never re-spelled four times over.
+ */
+type CompositionNavigationResult<
+  G extends GraphDef,
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  RecursiveAliases extends RecursiveAliasMap,
+  CoordinateState extends QueryCoordinateState,
+  NA extends string,
+  O,
+> = QueryBuilder<
+  G,
+  Aliases & Record<NA, NodeAlias<DynamicNodeType>>,
+  EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>,
+  RecursiveAliases &
+    BuildRecursiveAliases<
+      O extends { depth: infer D extends boolean | string } ? D : false,
+      O extends (
+        {
+          path: infer P extends boolean | string | QualifiedRecursivePathOption;
+        }
+      ) ?
+        P
+      : false,
+      NA
+    >,
+  CoordinateState
+>;
 
 /**
  * Builds projected fields for a node alias (including all metadata columns).
@@ -216,6 +471,7 @@ export class QueryBuilder<
   >;
 
   constructor(config: QueryBuilderConfig, state: QueryBuilderState) {
+    validateQueryState(state);
     this.#config = config;
     this.#state = state;
     this.temporal = ((mode, asOf) =>
@@ -270,15 +526,111 @@ export class QueryBuilder<
   }
 
   /**
-   * Starts a query from a node kind.
+   * Starts a query from one kind or a nonempty explicit list of kinds.
+   * A list expands each listed kind under the same axis a single kind takes,
+   * and scans the union; duplicates are normalized. Properties used in
+   * predicates and expressions must be shared by all listed kinds.
+   *
+   * The alias's expansion axis is one option, `expansion` (default
+   * `"subclasses"` — a supertype query is polymorphic unless
+   * narrowed). `"exact"` restores the exact-kind reading; `"narrower"`
+   * expands through `broader`/`narrower` instead (untyped alias — no
+   * schema relationship is claimed). Omitting the option, passing `{}`, or
+   * passing an explicit `undefined` all take the store default — which is
+   * why the default overload's parameter spells `expansion?: undefined`
+   * rather than a bare optional (`exactOptionalPropertyTypes` rejects a
+   * stated `undefined` against a bare optional) and why it cannot spell the
+   * whole `AliasExpansionAxis` union (it would then also capture the
+   * `"exact"` and `"subclasses"` calls the overloads below type). A bag that
+   * can carry an axis the call site does not pin — `AliasExpansionOptions`
+   * itself, or a wrapper's optional `options?: { expansion?: "exact" |
+   * "subclasses" }` — goes to the forwarded-bag overload, which types the
+   * alias as the narrowest type every axis the bag can carry admits
+   * (`ExpansionAliasNodeType`): untyped when it can carry `"narrower"`.
    *
    * @param kind - The node kind to start from
    * @param alias - A unique alias for this node (compile-time error if duplicate)
    */
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: undefined },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<ListAliasNodeType<G, Kinds[number]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "exact" },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<G["nodes"][Kinds[number]]["type"]>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<const Kinds extends SourceKindList<G>, A extends string>(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "subclasses" },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<ListPolymorphicNodeType<G, Kinds[number]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  from<
+    const Kinds extends SourceKindList<G>,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
+    kinds: Kinds,
+    alias: UniqueAlias<A, Aliases>,
+    options: O,
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            G["nodes"][Kinds[number]]["type"],
+            ListAliasNodeType<G, Kinds[number]>,
+            ListPolymorphicNodeType<G, Kinds[number]>
+          >
+        >
+      >,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: false },
+    options?: { expansion?: undefined },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  from<K extends keyof G["nodes"] & string, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "exact" },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
@@ -290,19 +642,183 @@ export class QueryBuilder<
   from<K extends keyof G["nodes"] & string, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true },
+    options: { expansion: "subclasses" },
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias>,
+    Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  from<
+    K extends keyof G["nodes"] & string,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: O,
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            G["nodes"][K]["type"],
+            AliasNodeType<G, K>,
+            PolymorphicNodeType<G["nodes"][K]["type"]>
+          >
+        >
+      >,
     EdgeAliases,
     RecursiveAliases,
     CoordinateState
   >;
 
   from<K extends keyof G["nodes"] & string, A extends string>(
-    kind: K,
+    kind: K | readonly K[],
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options?: AliasExpansionOptions,
+  ):
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      >
+    | QueryBuilder<
+        G,
+        Aliases &
+          Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>,
+        EdgeAliases,
+        RecursiveAliases,
+        CoordinateState
+      > {
+    validateQuerySource(this.#state, true);
+    // Validate alias to prevent SQL injection
+    validateSqlIdentifier(alias);
+    const requestedKinds =
+      typeof kind === "string" ? [kind] : [...new Set(kind)];
+    if (requestedKinds.length === 0) {
+      throw new ConfigurationError(
+        "from() requires a nonempty source kind list.",
+      );
+    }
+    for (const requestedKind of requestedKinds) {
+      if (!this.#config.registry.hasNodeType(requestedKind)) {
+        throw new KindNotFoundError(requestedKind, "node", {
+          graphId: this.#config.graphId,
+        });
+      }
+    }
+    const { expansion, kinds, rowTypeRefusal } = resolveAliasKinds(
+      options,
+      this.#config.defaultExpansion,
+      requestedKinds,
+      this.#config.registry,
+      aliasOverloadTyping(options, "from()"),
+    );
+
+    const newState: QueryBuilderState = {
+      ...this.#state,
+      startAlias: alias,
+      currentAlias: alias,
+      startKinds: kinds,
+      startRequestedKinds: requestedKinds,
+      startExpansion: expansion,
+      rowTypeRefusal,
+    };
+
+    return new QueryBuilder(this.#config, newState);
+  }
+
+  /**
+   * Runtime-kind sibling of `from`; accepts a kind name or Store-issued token.
+   * Throws `KindNotFoundError` if the kind is not registered. String-keyed
+   * predicates use the `n.field("name").number().gte(...)` discriminator.
+   *
+   * The runtime kind may not appear in `G["ontology"]` at all, so — unlike
+   * `from()` — this always widens to {@link PolymorphicNodeType} whenever the
+   * axis is not `"exact"`, rather than computing `SubsumptionAffected`.
+   * `expansion: "narrower"` types the alias as an untyped {@link NodeAlias},
+   * the same way `from()` does. Omitting the option, passing `{}`, and
+   * passing an explicit `undefined` all take the store default.
+   */
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options: { expansion: "exact" },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { expansion?: "subclasses" | undefined },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  /** The forwarded-bag overload. See {@link ExpansionAliasNodeType}. */
+  fromDynamic<
+    T extends string | RuntimeNodeKind,
+    A extends string,
+    O extends AliasExpansionOptions | undefined,
+  >(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options: O,
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<
+          ExpansionAliasNodeType<
+            ForwardedExpansionAxes<O>,
+            DynamicNodeTypeFor<T>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>,
+            PolymorphicNodeType<DynamicNodeTypeFor<T>>
+          >
+        >
+      >,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState
+  >;
+
+  fromDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias>,
@@ -310,63 +826,83 @@ export class QueryBuilder<
     RecursiveAliases,
     CoordinateState
   > {
-    // Validate alias to prevent SQL injection
+    validateQuerySource(this.#state, true);
     validateSqlIdentifier(alias);
+    const kindName = resolveRuntimeKindInput(
+      kind,
+      "node",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasNodeType(kindName)) {
+      throw new KindNotFoundError(kindName, "node", {
+        graphId: this.#config.graphId,
+      });
+    }
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-
-    // Expand kinds if including subclasses
-    const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+    const { expansion, kinds } = resolveAliasKinds(
+      options,
+      this.#config.defaultExpansion,
+      [kindName],
+      this.#config.registry,
+      INDEPENDENT_ALIAS_TYPING,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,
       startAlias: alias,
       currentAlias: alias,
       startKinds: kinds,
-      includeSubClasses,
+      startRequestedKinds: [kindName],
+      startExpansion: expansion,
+      dynamicNodeAliases: new Set([...this.#state.dynamicNodeAliases, alias]),
     };
 
     return new QueryBuilder(this.#config, newState);
   }
 
-  /**
-   * String-keyed sibling of `from` for runtime-declared kinds. Throws
-   * `KindNotFoundError` if the kind is not registered. Predicates use
-   * the `n.field("name").number().gte(...)` discriminator.
-   */
-  fromDynamic<A extends string>(
-    kind: string,
-    alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
-  ): QueryBuilder<
-    G,
-    Aliases & Record<A, NodeAlias<DynamicNodeType>>,
-    EdgeAliases,
-    RecursiveAliases,
-    CoordinateState
-  > {
-    validateSqlIdentifier(alias);
-    if (!this.#config.registry.hasNodeType(kind)) {
-      throw new KindNotFoundError(kind, "node", {
-        graphId: this.#config.graphId,
-      });
-    }
+  /** Stops a recursive branch at a matching endpoint; stopping endpoints are emitted by default. */
+  stopExpansion<A extends keyof Aliases & string>(
+    alias: A,
+    build: (node: NodeAccessor<Aliases[A]["type"]>) => Predicate,
+    options: Readonly<{ emitStopNode?: boolean }> = {},
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    const accessor = this.#createNodeAccessor(alias);
+    const predicate = build(accessor as NodeAccessor<Aliases[A]["type"]>);
+    return new QueryBuilder(
+      this.#config,
+      withRecursiveStopExpansion(
+        this.#state,
+        alias,
+        predicate.__expr,
+        options.emitStopNode ?? true,
+      ),
+    );
+  }
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
-
-    const newState: QueryBuilderState = {
-      ...this.#state,
-      startAlias: alias,
-      currentAlias: alias,
-      startKinds: kinds,
-      includeSubClasses,
-      dynamicNodeAliases: new Set([...this.#state.dynamicNodeAliases, alias]),
-    };
-
-    return new QueryBuilder(this.#config, newState);
+  /** Filters completed match rows, preserving optional and recursive expansion semantics. */
+  where(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => DatabaseExpression<
+      boolean | undefined,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQuerySource(this.#state, false);
+    const expression = build(this.#expressionContext());
+    if (!isDatabaseExpression(expression))
+      throw new ConfigurationError(
+        "where() requires a Boolean database expression; ranked match helpers belong in whereNode().",
+      );
+    const predicate = this.#expressionPredicate(expression);
+    const resultPredicate: PredicateExpression =
+      this.#state.resultPredicate === undefined ?
+        predicate
+      : {
+          __type: "and",
+          predicates: [this.#state.resultPredicate, predicate],
+        };
+    return new QueryBuilder(this.#config, { ...this.#state, resultPredicate });
   }
 
   /**
@@ -374,11 +910,25 @@ export class QueryBuilder<
    */
   whereNode<A extends keyof Aliases & string>(
     alias: A,
-    predicateFunction: (n: NodeAccessor<Aliases[A]["type"]>) => Predicate,
+    predicateFunction: (
+      n: NodeAccessor<Aliases[A]["type"]>,
+      expressions: QueryExpressionContext<
+        G,
+        Aliases,
+        EdgeAliases,
+        CoordinateState
+      >,
+    ) =>
+      | Predicate
+      | DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createNodeAccessor(alias);
     const predicate = predicateFunction(
       accessor as NodeAccessor<Aliases[A]["type"]>,
+      this.#expressionContext(),
     );
 
     const newState: QueryBuilderState = {
@@ -387,7 +937,7 @@ export class QueryBuilder<
         ...this.#state.predicates,
         {
           targetAlias: alias,
-          expression: predicate.__expr,
+          expression: this.#expressionPredicate(predicate),
         },
       ],
     };
@@ -405,11 +955,23 @@ export class QueryBuilder<
     alias: EA,
     predicateFunction: (
       edge: EdgeAccessor<EdgeAliases[EA]["type"]>,
-    ) => Predicate,
+      expressions: QueryExpressionContext<
+        G,
+        Aliases,
+        EdgeAliases,
+        CoordinateState
+      >,
+    ) =>
+      | Predicate
+      | DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(
       accessor as EdgeAccessor<EdgeAliases[EA]["type"]>,
+      this.#expressionContext(),
     );
 
     const newState: QueryBuilderState = {
@@ -419,7 +981,7 @@ export class QueryBuilder<
         {
           targetAlias: alias,
           targetType: "edge",
-          expression: predicate.__expr,
+          expression: this.#expressionPredicate(predicate),
         },
       ],
     };
@@ -443,7 +1005,7 @@ export class QueryBuilder<
       direction?: "out";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -475,7 +1037,7 @@ export class QueryBuilder<
       direction: "in";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -497,7 +1059,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -515,7 +1077,10 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
@@ -553,25 +1118,348 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       false,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
+      options?.includeIdentityMembers ?? false,
     );
   }
 
   /**
-   * String-keyed sibling of `traverse` for runtime-declared edge kinds.
-   * Throws `KindNotFoundError` if the edge kind is not registered.
+   * Navigates to every composition PART transitively under the source
+   * alias's kind — the declared-structure alternative to spelling
+   * `.traverse(edgeKind, ...).recursive(...)` by hand over the realizing
+   * edge kinds, and the one way to cross a composition relation realized by
+   * more than one edge kind in a single step (a Podcast whose Episodes are
+   * `episodeOf` and whose Segments are `segmentOf` still reads as one
+   * `.parts(...)` call).
+   *
+   * Direction is derived per realizing edge kind from
+   * `registry.compositionPartSide`, not fixed: a `part -> whole` edge
+   * (`partSide: "from"`) is followed reversed (`"in"`) to reach parts, and a
+   * `whole -> part` edge (`partSide: "to"`, the `has_*` convention) is
+   * followed in its own direction (`"out"`). A relation realized by both
+   * orientations compiles to one traversal step that unions them — the same
+   * `inverseEdgeKinds` mechanism `{ expand: "inverse" }` already compiles to
+   * a `UNION ALL` of both directions at every recursion round — so a mixed
+   * relation costs nothing extra to declare and the uniform case (the common
+   * one) pays nothing extra to compile.
+   *
+   * Recurses by default — the difference from `traverse`, which reaches only
+   * the direct level — to the full transitive parts closure at any depth,
+   * with no hop ceiling, rather than a bare `.recursive()`'s implicit cap;
+   * a stated `maxHops` bounds the walk exactly as given (`maxHops: 1` for
+   * direct parts only).
+   * `via` narrows the walk to one realizing edge and to the kinds that edge
+   * alone reaches. The result alias stays `DynamicNodeType`: a
+   * realizing edge can admit more than one part kind, and a conditional node
+   * type on this alias is not assignable back onto `QueryBuilder`. `via` as
+   * an edge type does type the edge alias.
+   *
+   * Refuses rather than silently returning zero rows: an alias whose kind
+   * declares no composition parts throws `ConfigurationError` with code
+   * `COMPOSITION_NO_PARTS_DECLARED`; an `{ from }` naming an alias this
+   * query does not have throws `COMPOSITION_UNKNOWN_ALIAS` instead — not the
+   * former, which would misdiagnose a typo'd alias as a composition
+   * problem.
    */
-  traverseDynamic<EA extends string>(
-    edgeKind: string,
+  parts<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases> = Record<
+      string,
+      never
+    >,
+  >(
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options?: O,
+  ): CompositionNavigationResult<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
+  > {
+    return this.#navigateComposition<NA, O>("parts", nodeAlias, options);
+  }
+
+  /**
+   * Navigates to every composition WHOLE transitively over the source
+   * alias's kind — the mirror of {@link QueryBuilder.parts}. Direction is
+   * derived the same way, flipped: a `part -> whole` edge is followed in its
+   * own direction (`"out"`) and a `whole -> part` (`has_*`) edge is followed
+   * reversed (`"in"`). See {@link QueryBuilder.parts} for the recursion,
+   * typing, and refusal rules, which are otherwise identical.
+   *
+   * Refuses with `ConfigurationError` (`COMPOSITION_NO_WHOLES_DECLARED`) on
+   * an alias whose kind declares no composition wholes.
+   */
+  wholes<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases> = Record<
+      string,
+      never
+    >,
+  >(
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options?: O,
+  ): CompositionNavigationResult<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
+  > {
+    return this.#navigateComposition<NA, O>("wholes", nodeAlias, options);
+  }
+
+  /**
+   * Shared body for `parts()`/`wholes()`. `relation` selects which registry
+   * readers and which orientation-to-direction mapping apply; everything
+   * else — refusal, edge-kind partition, the union construction, recursion —
+   * is one code path so the two steps cannot drift.
+   */
+  #navigateComposition<
+    NA extends string,
+    const O extends CompositionNavigationOptions<Aliases>,
+  >(
+    relation: "parts" | "wholes",
+    nodeAlias: UniqueAlias<NA, Aliases>,
+    options: O | undefined,
+  ): CompositionNavigationResult<
+    G,
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases,
+    CoordinateState,
+    NA,
+    O
+  > {
+    validateSqlIdentifier(nodeAlias);
+    assertCompositionNavigationOptionKeys(relation, nodeAlias, options);
+    const registry = this.#config.registry;
+    const fromAlias = options?.from ?? this.#state.currentAlias;
+    const sourceKinds = this.#getKindNamesForAlias(fromAlias);
+    if (sourceKinds === undefined) {
+      const knownAliases = [
+        this.#state.startAlias,
+        ...this.#state.traversals.map((traversal) => traversal.nodeAlias),
+      ];
+      throw new CompositionConfigurationError(
+        `.${relation}("${nodeAlias}", { from: "${fromAlias}" }) was called, but this query has no alias "${fromAlias}". ` +
+          `Known aliases: ${knownAliases.map((known) => `"${known}"`).join(", ")}.`,
+        {
+          code: "COMPOSITION_UNKNOWN_ALIAS",
+          relation,
+          alias: fromAlias,
+          knownAliases,
+        },
+        {
+          suggestion: `Pass the alias of a node already in this query as { from: ... }, e.g. one of ${knownAliases.map((known) => `"${known}"`).join(", ")}.`,
+        },
+      );
+    }
+
+    const { edgeKindsFrom, targetKindsFrom } = compositionReadersTowards(
+      registry,
+      relation,
+    );
+
+    const edgeKinds = new Set<string>();
+    for (const kind of sourceKinds) {
+      for (const edgeKind of edgeKindsFrom(kind)) edgeKinds.add(edgeKind);
+    }
+    const viaKind =
+      options?.via === undefined ? undefined : compositionViaKind(options.via);
+    // A walk narrowed to one edge reaches only what that edge reaches from
+    // the source alias, so its target kinds are that edge's own closure, not
+    // the whole composition closure. The registry readers answer in concrete
+    // kinds, subclasses of every declared endpoint included, so a live row
+    // whose kind is an undeclared subclass of a declared target is returned
+    // rather than silently dropped.
+    const viaReach =
+      viaKind === undefined ? undefined : (
+        compositionViaReach(registry, relation, sourceKinds, viaKind)
+      );
+    if (viaReach?.realized === false) {
+      throw new CompositionConfigurationError(
+        `.${relation}("${nodeAlias}") via "${viaKind}" realizes no composition pair for alias "${fromAlias}".`,
+        {
+          code: "COMPOSITION_VIA_NOT_DECLARED",
+          relation,
+          alias: fromAlias,
+          via: viaKind,
+          declaredVia: viaReach.declaredVia,
+        },
+        {
+          suggestion: `Pass via naming one of the declared realizing edges, or omit it to walk every composition edge of this alias.`,
+        },
+      );
+    }
+    const targetKinds = new Set(
+      viaReach === undefined ?
+        sourceKinds.flatMap((kind) => targetKindsFrom(kind))
+      : viaReach.targetKinds,
+    );
+    if (viaKind !== undefined) {
+      edgeKinds.clear();
+      edgeKinds.add(viaKind);
+    }
+    if (edgeKinds.size === 0) {
+      const kindsLabel =
+        sourceKinds.length > 0 ?
+          sourceKinds.map((kind) => `"${kind}"`).join(", ")
+        : "(unknown)";
+      throw new CompositionConfigurationError(
+        `.${relation}("${nodeAlias}") was called on alias "${fromAlias}" (kind${sourceKinds.length === 1 ? "" : "s"} ${kindsLabel}), which declares no composition ${relation}.`,
+        {
+          code:
+            relation === "parts" ?
+              "COMPOSITION_NO_PARTS_DECLARED"
+            : "COMPOSITION_NO_WHOLES_DECLARED",
+          alias: fromAlias,
+          kinds: sourceKinds,
+        },
+        {
+          suggestion:
+            relation === "parts" ?
+              `Declare a partOf/hasPart relation naming ${kindsLabel} as the whole, or call .traverse(...) directly for a non-composition relationship.`
+            : `Declare a partOf/hasPart relation naming ${kindsLabel} as the part, or call .traverse(...) directly for a non-composition relationship.`,
+        },
+      );
+    }
+
+    // The orientation table, derived through the one shared partition
+    // (`partitionCompositionEdgeKindsByDirection`) `subgraph({ composition:
+    // true })` also uses, so the two navigators cannot drift on which way
+    // an edge is walked or on what happens when an edge kind has no
+    // recorded part side: a `part -> whole` edge ("from") reaches
+    // its parts reversed ("in") and its wholes forward ("out"); a
+    // `whole -> part` edge ("to") is the mirror.
+    const { outEdgeKinds, inEdgeKinds } =
+      partitionCompositionEdgeKindsByDirection(registry, edgeKinds, relation);
+
+    // Uniform orientation (either set empty) needs no `inverseEdgeKinds` —
+    // the direct-only compiled branch — and pays nothing beyond a plain
+    // traversal; mixed orientation folds the other set in as the existing
+    // union machinery's inverse branch.
+    const [direction, directEdgeKinds, inverseEdgeKinds]: readonly [
+      TraversalDirection,
+      readonly string[],
+      readonly string[],
+    ] =
+      outEdgeKinds.length > 0 ?
+        ["out", outEdgeKinds, inEdgeKinds]
+      : ["in", inEdgeKinds, []];
+
+    const edgeAlias = `${nodeAlias}_edge`;
+    validateSqlIdentifier(edgeAlias);
+
+    // The derived edge alias is not caller-chosen the way `.traverse()`'s
+    // is, so a collision is invisible to the caller until it silently
+    // merges two different edge types under one alias — refuse
+    // rather than let `whereEdge(edgeAlias, ...)` later target an
+    // ambiguous traversal.
+    if (this.#getEdgeKindNamesForAlias(edgeAlias) !== undefined) {
+      throw new ConfigurationError(
+        `.${relation}("${nodeAlias}") would derive the edge alias "${edgeAlias}", which this query already uses for another traversal. Choose a different alias for .${relation}("${nodeAlias}") or for the conflicting traversal.`,
+        { alias: edgeAlias, relation, nodeAlias },
+      );
+    }
+
+    const newState: QueryBuilderState = {
+      ...this.#state,
+      dynamicEdgeAliases: new Set([
+        ...this.#state.dynamicEdgeAliases,
+        edgeAlias,
+      ]),
+    };
+
+    const traversalBuilder = new TraversalBuilder<
+      G,
+      AliasMap,
+      EdgeAliasMap,
+      string,
+      string,
+      TraversalDirection,
+      false,
+      false,
+      false,
+      RecursiveAliasMap,
+      "open",
+      DynamicEdgeType
+    >(
+      this.#config,
+      newState,
+      directEdgeKinds,
+      edgeAlias,
+      direction,
+      fromAlias,
+      inverseEdgeKinds,
+      false,
+      // Exhaustive until `recursive()` is given a bound to apply.
+      EXHAUSTIVE_VARIABLE_LENGTH_STATE,
+      undefined, // pendingEdgePredicates — default
+      false,
+      // A composition walk follows the rows that bind a part to its whole,
+      // the same membership the cascade deletes by, not the read's window.
+      compositionEdgeKindMembers(registry, edgeKinds),
+    );
+
+    // Sorted for deterministic output.
+    const targetKindList = [...targetKinds].toSorted();
+
+    // Recurse by default (the value proposition versus `traverse`), to the
+    // closure rather than a bare `.recursive()`'s implicit cap: skip only
+    // when the caller both asked for exactly one hop and requested neither a
+    // depth nor a path column, so no accepted option is ever silently
+    // dropped by the optimization.
+    const wantsRecursiveOutput =
+      (options?.depth ?? false) !== false || (options?.path ?? false) !== false;
+    const willRecurse = !(options?.maxHops === 1 && !wantsRecursiveOutput);
+
+    return (willRecurse ?
+      traversalBuilder
+        .recursive({
+          ...(options?.maxHops === undefined ?
+            {}
+          : { maxHops: options.maxHops }),
+          ...(options?.depth === undefined ? {} : { depth: options.depth }),
+          ...(options?.path === undefined ? {} : { path: options.path }),
+        })
+        .toKindSet(targetKindList, nodeAlias)
+    : traversalBuilder.toKindSet(
+        targetKindList,
+        nodeAlias,
+      )) as unknown as CompositionNavigationResult<
+      G,
+      Aliases,
+      EdgeAliases,
+      RecursiveAliases,
+      CoordinateState,
+      NA,
+      O
+    >;
+  }
+
+  /**
+   * Runtime-kind sibling of `traverse`; accepts a kind name or Store-issued
+   * token. Throws `KindNotFoundError` if the edge kind is not registered.
+   */
+  traverseDynamic<T extends string | RuntimeEdgeKind, EA extends string>(
+    edgeKind: T,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
-    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType>>,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>>>,
     string,
     EA,
     TraversalDirection,
@@ -579,7 +1467,8 @@ export class QueryBuilder<
     false,
     false,
     RecursiveAliases,
-    CoordinateState
+    CoordinateState,
+    DynamicEdgeTypeFor<T>
   > {
     return this.#beginDynamicTraversal(edgeKind, edgeAlias, false, options);
   }
@@ -602,7 +1491,7 @@ export class QueryBuilder<
       direction?: "out";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -624,7 +1513,7 @@ export class QueryBuilder<
       direction: "in";
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -646,7 +1535,7 @@ export class QueryBuilder<
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -664,7 +1553,10 @@ export class QueryBuilder<
     validateSqlIdentifier(edgeAlias);
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
@@ -702,27 +1594,33 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       true,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
+      options?.includeIdentityMembers ?? false,
     );
   }
 
   /**
-   * String-keyed sibling of `optionalTraverse` for runtime-declared edge
-   * kinds. LEFT JOIN semantics — non-matching rows produce a null edge
-   * alias instead of dropping. Throws `KindNotFoundError` if the edge
-   * kind is not registered.
+   * Runtime-kind sibling of `optionalTraverse`; accepts a kind name or
+   * Store-issued token. LEFT JOIN semantics — non-matching rows produce a null
+   * edge alias instead of dropping. Throws `KindNotFoundError` if the edge kind
+   * is not registered.
    */
-  optionalTraverseDynamic<EA extends string>(
-    edgeKind: string,
+  optionalTraverseDynamic<
+    T extends string | RuntimeEdgeKind,
+    EA extends string,
+  >(
+    edgeKind: T,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
       expand?: TraversalExpansion;
       from?: keyof Aliases & string;
-    },
+    } & IdentityTraversalOption<G>,
   ): TraversalBuilder<
     G,
     Aliases,
-    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, true>>,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, true>>,
     string,
     EA,
     TraversalDirection,
@@ -730,7 +1628,8 @@ export class QueryBuilder<
     false,
     false,
     RecursiveAliases,
-    CoordinateState
+    CoordinateState,
+    DynamicEdgeTypeFor<T>
   > {
     return this.#beginDynamicTraversal(edgeKind, edgeAlias, true, options);
   }
@@ -740,21 +1639,26 @@ export class QueryBuilder<
    * The only difference is the `optional` flag passed to the
    * `TraversalBuilder` constructor.
    */
-  #beginDynamicTraversal<EA extends string, Optional extends boolean>(
-    edgeKind: string,
+  #beginDynamicTraversal<
+    T extends string | RuntimeEdgeKind,
+    EA extends string,
+    Optional extends boolean,
+  >(
+    edgeKind: T,
     edgeAlias: EA,
     optional: Optional,
     options:
-      | {
+      | ({
           direction?: TraversalDirection;
           expand?: TraversalExpansion;
           from?: keyof Aliases & string;
-        }
+          includeIdentityMembers?: boolean;
+        } & IdentityTraversalOption<G>)
       | undefined,
   ): TraversalBuilder<
     G,
     Aliases,
-    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, Optional>>,
     string,
     EA,
     TraversalDirection,
@@ -762,24 +1666,33 @@ export class QueryBuilder<
     false,
     false,
     RecursiveAliases,
-    CoordinateState
+    CoordinateState,
+    DynamicEdgeTypeFor<T>
   > {
     validateSqlIdentifier(edgeAlias);
-    if (!this.#config.registry.hasEdgeType(edgeKind)) {
-      throw new KindNotFoundError(edgeKind, "edge", {
+    const edgeKindName = resolveRuntimeKindInput(
+      edgeKind,
+      "edge",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasEdgeType(edgeKindName)) {
+      throw new KindNotFoundError(edgeKindName, "edge", {
         graphId: this.#config.graphId,
       });
     }
 
     const direction = options?.direction ?? "out";
+    this.#assertIdentityTraversalAllowed(options);
     const expansion = options?.expand ?? this.#config.defaultTraversalExpansion;
+    validateQuerySource(this.#state, false);
+    validateTraversalOptions(direction, expansion);
     const includeImplyingEdges =
       expansion === "implying" || expansion === "all";
     const includeInverseEdges = expansion === "inverse" || expansion === "all";
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     const edgeKinds = this.#expandTraversalEdgeKinds(
-      edgeKind,
+      edgeKindName,
       includeImplyingEdges,
     );
     const inverseEdgeKinds =
@@ -798,7 +1711,7 @@ export class QueryBuilder<
     return new TraversalBuilder<
       G,
       Aliases,
-      EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeType, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<DynamicEdgeTypeFor<T>, Optional>>,
       string,
       EA,
       TraversalDirection,
@@ -806,7 +1719,8 @@ export class QueryBuilder<
       false,
       false,
       RecursiveAliases,
-      CoordinateState
+      CoordinateState,
+      DynamicEdgeTypeFor<T>
     >(
       this.#config,
       newState,
@@ -816,6 +1730,211 @@ export class QueryBuilder<
       fromAlias,
       inverseEdgeKinds,
       optional,
+      undefined, // variableLength — default
+      undefined, // pendingEdgePredicates — default
+      options?.includeIdentityMembers ?? false,
+    );
+  }
+
+  /** @internal Identifies this query's lexical expression scope. */
+  getExpressionScopeIdentity(): symbol {
+    return getExpressionScope(this.#config);
+  }
+
+  /**
+   * @internal Refuses this builder for a `createFragment()` fragment whose
+   * required aliases it does not hold: each must be a node alias here whose
+   * every bound kind is the declared kind or one of its subclasses, the kinds
+   * the fragment body was typed against.
+   *
+   * @throws ConfigurationError (`QUERY_FRAGMENT_REQUIREMENT_UNMET`)
+   */
+  assertFragmentRequirements(requires: Readonly<Record<string, string>>): void {
+    for (const [alias, requiredKind] of Object.entries(requires)) {
+      const boundKinds = this.#getKindNamesForAlias(alias);
+      const admittedKinds = expandKindsForAxis(
+        "subclasses",
+        requiredKind,
+        this.#config.registry,
+      );
+      if (
+        boundKinds?.every((boundKind) => admittedKinds.includes(boundKind)) ===
+        true
+      ) {
+        continue;
+      }
+      const bound =
+        boundKinds === undefined ?
+          `this query has no node alias "${alias}"`
+        : `this query binds it to ${boundKinds.map((kind) => `"${kind}"`).join(", ")}`;
+      throw new ConfigurationError(
+        `A fragment requires alias "${alias}" to be a "${requiredKind}" node, but ${bound}.`,
+        {
+          code: "QUERY_FRAGMENT_REQUIREMENT_UNMET",
+          alias,
+          requiredKind,
+          boundKinds,
+        },
+        {
+          suggestion: `Pipe the fragment into a query whose "${alias}" alias is a "${requiredKind}" node.`,
+        },
+      );
+    }
+  }
+
+  #expressionPredicate(
+    predicate: Predicate | DatabaseExpression<boolean | undefined>,
+  ): PredicateExpression {
+    if ("__expr" in predicate) return predicate.__expr;
+    assertExpressionScope(predicate, this.getExpressionScopeIdentity());
+    if (predicate.valueType !== "boolean")
+      throw new ConfigurationError(
+        "A predicate requires a Boolean database expression.",
+      );
+    return { __type: "database_expression_predicate", expression: predicate };
+  }
+
+  #expressionContext(): QueryExpressionContext<
+    G,
+    Aliases,
+    EdgeAliases,
+    CoordinateState
+  > {
+    const aliases = createExpressionAliasContext<Aliases, EdgeAliases>(
+      this.#config,
+      this.#state,
+    );
+    const helpers = createExpressionSubqueryHelpers<
+      QueryBuilder<
+        G,
+        EmptyAliasMap,
+        EmptyEdgeAliasMap,
+        EmptyRecursiveAliasMap,
+        CoordinateState
+      >,
+      ExpressionAliasContext<Aliases, EdgeAliases, never>,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >({
+      parentScopeIdentity: this.getExpressionScopeIdentity(),
+      parentProvenance: {
+        graphId: this.#config.graphId,
+        executionTarget:
+          this.#config.backend === undefined ?
+            undefined
+          : backendDerivationRoot(this.#config.backend),
+      },
+      parentCoordinate: buildQueryAst(this.#config, this.#state),
+      createSubquery: () => {
+        const { resultPredicate: _resultPredicate, ...subqueryState } =
+          this.#state;
+        const config = { ...this.#config };
+        registerQueryBuilderInternalContext(
+          config,
+          getQueryBuilderInternalContext(this.#config),
+        );
+        return new QueryBuilder(config, {
+          ...subqueryState,
+          startAlias: "",
+          currentAlias: "",
+          startKinds: [],
+          startRequestedKinds: [],
+          traversals: [],
+          predicates: [],
+          projection: [],
+          orderBy: [],
+          aggregateOrderBy: [],
+          groupBy: undefined,
+          having: undefined,
+          limit: undefined,
+          offset: undefined,
+          fusion: undefined,
+          dynamicNodeAliases: new Set(),
+          dynamicEdgeAliases: new Set(),
+        });
+      },
+      createOuterContext: (childScope) =>
+        createExpressionAliasContext<Aliases, EdgeAliases, never>(
+          this.#config,
+          this.#state,
+          (expression) =>
+            createOuterReferenceExpression(expression, childScope),
+        ),
+    });
+    return new Proxy(helpers, {
+      get(target, key, receiver) {
+        if (key === "$exists" || key === "$scalar")
+          return Reflect.get(target, key, receiver);
+        return Reflect.get(aliases, key);
+      },
+    }) as QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>;
+  }
+
+  /** Projects database expressions; the callback runs once when building the query. */
+  project<
+    const Fields extends Readonly<
+      Record<
+        string,
+        DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      >
+    >,
+  >(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  > {
+    return this.#project(build(this.#expressionContext()));
+  }
+
+  #project<Fields extends DatabaseProjection>(
+    fields: Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  > {
+    if (Object.getOwnPropertySymbols(fields).length > 0)
+      throw new ConfigurationError("Projection output names must be strings.");
+    const entries = Object.entries(fields);
+    if (entries.length === 0)
+      throw new ConfigurationError(
+        "project() requires at least one database expression.",
+      );
+    const projection = entries.map(([outputName, source]) => {
+      validateSqlIdentifier(outputName);
+      if (
+        outputName.startsWith("__tg_") ||
+        outputName === "typegraphschemaversion"
+      )
+        throw new ConfigurationError("Projection output name is reserved.");
+      if (!isDatabaseExpression(source))
+        throw new ConfigurationError(
+          "project() accepts database expressions; use expr.literal() for constants.",
+        );
+      assertExpressionScope(source, this.getExpressionScopeIdentity());
+      return { outputName, source };
+    });
+    return new ExecutableProjectionQuery(
+      this.#config,
+      { ...this.#state, projection },
+      fields,
+      () => this.#expressionContext(),
+    );
+  }
+
+  /** Counts match rows (or groups), preserving offset and limit. */
+  count(): Promise<number> {
+    return executeQueryTerminal(this.#config, this.#state, "count");
+  }
+
+  /** Tests whether the bounded relation contains a row. */
+  async exists(): Promise<boolean> {
+    return (
+      (await executeQueryTerminal(this.#config, this.#state, "exists")) > 0
     );
   }
 
@@ -856,63 +1975,112 @@ export class QueryBuilder<
    *
    * @param fields - Object mapping output names to field refs or aggregate expressions
    */
+  aggregate<
+    const Fields extends Readonly<
+      Record<
+        string,
+        DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      >
+    >,
+  >(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => Fields,
+  ): ExecutableProjectionQuery<
+    Fields,
+    QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+  >;
   aggregate<R extends Record<string, FieldRef | AggregateExpr>>(
     fields: R,
-  ): ExecutableAggregateQuery<G, Aliases, R> {
+  ): ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>;
+  aggregate<
+    R extends Record<string, FieldRef | AggregateExpr>,
+    Fields extends DatabaseProjection,
+  >(
+    fields:
+      | R
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => Fields),
+  ):
+    | ExecutableAggregateQuery<G, Aliases & EdgeAliases, R>
+    | ExecutableProjectionQuery<
+        Fields,
+        QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>
+      > {
+    if (typeof fields === "function")
+      return this.#project(fields(this.#expressionContext()));
+
     const resolvedFields = Object.fromEntries(
       Object.entries(fields).map(([outputName, source]) => {
-        if (source.__type !== "field_ref") {
-          return [outputName, source];
-        }
+        const fieldRef = source.__type === "aggregate" ? source.field : source;
 
         if (
-          source.valueType !== undefined ||
-          source.path.length !== 1 ||
-          source.path[0] !== "props" ||
-          source.jsonPointer === undefined
+          fieldRef.path.length !== 1 ||
+          fieldRef.path[0] !== "props" ||
+          fieldRef.jsonPointer === undefined
         ) {
           return [outputName, source];
         }
 
-        const segments = parseJsonPointer(source.jsonPointer);
-        if (segments.length !== 1) {
+        const segments = parseJsonPointer(fieldRef.jsonPointer);
+        if (segments.length === 0) {
           return [outputName, source];
         }
 
-        const propertyName = segments[0];
-        if (propertyName === undefined) {
-          return [outputName, source];
-        }
-
-        const kindNames = this.#getKindNamesForAlias(source.alias);
-        const typeInfo =
-          kindNames ?
-            this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              kindNames,
-              propertyName,
-            )
-          : undefined;
+        const nodeKindNames = this.#getKindNamesForAlias(fieldRef.alias);
+        const edgeKindNames = this.#getEdgeKindNamesForAlias(fieldRef.alias);
+        const typeInfo = resolveAggregateFieldTypeInfo(
+          this.#config.schemaIntrospector,
+          nodeKindNames,
+          edgeKindNames,
+          segments,
+        );
 
         if (!typeInfo) {
+          if (source.__type === "aggregate") validateAggregateOperand(source);
           return [outputName, source];
         }
 
-        return [
-          outputName,
-          {
-            ...source,
-            valueType: typeInfo.valueType,
-            elementType: typeInfo.elementType,
-          } satisfies FieldRef,
-        ];
+        if (source.__type === "aggregate") {
+          validateAggregateOperand(source, typeInfo.valueType);
+        }
+
+        const resolvedField = {
+          ...fieldRef,
+          valueType: typeInfo.valueType,
+          elementType: typeInfo.elementType,
+        } satisfies FieldRef;
+
+        return source.__type === "aggregate" ?
+            [outputName, { ...source, field: resolvedField }]
+          : [outputName, resolvedField];
       }),
     ) as R;
 
     const projection: ProjectedField[] = Object.entries(resolvedFields).map(
-      ([outputName, source]) => ({
-        outputName,
-        source,
-      }),
+      ([outputName, source]) => {
+        const sourceAlias =
+          source.__type === "aggregate" ? source.field.alias : source.alias;
+        const edgeTraversal = this.#state.traversals.find(
+          (traversal) => traversal.edgeAlias === sourceAlias,
+        );
+        return edgeTraversal === undefined ?
+            { outputName, source }
+          : {
+              outputName,
+              source,
+              cteAlias: `cte_${edgeTraversal.nodeAlias}`,
+            };
+      },
     );
 
     const newState: QueryBuilderState = {
@@ -926,39 +2094,63 @@ export class QueryBuilder<
   /**
    * Orders results.
    */
+  orderBy(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) => DatabaseExpression<
+      unknown,
+      (keyof Aliases | keyof EdgeAliases) & string
+    >,
+    direction?: SortDirection,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   orderBy<A extends (keyof Aliases | keyof EdgeAliases) & string>(
     alias: A,
-    field: string,
+    field: AliasOrderField<Aliases, EdgeAliases, A>,
+    direction?: SortDirection,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+  orderBy(
+    alias:
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression)
+      | ((keyof Aliases | keyof EdgeAliases) & string),
+    field?: string,
     direction: SortDirection = "asc",
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    if (typeof alias === "function") {
+      const expression = alias(this.#expressionContext());
+      assertExpressionScope(expression, this.getExpressionScopeIdentity());
+      const sort = field ?? "asc";
+      validateSortDirection(sort);
+      return new QueryBuilder(this.#config, {
+        ...this.#state,
+        orderBy: [
+          ...this.#state.orderBy,
+          { field: expression, direction: sort },
+        ],
+      });
+    }
+    if (field === undefined)
+      throw new ConfigurationError("orderBy() requires a field.");
+    validateSortDirection(direction);
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
-    const isEdge = edgeKindNames !== undefined;
-    const isSystem =
-      field === "id" ||
-      field === "kind" ||
-      (isEdge && (field === "from_id" || field === "to_id"));
-    const typeInfo =
-      isSystem ? undefined
-      : isEdge ?
-        this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          edgeKindNames,
-          field,
-        )
-      : this.#getOrderByTypeInfo(alias, field);
-    const orderSpec: OrderSpec =
-      isSystem ?
-        {
-          field: fieldRef(alias, [field], { valueType: "string" }),
-          direction,
-        }
-      : {
-          field: fieldRef(alias, ["props"], {
-            jsonPointer: jsonPointer([field]),
-            valueType: typeInfo?.valueType,
-            elementType: typeInfo?.elementType,
-          }),
-          direction,
-        };
+    const nodeKindNames = this.#getKindNamesForAlias(alias);
+    const orderSpec = resolveAliasOrderSpec(
+      this.#config.schemaIntrospector,
+      alias,
+      edgeKindNames === undefined ?
+        nodeKindNames === undefined ?
+          undefined
+        : { isEdge: false, nodeKindNames }
+      : { isEdge: true, edgeKindNames },
+      field,
+      direction,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -968,19 +2160,13 @@ export class QueryBuilder<
     return new QueryBuilder(this.#config, newState);
   }
 
-  #getOrderByTypeInfo(alias: string, field: string): FieldTypeInfo | undefined {
-    const kindNames = this.#getKindNamesForAlias(alias);
-    return kindNames ?
-        this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
-      : undefined;
-  }
-
   /**
    * Limits the number of results.
    */
   limit(
     n: number,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQueryRange(n, "limit");
     return new QueryBuilder(this.#config, {
       ...this.#state,
       limit: n,
@@ -993,6 +2179,7 @@ export class QueryBuilder<
   offset(
     n: number,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    validateQueryRange(n, "offset");
     return new QueryBuilder(this.#config, {
       ...this.#state,
       offset: n,
@@ -1006,15 +2193,61 @@ export class QueryBuilder<
    * @param alias - The node alias to group by
    * @param field - The field name to group by
    */
+  groupBy(
+    build: (
+      context: QueryExpressionContext<G, Aliases, EdgeAliases, CoordinateState>,
+    ) =>
+      | DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >
+      | readonly DatabaseExpression<
+          unknown,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >[],
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
   groupBy<A extends keyof Aliases & string>(
     alias: A,
     field: string,
+  ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
+  groupBy(
+    alias:
+      | (keyof Aliases & string)
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression | readonly DatabaseExpression[]),
+    field?: string,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    if (typeof alias === "function") {
+      const value = alias(this.#expressionContext());
+      const fields: readonly DatabaseExpression[] =
+        Array.isArray(value) ? value : [value as DatabaseExpression];
+      if (fields.length === 0)
+        throw new ConfigurationError(
+          "groupBy() requires at least one database expression.",
+        );
+      for (const expression of fields)
+        assertExpressionScope(expression, this.getExpressionScopeIdentity());
+      return new QueryBuilder(this.#config, {
+        ...this.#state,
+        groupBy: {
+          fields: [...(this.#state.groupBy?.fields ?? []), ...fields],
+        },
+      });
+    }
+    if (field === undefined)
+      throw new ConfigurationError("groupBy() requires a field.");
     const kindNames = this.#getKindNamesForAlias(alias);
     const typeInfo =
       kindNames ?
         this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
       : undefined;
+    assertSharedNodeField(kindNames, field, typeInfo);
 
     const fieldRefValue: FieldRef = {
       __type: "field_ref",
@@ -1070,11 +2303,30 @@ export class QueryBuilder<
    * @param predicate - A predicate expression to filter groups
    */
   having(
-    predicate: PredicateExpression,
+    predicateOrBuild:
+      | PredicateExpression
+      | ((
+          context: QueryExpressionContext<
+            G,
+            Aliases,
+            EdgeAliases,
+            CoordinateState
+          >,
+        ) => DatabaseExpression<
+          boolean | undefined,
+          (keyof Aliases | keyof EdgeAliases) & string
+        >),
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
+    const predicate =
+      typeof predicateOrBuild === "function" ?
+        this.#expressionPredicate(predicateOrBuild(this.#expressionContext()))
+      : predicateOrBuild;
     return new QueryBuilder(this.#config, {
       ...this.#state,
-      having: predicate,
+      having:
+        this.#state.having === undefined ?
+          predicate
+        : { __type: "and", predicates: [this.#state.having, predicate] },
     });
   }
 
@@ -1118,10 +2370,15 @@ export class QueryBuilder<
    * traversals, ordering, and other query operations. Use this for
    * composing complex queries from simpler, reusable parts.
    *
+   * An inline function is typed by this builder. A `createFragment()`
+   * fragment keeps every alias this builder carries and adds its own; piping
+   * one into a builder that lacks an alias it requires, binds that alias at
+   * another kind, or already uses an alias it adds is a compile error here.
+   *
    * @example
    * ```typescript
-   * // Define a reusable fragment
-   * const activeUsers = createFragment<MyGraph>()((q) =>
+   * // Define a reusable fragment that requires a `User` alias `u`
+   * const activeUsers = createFragment<MyGraph>()({ u: "User" }, (q) =>
    *   q.whereNode("u", ({ status }) => status.eq("active"))
    * );
    *
@@ -1170,7 +2427,7 @@ export class QueryBuilder<
    * Gets all kind names for an alias.
    */
   #getKindNamesForAlias(alias: string): readonly string[] | undefined {
-    if (alias === this.#state.startAlias) {
+    if (hasQuerySource(this.#state) && alias === this.#state.startAlias) {
       return this.#state.startKinds;
     }
     for (const traversal of this.#state.traversals) {
@@ -1197,6 +2454,7 @@ export class QueryBuilder<
         )
       : undefined;
 
+    assertSharedNodeField(kindNames, property, typeInfo);
     const ref = fieldRef(alias, ["props"], {
       jsonPointer: jsonPointer([property]),
       valueType: typeInfo?.valueType,
@@ -1221,15 +2479,21 @@ export class QueryBuilder<
     const kindAccessor = stringField(
       fieldRef(alias, ["kind"], { valueType: "string" }),
     );
-    const fulltextAccessor = createFulltextAccessor(alias, () =>
-      this.#hasSearchableField(kindNames),
+    const fulltextAccessor = createFulltextAccessor(
+      alias,
+      kindNames === undefined ? undefined : (
+        () =>
+          this.#config.schemaIntrospector.kindsWithoutSearchableField(kindNames)
+      ),
     );
+    const metadataAccessor = createMetadataAccessor(alias, false);
 
     if (this.#state.dynamicNodeAliases.has(alias)) {
       return {
         id: idAccessor,
         kind: kindAccessor,
         $fulltext: fulltextAccessor,
+        $meta: metadataAccessor,
         field: (name: string) =>
           createDynamicFieldBuilder(
             this.#config.schemaIntrospector,
@@ -1246,13 +2510,30 @@ export class QueryBuilder<
       get: (_, property: string | symbol) => {
         // Handle symbols and special properties to avoid infinite loops
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        if (property === "toJSON") return;
 
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "$fulltext") return fulltextAccessor;
+        if (property === "$meta") return metadataAccessor;
+
+        // A DECLARED field wins over the interop exemption: `toJSON` and `then`
+        // are legal schema field names, and the accessor type offers them, so
+        // resolving them to `undefined` here made a declared field
+        // unaddressable in a predicate. Only an UNDECLARED probe resolves to
+        // `undefined`, keeping the accessor safe to await or stringify.
+        if (
+          isInteropProbeKey(property) &&
+          !(
+            kindNames !== undefined &&
+            this.#config.schemaIntrospector.hasDeclaredField(
+              kindNames,
+              property,
+            )
+          )
+        ) {
+          return;
+        }
 
         // Schema properties
         return this.#getFieldBuilderForProperty(kindNames, property, alias);
@@ -1260,9 +2541,23 @@ export class QueryBuilder<
     });
   }
 
-  #hasSearchableField(kindNames: readonly string[] | undefined): boolean {
-    if (!kindNames) return false;
-    return this.#config.schemaIntrospector.hasSearchableField(kindNames);
+  /**
+   * Guards `includeIdentityMembers` against a non-identity-enabled builder.
+   */
+  #assertIdentityTraversalAllowed(
+    options: Readonly<{ includeIdentityMembers?: boolean }> | undefined,
+  ): void {
+    if (!options?.includeIdentityMembers || this.#config.identityEnabled) {
+      return;
+    }
+    throw new ConfigurationError(
+      "includeIdentityMembers requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId: this.#config.graphId },
+      {
+        suggestion:
+          "Enable defineGraph(...).identity and build the registry from that graph.",
+      },
+    );
   }
 
   #expandTraversalEdgeKinds(
@@ -1353,6 +2648,7 @@ export class QueryBuilder<
     const toIdAccessor = stringField(
       fieldRef(alias, ["to_id"], { valueType: "string" }),
     );
+    const metadataAccessor = createMetadataAccessor(alias, true);
 
     if (this.#state.dynamicEdgeAliases.has(alias)) {
       return {
@@ -1360,6 +2656,7 @@ export class QueryBuilder<
         kind: kindAccessor,
         fromId: fromIdAccessor,
         toId: toIdAccessor,
+        $meta: metadataAccessor,
         field: (name: string) =>
           createDynamicFieldBuilder(
             this.#config.schemaIntrospector,
@@ -1376,14 +2673,28 @@ export class QueryBuilder<
       get: (_, property: string | symbol) => {
         // Handle symbols and special properties to avoid infinite loops
         if (typeof property === "symbol") return;
-        if (property === "then") return;
-        if (property === "toJSON") return;
 
         // System fields
         if (property === "id") return idAccessor;
         if (property === "kind") return kindAccessor;
         if (property === "fromId") return fromIdAccessor;
         if (property === "toId") return toIdAccessor;
+        if (property === "$meta") return metadataAccessor;
+
+        // A DECLARED field wins over the interop exemption — see
+        // #createNodeAccessor.
+        if (
+          isInteropProbeKey(property) &&
+          !(
+            edgeKindNames !== undefined &&
+            this.#config.schemaIntrospector.hasDeclaredEdgeField(
+              edgeKindNames,
+              property,
+            )
+          )
+        ) {
+          return;
+        }
 
         // Schema properties
         return this.#getFieldBuilderForEdgeProperty(

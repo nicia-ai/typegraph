@@ -12,6 +12,12 @@
  *    compute the constraint key; the create leg must reuse that validated
  *    object instead of re-running the full Zod parse. Counted through a
  *    schema-level refinement that increments per parse.
+ *
+ * 3. ENDPOINT LOCKS — a resurrection reads both endpoints under the
+ *    edge-endpoint lock, in one statement when they share a kind, and still
+ *    refuses the source first. An import reads each endpoint once per
+ *    attempt, and none it skipped as already live on a writer-serializing
+ *    engine.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -21,9 +27,16 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
+  RestrictedDeleteError,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import { type GraphData, importGraph } from "../src/interchange";
 
 // ============================================================
 // Call-counting overlay (follows the write transaction)
@@ -35,7 +48,9 @@ const COUNTED_METHODS = [
   "deleteEdge",
   "deleteEdgesBatch",
   "getEdge",
+  "getEdges",
   "getNode",
+  "lockNodes",
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
 ] as const;
@@ -50,24 +65,29 @@ function withCallCounts(backend: GraphBackend): {
   function wrapMethods<T extends GraphBackend | TransactionBackend>(
     target: T,
   ): T {
-    const wrapped = { ...target } as Record<string, unknown>;
+    // Built from a name list rather than written as a literal, so the overlay
+    // carries an assertion: `ExactBackendOverlay<T, Partial<T>>` reduces to
+    // `Partial<T>` only once `T` is resolved, and the checker cannot verify
+    // that against an unresolved type parameter.
+    const overrides: Record<string, unknown> = {};
     for (const name of COUNTED_METHODS) {
       const original = (target as Record<string, unknown>)[name];
       if (typeof original !== "function") continue;
-      wrapped[name] = (...args: unknown[]) => {
+      overrides[name] = (...args: unknown[]) => {
         counts[name] = (counts[name] ?? 0) + 1;
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
-    return wrapped as T;
+    return deriveBackend<T, Partial<T>>(
+      target,
+      overrides as ExactBackendOverlay<T, Partial<T>>,
+    );
   }
 
-  const outer = wrapMethods(backend);
-  const counted: GraphBackend = {
-    ...outer,
+  const counted: GraphBackend = deriveBackend(wrapMethods(backend), {
     transaction: (fn, options) =>
       backend.transaction((target) => fn(wrapMethods(target)), options),
-  };
+  });
   return { backend: counted, counts };
 }
 
@@ -117,6 +137,86 @@ async function seedHubAndSpokes(
 }
 
 describe("cascade edge deletion batches", () => {
+  it("portable node bulkDelete rolls back earlier ids when restrict refuses", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("restricted_atomic_node_batch_delete"),
+        backend,
+      );
+      const hub = await store.nodes.Hub.create({ name: "hub" });
+      const connected = await store.nodes.Spoke.create({ name: "connected" });
+      const isolated = await store.nodes.Spoke.create({ name: "isolated" });
+      await store.edges.links.create(hub, connected, {});
+
+      await expect(
+        store.nodes.Spoke.bulkDelete([isolated.id, connected.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+      await expect(
+        store.nodes.Spoke.getById(isolated.id),
+      ).resolves.toBeDefined();
+      await expect(
+        store.nodes.Spoke.getById(connected.id),
+      ).resolves.toBeDefined();
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("direct bulkDelete resolves and retires N edges with two batch calls", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("direct_edge_batch_delete"),
+        backend,
+      );
+      const hub = await seedHubAndSpokes(store);
+      const edges = await store.edges.links.findFrom(hub);
+
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      await store.edges.links.bulkDelete(edges.map((edge) => edge.id));
+
+      expect(counts["getEdges"]).toBe(1);
+      expect(counts["getEdge"]).toBe(0);
+      expect(counts["deleteEdgesBatch"]).toBe(1);
+      expect(counts["deleteEdge"]).toBe(0);
+      expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
+  it("direct bulkHardDelete resolves and removes N edges with two batch calls", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("direct_edge_batch_hard_delete"),
+        backend,
+      );
+      const hub = await seedHubAndSpokes(store);
+      const edges = await store.edges.links.findFrom(hub);
+
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      await store.edges.links.bulkHardDelete(edges.map((edge) => edge.id));
+
+      // One resolution read and one kind-asserting delete for all N ids,
+      // where a per-id loop pays a gate read and a delete per edge.
+      expect(counts["getEdges"]).toBe(1);
+      expect(counts["getEdge"]).toBe(0);
+      expect(counts["hardDeleteEdgesBatch"]).toBe(1);
+      expect(counts["hardDeleteEdge"]).toBe(0);
+      expect(
+        await store.edges.links.findFrom(hub, {
+          temporalMode: "includeTombstones",
+        }),
+      ).toHaveLength(0);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
   it("soft delete removes N edges with one batched statement", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
@@ -197,11 +297,18 @@ describe("cascade edge deletion batches", () => {
 });
 
 // ============================================================
-// Delete preflight elimination
+// Delete gate and transaction recheck
 // ============================================================
 
 describe("delete round trips", () => {
-  it("edge delete and hard delete read the row once (gate only)", async () => {
+  // The in-transaction recheck read these paths used to make is GONE: the
+  // DELETE / UPDATE statements now carry the expected kind in their own WHERE
+  // (see UpdateEdgeParams.kind), so the write is its own recheck and a second
+  // `getEdge` would re-derive a verdict the statement already enforces. The
+  // gate outside the transaction stays — it is what keeps an absent or
+  // wrong-kind edge from opening an empty transaction and from firing hooks —
+  // so each path is one read plus one write instead of two reads plus one.
+  it("edge delete and hard delete gate once; the write carries its own kind predicate", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -239,7 +346,7 @@ describe("delete round trips", () => {
     }
   });
 
-  it("node hard delete reads once; soft delete keeps its consumed preflight", async () => {
+  it("node deletes read a gate; the delete lock costs a statement only where writers contend", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {
       const { backend, counts } = withCallCounts(rawBackend);
@@ -250,16 +357,24 @@ describe("delete round trips", () => {
       await store.nodes.Spoke.create({ name: "a" }, { id: "a" });
       await store.nodes.Spoke.create({ name: "b" }, { id: "b" });
 
+      // The gate is the one read. On a backend whose writers contend, a
+      // delete lock precedes the cascade's edge read (#795); SQLite's writer
+      // slot already excludes every other writer, which its declared write
+      // fence states, so a hard delete there pays no lock statement.
       counts["getNode"] = 0;
+      counts["lockNodes"] = 0;
       await store.nodes.Spoke.hardDelete("a" as never);
       expect(counts["getNode"]).toBe(1);
+      expect(counts["lockNodes"]).toBe(0);
       expect(await store.nodes.Spoke.getById("a" as never)).toBeUndefined();
 
-      // Soft delete's pipeline consumes the pre-image (uniqueness keys),
-      // so its in-transaction preflight is deliberate: gate + preflight.
+      // Soft delete's pipeline consumes the pre-image (uniqueness keys); the
+      // locked read IS that preflight, so it costs no extra read.
       counts["getNode"] = 0;
+      counts["lockNodes"] = 0;
       await store.nodes.Spoke.delete("b" as never);
-      expect(counts["getNode"]).toBe(2);
+      expect(counts["getNode"]).toBe(1);
+      expect(counts["lockNodes"]).toBe(1);
       expect(await store.nodes.Spoke.getById("b" as never)).toBeUndefined();
     } finally {
       await rawBackend.close();
@@ -267,7 +382,7 @@ describe("delete round trips", () => {
   });
 
   it("a stale gate read degrades to a guarded no-op, recorded history intact", async () => {
-    // Simulates the race the removed preflight used to absorb: the gate
+    // Simulates the race the transaction recheck must absorb: the gate
     // sees a live row, but the row is tombstoned before the write
     // transaction runs. The tombstone UPDATE's `deleted_at IS NULL`
     // guard makes it a 0-row no-op, and the recorded-capture touch of
@@ -276,15 +391,14 @@ describe("delete round trips", () => {
     try {
       let staleEdgeRow: unknown;
       let serveStaleGate = false;
-      const lying: GraphBackend = {
-        ...rawBackend,
+      const lying: GraphBackend = deriveBackend(rawBackend, {
         getEdge: async (graphId: string, id: string) => {
           const row = await rawBackend.getEdge(graphId, id);
           if (serveStaleGate) return staleEdgeRow as never;
           staleEdgeRow = row;
           return row;
         },
-      };
+      });
       const [store] = await createStoreWithSchema(
         buildCascadeGraph("delete_rt_race"),
         lying,
@@ -417,6 +531,125 @@ describe("getOrCreate validates props once", () => {
       expect(parses()).toBe(3);
     } finally {
       await backend.close();
+    }
+  });
+});
+
+/** An import payload of `edgeCount` Person `a` -> `b` edges. */
+function importPayload(
+  nodes: GraphData["nodes"],
+  edgeCount: number,
+): GraphData {
+  return {
+    formatVersion: "2.0",
+    exportedAt: "2026-01-01T00:00:00.000Z",
+    source: { type: "external" },
+    nodes,
+    edges: Array.from({ length: edgeCount }, (_, index) => ({
+      kind: "knows",
+      id: `imported-${index}`,
+      from: { kind: "Person", id: "a" },
+      to: { kind: "Person", id: "b" },
+      properties: {},
+    })),
+  };
+}
+
+describe("endpoint lock round trips", () => {
+  const Person = defineNode("Person", {
+    schema: z.object({ name: z.string() }),
+  });
+  const knows = defineEdge("knows", { schema: z.object({}) });
+  const graph = defineGraph({
+    id: "endpoint_lock_rt",
+    nodes: { Person: { type: Person, onDelete: "cascade" } },
+    edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  });
+
+  it("a same-kind resurrection locks both endpoints in one statement and refuses the source first", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      const bob = await store.nodes.Person.create({ name: "b" }, { id: "b" });
+      const edge = await store.edges.knows.create(alice, bob, {});
+      await store.edges.knows.delete(edge.id);
+
+      counts["lockNodes"] = 0;
+      const revived = await store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        {},
+      );
+      expect(revived.action).toBe("resurrected");
+      expect(counts["lockNodes"]).toBe(1);
+
+      await store.edges.knows.delete(edge.id);
+      await store.nodes.Person.delete(alice.id);
+      await store.nodes.Person.delete(bob.id);
+      const refusal: unknown = await store.edges.knows
+        .getOrCreateByEndpoints(alice, bob, {})
+        .then(
+          () => {
+            throw new Error("Expected the resurrection to be refused.");
+          },
+          (error_: unknown) => error_,
+        );
+      expect(refusal).toBeInstanceOf(EndpointNotFoundError);
+      expect((refusal as EndpointNotFoundError).details).toMatchObject({
+        endpoint: "from",
+      });
+    } finally {
+      await rawBackend.close();
+    }
+  });
+  it("an import reads an endpoint it did not write once per attempt, across slices", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      await store.nodes.Person.create({ name: "b" }, { id: "b" });
+
+      counts["lockNodes"] = 0;
+      const result = await importGraph(store, importPayload([], 3), {
+        onConflict: "error",
+        batchSize: 1,
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.edges.created).toBe(3);
+      // Three slices name the same two endpoints; the first slice's read is
+      // reused by the other two.
+      expect(counts["lockNodes"]).toBe(1);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
+  it("an import on a writer-serializing engine does not re-read nodes it skipped as live", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(graph, backend);
+      await store.nodes.Person.create({ name: "a" }, { id: "a" });
+      await store.nodes.Person.create({ name: "b" }, { id: "b" });
+      const nodes: GraphData["nodes"] = ["a", "b"].map((id) => ({
+        kind: "Person",
+        id,
+        properties: { name: id },
+      }));
+
+      counts["lockNodes"] = 0;
+      const result = await importGraph(store, importPayload(nodes, 2), {
+        onConflict: "skip",
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.nodes.skipped).toBe(2);
+      expect(result.edges.created).toBe(2);
+      expect(counts["lockNodes"]).toBe(0);
+    } finally {
+      await rawBackend.close();
     }
   });
 });

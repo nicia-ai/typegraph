@@ -241,6 +241,20 @@ export async function main() {
       if (found >= 3) break; // Early exit - only first batch is fetched
     }
 
+    // A heterogeneous page uses the same paginator. These kinds share no
+    // schema fields, so order by system identity and narrow returned nodes.
+    console.log("\n=== Multiple Kinds in One Query ===\n");
+    const mixedPage = await store
+      .query()
+      .from(["User", "Post"], "item")
+      .orderBy("item", "kind")
+      .select((ctx) => ctx.item)
+      .paginate({ first: 5 });
+    for (const node of mixedPage.data) {
+      const label = node.kind === "User" ? node.name : node.title;
+      console.log(`  ${node.kind}: ${label}`);
+    }
+
     // ============================================================
     // Comparing Pagination Strategies
     // ============================================================

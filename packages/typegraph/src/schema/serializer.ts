@@ -6,18 +6,26 @@
  */
 import { z } from "zod";
 
+import { captureWherePredicate } from "../constraints";
 import {
   getEdgeKinds,
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { isEdgeTargetMap, projectTargetKinds } from "../core/edge-endpoints";
+import { serializedTargetCardinalityField } from "../core/edge-integrity-options";
+import { canonicalAnnotations } from "../core/json-value";
 import {
   type EdgeRegistration,
-  type KindAnnotations,
   type NodeRegistration,
   type NullCheckOp,
   type UniqueConstraint,
 } from "../core/types";
+import {
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
+import { ConfigurationError } from "../errors";
 import {
   type GraphExtension,
   LEGACY_GRAPH_EXTENSION_VERSION,
@@ -33,10 +41,21 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
-import { computeClosuresFromOntology } from "../registry/kind-registry";
+import { type NamedOntologyRelation } from "../ontology/validation";
+import {
+  canonicalCompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
+import {
+  computeClosuresFromNamedOntology,
+  KindRegistry,
+  type RegistryClosures,
+} from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
-import { sortedReplacer } from "./canonical";
+import { createDataKeyedBag } from "../utils/object";
+import { canonicalJson } from "./canonical";
 import {
   type JsonSchema,
   type SchemaHash,
@@ -67,13 +86,15 @@ export function serializeSchema<G extends GraphDef>(
 ): SerializedSchema {
   const nodes = serializeNodes(graph);
   const edges = serializeEdges(graph);
-  const ontology = serializeOntology(graph.ontology);
+  const ontology = serializeOntology(graph.ontology, edges);
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
+  const annotations = canonicalAnnotations(graph.annotations);
 
   return {
     graphId: graph.id,
+    ...(annotations === undefined ? {} : { annotations }),
     version,
     generatedAt: nowIso(),
     nodes,
@@ -83,6 +104,7 @@ export function serializeSchema<G extends GraphDef>(
       onNodeDelete: graph.defaults.onNodeDelete,
       temporalMode: graph.defaults.temporalMode,
     },
+    ...(graph.identity === undefined ? {} : { identity: graph.identity }),
     // `serializeIndexes` collapses both absent and empty inputs to
     // `undefined` (see the helper's docstring); omit the field entirely
     // in that case so legacy graphs hash byte-identically to the
@@ -98,6 +120,43 @@ export function serializeSchema<G extends GraphDef>(
     // stability across insertion-order differences.
     ...(deprecatedKinds === undefined ? {} : { deprecatedKinds }),
   };
+}
+
+const SERIALIZED_SCHEMA_TOP_LEVEL_KEYS = new Set([
+  "graphId",
+  "annotations",
+  "version",
+  "generatedAt",
+  "nodes",
+  "edges",
+  "ontology",
+  "defaults",
+  "identity",
+  "indexes",
+  "extension",
+  "deprecatedKinds",
+]);
+
+/**
+ * Serializes a graph while retaining top-level fields authored by a newer
+ * schema-document format.
+ *
+ * Known fields always come from the current graph, including omission of
+ * optional slices. Only fields this version does not own are carried forward.
+ * Every recommit path uses this function so parsing a newer document can never
+ * turn a later, otherwise-valid schema write into silent metadata loss.
+ */
+export function serializeSchemaPreservingUnknownFields<G extends GraphDef>(
+  graph: G,
+  version: number,
+  previous: SerializedSchema,
+): SerializedSchema {
+  const unknownFields = Object.fromEntries(
+    Object.entries(previous).filter(
+      ([key]) => !SERIALIZED_SCHEMA_TOP_LEVEL_KEYS.has(key),
+    ),
+  );
+  return { ...unknownFields, ...serializeSchema(graph, version) };
 }
 
 function serializeDeprecatedKinds(
@@ -131,21 +190,6 @@ function canonicalExtension(
   if (document.version !== LEGACY_GRAPH_EXTENSION_VERSION) return document;
   const { version: _omit, ...rest } = document;
   return rest;
-}
-
-/**
- * Annotations are omitted from the canonical form when absent OR
- * empty (`{}`). Mirrors the omit-when-empty rule applied to
- * `indexes` and `deprecatedKinds` so that legacy graphs without
- * annotations and graphs declaring `annotations: {}` hash
- * byte-identically.
- */
-function canonicalAnnotations(
-  annotations: KindAnnotations | undefined,
-): KindAnnotations | undefined {
-  if (annotations === undefined) return undefined;
-  if (Object.keys(annotations).length === 0) return undefined;
-  return annotations;
 }
 
 // ============================================================
@@ -247,6 +291,9 @@ function serializeNodeIndexDeclaration(
     ) ?
       {}
     : { keySystemColumns: declaration.keySystemColumns }),
+    ...(declaration.keys === undefined || declaration.keys.length === 0 ?
+      {}
+    : { keys: declaration.keys }),
     // `origin: "compile-time"` is the default and is omitted from the
     // canonical form (absence == compile-time). Only `runtime` is
     // emitted explicitly so the restart loader can route the declaration
@@ -286,7 +333,7 @@ function serializeEdgeIndexDeclaration(
 function serializeNodes<G extends GraphDef>(
   graph: G,
 ): Record<string, SerializedNodeDef> {
-  const result: Record<string, SerializedNodeDef> = {};
+  const result = createDataKeyedBag<SerializedNodeDef>();
 
   for (const kindName of getNodeKinds(graph)) {
     const registration = graph.nodes[kindName];
@@ -294,7 +341,9 @@ function serializeNodes<G extends GraphDef>(
     result[kindName] = serializeNodeDef(registration);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `SerializedSchema.nodes`, which
+  // `serializeSchema` returns. See `createDataKeyedBag` in ../utils/object.ts.
+  return { ...result };
 }
 
 /**
@@ -320,14 +369,22 @@ function serializeNodeDef(registration: NodeRegistration): SerializedNodeDef {
 function serializeUniqueConstraints(
   constraints: readonly UniqueConstraint[],
 ): readonly SerializedUniqueConstraint[] {
-  return constraints.map((constraint) => ({
-    name: constraint.name,
-    fields: [...constraint.fields],
-    where:
-      constraint.where ? serializeWherePredicate(constraint.where) : undefined,
-    scope: constraint.scope,
-    collation: constraint.collation,
-  }));
+  return constraints.map((constraint) => {
+    const { scope, collation } = withUniqueConstraintDefaults(
+      constraint,
+      NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+    );
+    return {
+      name: constraint.name,
+      fields: [...constraint.fields],
+      where:
+        constraint.where ?
+          serializeWherePredicate(constraint.where)
+        : undefined,
+      scope,
+      collation,
+    };
+  });
 }
 
 /**
@@ -355,35 +412,31 @@ type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
 /**
  * Serializes a where predicate function to a JSON-serializable structure.
  *
- * The where function is called with a proxy builder that captures the
- * field and operation, which can then be serialized and later deserialized.
+ * Capture runs through `captureWherePredicate` — the same builder constraint
+ * EVALUATION and definition-time VALIDATION use — rather than a second proxy
+ * spelled here. Two builders answering the same question is how a persisted
+ * `where` drifts from the one the store enforces.
+ *
+ * No field validation happens here: `defineGraph` refuses an undeclared `where`
+ * field before a constraint can be registered (`assertWhereFieldDeclared`), and
+ * `validateGraphExtension` refuses the same thing for document-declared kinds,
+ * so by the time a graph is serialized its clauses are already declared-field
+ * clauses. Re-checking would make persistence a second owner of a decision that
+ * has one.
  */
 function serializeWherePredicate(
   whereFunction: (builder: PredicateBuilder) => SerializedPredicate,
 ): string {
-  // Create a proxy builder that captures the predicate structure
-  const builder = new Proxy(
-    {},
-    {
-      get(_target, field: string): FieldPredicateBuilder {
-        return {
-          isNull: (): SerializedPredicate => ({
-            __type: "unique_predicate",
-            field,
-            op: "isNull" as const,
-          }),
-          isNotNull: (): SerializedPredicate => ({
-            __type: "unique_predicate",
-            field,
-            op: "isNotNull" as const,
-          }),
-        };
+  const predicate = captureWherePredicate(whereFunction);
+  if (predicate === undefined) {
+    throw new ConfigurationError(
+      `A unique constraint's \`where\` callback did not return a predicate, so it cannot be persisted.`,
+      {},
+      {
+        suggestion: `Return a field predicate, e.g. \`where: (fields) => fields.someField.isNotNull()\`.`,
       },
-    },
-  );
-
-  // Call the where function to get the predicate
-  const predicate = whereFunction(builder);
+    );
+  }
 
   // Serialize the predicate structure as JSON
   return JSON.stringify({ field: predicate.field, op: predicate.op });
@@ -441,7 +494,7 @@ export function deserializeWherePredicate(
 function serializeEdges<G extends GraphDef>(
   graph: G,
 ): Record<string, SerializedEdgeDef> {
-  const result: Record<string, SerializedEdgeDef> = {};
+  const result = createDataKeyedBag<SerializedEdgeDef>();
 
   for (const kindName of getEdgeKinds(graph)) {
     const registration = graph.edges[kindName];
@@ -449,7 +502,8 @@ function serializeEdges<G extends GraphDef>(
     result[kindName] = serializeEdgeDef(registration);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `SerializedSchema.edges`.
+  return { ...result };
 }
 
 /**
@@ -459,13 +513,48 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
   const edge = registration.type;
   const annotations = canonicalAnnotations(edge.annotations);
 
+  const isMap = isEdgeTargetMap(registration.to);
+  const toKinds =
+    isMap ?
+      projectTargetKinds(registration.to).toSorted()
+    : registration.to.map((node) => node.kind);
+
+  let targetKindsBySource: Record<string, readonly string[]> | undefined;
+  if (isMap) {
+    const map = createDataKeyedBag<readonly string[]>();
+    for (const [sourceKind, targets] of Object.entries(registration.to)) {
+      map[sourceKind] = targets.map((t) => t.kind).toSorted();
+    }
+    targetKindsBySource = { ...map };
+  }
+
   return {
     kind: edge.kind,
     fromKinds: registration.from.map((node) => node.kind),
-    toKinds: registration.to.map((node) => node.kind),
+    toKinds,
+    ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
+    // Omitted (rather than always written, like `cardinality`) when the
+    // registration leaves it undeclared or declares the default explicitly:
+    // a graph that never uses this option must serialize byte-identically,
+    // and hash byte-identically, to a document produced before this option
+    // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
+    // is what reads an absent key back as unconstrained.
+    ...serializedTargetCardinalityField(registration.targetCardinality),
     endpointExistence: registration.endpointExistence ?? "notDeleted",
+    ...(registration.matchIdentity === undefined ?
+      {}
+    : {
+        matchIdentity: {
+          name: registration.matchIdentity.name,
+          fields: [...registration.matchIdentity.fields],
+        },
+      }),
+    // Emitted only when true: `computeSchemaHash` hashes this document, so
+    // emitting `acyclic: false` on every edge would move the hash of every
+    // existing graph on next open (see `SerializedEdgeDef.acyclic`).
+    ...(registration.acyclic === true ? { acyclic: true } : {}),
     description: edge.description,
     ...(annotations === undefined ? {} : { annotations }),
   };
@@ -477,9 +566,15 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
 
 /**
  * Serializes the complete ontology.
+ *
+ * `metaEdges` is derived 1:1 from `relations` — see
+ * `SerializedOntology.metaEdges`'s docblock — so it is computed here purely
+ * for introspection and carries no information `classifyOntologyChanges`
+ * (`src/schema/ontology-change.ts`) needs; that module diffs `relations`.
  */
 function serializeOntology(
   relations: readonly OntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
 ): SerializedOntology {
   // Collect unique meta-edges
   const metaEdgeMap = new Map<string, MetaEdge>();
@@ -491,23 +586,30 @@ function serializeOntology(
   }
 
   // Serialize meta-edges
-  const metaEdges: Record<string, SerializedMetaEdge> = {};
+  // Data-keyed: meta-edge names.
+  const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
   for (const [name, metaEdge] of metaEdgeMap) {
     metaEdges[name] = serializeMetaEdge(metaEdge);
   }
 
-  // Serialize relations
-  const serializedRelations = relations.map((relation) =>
+  const namedRelations = relations.map((relation) =>
     serializeOntologyRelation(relation),
   );
+  if (namedRelations.length === 0) {
+    return {
+      metaEdges: { ...metaEdges },
+      relations: namedRelations,
+      closures: emptySerializedClosures(),
+    };
+  }
 
-  // Compute and serialize closures
-  const closures = serializeClosures(relations);
-
+  // Closures read only each relation's meta-edge and endpoints, so the
+  // relations before `partSide` canonicalization compute the same ones.
+  const closures = computeClosuresFromNamedOntology(namedRelations);
   return {
-    metaEdges,
-    relations: serializedRelations,
-    closures,
+    metaEdges: { ...metaEdges },
+    relations: withCanonicalPartSides(namedRelations, edges, closures),
+    closures: serializeComputedClosures(closures),
   };
 }
 
@@ -515,15 +617,18 @@ function serializeOntology(
  * Serializes a meta-edge.
  */
 function serializeMetaEdge(metaEdge: MetaEdge): SerializedMetaEdge {
-  return {
-    name: metaEdge.name,
-    transitive: metaEdge.properties.transitive,
-    symmetric: metaEdge.properties.symmetric,
-    reflexive: metaEdge.properties.reflexive,
-    inverse: metaEdge.properties.inverse,
-    inference: metaEdge.properties.inference,
-    description: metaEdge.properties.description,
-  };
+  return serializedMetaEdge(metaEdge.name, metaEdge.properties.description);
+}
+
+/**
+ * The fields a serialized meta-edge carries — everything else an earlier
+ * release wrote is dropped (see {@link canonicalStoredSchemaDocument}).
+ */
+function serializedMetaEdge(
+  name: string,
+  description: string | undefined,
+): SerializedMetaEdge {
+  return { name, description };
 }
 
 /**
@@ -536,34 +641,73 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
   };
 }
 
 /**
- * Serializes precomputed closures.
+ * `relations` with each composition `partSide` reduced to
+ * `canonicalCompositionPartSide`: a side the realizing edge's endpoints
+ * already decide is omitted, so spelling it out does not change the document,
+ * its hash, or the relation's identity in a diff. A side the edge admits both
+ * ways is kept, since it is what decides the relation.
+ */
+function withCanonicalPartSides(
+  relations: readonly SerializedOntologyRelation[],
+  edges: Record<string, SerializedEdgeDef>,
+  closures: RegistryClosures,
+): readonly SerializedOntologyRelation[] {
+  if (!relations.some((relation) => relation.partSide !== undefined)) {
+    return relations;
+  }
+  const registry = new KindRegistry(new Map(), new Map(), closures);
+  const edgeFacts = buildSerializedEdgeKindFacts(edges);
+  return relations.map((relation) => {
+    if (relation.partSide === undefined) return relation;
+    const { partSide: _declared, ...rest } = relation;
+    const partSide = canonicalCompositionPartSide(
+      relation,
+      edgeFacts,
+      registry,
+    );
+    return partSide === undefined ? rest : { ...rest, partSide };
+  });
+}
+
+/**
+ * Serializes the closures precomputed from a set of relations. Takes the
+ * relations by name, so a stored document's own relations recompute exactly
+ * the closures this release writes for them (see
+ * {@link canonicalStoredSchemaDocument}).
  */
 function serializeClosures(
-  relations: readonly OntologyRelation[],
+  relations: readonly NamedOntologyRelation[],
 ): SerializedClosures {
-  if (relations.length === 0) {
-    return {
-      subClassAncestors: {},
-      subClassDescendants: {},
-      broaderClosure: {},
-      narrowerClosure: {},
-      equivalenceSets: {},
-      disjointPairs: [],
-      partOfClosure: {},
-      hasPartClosure: {},
-      iriToKind: {},
-      edgeInverses: {},
-      edgeImplicationsClosure: {},
-      edgeImplyingClosure: {},
-    };
-  }
+  return relations.length === 0 ?
+      emptySerializedClosures()
+    : serializeComputedClosures(computeClosuresFromNamedOntology(relations));
+}
 
-  const computed = computeClosuresFromOntology(relations);
+function emptySerializedClosures(): SerializedClosures {
+  return {
+    subClassAncestors: {},
+    subClassDescendants: {},
+    broaderClosure: {},
+    narrowerClosure: {},
+    equivalenceSets: {},
+    disjointPairs: [],
+    partOfClosure: {},
+    hasPartClosure: {},
+    iriToKind: {},
+    edgeInverses: {},
+    edgeImplicationsClosure: {},
+    edgeImplyingClosure: {},
+  };
+}
 
+function serializeComputedClosures(
+  computed: RegistryClosures,
+): SerializedClosures {
   return {
     subClassAncestors: mapToRecord(computed.subClassAncestors),
     subClassDescendants: mapToRecord(computed.subClassDescendants),
@@ -586,11 +730,14 @@ function serializeClosures(
 function mapToRecord(
   map: ReadonlyMap<string, ReadonlySet<string>>,
 ): Record<string, readonly string[]> {
-  const result: Record<string, readonly string[]> = {};
+  // Data-keyed: the map's keys are kind / meta-edge names.
+  const result = createDataKeyedBag<readonly string[]>();
   for (const [key, values] of map) {
     result[key] = [...values];
   }
-  return result;
+  // Spread at the boundary: the closures land in the returned
+  // `SerializedOntology`. See `createDataKeyedBag` in ../utils/object.ts.
+  return { ...result };
 }
 
 /**
@@ -636,14 +783,46 @@ export function serializeSchemaProperties(schema: z.ZodType): JsonSchema {
   return computed;
 }
 
+/**
+ * What a schema `z.toJSONSchema` cannot convert projects as: `z.set()`,
+ * `z.map()`, `z.date()`, `z.bigint()`, a `.transform()`, a `z.custom()`
+ * (which is what `embedding()` is), and any other construct with no JSON
+ * Schema spelling. ONE such field collapses the whole kind to this
+ * placeholder, so it states nothing about the kind's properties: it is the
+ * absence of a projection, in the persisted form documents have always
+ * carried (changing that form would change every such graph's schema hash).
+ * A live graph's structural-subsumption check does not compare this form: it
+ * marks each unconvertible node on its own (`structuralSubtypeProjection`).
+ *
+ * A genuine projection is never mistaken for it, because Zod stamps every
+ * converted schema with `$schema` — an empty `z.object({})` included.
+ */
+const UNPROJECTABLE_SCHEMA_PROJECTION: JsonSchema = Object.freeze({
+  type: "object",
+});
+
+/**
+ * Whether `projection` is the unprojectable placeholder rather than a
+ * schema. The one owner of that decision, for a live graph's projection and
+ * a persisted document's alike: a consumer that compares projections must
+ * ask this first, since the placeholder compared as a schema reads as an
+ * open object declaring no properties — a false statement about the kind.
+ */
+export function isUnprojectableSchemaProjection(
+  projection: JsonSchema,
+): boolean {
+  const keys = Object.keys(projection);
+  return (
+    keys.length === 1 &&
+    projection.type === UNPROJECTABLE_SCHEMA_PROJECTION.type
+  );
+}
+
 function serializeZodSchema(schema: z.ZodType): JsonSchema {
   try {
-    // Zod 4 has toJSONSchema as a standard export
-    const jsonSchema = z.toJSONSchema(schema);
-    return jsonSchema as JsonSchema;
+    return z.toJSONSchema(schema) as JsonSchema;
   } catch {
-    // Fallback for schemas that can't be converted
-    return { type: "object" };
+    return UNPROJECTABLE_SCHEMA_PROJECTION;
   }
 }
 
@@ -690,6 +869,101 @@ export async function getSchemaHash(
 }
 
 /**
+ * The schema-version slot used only to serialize a graph for its
+ * {@link getGraphDefinitionHash}. The value is written into the serialized
+ * document but {@link computeSchemaHash} deliberately excludes `version` (and
+ * `generatedAt`), so the digest is blind to it.
+ */
+const DEFINITION_HASH_VERSION = 1;
+
+/**
+ * Deterministic, version-blind hash of a graph DEFINITION.
+ *
+ * A durable working copy must attest the caller's fork-time definition
+ * identity even when it committed no schema row: the identity of a graph
+ * definition does not depend on which schema version it happened to be
+ * persisted under. This returns exactly the schema-content digest
+ * {@link getSchemaHash} produces, at a fixed version slot, so two references
+ * to the same definition hash identically regardless of the version argument
+ * (which {@link computeSchemaHash} excludes) — and a graph that reuses another
+ * graph's id but declares different nodes/edges/constraints hashes
+ * differently.
+ */
+export async function getGraphDefinitionHash(
+  graph: GraphDef,
+): Promise<SchemaHash> {
+  return getSchemaHash(graph, DEFINITION_HASH_VERSION);
+}
+
+/**
+ * A stored schema document in the form this release's serializer writes for
+ * the schema it describes, so its {@link computeSchemaHash} is comparable with
+ * the hash of a graph serialized today.
+ *
+ * A document written by an earlier release, or read back through the parser,
+ * differs from that form only in derived or defaulted content, never in what
+ * the schema states:
+ *
+ * - `ontology.metaEdges` entries carried `transitive`/`symmetric`/`reflexive`/
+ *   `inverse`/`inference`, which this release no longer writes.
+ * - `ontology.closures` are derived from `ontology.relations`; an earlier
+ *   release derived some of them differently (the `equivalentTo` closures).
+ *   They are recomputed from the document's own relations.
+ * - An absent edge `targetCardinality` means `"many"`, which the serializer
+ *   omits.
+ * - An absent unique-constraint `scope` or `collation` means what
+ *   `NODE_UNIQUE_CONSTRAINT_DEFAULTS` says, which `defineGraph` writes into
+ *   the declaration an untyped caller left them out of, so the serializer
+ *   writes them out.
+ *
+ * The document must be the stored JSON as written, not the output of the
+ * schema parser: the parser fills in defaults, and the canonical form is
+ * defined over what was stored.
+ *
+ * Everything else is kept verbatim, so a document that differs from today's
+ * serialization in anything the schema states still hashes differently.
+ */
+export function canonicalStoredSchemaDocument(
+  document: SerializedSchema,
+): SerializedSchema {
+  // Data-keyed: node and edge kind names and meta-edge names.
+  const nodes = createDataKeyedBag<SerializedNodeDef>();
+  for (const [kind, node] of Object.entries(document.nodes)) {
+    nodes[kind] = {
+      ...node,
+      uniqueConstraints: node.uniqueConstraints.map((constraint) =>
+        withUniqueConstraintDefaults(
+          constraint,
+          NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+        ),
+      ),
+    };
+  }
+  const edges = createDataKeyedBag<SerializedEdgeDef>();
+  for (const [kind, edge] of Object.entries(document.edges)) {
+    const { targetCardinality, ...rest } = edge;
+    edges[kind] = {
+      ...rest,
+      ...serializedTargetCardinalityField(targetCardinality),
+    };
+  }
+  const metaEdges = createDataKeyedBag<SerializedMetaEdge>();
+  for (const [name, metaEdge] of Object.entries(document.ontology.metaEdges)) {
+    metaEdges[name] = serializedMetaEdge(metaEdge.name, metaEdge.description);
+  }
+  return {
+    ...document,
+    nodes: { ...nodes },
+    edges: { ...edges },
+    ontology: {
+      ...document.ontology,
+      metaEdges: { ...metaEdges },
+      closures: serializeClosures(document.ontology.relations),
+    },
+  };
+}
+
+/**
  * Computes a hash of the schema content for change detection.
  *
  * Excludes version and generatedAt since those change on every save.
@@ -708,6 +982,7 @@ export async function computeSchemaHash(
     edges: schema.edges,
     ontology: schema.ontology,
     defaults: schema.defaults,
+    ...(schema.identity === undefined ? {} : { identity: schema.identity }),
     ...(schema.indexes === undefined ? {} : { indexes: schema.indexes }),
     ...(schema.extension === undefined ? {} : { extension: schema.extension }),
     ...(schema.deprecatedKinds === undefined ?
@@ -716,6 +991,5 @@ export async function computeSchemaHash(
   };
 
   // Serialize with sorted keys for deterministic output
-  const json = JSON.stringify(hashable, sortedReplacer);
-  return sha256Hex(json);
+  return sha256Hex(canonicalJson(hashable));
 }

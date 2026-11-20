@@ -1,8 +1,9 @@
 /**
  * bulkCreate round-trip batching.
  *
- * A batch create must not degenerate into per-row statements: existence
- * probes go through one getNodes per kind, uniqueness pre-checks through
+ * A batch create must not degenerate into per-row statements: caller-id
+ * existence probes go through one getNodes per kind while generated ids skip
+ * that guaranteed-empty read, uniqueness pre-checks through
  * one checkUniqueBatch per (constraint, kind), uniqueness entries through
  * one insertUniqueBatch, fulltext sync through one upsertFulltextBatch per
  * kind, and embedding sync through one upsertEmbeddingBatch per
@@ -11,20 +12,36 @@
  * split, alongside the behavioral semantics that must not drift:
  * in-batch conflicts, conflicts with existing rows, and create-over-
  * tombstone.
+ *
+ * The same accounting covers a batch whose items carry `partOf`: the whole
+ * rows go through one getNodes per kind (never one getNode per item, and never
+ * a read of the part row the batch's own insert just wrote), and the
+ * acyclicity relation is walked once for the whole batch rather than once per
+ * attaching item.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
   embedding,
+  partOf,
   searchable,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
-import { UniquenessError } from "../src/errors";
+import { EndpointNotFoundError, UniquenessError } from "../src/errors";
+import * as acyclicityModule from "../src/store/acyclicity";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string(), email: z.string() }),
@@ -37,6 +54,27 @@ const Document = defineNode("Doc", {
     embedding: embedding(4),
   }),
 });
+
+/** A reflexive composition pair: the only shape in which a create batch's own items can close a cycle. */
+const Folder = defineNode("Folder", { schema: z.object({ name: z.string() }) });
+const folderOf = defineEdge("folderOf", { schema: z.object({}) });
+
+function buildCompositionGraph() {
+  return defineGraph({
+    id: "bulk-batching-composition",
+    nodes: { Folder: { type: Folder } },
+    edges: {
+      folderOf: {
+        type: folderOf,
+        from: [Folder],
+        to: [Folder],
+        cardinality: "one",
+      },
+    },
+    // Reflexive, so the orientation must be stated explicitly.
+    ontology: [partOf(Folder, Folder, { via: folderOf, partSide: "from" })],
+  });
+}
 
 function buildGraph() {
   return defineGraph({
@@ -72,6 +110,8 @@ const COUNTED_METHODS = [
   "upsertFulltextBatch",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
+  "updateNode",
+  "updateResolvedNodesBatch",
 ] as const;
 
 /**
@@ -90,25 +130,59 @@ function withCallCounts(backend: GraphBackend): {
   function wrapMethods<T extends GraphBackend | TransactionBackend>(
     target: T,
   ): T {
-    const wrapped = { ...target } as Record<string, unknown>;
+    // Built from a name list rather than written as a literal, so the overlay
+    // carries an assertion: `ExactBackendOverlay<T, Partial<T>>` reduces to
+    // `Partial<T>` only once `T` is resolved, and the checker cannot verify
+    // that against an unresolved type parameter.
+    const overrides: Record<string, unknown> = {};
     for (const name of COUNTED_METHODS) {
       const original = (target as Record<string, unknown>)[name];
       if (typeof original !== "function") continue;
-      wrapped[name] = (...args: unknown[]) => {
+      overrides[name] = (...args: unknown[]) => {
         counts[name] = (counts[name] ?? 0) + 1;
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
-    return wrapped as T;
+    return deriveBackend<T, Partial<T>>(
+      target,
+      overrides as ExactBackendOverlay<T, Partial<T>>,
+    );
   }
 
-  const outer = wrapMethods(backend);
-  const counted: GraphBackend = {
-    ...outer,
-    transaction: (fn, options) =>
-      backend.transaction((target) => fn(wrapMethods(target)), options),
-  };
+  const counted: GraphBackend = deriveBackend(wrapMethods(backend), {
+    transaction: (fn, options) => {
+      counts["transaction"] = (counts["transaction"] ?? 0) + 1;
+      return backend.transaction((target) => fn(wrapMethods(target)), options);
+    },
+  });
   return { backend: counted, counts };
+}
+
+/**
+ * The counted backend and a store on it, with every call the store's own boot
+ * made already discounted — so a test's assertions describe only what its own
+ * `run` body triggered. Shared by both graphs' helpers below, which differ
+ * only in the graph they build (and so in the store type they hand back).
+ */
+async function withCountedBackend<T>(
+  run: (
+    backend: GraphBackend,
+    counts: CallCounts,
+    raw: GraphBackend,
+  ) => Promise<T>,
+): Promise<T> {
+  const { backend: raw } = createLocalSqliteBackend();
+  try {
+    const { backend, counts } = withCallCounts(raw);
+    return await run(backend, counts, raw);
+  } finally {
+    await raw.close();
+  }
+}
+
+function resetCounts(counts: CallCounts): void {
+  for (const name of COUNTED_METHODS) counts[name] = 0;
+  counts["transaction"] = 0;
 }
 
 async function withCountedStore<T>(
@@ -120,16 +194,33 @@ async function withCountedStore<T>(
     raw: GraphBackend,
   ) => Promise<T>,
 ): Promise<T> {
-  const { backend: raw } = createLocalSqliteBackend();
-  try {
-    const { backend, counts } = withCallCounts(raw);
+  return withCountedBackend(async (backend, counts, raw) => {
     const [store] = await createStoreWithSchema(buildGraph(), backend);
     // Boot traffic is not under test — count only what `run` triggers.
-    for (const name of COUNTED_METHODS) counts[name] = 0;
-    return await run(store, counts, raw);
-  } finally {
-    await raw.close();
-  }
+    resetCounts(counts);
+    return run(store, counts, raw);
+  });
+}
+
+async function withCountedCompositionStore<T>(
+  run: (
+    store: Awaited<
+      ReturnType<
+        typeof createStoreWithSchema<ReturnType<typeof buildCompositionGraph>>
+      >
+    >[0],
+    counts: CallCounts,
+    raw: GraphBackend,
+  ) => Promise<T>,
+): Promise<T> {
+  return withCountedBackend(async (backend, counts, raw) => {
+    const [store] = await createStoreWithSchema(
+      buildCompositionGraph(),
+      backend,
+    );
+    resetCounts(counts);
+    return run(store, counts, raw);
+  });
 }
 
 const BATCH_SIZE = 40;
@@ -144,9 +235,24 @@ function personInputs(offset = 0) {
 }
 
 describe("bulkCreate probe batching", () => {
-  it("replaces per-row existence probes with one getNodes per kind", async () => {
+  it("skips existence probes for generated ids", async () => {
     await withCountedStore(async (store, counts) => {
       const created = await store.nodes.Person.bulkCreate(personInputs());
+      expect(created).toHaveLength(BATCH_SIZE);
+
+      expect(counts["getNodes"]).toBe(0);
+      expect(counts["getNode"]).toBe(0);
+    });
+  });
+
+  it("batches caller-id existence probes once per kind", async () => {
+    await withCountedStore(async (store, counts) => {
+      const created = await store.nodes.Person.bulkCreate(
+        personInputs().map((input, index) => ({
+          ...input,
+          id: `person-${index}`,
+        })),
+      );
       expect(created).toHaveLength(BATCH_SIZE);
 
       expect(counts["getNodes"]).toBe(1);
@@ -204,6 +310,175 @@ describe("bulkCreate side-effect batching", () => {
 
       expect(counts["upsertEmbeddingBatch"]).toBe(1);
       expect(counts["upsertEmbedding"]).toBe(0);
+    });
+  });
+});
+
+describe("resolved bulk update batching", () => {
+  it("keeps history-tracked whole-row updates at a bounded write count", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `history-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      const updated = await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      expect(updated).toHaveLength(BATCH_SIZE);
+      expect(counts["updateResolvedNodesBatch"]).toBe(1);
+      expect(counts["updateNode"]).toBe(0);
+      expect(counts["upsertFulltextBatch"]).toBe(1);
+      expect(counts["upsertEmbeddingBatch"]).toBe(1);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("falls back before a resolved batch exceeds the advertised bind budget", async () => {
+    const { backend: raw } = createLocalSqliteBackend({
+      capabilities: { maxBindParameters: 100 },
+    });
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        revisionTracking: true,
+      });
+      const inputs = Array.from({ length: BATCH_SIZE }, (_, index) => ({
+        id: `budget-doc-${index}`,
+        props: {
+          title: `before ${index}`,
+          body: `body ${index}`,
+          embedding: [index, 1, 2, 3],
+        },
+      }));
+      await store.nodes.Doc.bulkUpsertById(inputs);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      await store.nodes.Doc.bulkUpsertById(
+        inputs.map((input, index) => ({
+          ...input,
+          props: {
+            title: `after ${index}`,
+            body: `revised ${index}`,
+            embedding: [index, 4, 5, 6],
+          },
+        })),
+      );
+
+      // The resolved statement costs 126 binds, so the one owner of the
+      // budget calculation retains the established per-row fallback.
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      expect(counts["updateNode"]).toBe(BATCH_SIZE);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("falls back before row mutation when a transaction port lacks a required unique sidecar", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const narrowed = deriveBackend(raw, {
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) => fn(projectBackendWithout(target, ["checkUniqueBatch"])),
+            options,
+          ),
+      });
+      const { backend, counts } = withCallCounts(narrowed);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await store.nodes.Person.bulkUpsertById([
+        { id: "port-a", props: { name: "A", email: "a@example.com" } },
+        { id: "port-b", props: { name: "B", email: "b@example.com" } },
+      ]);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      const updated = await store.nodes.Person.bulkUpsertById([
+        { id: "port-a", props: { name: "A2", email: "a@example.com" } },
+        { id: "port-b", props: { name: "B2", email: "b@example.com" } },
+      ]);
+
+      expect(updated.map((node) => node.id)).toEqual(["port-a", "port-b"]);
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      expect(counts["updateNode"]).toBe(2);
+      await expect(
+        store.nodes.Person.getById(asNodeId("port-a")),
+      ).resolves.toMatchObject({ name: "A2", email: "a@example.com" });
+      await expect(
+        store.nodes.Person.getById(asNodeId("port-b")),
+      ).resolves.toMatchObject({ name: "B2", email: "b@example.com" });
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("retains bulkUpsertById's sequential unique-key behavior when a batch could otherwise swap keys", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(raw);
+      const [store] = await createStoreWithSchema(buildGraph(), backend, {
+        history: true,
+        revisionTracking: true,
+      });
+      await store.nodes.Person.bulkUpsertById([
+        { id: "swap-a", props: { name: "A", email: "a@example.com" } },
+        { id: "swap-b", props: { name: "B", email: "b@example.com" } },
+      ]);
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      counts["transaction"] = 0;
+
+      await expect(
+        store.nodes.Person.bulkUpsertById([
+          { id: "swap-a", props: { name: "A", email: "b@example.com" } },
+          { id: "swap-b", props: { name: "B", email: "a@example.com" } },
+        ]),
+      ).rejects.toBeInstanceOf(UniquenessError);
+
+      expect(counts["updateResolvedNodesBatch"]).toBe(0);
+      await expect(
+        store.nodes.Person.getById(asNodeId("swap-a")),
+      ).resolves.toMatchObject({ email: "a@example.com" });
+      await expect(
+        store.nodes.Person.getById(asNodeId("swap-b")),
+      ).resolves.toMatchObject({ email: "b@example.com" });
+    } finally {
+      await raw.close();
+    }
+  });
+});
+
+describe("bulkInsert transaction ownership", () => {
+  it("lets the write executor own the ordinary transaction boundary", async () => {
+    await withCountedStore(async (store, counts) => {
+      await store.nodes.Person.bulkInsert(personInputs());
+
+      expect(counts["transaction"]).toBe(1);
     });
   });
 });
@@ -293,26 +568,202 @@ describe("bulkCreate batching semantics (must not drift)", () => {
     });
   });
 
-  it("still rejects create over a tombstoned id at the insert", async () => {
-    // Pins current semantics: the existence probe lets tombstoned ids
-    // through (only live rows raise NodeAlreadyExistsError) and the INSERT
-    // then fails on the primary key — resurrect goes through upsert paths,
-    // not create. Probe batching must not change this.
+  it("resurrects a tombstoned id instead of failing at the insert", async () => {
+    // Pins current semantics: the existence probe lets tombstoned ids through
+    // (only live rows raise NodeAlreadyExistsError) and the batch partitions
+    // them into resurrections — properties replaced, validity window reset.
+    // Probe batching must not change this.
     await withCountedStore(async (store) => {
-      const node = await store.nodes.Person.create({
-        name: "first",
-        email: "gone@example.com",
-      });
+      const originalValidFrom = "2020-01-01T00:00:00.000Z";
+      const node = await store.nodes.Person.create(
+        {
+          name: "first",
+          email: "gone@example.com",
+        },
+        { validFrom: originalValidFrom },
+      );
       await store.nodes.Person.delete(node.id);
 
-      await expect(
-        store.nodes.Person.bulkCreate([
-          {
-            id: node.id,
-            props: { name: "second", email: "back@example.com" },
-          },
-        ]),
-      ).rejects.toThrow();
+      const [resurrected] = await store.nodes.Person.bulkCreate([
+        {
+          id: node.id,
+          props: { name: "second", email: "back@example.com" },
+        },
+      ]);
+
+      expect(resurrected).toMatchObject({ id: node.id, name: "second" });
+      expect(requireDefined(resurrected).meta.deletedAt).toBeUndefined();
+      expect(requireDefined(resurrected).meta.validFrom).not.toBe(
+        originalValidFrom,
+      );
+      expect(requireDefined(resurrected).meta.validTo).toBeUndefined();
+    });
+  });
+});
+
+describe("bulkCreate composition attach batching", () => {
+  const ATTACHING_BATCH_SIZE = 8;
+
+  it("reads the whole rows once per kind, and never re-reads the part rows it just wrote", async () => {
+    await withCountedCompositionStore(async (store, counts) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      resetCounts(counts);
+
+      const parts = await store.nodes.Folder.bulkCreate(
+        Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+          props: { name: `part-${index}` },
+          partOf: { whole: { kind: "Folder" as const, id: whole.id } },
+        })),
+      );
+      expect(parts).toHaveLength(ATTACHING_BATCH_SIZE);
+
+      // One getNodes for the single distinct whole; zero getNode, which is
+      // what rules out both a per-item whole probe and a part-row re-read
+      // (the items' own ids are generated, so nothing else reads a node).
+      expect(counts["getNodes"]).toBe(1);
+      expect(counts["getNode"]).toBe(0);
+    });
+  });
+  // MUTATION CHECK: have `prepareBatchCompositionCreateEdges`
+  // (src/store/operations/node-operations.ts) prepare each item with
+  // `endpoints: { source: "read" }` instead of the primed whole. Both endpoint
+  // rows are then read per item and `getNode` counts 16 instead of 0.
+
+  it("walks the acyclicity relation once for the whole batch", async () => {
+    await withCountedCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const probe = vi.spyOn(
+        acyclicityModule,
+        "assertUnwrittenEdgeRelationsAcyclic",
+      );
+      try {
+        await store.nodes.Folder.bulkCreate(
+          Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+            props: { name: `part-${index}` },
+            partOf: { whole: { kind: "Folder" as const, id: whole.id } },
+          })),
+        );
+        expect(probe).toHaveBeenCalledTimes(1);
+        expect(probe.mock.calls[0]?.[1]).toHaveLength(ATTACHING_BATCH_SIZE);
+      } finally {
+        probe.mockRestore();
+      }
+    });
+  });
+  // MUTATION CHECK: restore the per-item probe (prepare with
+  // `validateRelations: true` and drop the single
+  // `assertPreparedEdgeCreateRelations` call) — the probe is then entered 8
+  // times, once per attaching item, each with a single proposed edge.
+
+  it("attaches every item of the batch", async () => {
+    await withCountedCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const parts = await store.nodes.Folder.bulkCreate(
+        Array.from({ length: ATTACHING_BATCH_SIZE }, (_, index) => ({
+          props: { name: `part-${index}` },
+          partOf: { whole: { kind: "Folder" as const, id: whole.id } },
+        })),
+      );
+      const edges = await store.edges.folderOf.find({});
+      expect(edges).toHaveLength(ATTACHING_BATCH_SIZE);
+      expect(new Set(edges.map((edge) => edge.fromId))).toEqual(
+        new Set(parts.map((part) => part.id)),
+      );
+      expect(new Set(edges.map((edge) => edge.toId))).toEqual(
+        new Set([whole.id]),
+      );
+    });
+  });
+});
+
+/**
+ * The `getNodes` port is an optimization, so the attach loop keeps a
+ * per-`(kind, id)` `getNode` fallback. A backend projected WITHOUT the port
+ * is the only way to reach that arm — and what it must prove is not the read
+ * count but that the arm reaches the identical verdicts: the same successful
+ * attachment, and the same refusal on the same endpoint side.
+ */
+async function withPortlessCompositionStore<T>(
+  run: (
+    store: Awaited<
+      ReturnType<
+        typeof createStoreWithSchema<ReturnType<typeof buildCompositionGraph>>
+      >
+    >[0],
+    counts: CallCounts,
+  ) => Promise<T>,
+): Promise<T> {
+  return withCountedBackend(async (backend, counts) => {
+    const portless = projectBackendWithout(backend, ["getNodes"]);
+    expect("getNodes" in portless).toBe(false);
+    const [store] = await createStoreWithSchema(
+      buildCompositionGraph(),
+      portless,
+    );
+    resetCounts(counts);
+    return run(store, counts);
+  });
+}
+
+describe("bulkCreate composition attach on a backend without the batch point read", () => {
+  it("attaches every item through the per-key getNode fallback", async () => {
+    await withPortlessCompositionStore(async (store, counts) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      resetCounts(counts);
+
+      const parts = await store.nodes.Folder.bulkCreate([
+        {
+          props: { name: "one" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
+        {
+          props: { name: "two" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
+      ]);
+
+      const edges = await store.edges.folderOf.find({});
+      expect(edges).toHaveLength(2);
+      expect(new Set(edges.map((edge) => edge.fromId))).toEqual(
+        new Set(parts.map((part) => part.id)),
+      );
+      // The fallback reads the one distinct whole ONCE, not once per item.
+      expect(counts["getNodes"]).toBe(0);
+      expect(counts["getNode"]).toBe(1);
+    });
+  });
+  // MUTATION CHECK: make `readBatchCompositionWholeRows`
+  // (src/store/operations/node-operations.ts) return an empty map when the port
+  // is unreachable instead of falling back — both items then refuse with
+  // EndpointNotFoundError against a whole that is demonstrably live.
+
+  it("refuses a missing whole with the identical error the ported path raises", async () => {
+    await withPortlessCompositionStore(async (store) => {
+      const whole = await store.nodes.Folder.create({ name: "whole" });
+      const before = await store.nodes.Folder.count();
+
+      const error = await store.nodes.Folder.bulkCreate([
+        {
+          props: { name: "ok" },
+          partOf: { whole: { kind: "Folder", id: whole.id } },
+        },
+        {
+          props: { name: "orphan" },
+          partOf: { whole: { kind: "Folder", id: "no-such-folder" } },
+        },
+      ]).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(EndpointNotFoundError);
+      expect((error as EndpointNotFoundError).details).toMatchObject({
+        edgeKind: "folderOf",
+        // `folderOf` carries the part on its `from` side, so the WHOLE is `to`.
+        endpoint: "to",
+        nodeKind: "Folder",
+        nodeId: "no-such-folder",
+      });
+      // One refused item aborts the whole batch: neither node row survives.
+      expect(await store.nodes.Folder.count()).toBe(before);
+      expect(await store.edges.folderOf.find({})).toHaveLength(0);
     });
   });
 });

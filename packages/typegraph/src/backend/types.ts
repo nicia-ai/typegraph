@@ -6,6 +6,8 @@
  */
 import {
   type IndexEntity,
+  type JsonScalar,
+  type JsonValue,
   type KindEntity,
   type TemporalMode,
 } from "../core/types";
@@ -18,10 +20,15 @@ import {
 import { type SqlFragment } from "../query/sql-fragment";
 import {
   type CompiledRowsSql,
+  type CompiledSelectSql,
   type CompiledStatementSql,
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
+// Type-only: `store/claims/edge-claims.ts` value-imports several params
+// types from this file, but a type-only import is erased at runtime, so this
+// back-edge creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "../store/claims/edge-claims";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 
 // ============================================================
@@ -98,6 +105,51 @@ export type FilteredApproximateSearch = Readonly<{
 }>;
 
 /**
+ * Whether an engine exposes a PER-SEARCH knob for the ANN candidate frontier —
+ * the parameter {@link VectorSearchParams.efSearch} maps onto.
+ *
+ * Declared, never inferred: `efSearch` is an accepted option, so a backend that
+ * cannot apply it must refuse it rather than ignore it (AGENTS.md contract
+ * discipline). This capability is what the shared refusal predicate reads, and
+ * what a caller reads to know whether passing `efSearch` will be honored.
+ *
+ * - **pgvector**: `hnsw.ef_search`, applied per search with `SET LOCAL` inside
+ *   the search's own transaction — hence `requiresTransactionScope`, since a
+ *   session-wide `SET` would leak the override into concurrent searches.
+ * - **sqlite-vec**: `tunable: false`. A vec0 KNN takes `k` and nothing else;
+ *   there is no frontier to widen.
+ * - **libSQL DiskANN**: `tunable: false`. `vector_top_k(idx, q, k)` is a table
+ *   function with no per-query parameters; DiskANN's `search_l` is fixed at
+ *   index-creation time.
+ */
+export type VectorSearchFrontierTuning =
+  | Readonly<{
+      tunable: true;
+      /** Engine-native parameter `efSearch` maps to (`"hnsw.ef_search"`). */
+      parameter: string;
+      /**
+       * The one index type whose search honors the parameter. `efSearch` on a
+       * slot of any other index type is refused, not ignored: an IVFFlat or
+       * brute-force slot would silently discard it.
+       */
+      indexType: VectorIndexType;
+      /**
+       * `true` when applying the parameter needs a transaction to scope it to
+       * the one search. A backend without interactive transactions refuses
+       * `efSearch` rather than leaking a session-wide setting.
+       */
+      requiresTransactionScope: boolean;
+    }>
+  | Readonly<{
+      tunable: false;
+      /**
+       * Why this engine has no per-search frontier knob — surfaced in the
+       * refusal's details so the state is named rather than implied.
+       */
+      reason: string;
+    }>;
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -117,6 +169,14 @@ export type VectorCapabilities = Readonly<{
    * an engine promise it does not keep.
    */
   filteredApproximateSearch: FilteredApproximateSearch;
+  /**
+   * Whether a per-search ANN frontier override (`efSearch`) can be applied.
+   * See {@link VectorSearchFrontierTuning}.
+   *
+   * Required, so a new vector strategy must state whether it honors the
+   * option instead of inheriting silence — the exact defect this closes.
+   */
+  searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // ============================================================
@@ -170,6 +230,47 @@ export type GraphAnalyticsCapabilities = Readonly<{
   mathFunctions: boolean;
 }>;
 
+/**
+ * How much of the contribution health lifecycle a backend can serve.
+ *
+ * The three rungs escalate — probe (read-only) → repair
+ * (non-destructive) → rebuild (destructive) — and each is declared
+ * separately because a backend can genuinely stop at any of them. A
+ * backend that provisions contributions but cannot probe its own catalog
+ * is a real gap, and the honest answer to `store.probeContributions()`
+ * there is a refusal, not `ready`: "assessed and healthy" and "never
+ * looked" must never share a return value.
+ */
+export type ContributionCapabilities = Readonly<{
+  /**
+   * Whether strategy-owned contribution tables are provisioned and
+   * attested by durable markers on this backend at all. `false` means
+   * there is nothing to assess, and the probe reports no entries rather
+   * than refusing.
+   */
+  supported: boolean;
+  /**
+   * Whether the backend can cross its durable markers against the live
+   * catalog — `store.probeContributions()` and
+   * `store.verifyContributions()`. False with `supported: true` is the
+   * declared gap: both refuse with `ConfigurationError`.
+   */
+  probe: boolean;
+  /**
+   * Whether the backend can run the destructive drop → recreate →
+   * repopulate → stamp rebuild (`store.rebuildContribution()`). Requires
+   * both a strategy that declares `dropDdl` and a transactional schema
+   * fence to run it under; false means `rebuildContribution` refuses.
+   *
+   * Describes the fulltext projection only. `rebuildContribution("vector")`
+   * refuses on every backend regardless of this flag — embeddings exist
+   * only in the storage a rebuild would drop, so there is nothing to
+   * reconstruct them from — and `reembedVectorField` is the sanctioned
+   * destructive path there.
+   */
+  rebuild: boolean;
+}>;
+
 // ============================================================
 // SQL Dialect & Capabilities
 // ============================================================
@@ -178,14 +279,143 @@ import { type SqlDialect } from "../query/dialect/types";
 
 export type { SqlDialect } from "../query/dialect/types";
 
+import { type RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
+export type { RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
+import {
+  type FenceSql,
+  type WriteFenceDeclaration,
+} from "./capabilities/write-fence";
+
+export type {
+  FenceSql,
+  WriteFenceDeclaration,
+} from "./capabilities/write-fence";
+
+import { type BackendCatalogProbes } from "./capabilities/catalog";
+import { type LineageMembers } from "./capabilities/lineage";
+import { type EngineRecordedTimeMembers } from "./capabilities/recorded-time";
+
+export type {
+  BackendCatalogProbes,
+  CatalogColumn,
+  CatalogIndexBehavior,
+  IndexState,
+  NormalizedColumnKind,
+  TableState,
+} from "./capabilities/catalog";
+export type {
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
+  LineageMembers,
+  LineageSession,
+} from "./capabilities/lineage";
+export type {
+  EngineRecordedRevision,
+  EngineRecordedTimeMembers,
+  RecordedSourceTable,
+  RecordedTimeSession,
+} from "./capabilities/recorded-time";
+
 /**
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
-  /** Whether the backend supports atomic transactions (D1 does not) */
-  transactions: boolean;
+  /**
+   * Retains TypeGraph allocation anchors atomically, with an indexed time lookup.
+   * Pruning also requires assertBaseSchemaCurrent; lookup reads pre-v9 storage.
+   */
+  recordedAnchorLookup?: boolean;
+  /** Supports bounded allocation-log retention; requires recordedAnchorLookup and assertBaseSchemaCurrent. */
+  recordedAnchorPruning?: boolean;
+  /** Atomically retains caller-key mutation outcomes in the configured Store operation relation. */
+  durableStoreOperations?: boolean;
+  /** How this backend executes work and establishes atomicity. */
+  execution: Readonly<{
+    /** Whether the backend can hold an interactive callback/session transaction. */
+    interactiveTransactions: boolean;
+    /**
+     * Where this exact backend object can execute a conformance-earned atomic
+     * batch. `root` owns the transaction boundary; `session` is already bound
+     * to the transaction that makes a closed statement sequence atomic.
+     */
+    atomicBatch: "none" | "root" | "session";
+    /**
+     * How this backend groups a multi-statement write into one unit: an
+     * `"interactive"` callback/session transaction that can hold a fenced
+     * conversation across several round trips; `"optimistic-retry"`, the
+     * same interactive transaction on an engine whose write fence resolves
+     * `mechanism: "row"` with `conflict: "commit-time"` — two acquirers of
+     * one fence row both proceed and the loser's COMMIT fails, so every
+     * store-owned unit of work must be prepared to replay from the top; a
+     * `"batch"` atomic program with no such transaction; or `"none"` when it
+     * offers neither and a managed write can only run its statements one at
+     * a time with no atomicity across them.
+     *
+     * Derived, never hand-declared, on every bundled backend through
+     * `deriveUnitOfWork` (`backend/capabilities/execution.ts`) —
+     * `"optimistic-retry"` when `interactiveTransactions` is true AND the
+     * caller supplied the resolved write-fence plan's `conflict` fact as
+     * `"commit-time"`, else `"interactive"` when `interactiveTransactions`
+     * is true, else `"batch"` when `atomicBatch` is not `"none"`, else
+     * `"none"` — overwriting whatever a profile's own `declaredCapabilities`
+     * set. `finalizeEngineCapabilities` is the one place that resolves this
+     * fact fresh, from the root profile's own `row`-mechanism plan; every
+     * later derivation boundary (`downgradeAtomicBatch`,
+     * `scopeAtomicBatchToSession`) carries it forward instead of
+     * re-resolving it, by reading whether its own source object was already
+     * `"optimistic-retry"` — so the tier survives a derived or
+     * session-scoped backend for as long as `interactiveTransactions` stays
+     * `true`. Optional so a custom `GraphBackend` implementation, which
+     * nothing derives this for, is not forced to declare it.
+     *
+     * `src/store/operations/write-transaction.ts`'s retry-routing helpers
+     * are the store-owned `"optimistic-retry"` consumers: every
+     * `runWritePlan`/`runHookedWritePlan`/
+     * `runAutocommitSingleStatementWritePlan` call, `runIdentityMutation`,
+     * `rebuildIdentityClosureWithSchemaFence`, `rebuildContribution`, and the
+     * index-materialization claim/record calls each wrap their write in
+     * `runRetriedUnit` when this reads `"optimistic-retry"` (and, for the
+     * transaction-opening ones, the write opens its own transaction rather
+     * than joining an existing one). Two backend-owned transactions consult
+     * the SAME tier directly, outside the store's write path entirely:
+     * PostgreSQL's graph-template instantiation row branch and
+     * `runSchemaWriteTransaction` (behind `commitSchemaVersion` and its
+     * three siblings), both in `src/backend/drizzle/postgres.ts` — each
+     * acquires the schema-commit fence row in a `db.transaction(...)` it
+     * opens directly, so each wraps that whole transaction in
+     * `runRetriedUnit` itself rather than routing through the store's
+     * helpers. Two further readers key off the
+     * `"batch"` value: the batch-tier write verdict
+     * (`resolveBatchWriteVerdict` in
+     * `backend/capabilities/batch-write-verdict.ts`) and the autocommit
+     * single-statement eligibility gate (`canFuseSchemaFenceInFirstWrite`).
+     * Absent is treated as anything but `"batch"`: `resolveBatchWriteVerdict`
+     * answers `program` (its "not a batch-tier limitation" verdict) for it,
+     * so a backend that declares neither an interactive transaction nor an
+     * atomic batch still fails closed on a write that needs one — through
+     * that write's own capability check, not through a batch-tier refusal it
+     * never earned.
+     */
+    unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+  }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
+  /**
+   * Whether aggregate calls may contain their own `ORDER BY` clause, as used
+   * by ordered scalar and record collection. Absent is `false`: custom and remote
+   * backends must opt in only when their active engine accepts that syntax.
+   */
+  orderedAggregates?: boolean;
+  /**
+   * Whether `updateNode` / `updateEdge` honor `clearValidTo: true` by storing
+   * SQL NULL in `valid_to`. Absent is `false`: custom backends must opt in so
+   * the store refuses every explicit clear-bearing call before lookup,
+   * coalescing, or write instead of making support depend on row state.
+   */
+  clearValidTo?: boolean;
   /**
    * Whether the backend's `execute()` supports `UPDATE … RETURNING`. Absent or
    * `true` means supported (every engine TypeGraph ships — SQLite ≥ 3.35,
@@ -199,7 +429,9 @@ export type BackendCapabilities = Readonly<{
    * Maximum number of bound parameters the engine accepts in one statement.
    * SQLite defaults to 999 (raisable at compile time via
    * `SQLITE_MAX_VARIABLE_NUMBER`), while hosted SQLite runtimes may impose a
-   * lower platform ceiling; PostgreSQL's wire protocol caps it at 65535.
+   * lower platform ceiling. PostgreSQL's wire protocol encodes a 65535-count,
+   * but postgres.js accepts at most 65533 bound values, so the bundled
+   * PostgreSQL capability advertises that lower shared-driver ceiling.
    * Recorded-time capture and recorded point reads size their multi-row
    * statements to this ceiling — the same budget the backend's own batched
    * inserts use — instead of a conservative dialect-blind constant. Custom
@@ -208,13 +440,87 @@ export type BackendCapabilities = Readonly<{
    * budget applies.
    */
   maxBindParameters?: number;
+  /**
+   * Whether this backend supplies the claim relations that fence declared
+   * constraints (`uniques`, re-keyed onto claim axes, plus
+   * `typegraph_edge_claims`) AND implements the claim members.
+   *
+   * Absent means `false`: the backend predates the claim relations, keeps every
+   * fence it has today, and is listed as such in the parity matrix. Never
+   * INFERRED from member presence — a projection that forwarded `capabilities`
+   * while dropping a method would otherwise yield a verdict read from a
+   * different object than the write goes to. `claimSupport`
+   * (`store/claims/backing.ts`) is the one reader, and it refuses a backend
+   * whose declaration and surface disagree in either direction.
+   */
+  readonly constraintClaims?: boolean;
+  /**
+   * Whether the command port can atomically apply the claim portion of
+   * a node create. Absent means projection-only: method presence alone is not
+   * evidence that a custom backend understands the newer plan field, so the
+   * store retains the standalone claim fallback.
+   */
+  readonly atomicNodeInsertClaims?: boolean;
+  /** Whether edge writes atomically persist and arbitrate `matchIdentity`. */
+  readonly durableEdgeMatchIdentity?: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
   fulltext?: FulltextCapabilities | undefined;
   /** Whole-graph analytics capabilities (undefined when unavailable). */
   graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+  /**
+   * How far up the contribution health ladder this backend goes
+   * (undefined on a backend with no contribution machinery at all,
+   * equivalent to every member `false`).
+   */
+  contributions?: ContributionCapabilities | undefined;
+  /**
+   * Whether this engine can compute a bounded transitive closure of a
+   * relation in one round trip (a recursive CTE, or a graph-native
+   * expansion operator).
+   *
+   * Absent means SUPPORTED. Every engine TypeGraph ships supports it, and
+   * every custom backend on this release already has every recursion site
+   * run against it unconditionally: making absence mean `false` would
+   * refuse traversals that work today. See
+   * {@link RecursiveTraversalCapability} for the full contract.
+   */
+  recursiveTraversal?: RecursiveTraversalCapability | undefined;
+  /**
+   * How this backend excludes concurrent writers: a keyed advisory lock, a
+   * single writer slot the engine serializes by construction, or a
+   * deployment-level promise that this process serializes its own writes and
+   * no other client writes to the database — see
+   * {@link WriteFenceDeclaration} for the full `mechanism`/`drain` contract.
+   *
+   * Absent means `unfenced` for any backend the first-party factories did
+   * not build (`resolveWriteFencePlan`, `src/backend/capabilities/write-fence.ts`):
+   * an undeclared custom backend is refused at construction for Operational
+   * Identity and for TypeGraph-owned recorded-clock allocation (`history` /
+   * `revisionTracking`) rather than silently emitting locks the engine may
+   * not honor.
+   */
+  writeFence?: WriteFenceDeclaration | undefined;
 }>;
+
+export type BackendExecutionCapabilities = BackendCapabilities["execution"];
+
+/**
+ * Capability overrides accepted by bundled backend factories.
+ *
+ * Root atomic-batch support is deliberately absent: bundled factories derive
+ * it from the transport they actually discover and register. Callers may
+ * override interactive transaction availability for an otherwise unknown
+ * driver, but cannot advertise an executor the factory did not find.
+ */
+export type BundledBackendCapabilityOverrides = Readonly<
+  Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+      interactiveTransactions?: boolean;
+    }>;
+  }
+>;
 
 /** Keeps session-scoped analytics honest when a required SQL feature is absent. */
 export function normalizeGraphAnalyticsCapabilities(
@@ -222,7 +528,7 @@ export function normalizeGraphAnalyticsCapabilities(
 ): BackendCapabilities {
   if (
     capabilities.graphAnalytics?.supported !== true ||
-    (capabilities.transactions &&
+    (capabilities.execution.interactiveTransactions &&
       capabilities.windowFunctions &&
       capabilities.returning !== false)
   ) {
@@ -232,6 +538,43 @@ export function normalizeGraphAnalyticsCapabilities(
     ...capabilities,
     graphAnalytics: { ...capabilities.graphAnalytics, supported: false },
   };
+}
+
+/**
+ * Returns whether the supplied backend or capability declaration can keep an
+ * interactive transaction open across awaited statements.
+ */
+export function supportsInteractiveTransactions(
+  backendOrCapabilities:
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  return "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities.execution.interactiveTransactions
+    : backendOrCapabilities.execution.interactiveTransactions;
+}
+
+/** Returns whether this exact root declares certified atomic batch support. */
+export function supportsRootAtomicBatch(
+  backendOrCapabilities:
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  const capabilities =
+    "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities
+    : backendOrCapabilities;
+  return capabilities.execution.atomicBatch === "root";
+}
+
+/** Returns whether this exact object owns any certified atomic batch session. */
+export function supportsAtomicBatch(
+  backendOrCapabilities:
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  const capabilities =
+    "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities
+    : backendOrCapabilities;
+  return capabilities.execution.atomicBatch !== "none";
 }
 
 // ============================================================
@@ -296,6 +639,17 @@ export function isLiveNodeRow(row: NodeRow): row is LiveNodeRow {
   return row.deleted_at === undefined;
 }
 
+/**
+ * Whether a node read found a row and that row is live: present and not
+ * tombstoned. Valid time is deliberately not part of it — a row whose window
+ * has closed is still a row an edge may point at.
+ */
+export function isLiveNodeRowPresent(
+  row: NodeRow | undefined,
+): row is LiveNodeRow {
+  return row !== undefined && isLiveNodeRow(row);
+}
+
 export function isTombstonedNodeRow(row: NodeRow): row is TombstonedNodeRow {
   return row.deleted_at !== undefined;
 }
@@ -311,9 +665,14 @@ export type GraphReadBackend = Pick<
   GraphBackend,
   | "dialect"
   | "getNode"
+  | "getNodes"
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findNodesAcrossKinds"
+  | "findEdgesAcrossKinds"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
 >;
 
@@ -329,11 +688,19 @@ export type EdgeRow = Readonly<{
   to_kind: string;
   to_id: string;
   props: RowProps;
+  match_identity_name?: string;
+  match_identity_key?: string;
   valid_from: string | undefined;
   valid_to: string | undefined;
   created_at: string;
   updated_at: string;
   deleted_at: string | undefined;
+}>;
+
+/** The schema-declared identity persisted with an edge row. */
+export type EdgeMatchIdentityStorage = Readonly<{
+  name: string;
+  key: string;
 }>;
 
 /**
@@ -361,6 +728,14 @@ export type SchemaVersionRow = Readonly<{
   is_active: boolean;
 }>;
 
+/** A durable, server-resident materialized schema template. */
+export type GraphTemplateRow = Readonly<{
+  template_id: string;
+  schema_hash: string;
+  schema_doc: string;
+  created_at: string;
+}>;
+
 // ============================================================
 // Insert Parameters
 // ============================================================
@@ -374,7 +749,13 @@ export type InsertNodeParams = Readonly<{
   id: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -383,18 +764,158 @@ export type InsertNodeParams = Readonly<{
   validTo?: string;
 }>;
 
+/** One validated plain caller-ID member of the heterogeneous node upsert CTE. */
+export type HeterogeneousNodeUpsertEntry = Readonly<{
+  kind: string;
+  id: string;
+  /** Complete create-parsed document used for inserts and resurrections. */
+  props: Readonly<Record<string, unknown>>;
+  /** Caller patch used only when the target row is already live. */
+  updateProps: Readonly<Record<string, unknown>>;
+}>;
+
+/** Exact-session input for the PostgreSQL heterogeneous node upsert lowering. */
+export type HeterogeneousNodeUpsertParams = Readonly<{
+  entries: readonly HeterogeneousNodeUpsertEntry[];
+  schemaFence: SchemaWriteFenceParams;
+}>;
+
 /**
- * Parameters for updating a node.
+ * A backend validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing SQL `NULL`.
  */
+export type BackendValidityEndMutation =
+  | Readonly<{ validTo?: string; clearValidTo?: never }>
+  | Readonly<{ validTo?: never; clearValidTo: true }>;
+
+/** Parameters for updating a node. */
 export type UpdateNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  validTo?: string;
+  /**
+   * Applied when resurrecting a tombstone, which RESETS the window. Omitted
+   * means the resurrection instant — unless a stated `validTo` at or before it
+   * would leave the row readable at no coordinate, in which case the
+   * resurrection stores no lower bound. Same rule, same owner, as an insert:
+   * `resolveStampedValidityLowerBound`.
+   *
+   * The store's own resurrection paths never omit it. Their window guard has to
+   * judge the bound the write will STORE, so they resolve it through that owner
+   * against the instant they sampled and pass the result — `null` included,
+   * which is how "store no lower bound" is spelled here. Omission is for callers
+   * with no such verdict to honor; it lets this builder decide against its own,
+   * strictly later sample.
+   */
+  validFrom?: string | null;
+  /**
+   * The effective `valid_from` this write ASSERTS the target row already
+   * carries, stated only by a caller whose decision DEPENDED on it.
+   *
+   * `(graph_id, kind, id)` does not pin a row across time. A caller that
+   * validated the document's window against the bound it probed — interchange
+   * import's `onConflict: "update"` is the case — decided what to write from a
+   * value a concurrent `hardDelete` + recreate can replace between the probe
+   * and the write, so a predicate on identity alone lets that decision land on
+   * a row it was never computed for: the document's stated `validFrom` is
+   * ignored, or a `valid_to` is persisted below the new row's `valid_from`.
+   * Stating the bound here puts it in the UPDATE's own `WHERE`, which is the
+   * only placement the race cannot slip past.
+   *
+   * NULL-SAFE: `null` asserts the row has NO lower bound (`IS NULL`), a string
+   * asserts equality, and omitting it asserts nothing. `null` and `undefined`
+   * are therefore NOT interchangeable here — see `expectedValidFromPredicate`.
+   *
+   * A backend MUST apply the predicate when it is present, on the same terms as
+   * {@link UpdateEdgeParams.kind}: silently ignoring it re-opens the window the
+   * caller stated it to close. A write whose stated bound does not match affects
+   * zero rows and surfaces as a `no_row_returned` `DatabaseOperationError`.
+   */
+  expectedValidFrom?: string | null;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;
+}> &
+  BackendValidityEndMutation;
+
+/**
+ * Parameters for updating a set of live nodes selected by a compiled
+ * TypeGraph query.
+ *
+ * The candidate query must expose the named node-id column from the same graph
+ * and kind. The backend independently fences the rows it writes to
+ * `graphId` and `kind`; constructing the matching candidate query remains the
+ * caller's responsibility.
+ * Property values replace top-level keys, including preserving an explicit
+ * JSON `null` value.
+ *
+ * This is a storage primitive: callers that expose it as a graph mutation are
+ * responsible for schema validation and for synchronizing uniqueness,
+ * fulltext, and vector sidecars. The result contains after-images only; callers
+ * that need previous property values must freeze the candidate set and retain
+ * its before-images in the same transaction before invoking this method.
+ */
+export type UpdateNodeSetParams = Readonly<{
+  operation: "updateWhere";
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  /** Top-level properties to remove (the storage form of an `undefined` patch value). */
+  unsetProperties?: readonly string[];
+  candidateIds: CompiledSelectSql;
+  /** Projected SQL column holding the candidate node id (for example `n_id`). */
+  candidateIdColumn: string;
+}>;
+
+/**
+ * A guarded set update whose exact current-value predicates are applied by the
+ * same outer UPDATE that writes the row. Kept as a distinct backend port so an
+ * older/custom `updateNodeSet` implementation can never silently ignore the
+ * compare-and-set fence.
+ */
+export type NodePropertyExpectation =
+  Readonly<{ kind: "value"; value: JsonScalar }> | Readonly<{ kind: "absent" }>;
+
+export type CompareAndSetNodeParams = Readonly<{
+  operation: "compareAndSet";
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties?: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+  /**
+   * Exact scalar-or-absence predicates re-checked by the outer UPDATE. This
+   * discriminated map cannot be assigned to an ordinary set update.
+   */
+  expected: Readonly<Record<string, NodePropertyExpectation>>;
+}>;
+
+/** The after-images changed by {@link GraphBackend.updateNodeSet}. */
+export type UpdateNodeSetResult = Readonly<{
+  affectedCount: number;
+  rows: readonly NodeRow[];
+}>;
+
+/** One resolved, whole-row replacement in a guarded node batch. */
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+  graphId: string;
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  /** The preimage version the batch must still observe for every member. */
+  expectedVersion: number;
+}>;
+
+/**
+ * Replaces several distinct live rows in one statement and returns their
+ * after-images. The all-or-nothing version gate makes this safe to use before
+ * rebuilding shared sidecars in a portable transaction.
+ */
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+  entries: readonly ResolvedNodeUpdateBatchEntry[];
 }>;
 
 /**
@@ -405,6 +926,28 @@ export type DeleteNodeParams = Readonly<{
   kind: string;
   id: string;
 }>;
+
+/**
+ * Why {@link GraphBackend.lockNodes} locks the rows it reads. The two purposes
+ * are the halves of one pairing — the pairing a foreign key's referential
+ * check makes with a referenced-row delete — so a live edge can never be left
+ * naming a deleted endpoint by writers that interleave:
+ *
+ * - `"edgeEndpoint"`: an edge write's endpoint liveness read. Endpoint locks do
+ *   not exclude each other or ordinary node updates, but one waits on a
+ *   concurrent delete's lock and then re-reads the committed row. PostgreSQL
+ *   spells it `FOR KEY SHARE`.
+ * - `"delete"`: a node delete's lock, taken before the delete reads the
+ *   node's connected edges. It waits on every endpoint lock an uncommitted
+ *   edge write holds, so the edge read that follows sees that edge once it
+ *   commits. PostgreSQL spells it `FOR UPDATE`.
+ *
+ * An engine that admits one writer at a time (SQLite) already serializes the
+ * two writes, so it takes neither lock. An engine with no row locks (declared
+ * `writeFence: { mechanism: "row" }`) takes one keyed fence row per node for
+ * both purposes, before the read and in the same transaction.
+ */
+export type NodeRowLock = "edgeEndpoint" | "delete";
 
 /**
  * Parameters for inserting an edge.
@@ -419,7 +962,18 @@ export type InsertEdgeParams = Readonly<{
   toId: string;
   props: Readonly<Record<string, unknown>>;
   /**
-   * Omitted (`undefined`): defaults to the insert's creation timestamp.
+   * Durable schema-declared match identity. Both values are written with the
+   * edge row and arbitrated by the database's edge-identity unique key.
+   */
+  matchIdentity?: EdgeMatchIdentityStorage;
+  /**
+   * Omitted (`undefined`): the insert stamps its own creation timestamp —
+   * UNLESS a stated `validTo` at or before that instant would make the stored
+   * window readable at no coordinate, in which case the row is stored with no
+   * lower bound ("ended at T, start unknown"). See
+   * `resolveStampedValidityLowerBound`, which every insert builder decides
+   * through. Custom backend implementations can import that owner from
+   * `@nicia-ai/typegraph/backend` rather than reimplementing the rule.
    * `null`: preserves an explicit open-left validity window (no lower
    * bound) — used by interchange import to round-trip a row that was
    * already NULL, instead of re-stamping it to the import's own timestamp.
@@ -447,10 +1001,78 @@ export type TrustedImportSession = Readonly<{
 export type UpdateEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /**
+   * The kind this write ASSERTS the target row already carries.
+   *
+   * Edge ids are graph-global while public collections are kind-scoped, so a
+   * kind-scoped write has an expected kind and must not land on a row carrying
+   * a different one. Stating it here puts the predicate in the write
+   * statement's own `WHERE`, which is the only placement a concurrent
+   * `hardDelete` + recreate cannot slip past: a read-then-write pair keyed on
+   * `(graph_id, id)` alone re-resolves that id between the read and the write
+   * under PostgreSQL READ COMMITTED. A write whose stated kind does not match
+   * affects zero rows.
+   *
+   * A backend MUST apply the predicate when it is present — silently ignoring
+   * it re-opens the window the caller stated it to close, and the ignoring
+   * backend looks correct until it is raced.
+   * `tests/edge-write-self-verification.test.ts` asserts the behavior against
+   * the built-in backends.
+   *
+   * Omitted where the operation legitimately spans kinds: the node delete
+   * cascade removes every connected edge whatever its kind, so it states none.
+   * {@link DeleteEdgeParams} and {@link HardDeleteEdgeParams} carry the same
+   * field with the same contract.
+   */
+  kind?: string;
+  /**
+   * The ENDPOINTS this write asserts the target row already carries, stated
+   * only by a write that actually checked them.
+   *
+   * Kind alone does not pin a row's identity. An edge's endpoints are immutable
+   * for a given row, but the ID is not: a concurrent `hardDelete` + recreate
+   * under the SAME kind with DIFFERENT endpoints satisfies a kind-only
+   * predicate, so an upsert that resolved this id BY endpoints could otherwise
+   * write to an edge pointing somewhere it never looked. Carrying them here
+   * closes that, on the same terms and in the same `WHERE` as `kind`.
+   *
+   * All four move together or not at all — they are one assertion. A plain
+   * `update` on a kind-scoped collection states none of them, because it
+   * resolved the edge by id and kind and made no claim about where it points;
+   * predicating on endpoints it never checked would refuse legitimate writes.
+   * The same MUST-apply contract as `kind` binds a backend that receives them.
+   */
+  fromKind?: string;
+  fromId?: string;
+  toKind?: string;
+  toId?: string;
   props: Readonly<Record<string, unknown>>;
-  validTo?: string;
+  /**
+   * Applied when resurrecting a tombstone, where it asserts a COMPLETE window:
+   * `validTo` is rewritten alongside it (omitted `validTo` reopens the window).
+   * Omitting `validFrom` on a resurrection leaves the stored window in place.
+   */
+  validFrom?: string | null;
+  /**
+   * The effective `valid_from` this write asserts the target row already
+   * carries. Same three states, same NULL-safety, and the same MUST-apply
+   * contract as {@link UpdateNodeParams.expectedValidFrom}; stated by the same
+   * kind of caller, one whose verdict READ that bound.
+   *
+   * Separate from the immutable-identity components above because it is not
+   * immutable: a resurrection rewrites `valid_from`. It is asserted for the
+   * opposite reason — precisely because it can change, a decision computed from
+   * it must be fenced against it having changed.
+   */
+  expectedValidFrom?: string | null;
+  /**
+   * The `valid_to` state a constraint decision read. NULL-safe and MUST apply
+   * when present, like `expectedValidFrom`; used to fence ended-to-open edges.
+   */
+  expectedValidTo?: string | null;
   clearDeleted?: boolean;
-}>;
+}> &
+  BackendValidityEndMutation;
 
 /**
  * Parameters for deleting an edge (soft delete).
@@ -458,6 +1080,8 @@ export type UpdateEdgeParams = Readonly<{
 export type DeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /**
@@ -470,17 +1094,54 @@ export type HardDeleteNodeParams = Readonly<{
 }>;
 
 /**
+ * Parameters for hard deleting a set of one kind's nodes (permanent removal);
+ * see {@link GraphBackend.hardDeleteNodesBatch}.
+ */
+export type HardDeleteNodesBatchParams = Readonly<{
+  graphId: string;
+  kind: string;
+  ids: readonly string[];
+}>;
+
+/**
+ * What {@link GraphBackend.hardDeleteNodesBatch} removed: the node rows its
+ * delete matched, and every edge row (live or tombstoned, of any kind) it
+ * removed at an endpoint named by a listed id of the kind. Neither list names
+ * a row the call left in place.
+ */
+export type HardDeleteNodesBatchResult = Readonly<{
+  removedNodeIds: readonly string[];
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
+ * Parameters for reading the live edges connected to a set of one kind's
+ * nodes; see {@link GraphBackend.findEdgesConnectedToNodes}. `nodeIds`, not
+ * `ids`: in the backend params vocabulary `ids` names the rows a write
+ * removes, and the write-surface assertion classifies params structurally.
+ */
+export type FindEdgesConnectedToNodesParams = Readonly<{
+  graphId: string;
+  nodeKind: string;
+  nodeIds: readonly string[];
+}>;
+
+/**
  * Parameters for hard deleting an edge (permanent removal).
  */
 export type HardDeleteEdgeParams = Readonly<{
   graphId: string;
   id: string;
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 /** Parameters for a batched edge delete (soft or hard). */
 export type DeleteEdgesBatchParams = Readonly<{
   graphId: string;
   ids: readonly string[];
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 // ============================================================
@@ -507,6 +1168,252 @@ export type UpsertEmbeddingParams = Readonly<{
   dimensions: number;
   metric: VectorMetric;
   indexType: VectorIndexType;
+}>;
+
+/**
+ * A projection written from the node row's `RETURNING` source by a fused
+ * generated-id insert. Identity is deliberately absent: the backend derives
+ * graph, kind, and id from the inserted-row CTE, so a sidecar cannot disagree
+ * with the node row it accompanies.
+ */
+export type NodeInsertProjection =
+  | Readonly<{
+      kind: "embedding";
+      fieldPath: string;
+      embedding: readonly number[];
+      dimensions: number;
+      metric: VectorMetric;
+      indexType: VectorIndexType;
+    }>
+  | Readonly<{
+      kind: "fulltext";
+      action: "upsert";
+      content: string;
+      language: string;
+    }>
+  | Readonly<{
+      kind: "fulltext";
+      action: "delete";
+    }>;
+
+/**
+ * A uniqueness-relation claim carried by an atomic node-insert plan.
+ *
+ * Node identity is deliberately absent: the backend derives the owner pair
+ * from the node insert parameters, so the claim cannot name a different row.
+ * Placement is decided by the store's claim-site owner and preserved by the
+ * SQL compiler as an explicit dependency around the node insert.
+ */
+export type NodeInsertClaimVerdict =
+  | Readonly<{
+      kind: "uniqueness";
+      probeAxes: readonly string[];
+      fields: readonly string[];
+    }>
+  | Readonly<{
+      kind: "disjointness";
+      conflictingKinds: readonly string[];
+    }>;
+
+export type NodeInsertClaim = Readonly<{
+  axis: string;
+  constraintName: string;
+  key: string;
+  placement: "pre-insert" | "post-insert";
+  /**
+   * The complete read set for this claim. A canonical claim upsert only sees
+   * the folded axis; the additional uniqueness axes preserve compatibility
+   * with rows written before that fold. Disjoint claims name their live-node
+   * fallback population instead, because old databases can have no claim row
+   * for an existing disjoint overlap.
+   */
+  verdict: NodeInsertClaimVerdict;
+}>;
+
+/** The two atomic node-insert shapes supported by a planned-write backend. */
+export type ManagedNodeCreateMode =
+  | Readonly<{ kind: "ordinary" }>
+  | Readonly<{
+      kind: "schema-fenced";
+      schemaFence: SchemaWriteFenceParams;
+    }>;
+
+/** A complete managed node create, including its row and atomic write plan. */
+export type ManagedNodeCreatePlan = Readonly<{
+  entity: "node";
+  params: InsertNodeParams;
+  /** Whether the node id was generated by the store rather than supplied. */
+  idGenerated: boolean;
+  mode: ManagedNodeCreateMode;
+  claims: readonly NodeInsertClaim[];
+  projections: readonly NodeInsertProjection[];
+}>;
+
+/** A complete managed edge create, including its row and atomic write plan. */
+export type ManagedEdgeCreatePlan = Readonly<{
+  entity: "edge";
+  params: InsertEdgeParams;
+  schemaFence?: SchemaWriteFenceParams;
+  /**
+   * Every cardinality claim this create owes. A command port applies EVERY
+   * entry or returns `unsupported` with the `"cardinalityClaim"` dimension
+   * before executing any SQL — the bundled fused insert applies exactly one
+   * entry and refuses a two-axis plan to the portable path (see
+   * `executeEdgeManagedCreate`).
+   */
+  cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
+}>;
+
+/** A node create command accepted by the authoritative command port. */
+export type NodeCreateCommand = Readonly<{
+  kind: "node.create";
+  plan: ManagedNodeCreatePlan;
+}>;
+
+/**
+ * An edge create command accepted by the authoritative command port.
+ *
+ * A port that reports `created` for it, or for an
+ * {@link EdgeConvergeCreateCommand}, has applied the `endpointPredicate`
+ * dimension: the statement that inserts checked both endpoints live and took
+ * the lock {@link GraphBackend.lockNodes} takes for `"edgeEndpoint"`
+ * (PostgreSQL `FOR KEY SHARE`, a fence row under a `row` write fence, or
+ * equivalent) on both rows, in (kind, id)
+ * code-point order, held to the end of the transaction. Without that lock a
+ * concurrent endpoint delete can leave the edge live on a deleted node; a port
+ * that cannot take it returns `unsupported` with `endpointPredicate`, and the
+ * store's portable path takes it instead.
+ */
+export type EdgeCreateCommand = Readonly<{
+  kind: "edge.create";
+  plan: ManagedEdgeCreatePlan;
+}>;
+
+/** The authoritative match-key read paired with a convergent edge create. */
+export type EdgeConvergenceMatch =
+  | Readonly<{
+      kind: "dynamic";
+      matchOn: readonly string[];
+      props: Record<string, unknown>;
+    }>
+  | Readonly<{
+      kind: "durable";
+      identity: EdgeMatchIdentityStorage;
+    }>;
+
+/** An edge create command that atomically returns an existing match or inserts. */
+export type EdgeConvergeCreateCommand = Readonly<{
+  kind: "edge.converge-create";
+  plan: ManagedEdgeCreatePlan;
+  match: EdgeConvergenceMatch;
+}>;
+
+/** The semantic commands currently supported by the authoritative port. */
+export type GraphCommand =
+  NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
+
+export type NodeCreateCommandResult =
+  | Readonly<{ outcome: "created"; entity: "node"; row: NodeRow }>
+  | Readonly<{ outcome: "rejected"; entity: "node"; reason: "unknown" }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "node";
+      dimensions: readonly [
+        "schemaFence" | "claims" | "projections",
+        ...(readonly ("schemaFence" | "claims" | "projections")[]),
+      ];
+    }>;
+
+export type EdgeCreateCommandResult =
+  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "rejected"; entity: "edge"; reason: "unknown" }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "edge";
+      dimensions: readonly [
+        "schemaFence" | "cardinalityClaim" | "endpointPredicate",
+        ...(readonly (
+          "schemaFence" | "cardinalityClaim" | "endpointPredicate"
+        )[]),
+      ];
+    }>;
+
+export type EdgeConvergeCreateCommandResult =
+  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "found"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "rejected"; entity: "edge"; reason: "unknown" }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "edge";
+      dimensions: readonly [
+        "convergence" | "endpointPredicate",
+        ...(readonly ("convergence" | "endpointPredicate")[]),
+      ];
+    }>;
+
+/** The session boundary on which an authoritative command executes. */
+export type GraphCommandSession = "root" | "transaction";
+
+/** Effective transaction isolation observed on the command's physical session. */
+export type GraphCommandIsolation =
+  "read_committed" | "repeatable_read" | "serializable" | "unknown";
+
+/**
+ * What one acquisition of the per-graph write fence observed and did on the
+ * session that took it.
+ *
+ * `fenceRow` is `"advanced"` when the acquiring statement also advanced the
+ * graph's row in the fences relation. Every holder that makes a decision only
+ * the fence protects advances that row, so a session whose snapshot predates
+ * another such holder's commit fails on the row with a serialization failure
+ * instead of deciding on a graph it can no longer see. `"none"` is an
+ * acquisition that took the keyed exclusion alone — a holder that decides
+ * nothing, or a fence that cannot reach a fences relation. Nothing detects a
+ * stale snapshot there, so only an isolation that takes a fresh snapshot per
+ * statement may make such a decision under it.
+ */
+export type GraphWriteFenceAcquisition = Readonly<{
+  isolation: GraphCommandIsolation;
+  fenceRow: "advanced" | "none";
+}>;
+
+declare const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
+
+/** Compile-time evidence that graph-write coordination is already established. */
+export type GraphCommandCoordination = Readonly<{
+  [GRAPH_COMMAND_COORDINATION_BRAND]: true;
+}>;
+
+export type GraphCommandExecutionContext =
+  | Readonly<{
+      session: "root";
+      coordination: "none";
+    }>
+  | Readonly<{
+      session: "transaction";
+      coordination: "none" | GraphCommandCoordination;
+    }>;
+
+/** The result union returned by the authoritative command port. */
+export type GraphCommandResult =
+  | NodeCreateCommandResult
+  | EdgeCreateCommandResult
+  | EdgeConvergeCreateCommandResult;
+
+/** The single extensible authority boundary for semantic backend commands. */
+export type GraphCommandPort = Readonly<{
+  /** The database session this port is structurally bound to. */
+  session: GraphCommandSession;
+  /**
+   * Execute an authoritative command. First-party Store paths pass an
+   * explicit execution context through
+   * `executeAuthoritativeGraphCommand`.
+   */
+  execute: (
+    this: void,
+    command: GraphCommand,
+    context: GraphCommandExecutionContext,
+  ) => Promise<GraphCommandResult>;
 }>;
 
 /**
@@ -603,9 +1510,19 @@ export type VectorSearchParams = Readonly<{
    * trades latency for recall. The floor for the over-fetch to fill its
    * candidate set is `efSearch >= limit`; ~2–4× is the high-recall
    * target. Applied transaction-locally (`SET LOCAL`) on the Postgres
-   * HNSW path only. No-op on backends without an HNSW frontier knob
-   * (sqlite-vec) and ignored — with a one-time warning — on Postgres
-   * backends without transactions (e.g. `drizzle-orm/neon-http`).
+   * HNSW path only.
+   *
+   * APPLIED OR REFUSED, never ignored. Read
+   * `capabilities.vector.searchFrontierTuning` to know which you get:
+   *
+   * - `tunable: false` (sqlite-vec, libSQL DiskANN — no per-search frontier
+   *   knob exists): `UnsupportedBackendCapabilityError`.
+   * - a slot whose index type is not the tunable one (pgvector IVFFlat or
+   *   brute-force): `ConfigurationError`.
+   * - `requiresTransactionScope` on a backend reporting
+   *   `execution.interactiveTransactions: false` (for example `drizzle-orm/neon-http`):
+   *   `UnsupportedBackendCapabilityError`, because `SET LOCAL` has no frame
+   *   to be local to.
    */
   efSearch?: number;
 }>;
@@ -743,6 +1660,23 @@ export type UpsertFulltextParams = Readonly<{
   content: string;
   language: string;
 }>;
+
+/** Parameters for the ordinary post-insert fulltext synchronization path. */
+export type NodeFulltextSync =
+  | Readonly<{
+      graphId: string;
+      nodeKind: string;
+      nodeId: string;
+      action: "upsert";
+      content: string;
+      language: string;
+    }>
+  | Readonly<{
+      graphId: string;
+      nodeKind: string;
+      nodeId: string;
+      action: "delete";
+    }>;
 
 /**
  * Parameters for deleting a single fulltext entry.
@@ -994,6 +1928,264 @@ export type RecordContributionMaterializationParams = Readonly<{
   error: string | undefined;
 }>;
 
+/**
+ * Why a contribution is not usable. Most members are a disagreement
+ * between the durable marker and the physical catalog; one
+ * (`failed-materialization`) is a state the two agree on and that is
+ * broken anyway. A contribution that is genuinely healthy — or that was
+ * simply never attempted — is not reported at all.
+ *
+ * - `orphaned-marker` — the marker records a successful materialization
+ *   but the physical table is gone (a partial restore, an out-of-band
+ *   `DROP`, a schema-scoped restore that missed the contribution
+ *   tables). The state {@link GraphBackend.verifyContributions} exists
+ *   to surface: nothing on the open path probes the catalog, so this
+ *   database opens clean and fails at the first dependent read or write.
+ * - `missing-marker` — the physical table exists but no marker attests
+ *   it as initialized (no row, no recorded success, or a recorded
+ *   failure). Reads and writes are refused with
+ *   `StoreNotInitializedError` even though storage is present. These
+ *   three causes share one state because they share one repair; check
+ *   {@link ContributionDiagnostic.lastError} to tell them apart.
+ * - `failed-materialization` — the marker records a *failed* attempt
+ *   and no table was produced. Marker and catalog agree here, so this
+ *   is not a disagreement — but it is where a contribution lands when
+ *   provisioning genuinely broke (the `fts5` module is absent, the role
+ *   lacks `CREATE`, the extension was never loaded), and calling it
+ *   healthy on the grounds that both sides agree would be the one
+ *   answer this method must never give. Distinguished from a
+ *   contribution that was never attempted, which has no marker row and
+ *   is correctly silent. {@link ContributionDiagnostic.lastError}
+ *   carries the reason it failed.
+ * - `stale` — the table exists and the marker records a prior success
+ *   at a different signature (a strategy swap, or a declared embedding
+ *   dimension that has moved ahead of the provisioned table).
+ *
+ * **Do not re-frame this union as "how the marker disagrees with the
+ * catalog."** It was described that way once, and the description was
+ * load-bearing in the wrong direction: under it, a marker recording a
+ * failed attempt with no table looks like agreement, therefore not a
+ * disagreement, therefore correctly silent — and a contribution that
+ * had genuinely broken was reported as healthy. The gap read as
+ * principled rather than as an oversight precisely because the framing
+ * endorsed it. "Why the contribution is unusable" is the question that
+ * makes `failed-materialization` obviously belong, and any future
+ * tidy-up that narrows the framing back will re-open the same hole.
+ */
+export type ContributionDiagnosticState =
+  "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
+
+/**
+ * One contribution that is not usable, reported by
+ * {@link GraphBackend.verifyContributions}.
+ *
+ * The identity fields come from the active contribution declaration and
+ * match the durable-marker identity contract, so a caller can route an entry
+ * to its repair without reconstructing any internal naming contract. A
+ * `missing-marker` entry may have no marker row at all.
+ *
+ * **Route on {@link ContributionDiagnosticState}, not on whether the
+ * entry is a vector slot.** The repair differs per state and the wrong
+ * choice destroys data: `store.reembedVectorField` drops and recreates
+ * storage, so applying it to a `missing-marker` — where the table is
+ * intact and only the bookkeeping is wrong — discards every embedding
+ * to fix a marker, and without an `embed` callback it leaves the field
+ * empty. Prefer `store.repairContributions()` for `missing-marker` and
+ * `failed-materialization`; it resolves the current strategy declarations
+ * internally and keeps the normal signature-drift guard enabled. It reports
+ * `stale` and `orphaned-marker` as `requires-rebuild`. See the per-state
+ * repair table in the troubleshooting guide.
+ */
+export type ContributionDiagnostic = Readonly<{
+  /** Producing strategy, e.g. `"fts5"` / `"tsvector"` / `"pgvector"`. */
+  owner: string;
+  /** Stable logical slot, e.g. `"fulltext"`. Never the SQL name. */
+  logicalName: string;
+  /** Resolved physical table name that was probed. */
+  physicalName: string;
+  /** Node kind — vector slots only. */
+  kind?: string;
+  /** Embedding field path — vector slots only. */
+  fieldPath?: string;
+  state: ContributionDiagnosticState;
+  /**
+   * The error the marker recorded against its last attempt, when it
+   * recorded one. Absent otherwise.
+   *
+   * This is the part of the picture the catalog cannot supply. `state`
+   * says what to do — the states are chosen so that each maps to one
+   * repair — while this says *why it broke*, which is a different
+   * question and often a different investigation. A failed attempt with no
+   * table surfaces as `failed-materialization`; when the table exists but
+   * the marker does not attest a successful materialization, it surfaces as
+   * `missing-marker`. This field distinguishes only failures whose marker
+   * recorded a reason; a missing row has no `lastError`. Present on any state
+   * whose marker row carries an error, not just those two states.
+   */
+  lastError?: string;
+}>;
+
+/**
+ * Outcome of one contribution considered by
+ * {@link GraphBackend.repairContributions}.
+ *
+ * Repair targets are always resolved from the backend's current strategy
+ * declarations. The diagnostic is returned for operator context only; callers
+ * never pass diagnostics or physical DDL back into the repair API.
+ */
+export type ContributionRepairEntry =
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "repaired";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "requires-rebuild";
+    }>
+  | Readonly<{
+      diagnostic: ContributionDiagnostic;
+      status: "failed";
+      error: string;
+    }>;
+
+/** Result of a contribution repair pass followed by a fresh verification. */
+export type ContributionRepairResult = Readonly<{
+  results: readonly ContributionRepairEntry[];
+  remaining: readonly ContributionDiagnostic[];
+}>;
+
+// ============================================================
+// Contribution readiness probe (#377)
+// ============================================================
+
+/**
+ * The search projection a probe entry summarizes. Deliberately the
+ * logical *class* rather than one physical table: a caller asking "is
+ * search ready?" is deciding whether to issue a fulltext or a vector
+ * query, and a per-`(kind, field)` breakdown of pgvector tables answers
+ * a question they did not ask. The physical detail an operator needs to
+ * act is one `verifyContributions()` call away, and
+ * {@link ContributionProbeEntry.detail} names the affected slots.
+ */
+export type ContributionProbeContribution = "fulltext" | "vector";
+
+/**
+ * Readiness of one search projection.
+ *
+ * - `ready` — every contribution backing this projection is attested by
+ *   its durable marker and present in the catalog. Not a promise about
+ *   future coherence: a write that lands after the probe returns is
+ *   outside what any assessment can cover.
+ * - `degraded` — at least one contribution is unusable. Dependent operations
+ *   may be refused with a typed contribution error, fail at the engine boundary
+ *   when compiled SQL directly references missing storage, or observe
+ *   incomplete storage.
+ *   {@link ContributionProbeEntry.detail} says which and why.
+ * - `building` — **reserved.** No shipped path publishes it. Recording
+ *   an in-flight marker would need a fifth
+ *   {@link ContributionDiagnosticState} and would widen the hot-path
+ *   gate's verdict set; the destructive rebuild instead runs inside one
+ *   transaction, so a concurrent probe observes the state before or
+ *   after it and never a partial one. Reserved rather than removed so a
+ *   future streaming/async materializer can populate it without a
+ *   breaking change — treat it as "not `ready`" today.
+ */
+export type ContributionProbeState = "ready" | "degraded" | "building";
+
+/**
+ * One search projection's readiness, from
+ * {@link GraphBackend.probeContributions}.
+ */
+export type ContributionProbeEntry = Readonly<{
+  contribution: ContributionProbeContribution;
+  state: ContributionProbeState;
+  /**
+   * Operator-facing summary of why the projection is not `ready` —
+   * e.g. `"fulltext table \"typegraph_node_fulltext\" is missing
+   * (orphaned-marker)"`. Absent on a `ready` entry.
+   *
+   * Human-readable and not a stable format: route on `state`, and call
+   * `store.verifyContributions()` for the structured per-table
+   * diagnostics this string is derived from.
+   */
+  detail?: string;
+}>;
+
+/**
+ * Result of {@link GraphBackend.probeContributions}.
+ *
+ * A projection with no declared contributions is omitted rather than
+ * reported `ready`, so an empty `entries` array means "nothing to
+ * assess" — a graph with no `searchable()` or `embedding()` fields, or a
+ * backend with no contribution support — never "assessed and healthy".
+ */
+export type ContributionProbeResult = Readonly<{
+  /**
+   * The durable graph revision the assessment was taken at, so a caller
+   * can place this probe in the graph's committed history.
+   *
+   * Graph-global, like the clock it reads: it advances on every committed
+   * capture from any writer, so an advance between two probes means
+   * "something committed in between", never "the write this caller just
+   * made landed". Confirm a specific write by observing the write itself.
+   *
+   * Absent unless the Store is revision-tracked (`revisionTracking:
+   * true` or `history: true`) — the same condition under which
+   * `store.revisionNow()` returns a value. This is the one honest shape:
+   * a store with no durable revision clock has no revision to stamp, and
+   * substituting a wall-clock timestamp or the schema version would be a
+   * materially weaker guarantee wearing the name of a stronger one. The
+   * schema version in particular does not advance on data writes, so it
+   * could not order a probe against a caller's write at all.
+   */
+  graphRevision?: string;
+  entries: readonly ContributionProbeEntry[];
+}>;
+
+// ============================================================
+// Destructive contribution rebuild (#337)
+// ============================================================
+
+/**
+ * Which search projection {@link GraphBackend.rebuildContribution}
+ * targets. Scoped explicitly at the call site rather than inferred from
+ * a diagnostic: the operation destroys storage, so which storage is the
+ * caller's decision to state, not TypeGraph's to guess.
+ */
+export type ContributionRebuildScope = ContributionProbeContribution;
+
+/**
+ * What a rebuild's `repopulate` callback reconstructed. Reported back so
+ * the rebuild result can distinguish "recreated empty storage" from
+ * "recreated and refilled", which is the difference between a finished
+ * repair and half of one.
+ */
+export type ContributionRepopulationStats = Readonly<{
+  /** Nodes scanned. */
+  processed: number;
+  /** Content rows written. */
+  repopulated: number;
+  /** Nodes whose stored `props` could not be read as an object. */
+  skipped: number;
+}>;
+
+/** Outcome of one destructive contribution rebuild. */
+export type ContributionRebuildResult = Readonly<{
+  /** Physical tables dropped and recreated, in the order rebuilt. */
+  rebuilt: readonly string[];
+  /** Nodes scanned while reconstructing content from stored rows. */
+  processed: number;
+  /** Content rows written into the recreated storage. */
+  repopulated: number;
+  /**
+   * Nodes whose stored `props` could not be read as an object, so no
+   * content row could be reconstructed for them. Non-zero means the
+   * rebuilt index is missing those nodes; the IDs come back from
+   * `store.search.rebuildFulltext()`, which reports them individually.
+   */
+  skipped: number;
+}>;
+
 // ============================================================
 // Kind Removals (data-cleanup status)
 // ============================================================
@@ -1073,6 +2265,105 @@ export type InternalTransactionOptions = TransactionOptions &
 // ============================================================
 
 /**
+ * The physical names of the six Operational Identity relations: the current
+ * assertion ledger, its recorded-time twin, the two DERIVED relations
+ * (closure, separation) rebuilt from the ledger, and the transition log's
+ * append-only annotation relation plus its retention watermark.
+ *
+ * Named once so the two ports that speak about them —
+ * {@link GraphBackend.ensureIdentityTables} and
+ * {@link GraphBackend.identityTableDdl} — cannot drift apart. A backend
+ * that implements those ports directly (rather than through the bundled
+ * Drizzle profiles, which also self-heal these two relations through base
+ * schema adoption) is the sole provisioning path for the transition log on
+ * such a backend, so both fields are required here, not optional.
+ */
+export type IdentityTableNames = Readonly<{
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
+}>;
+
+/**
+ * The physical names of the three recorded relations. Named once so the
+ * ports that speak about them cannot drift apart — the {@link IdentityTableNames}
+ * precedent.
+ */
+export type RecordedTableNames = Readonly<{
+  recordedClock: string;
+  recordedEdges: string;
+  recordedNodes: string;
+}>;
+
+/**
+ * One recorded relation's provisioning DDL, with the roles the caller needs
+ * SEPARATED rather than positional.
+ */
+export type RecordedRelationDdl = Readonly<{
+  /** The single `CREATE TABLE` statement. */
+  createTable: string;
+  /** Its index/constraint statements, in application order. */
+  indexes: readonly string[];
+  /**
+   * The name the ENGINE will have given this relation's PRIMARY KEY constraint
+   * once `createTable` has executed, or `undefined` on an engine that does not
+   * name PK constraints separately (SQLite).
+   *
+   * NOT "the name the DDL text declares": both bundled emitters push an unnamed
+   * inline `PRIMARY KEY (…)` (`ddl.ts:114-118`, `:441-445`), so on PostgreSQL the
+   * server derives `<table>_pkey`. The point of the field is that the derivation
+   * is an ENGINE convention, and the only honest source of it is whoever authored
+   * the DDL for that engine — a migration that reconstructs it bakes one adapter's
+   * convention in.
+   *
+   * The name is returned UNREDUCED. Reducing an over-long identifier is a
+   * separate decision with a separate owner (`shortenedIdentifier`), and it
+   * applies only to the RENAME's target. The source name is the *temporary*
+   * table's PK name, and temp table names are hash-derived and short BY
+   * CONSTRUCTION (`` `__tg_${role}_${shortHash(tableName)}` ``, an 8-char
+   * hash, so `<temp>_pkey` is at most ~21 bytes for any configured table
+   * name) — nowhere near the 63-byte ceiling. So the split is a structural
+   * fact about the temp-name shape, not a claim about PostgreSQL's
+   * truncation semantics: `shortenedIdentifier` is the identity on the
+   * source for every reachable input, and its effect is observable only on
+   * the target.
+   *
+   * A backend must apply this option consistently across name sets: return a
+   * name for both the temporary and final relation, or `undefined` for both.
+   * The migration refuses a mixed pair because silently dropping either name
+   * would leave the swapped relation with a backend-inconsistent constraint.
+   */
+  primaryKeyConstraintName?: string | undefined;
+}>;
+
+/**
+ * The database-global extensions TypeGraph installs on a caller's behalf.
+ *
+ * The extent is closed on purpose: {@link GraphBackend.ensureExtension}
+ * interpolates the name into DDL, so the allowlist — not the caller — is what
+ * decides the identifier can be trusted. `pg_trgm` backs `method: "trigram"`
+ * index materialization; `vector` backs pgvector storage.
+ */
+export const DATABASE_EXTENSION_NAMES = ["pg_trgm", "vector"] as const;
+
+/** A name {@link GraphBackend.ensureExtension} accepts. */
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+/**
+ * Optional durable-identity batch write seam. Every input must carry
+ * `matchIdentity`; identity conflicts are omitted from the returned rows.
+ */
+export type DurableEdgeBatchMembers = Readonly<{
+  insertEdgesDurableBatchReturning?: (
+    this: void,
+    params: readonly InsertEdgeParams[],
+  ) => Promise<readonly EdgeRow[]>;
+}>;
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -1108,9 +2399,46 @@ export type GraphBackend = Readonly<{
    * SQLite backend without sqlite-vec).
    */
   vectorStrategy?: VectorStrategy | undefined;
+  /**
+   * The lock-statement spelling this backend's `capabilities.writeFence`
+   * declaration requires when `mechanism` is `"advisory"` — resolved through
+   * {@link resolveWriteFencePlan} rather than read directly by a lock site.
+   * Absent on a backend that serializes writers instead (SQLite's writer
+   * slot needs no lock statement at all) or that declares no usable fence.
+   */
+  fenceSql?: FenceSql | undefined;
 
   // === Node Operations ===
   insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+  /**
+   * Inserts a node only when its primary-key slot is empty. `undefined` means
+   * the slot was already occupied; unlike `insertNode`, that outcome is not a
+   * database error and leaves the surrounding transaction usable.
+   *
+   * First-party SQL backends expose this for the caller-supplied-id create
+   * fast path. Custom backends may omit it and retain the probe-then-insert
+   * path.
+   */
+  insertNodeIfAbsent?: (
+    this: void,
+    params: InsertNodeParams,
+  ) => Promise<NodeRow | undefined>;
+  /**
+   * First-party transactional fast path: the INSERT takes the active-schema
+   * shared fence in its source query. A missing row is deliberately ambiguous
+   * (stale schema versus an occupied id) and must be diagnosed by the caller.
+   */
+  insertNodeIfAbsentWithSchemaFence?: (
+    this: void,
+    params: InsertNodeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  /** Like `insertNode`, but acquires the schema fence in that INSERT. */
+  insertNodeWithSchemaFence?: (
+    this: void,
+    params: InsertNodeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
     this: void,
@@ -1121,8 +2449,46 @@ export type GraphBackend = Readonly<{
     params: readonly InsertNodeParams[],
   ) => Promise<readonly NodeRow[]>;
   updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+  /** One data-modifying CTE for plain caller-ID node upserts across kinds. */
+  upsertHeterogeneousNodes?: (
+    this: void,
+    params: HeterogeneousNodeUpsertParams,
+  ) => Promise<readonly NodeRow[]>;
+  updateNodeSet?: (
+    this: void,
+    params: UpdateNodeSetParams,
+  ) => Promise<UpdateNodeSetResult>;
+  updateResolvedNodesBatch?: (
+    this: void,
+    params: ResolvedNodeUpdateBatchParams,
+  ) => Promise<readonly NodeRow[]>;
+  compareAndSetNode?: (
+    this: void,
+    params: CompareAndSetNodeParams,
+  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
+  /**
+   * Batched {@link hardDeleteNode} for one kind, in its order: removes the
+   * uniqueness entries, fulltext rows and every incident edge (either
+   * endpoint, any edge kind, live or tombstoned) of the listed ids of `kind`,
+   * then their node rows last — so a failure part-way leaves each node row in
+   * place for a retry to finish, never an orphaned claim behind a removed
+   * row. A listed id whose node row is already gone still has whatever such
+   * rows it left cleared, as `hardDeleteNode` clears them. One statement set
+   * per bind-budget chunk instead of one per node. Never touches a row of
+   * another kind.
+   *
+   * Like `hardDeleteNode` it cleans no embeddings (the store does, through the
+   * vector members) and releases no edge claims. Not atomic on its own: the
+   * store runs it inside its write frame. Optional — the store falls back to
+   * one `hardDeleteNode` per node when it is absent, deciding so before any
+   * statement runs.
+   */
+  hardDeleteNodesBatch?: (
+    this: void,
+    params: HardDeleteNodesBatchParams,
+  ) => Promise<HardDeleteNodesBatchResult>;
   getNode: (
     this: void,
     graphId: string,
@@ -1135,9 +2501,36 @@ export type GraphBackend = Readonly<{
     kind: string,
     ids: readonly string[],
   ) => Promise<readonly NodeRow[]>;
+  /**
+   * Reads the rows {@link GraphBackend.getNodes} reads — live and tombstoned
+   * alike — and locks them until the surrounding transaction ends, acquiring
+   * them in code-point order of `id`, as {@link NodeRowLock} describes. The
+   * store's portable edge writes read their endpoints' liveness through this
+   * member, and its portable node deletes read their row(s) through it before
+   * they read connected edges. Single-statement commands and closed atomic
+   * programs take the same locks themselves instead (see
+   * {@link EdgeCreateCommand}): inside the reading statement, or as fence rows
+   * ahead of it in the same transaction under a `row` write fence.
+   *
+   * Required, because the store has no sound fallback: an unlocked read
+   * would let a concurrent edge write and endpoint delete each miss the
+   * other. A backend whose engine admits one writer at a time — its declared
+   * write fence is `engine-serialized` or `caller-serialized` — may implement
+   * it as the plain ordered `getNodes` read, as the bundled SQLite backends
+   * do with an empty lock clause.
+   */
+  lockNodes: (
+    this: void,
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    lock: NodeRowLock,
+  ) => Promise<readonly NodeRow[]>;
 
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+  /** Executes semantic authoritative graph commands. */
+  commands: GraphCommandPort;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -1149,22 +2542,36 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly EdgeRow[]>;
   updateEdge: (this: void, params: UpdateEdgeParams) => Promise<EdgeRow>;
   deleteEdge: (this: void, params: DeleteEdgeParams) => Promise<void>;
-  hardDeleteEdge: (this: void, params: HardDeleteEdgeParams) => Promise<void>;
+  /**
+   * Permanently removes one edge row. Resolves `true` when the statement
+   * removed it and `false` when it matched none — the id is absent, or the
+   * row no longer carries the asserted kind. The store releases a removed
+   * edge's claims only on `true`: a release keyed by id alone would strip the
+   * claims of a different edge a concurrent writer committed under that id.
+   */
+  hardDeleteEdge: (
+    this: void,
+    params: HardDeleteEdgeParams,
+  ) => Promise<boolean>;
   /**
    * Batched {@link deleteEdge}: one soft-delete statement per bind-budget
    * chunk instead of one per edge. Optional — cascade deletes fall back to
-   * the per-edge form when unset. Same per-row semantics (idempotent on
-   * already-tombstoned rows).
+   * the per-edge form when unset. Same per-row semantics, including an
+   * optional asserted kind and idempotence on already-tombstoned rows.
    */
   deleteEdgesBatch?: (
     this: void,
     params: DeleteEdgesBatchParams,
   ) => Promise<void>;
-  /** Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. */
+  /**
+   * Batched {@link hardDeleteEdge}; see {@link deleteEdgesBatch}. Resolves
+   * the ids of the rows it removed, in any order — never an id whose row it
+   * left in place — for the same claim-release reason.
+   */
   hardDeleteEdgesBatch?: (
     this: void,
     params: DeleteEdgesBatchParams,
-  ) => Promise<void>;
+  ) => Promise<readonly string[]>;
   getEdge: (
     this: void,
     graphId: string,
@@ -1177,7 +2584,10 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
-  countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+  countEdgesAtEndpoint: (
+    this: void,
+    params: CountEdgesAtEndpointParams,
+  ) => Promise<number>;
   edgeExistsBetween: (
     this: void,
     params: EdgeExistsBetweenParams,
@@ -1188,11 +2598,30 @@ export type GraphBackend = Readonly<{
     this: void,
     params: FindEdgesConnectedToParams,
   ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Set-wise {@link findEdgesConnectedTo}: every live (not tombstoned) edge,
+   * of ANY edge kind, with either endpoint among `nodeIds` of `nodeKind` —
+   * each edge once, in no particular order. One statement per bind-budget
+   * chunk. Kind-blind on purpose: a store delete judges `onDelete: "restrict"`
+   * against every stored edge, including kinds the current graph no longer
+   * declares, which the kind-licensed
+   * {@link findEdgesByHeterogeneousEndpointSet} cannot see. Optional — the
+   * store falls back to one `findEdgesConnectedTo` per node.
+   */
+  findEdgesConnectedToNodes?: (
+    this: void,
+    params: FindEdgesConnectedToNodesParams,
+  ) => Promise<readonly EdgeRow[]>;
 
   // === Collection Query Operations ===
   findNodesByKind: (
     this: void,
     params: FindNodesByKindParams,
+  ) => Promise<readonly NodeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findNodesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
   ) => Promise<readonly NodeRow[]>;
   countNodesByKind: (
     this: void,
@@ -1201,6 +2630,68 @@ export type GraphBackend = Readonly<{
   findEdgesByKind: (
     this: void,
     params: FindEdgesByKindParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Optional V1 keyed read for the `oneActive` claim population. Returns only
+   * undeleted edges with `valid_to IS NULL`, including future `valid_from`.
+   * An absent custom-backend method makes bounded candidate planning use its
+   * complete-clone path.
+   */
+  findActiveEdgesBySourceV1?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
+  /** Exact lookup for durable identity owners, including tombstoned rows. */
+  findEdgesByMatchIdentity?: (
+    this: void,
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => Promise<readonly EdgeRow[]>;
+  /** Optional graph-wide keyset read for merge and interchange. */
+  findEdgesAcrossKinds?: (
+    this: void,
+    params: FindRowsAcrossKindsParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads the edges of a SET of endpoints in one statement per bind-budget
+   * chunk — see {@link FindEdgesByEndpointSetParams}.
+   *
+   * **Optional, and its absence is the capability signal.** `store.edges.<kind>
+   * .bulkFindFrom` / `.bulkFindTo` check for this method before issuing any
+   * read and refuse with a typed `ConfigurationError` when it is missing,
+   * rather than degrading to a per-endpoint loop. A caller reaching for a bulk
+   * endpoint read is asking for set-oriented statements; quietly giving them N
+   * singleton statements is the surprise the method exists to prevent.
+   *
+   * Both bundled Drizzle backends implement it. A custom backend that does not
+   * simply omits it and the bulk reads refuse; the singleton `findEdgesByKind`
+   * path is unaffected.
+   */
+  findEdgesByEndpointSet?: (
+    this: void,
+    params: FindEdgesByEndpointSetParams,
+  ) => Promise<readonly EdgeRow[]>;
+  /**
+   * Reads several edge kinds from a heterogeneous set of endpoints without
+   * issuing one statement per licensed `(edge kind, endpoint kind)` pair.
+   *
+   * Optional for custom backends. Store-level heterogeneous bulk reads refuse
+   * when it is absent rather than hiding a per-kind/per-endpoint fallback.
+   */
+  findEdgesByHeterogeneousEndpointSet?: (
+    this: void,
+    params: FindEdgesByHeterogeneousEndpointSetParams,
   ) => Promise<readonly EdgeRow[]>;
   countEdgesByKind: (
     this: void,
@@ -1220,6 +2711,26 @@ export type GraphBackend = Readonly<{
     entries: readonly InsertUniqueParams[],
   ) => Promise<void>;
   deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness sidecar owned by the specified
+   * concrete nodes. Optional capability used by set-based updates before they
+   * rebuild reservations from the returned node after-images.
+   */
+  hardDeleteUniquesByNodeIds?: (
+    this: void,
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => Promise<void>;
+  /**
+   * Permanently removes every uniqueness claim owned by nodes of one concrete
+   * kind, at whatever axis each claim sits on. THE definition of "the claims
+   * this kind owns" — kind removal reaps through it so it can neither leak a
+   * claim whose axis is a sibling kind nor delete a surviving sibling's claim.
+   * Optional capability.
+   */
+  hardDeleteUniquesByConcreteKind?: (
+    this: void,
+    params: HardDeleteUniquesByConcreteKindParams,
+  ) => Promise<void>;
   checkUnique: (
     this: void,
     params: CheckUniqueParams,
@@ -1228,6 +2739,88 @@ export type GraphBackend = Readonly<{
     this: void,
     params: CheckUniqueBatchParams,
   ) => Promise<readonly UniqueRow[]>;
+
+  // === Edge Cardinality Claim Operations ===
+  /**
+   * Takes the claim on one edge cardinality axis, in two statements: a
+   * decision-free create-or-lock that reports the committed holder, and — only
+   * when that holder is a different edge — a conditional takeover that succeeds
+   * exactly when the incumbent is no longer an edge the axis and key describe.
+   *
+   * The claim is the FENCE for a declared cardinality: `(kind, from)` and
+   * `(kind, from, to)` are predicates the edges primary key `(graph_id, id)`
+   * cannot enforce, so without this relation two concurrent writers can both
+   * pass the probe and both commit. Read through the `constraintClaims`
+   * capability, never through member presence — see `claimSupport`
+   * (`store/claims/backing.ts`).
+   */
+  claimEdgeCardinality?: (
+    this: void,
+    params: ClaimEdgeCardinalityParams,
+  ) => Promise<EdgeClaimOutcome>;
+  /**
+   * Strong single-claim variant which, while holding the claim row, also
+   * refuses any claimless live edge that already matches the declared axis.
+   *
+   * Member presence is an explicit optimization contract: callers may omit
+   * the separate entity-relation cardinality probe only when the exact write
+   * target exposes this operation. Custom and legacy backends that implement
+   * only `claimEdgeCardinality` retain the probe-first path unchanged.
+   */
+  claimEdgeCardinalityGuarded?: (
+    this: void,
+    params: ClaimEdgeCardinalityParams,
+  ) => Promise<EdgeClaimOutcome>;
+  /**
+   * Batched variant of `claimEdgeCardinality`: one multi-row create-or-lock
+   * statement, then a takeover statement only for the entries a different edge
+   * holds. Outcomes are returned positionally, one per entry.
+   *
+   * Callers must not pass two entries with the same conflict target
+   * (`axis`, `key`): a multi-row upsert cannot affect one row twice.
+   */
+  claimEdgeCardinalityBatch?: (
+    this: void,
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ) => Promise<readonly EdgeClaimOutcome[]>;
+  /**
+   * Housekeeping only: drops the claim rows named edges hold, so hard deletes,
+   * kind removal and `clearGraph` do not grow the relation without bound. The
+   * FENCE never depends on it having run — a claim whose holder is no longer
+   * live (or, for `oneActive`, no longer active) is taken over in place.
+   */
+  purgeEdgeClaims?: (
+    this: void,
+    params: PurgeEdgeClaimsParams,
+  ) => Promise<void>;
+
+  /**
+   * Read-only diagnostic: the rows that make a declared constraint currently
+   * violated, for a caller (`store.verifyConstraintFences()`) that folds them
+   * onto the claim axes they contend for.
+   *
+   * It reads the ENTITY relations for the two families whose pre-upgrade
+   * violations no claim row records — a database written before the claim
+   * relations existed holds no edge claims at all — and the `uniques` relation
+   * for uniqueness, where a pre-upgrade duplicate is exactly two live rows
+   * sitting at two different `node_kind`s. A scan of a claim relation's primary
+   * key can find neither, which is why this is not one.
+   *
+   * Returns the contending ROWS, not the verdict: the axis a `uniques` row
+   * belongs to is a fold over the graph's subclass component, and the key an
+   * edge's claim sits on is `edgeCardinalitySpec`'s — both of which live
+   * above the backend, so a backend that decided either would be a second
+   * spelling of a decision the fence already owns.
+   *
+   * Writes nothing: no DDL, no claim writes. Safe on a replica and under a
+   * least-privilege role. Present only on backends that can run the audit;
+   * `store.verifyConstraintFences()` refuses with a typed error when absent
+   * rather than reporting an empty (and therefore reassuring) result.
+   */
+  readConstraintFenceViolations?: (
+    this: void,
+    params: ReadConstraintFenceViolationsParams,
+  ) => Promise<ConstraintFenceViolationRows>;
 
   // === Schema Operations ===
   getActiveSchema: (
@@ -1253,7 +2846,7 @@ export type GraphBackend = Readonly<{
    * - If a row already exists at `params.version` with a different
    *   `schemaHash`, throws `SchemaContentConflictError`.
    *
-   * Requires `capabilities.transactions === true`. On non-transactional
+   * Requires `capabilities.execution.interactiveTransactions === true`. On non-transactional
    * backends (e.g. Cloudflare D1, drizzle-orm/neon-http) this method
    * throws `ConfigurationError` rather than running with degraded
    * atomicity that would silently re-introduce the orphan-row crash
@@ -1262,6 +2855,77 @@ export type GraphBackend = Readonly<{
   commitSchemaVersion: (
     this: void,
     params: CommitSchemaVersionParams,
+  ) => Promise<SchemaVersionRow>;
+  /**
+   * Commit a schema version only if every requested kind is empty. The probes
+   * and schema CAS run under one backend-owned write fence, preventing a
+   * participating schema-managed Store write from landing between the final
+   * count and commit. Raw Stores and direct backend writes are not fenced.
+   */
+  commitSchemaVersionIfKindsEmpty?: (
+    this: void,
+    params: CommitSchemaVersionParams,
+    probes: readonly SchemaKindEmptinessProbe[],
+  ) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
+  /**
+   * Acquire the transaction-scoped shared fence for a schema-managed graph
+   * write, then verify that the active schema still matches the Store that is
+   * issuing it. Official transactional backends provide this method; custom
+   * backends may omit it, in which case schema-managed Store writes fail
+   * closed rather than racing a schema change. This method must be called on a
+   * transaction-scoped backend. PostgreSQL locks the active schema row, so a
+   * concurrent change either becomes visible at read committed or raises the
+   * database's native serialization failure at stronger isolation.
+   *
+   * On rejection the thrown `StaleVersionError` reports the active
+   * version this transaction can observe after the conflict resolves, so
+   * `details.actual` names the version that won rather than the absence the
+   * blocked read momentarily saw.
+   */
+  lockSchemaVersionForWrite?: (
+    this: void,
+    params: Readonly<{ graphId: string; expectedVersion: number }>,
+  ) => Promise<void>;
+  /**
+   * PostgreSQL/PGlite transaction-scoped fast path that takes the active
+   * schema `FOR SHARE` fence and the recorded graph advisory lock in one SQL
+   * statement, in that order, and — when `params.fenceRow` is `"advance"` —
+   * the graph's fence-row advance after them. The graph-lock CTE is reachable
+   * only through a matching schema row, so a stale Store never acquires the
+   * later lock. The result reports what the statement observed and did,
+   * exactly as the portable acquisition does: `fenceRow: "advanced"` only
+   * when the statement wrote the row.
+   *
+   * Bundled PostgreSQL/PGlite transaction targets expose this member; their
+   * root backends omit it so it cannot be used outside an already-open
+   * transaction. SQLite/custom transaction backends omit it too. A zero-row
+   * fence runs the same honest active-version diagnostic as
+   * {@link GraphBackend.lockSchemaVersionForWrite} and throws its
+   * `StaleVersionError`.
+   */
+  lockSchemaVersionAndGraphWrite?: (
+    this: void,
+    params: SchemaGraphWriteFenceParams,
+  ) => Promise<GraphWriteFenceAcquisition>;
+  /**
+   * Internal schema-lifecycle seam for features whose data preflight must
+   * commit atomically with the schema CAS. The callback runs in the same
+   * write transaction after the schema write fence is acquired and before the
+   * version write; it receives no schema-version write methods, so callers
+   * cannot bypass the CAS.
+   *
+   * The preflight target is a {@link SchemaCommitPreflightBackend}: the
+   * transaction backend plus the schema-write DDL primitive, because a
+   * transition may have to CREATE the storage its own preflight then fills —
+   * and creating it outside this transaction would publish it empty whenever
+   * the commit is refused.
+   *
+   * @internal
+   */
+  commitSchemaVersionWithPreflight?: (
+    this: void,
+    params: CommitSchemaVersionParams,
+    preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   ) => Promise<SchemaVersionRow>;
   /**
    * Atomically flips the active schema pointer to an existing version,
@@ -1276,6 +2940,80 @@ export type GraphBackend = Readonly<{
     this: void,
     params: SetActiveVersionParams,
   ) => Promise<void>;
+  /**
+   * {@link GraphBackend.setActiveVersion} with a data preflight, for a flip
+   * that reactivates a stricter schema than the active one. The callback runs
+   * in the same write transaction after the schema write fence is acquired
+   * and before the pointer flip, exactly as
+   * {@link GraphBackend.commitSchemaVersionWithPreflight} runs its own.
+   *
+   * @internal
+   */
+  setActiveVersionWithPreflight?: (
+    this: void,
+    params: SetActiveVersionParams,
+    preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
+  ) => Promise<void>;
+
+  /**
+   * Register an immutable materialized schema template: insert it when no
+   * template holds `templateId`, then return the row stored under that id,
+   * whichever release wrote it. The caller judges whether the stored row
+   * holds the same schema; a member does not refuse a differing row itself.
+   */
+  registerGraphTemplate?: (
+    this: void,
+    params: Readonly<{
+      templateId: string;
+      schemaHash: string;
+      schemaDoc: SerializedSchema;
+    }>,
+  ) => Promise<GraphTemplateRow>;
+  /**
+   * Instantiate a v1 schema from a registered template in one database
+   * statement. The caller supplies the hash of the graph-id-rebound document;
+   * the large schema document remains server-side.
+   */
+  instantiateGraphTemplate?: (
+    this: void,
+    params: Readonly<{
+      templateId: string;
+      templateSchemaHash: string;
+      graphId: string;
+      schemaHash: string;
+    }>,
+  ) => Promise<
+    | Readonly<{ status: "ready"; row: SchemaVersionRow }>
+    | Readonly<{ status: "refused" }>
+  >;
+
+  /**
+   * Run an administrative callback while holding the same per-graph lock as
+   * schema commits. The callback receives the transaction-scoped backend, so
+   * its reads, DML, and DDL are committed atomically before another schema
+   * writer can proceed.
+   *
+   * This is intentionally absent from {@link TransactionBackend}: nesting a
+   * schema-write lock from an already-open transaction can deadlock. It is an
+   * optional backend capability so custom backends can decline operations
+   * that require a schema fence rather than silently running them unsafely.
+   */
+  schemaWriteTransaction?: <T>(
+    this: void,
+    graphId: string,
+    fn: (
+      tx: TransactionBackend &
+        Readonly<{
+          executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+          tableExists: (this: void, tableName: string) => Promise<boolean>;
+          executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+          deleteSchemaVectorSlotContribution: (
+            this: void,
+            slot: VectorSlot,
+          ) => Promise<void>;
+        }>,
+    ) => Promise<T>,
+  ) => Promise<T>;
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
   upsertEmbedding?: (
@@ -1293,6 +3031,11 @@ export type GraphBackend = Readonly<{
   deleteEmbedding?: (
     this: void,
     params: DeleteEmbeddingParams,
+  ) => Promise<void>;
+  deleteEmbeddingBatch?: (
+    this: void,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
   ) => Promise<void>;
   /**
    * KNN search over one `(nodeKind, fieldPath)` slot. Top-k is computed
@@ -1382,6 +3125,19 @@ export type GraphBackend = Readonly<{
   ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
 
   /**
+   * Install the PostgreSQL `pg_trgm` extension under a database-global
+   * concurrency fence. Relational trigram index materialization calls this
+   * before emitting its index DDL; non-PostgreSQL backends omit it.
+   *
+   * @deprecated The `pg_trgm`-only spelling of {@link GraphBackend.ensureExtension},
+   *   which says the same thing for every extension the library installs. It is
+   *   retained — and still consulted, after `ensureExtension` — so a backend
+   *   written against 0.47 keeps its fence; the bundled PostgreSQL backend
+   *   implements it by delegating. Implement `ensureExtension` in new backends.
+   */
+  ensureTrigramExtension?: (this: void) => Promise<void>;
+
+  /**
    * Idempotently ensure ONLY the `typegraph_revision_origins` table exists.
    *
    * Revision-tracked stores use this per-graph, durable random origin together
@@ -1391,6 +3147,104 @@ export type GraphBackend = Readonly<{
    * without replaying all base-table DDL during a merge read.
    */
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently install the revision-change table and row triggers under a
+   * privileged schema owner. Runtime lineage verifies the installation with
+   * `revisionChangesJournalReady` and never invokes this DDL member.
+   */
+  ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+
+  /** Read-only proof that the revision journal and every row trigger are installed. */
+  revisionChangesJournalReady?: (this: void) => Promise<boolean>;
+
+  /**
+   * Idempotently add the durable edge-match identity columns, pair constraint,
+   * and unique index to the configured edge relation.
+   *
+   * Every edge write names these nullable columns, even when its graph does
+   * not declare `matchIdentity`. Privileged schema preparation therefore calls
+   * this focused hook on every open so pre-provisioned base tables adopt newer
+   * physical storage without replaying the complete base-table DDL set.
+   * Ordinary runtime store construction never performs DDL.
+   *
+   * @internal
+   */
+  ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently ensure ONLY the three Operational Identity relations exist —
+   * the current-assertions table, the recorded-time assertions table, and the
+   * derived closure and separation tables — with their indexes and CHECK
+   * constraints (CREATE TABLE / CREATE INDEX IF NOT EXISTS).
+   *
+   * First enablement of identity on an existing populated deployment attaches
+   * via `createStore` / `createSqliteBackend` / `createPostgresBackend`, none
+   * of which run DDL, so the enablement preflight would otherwise
+   * SELECT/DELETE/INSERT tables that do not exist yet. The store calls this
+   * before the enablement locks and closure rebuild. Focused rather than
+   * `bootstrapTables` for the same concurrency rationale as
+   * {@link ensureRevisionOriginsTable}. Stores call it before opening the
+   * schema-commit transaction so DDL does not re-enter its per-graph lock.
+   * Returns the logical names that were absent before this call. Callers set
+   * `provisionMissing` only for safe first enablement; on an already-enabled
+   * graph, missing ledger tables are deliberately left absent so a failed open
+   * cannot make its next retry silently accept empty replacement storage.
+   *
+   * @internal
+   */
+  ensureIdentityTables?: (
+    this: void,
+    tableNames: IdentityTableNames,
+    options: Readonly<{ provisionMissing: boolean }>,
+  ) => Promise<readonly string[]>;
+
+  /**
+   * The idempotent CREATE statements for exactly the identity relations —
+   * the same DDL {@link ensureIdentityTables} issues, handed back as data
+   * instead of executed.
+   *
+   * Pure and synchronous: it executes nothing and probes no catalog, so it is
+   * safe to call from inside an already-open transaction, where invoking a
+   * top-level backend method would re-enter the backend's serialized statement
+   * queue and deadlock. That is the whole point. Provisioning a missing DERIVED
+   * relation (closure, separation) on an already-enabled graph has to CREATE it
+   * and FILL it in one transaction, because a created-but-empty derived
+   * relation is readable and answers every question with "nothing" — for the
+   * separation relation, "nothing" means "not separated", which is exactly the
+   * answer that lets a contradictory merge commit.
+   *
+   * A backend that omits this cannot offer that atomicity. Callers do not fall
+   * back: when a fill is owed, the upgrade is REFUSED with the typed
+   * `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` error naming this port — creating
+   * and filling back-to-back would publish the readable-empty state the
+   * paragraph above forbids.
+   *
+   * @internal
+   */
+  identityTableDdl?: (
+    this: void,
+    tableNames: IdentityTableNames,
+  ) => readonly string[];
+
+  /**
+   * The provisioning DDL for the three recorded relations under the given
+   * physical names, keyed by logical relation. Used only by the offline legacy
+   * preview-schema migration, which builds temp tables, copies, and swaps —
+   * so it is called TWICE per migration, once per name set, and the migration
+   * (not the backend) composes the temp `createTable` with the final `indexes`.
+   *
+   * A backend that omits this cannot be migrated FROM the timestamp-only
+   * preview schema — a schema only the bundled Drizzle backends ever created.
+   * `migrateLegacyRecordedTime` REFUSES with `UnsupportedBackendCapabilityError`
+   * naming this port rather than emitting DDL it cannot author.
+   *
+   * @internal
+   */
+  recordedTableDdl?: (
+    this: void,
+    tableNames: RecordedTableNames,
+  ) => Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>>;
 
   /**
    * Look up a recorded materialization for a declared index by its
@@ -1437,6 +3291,50 @@ export type GraphBackend = Readonly<{
     this: void,
     params: ReleaseIndexMaterializationClaimParams,
   ) => Promise<void>;
+
+  /**
+   * Physical-schema introspection: table/index presence, PostgreSQL's
+   * invalid-index leftover state, and normalized column types. Present on
+   * both bundled Drizzle backends; a custom backend that omits it loses the
+   * store paths that consult it directly: index materialization
+   * (`store.materializeIndexes()` refuses only once its empty-candidate
+   * short circuit and the status-table ensure step have already run;
+   * `store.materializeSystemIndexes()`, which has no candidate short
+   * circuit, refuses only once that same status-table ensure step has
+   * run), the recorded-time schema check, and the recorded-time
+   * migration's column read.
+   */
+  catalog?: BackendCatalogProbes | undefined;
+
+  /**
+   * The engine's whole-database revision and the per-graph change delta
+   * since an earlier one. Present only when a backend's engine declares it
+   * (`EngineProvisioning.lineage`) — absent by default on a custom backend
+   * that supplies none, and absent on both bundled Drizzle profiles
+   * regardless of `history`. A history-enabled store never populates this
+   * member itself: it always resolves its lineage from its own recorded
+   * relations instead (`resolveLineage` in
+   * `store/recorded-capture/lineage.ts`), never from this member. Every
+   * consumer falls back to a full comparison when this is absent — see
+   * `requireLineage` in `backend/capabilities/lineage.ts`.
+   */
+  lineage?: LineageMembers | undefined;
+
+  /**
+   * The engine's own recorded (system-time) read source and revision clock.
+   * Present only when a backend's engine declares it
+   * (`EngineProvisioning.recordedTime`) — absent by default on a custom
+   * backend that supplies none, and absent on both bundled Drizzle profiles,
+   * which always allocate TypeGraph's own recorded clock and relations
+   * instead. Declaring this member is what makes a backend engine-native for
+   * recorded time — see `resolveRecordedTimeOwnership` in
+   * `backend/capabilities/recorded-time-ownership.ts`, the one reader of
+   * that distinction. A backend that supplies `recordedTime` must also
+   * supply `lineage`: engine-native history keeps no recorded relations of
+   * its own to derive a change delta from, so `createSqlBackend` refuses a
+   * profile that declares one without the other.
+   */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
 
   // === Contribution Materialization (#135 — durable strategy-owned
   // storage marker, sibling of the index status table) ===
@@ -1492,11 +3390,11 @@ export type GraphBackend = Readonly<{
 
   /**
    * Bootstraps the per-deployment `typegraph_kind_removals` table so
-   * `store.removeKinds()` and `store.materializeRemovals()` can persist
-   * removal status. Mirrors the focused-bootstrap rationale documented
-   * on `ensureIndexMaterializationsTable` — the full `bootstrapTables`
-   * touches every base table and risks Postgres SHARE-lock deadlock
-   * under concurrent replica startup.
+   * `store.evolve()` can check pending removals and the removal verbs can
+   * persist and materialize removal status. Mirrors the focused-bootstrap
+   * rationale documented on `ensureIndexMaterializationsTable` — the full
+   * `bootstrapTables` touches every base table and risks Postgres SHARE-lock
+   * deadlock under concurrent replica startup.
    */
   ensureKindRemovalsTable?: (this: void) => Promise<void>;
 
@@ -1634,6 +3532,122 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
 
   /**
+   * Diagnostic: compare each contribution currently expected for `graphId`
+   * against its durable marker and the physical catalog.
+   *
+   * Covers the strategy-owned `runtimeEnsure` contributions (fulltext)
+   * plus the `ownedTables` contribution(s) of each supplied vector slot.
+   * Returns one {@link ContributionDiagnostic} per detected unusable
+   * contribution. A recorded failed materialization is unusable even when
+   * marker and catalog agree that no table was produced. A contribution with
+   * neither a marker nor a table is treated as never attempted and omitted;
+   * marker rows outside the current declaration set are not audited. An empty
+   * array therefore is not proof that storage was initialized.
+   *
+   * Deliberately NOT part of the open path. `ensureRuntimeContributions`
+   * and `assertRuntimeContributionsInitialized` short-circuit on a
+   * per-instance signature cache and then on the marker row alone, which
+   * is the right default for a hot path but leaves a database whose
+   * contribution tables were dropped out of band opening clean and
+   * failing at the first dependent read or write. This method is the explicit,
+   * operator-invoked catalog probe that fills that gap: it issues one uncached
+   * existence query per distinct physical table and performs ZERO DDL
+   * and ZERO writes, so it is safe under a least-privilege runtime role.
+   *
+   * Present only on backends that can probe their own catalog.
+   */
+  verifyContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionDiagnostic[]>;
+
+  /**
+   * Re-audit current contribution declarations and non-destructively repair
+   * `missing-marker` and `failed-materialization` findings. The backend must
+   * resolve every target itself; it must not accept caller-provided physical
+   * identities or DDL. `stale` and `orphaned-marker` findings are returned as
+   * `requires-rebuild` because repairing either can require destructive data
+   * reconstruction.
+   *
+   * Present only on backends that can both probe their catalog and run the
+   * strategy-owned contribution DDL.
+   */
+  repairContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<ContributionRepairResult>;
+
+  /**
+   * Read-only readiness probe: the same marker-versus-catalog audit
+   * `verifyContributions` performs, projected onto one entry per search
+   * projection. Shares that method's detection logic exactly — a second
+   * implementation would be free to disagree with the one the hot-path
+   * gate actually consults, and a health check that disagrees with the
+   * gate is worse than none.
+   *
+   * Writes nothing: no DDL, no marker writes, no effect on the
+   * per-instance caches the hot path relies on. Safe on a read path, on
+   * a replica, and under a least-privilege role.
+   *
+   * Present only on backends that can probe their catalog; a backend
+   * that provisions contributions without this method declares the gap
+   * as `capabilities.contributions.probe === false`.
+   */
+  probeContributions?: (
+    this: void,
+    graphId: string,
+    vectorSlots: readonly VectorSlot[],
+  ) => Promise<readonly ContributionProbeEntry[]>;
+
+  /**
+   * Destructively rebuild one search projection for one graph: clear that
+   * graph's rows from the projection's storage, ensure the storage matches
+   * the current `createDdl`, reconstruct the graph's content, and stamp the
+   * durable marker at the current signature.
+   *
+   * This is the repair `repairContributions` deliberately refuses to
+   * perform, and it must never be reachable from it. A `stale`
+   * contribution's table exists at the *old* physical shape, so the
+   * idempotent `CREATE ... IF NOT EXISTS` in the ordinary ensure path
+   * no-ops; re-stamping the marker there would leave it blessing a table
+   * whose shape is wrong, which is exactly what the drift guard exists
+   * to prevent. Only a drop makes the recreate meaningful, and destroying
+   * content is a decision the caller states rather than one a flag named
+   * `force` implies.
+   *
+   * The fulltext projection's storage is one physical table shared by every
+   * graph in the database, while this call is fenced per graph.
+   * Implementations must therefore scope the teardown to `graphId` and may
+   * drop the storage only when doing so destroys no other graph's rows;
+   * when the recorded shape is stale and the drop that would repair it is
+   * not available, they refuse (`shared-storage-in-use`) rather than
+   * re-stamp a shape nothing verified.
+   *
+   * Runs the whole sequence inside one transaction under the same
+   * per-graph fence as a schema commit, so an interrupted rebuild leaves
+   * the contribution exactly as it was rather than attested-but-empty.
+   *
+   * `repopulate` receives that transaction and reconstructs content from
+   * rows TypeGraph already stores. The inversion exists because deciding
+   * *what* content a node contributes needs the schema registry, which
+   * is a Store-layer concern the backend must not reach into.
+   *
+   * @param scope which projection to rebuild. Implementations must
+   *   refuse `"vector"`: embeddings live only in the storage this would
+   *   drop, so there is nothing to reconstruct them from.
+   */
+  rebuildContribution?: (
+    this: void,
+    graphId: string,
+    scope: ContributionRebuildScope,
+    repopulate: (
+      target: TransactionBackend,
+    ) => Promise<ContributionRepopulationStats>,
+  ) => Promise<ContributionRebuildResult>;
+
+  /**
    * Bootstraps the fulltext storage table the active `FulltextStrategy`
    * owns. Same focused-bootstrap rationale as the other `ensure*Table`
    * methods: idempotent and concurrency-safe under replica startup.
@@ -1672,10 +3686,41 @@ export type GraphBackend = Readonly<{
 
   // === Graph Lifecycle ===
   /**
+   * Adopts deployment-wide base relations to the physical schema required by
+   * this library version and stamps the singleton installation marker.
+   * Privileged schema-management entry points call this; ordinary raw Store
+   * construction never does.
+   *
+   * @internal
+   */
+  adoptBaseSchema?: (this: void) => Promise<void>;
+
+  /**
+   * SELECT-only sibling of {@link GraphBackend.adoptBaseSchema}. Throws a
+   * typed base-schema migration error when privileged adoption has not run.
+   * Least-privilege verified/template entry points call this before DML.
+   *
+   * @internal
+   */
+  assertBaseSchemaCurrent?: (this: void) => Promise<void>;
+
+  /**
    * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
    * Intended for import-replacement workflows. No hooks, no per-row logic.
    */
   clearGraph: (this: void, graphId: string) => Promise<void>;
+
+  /**
+   * Clears graph data while retaining contribution markers for physical
+   * storage that remains provisioned. Optional so custom backends can keep
+   * their existing `clearGraph` behavior; `Store.clear()` uses this member
+   * when available, and refuses a stated
+   * `preserveContributionMaterializations: true` when it is absent.
+   */
+  clearGraphPreservingContributionMaterializations?: (
+    this: void,
+    graphId: string,
+  ) => Promise<void>;
 
   /**
    * Creates the base TypeGraph tables if they don't already exist.
@@ -1717,11 +3762,17 @@ export type GraphBackend = Readonly<{
    * entire operation back.
    *
    * This is a top-level-only lifecycle operation and is deliberately absent
-   * from {@link TransactionBackend}.
+   * from {@link TransactionBackend}. When `schemaWrite` is supplied, the
+   * import acquires and validates that Store version's managed-write fence
+   * before checking emptiness or writing. Omitting it retains the raw,
+   * unversioned import behavior.
    */
   trustedImport?: <T>(
     this: void,
     fn: (session: TrustedImportSession) => Promise<T>,
+    options?: Readonly<{
+      schemaWrite?: Readonly<{ graphId: string; expectedVersion: number }>;
+    }>,
   ) => Promise<T>;
 
   // === Query Execution ===
@@ -1772,6 +3823,31 @@ export type GraphBackend = Readonly<{
    */
   executeDdl?: (this: void, ddl: string) => Promise<void>;
 
+  /**
+   * Installs a database-global extension idempotently, tolerating the
+   * concurrent-install race.
+   *
+   * `CREATE EXTENSION IF NOT EXISTS` is not a concurrency primitive on
+   * PostgreSQL: the existence check cannot see another session's uncommitted
+   * `pg_extension` row, so the loser of a race waits for the winner and is
+   * then handed SQLSTATE 23505 instead of the harmless "already exists"
+   * notice (#446). A backend implementing this member owns that retry, and
+   * may additionally serialize same-extension installers behind a fence of its
+   * own (the bundled PostgreSQL backend takes a transaction advisory lock
+   * keyed on the extension, #475).
+   *
+   * This is the one member the library asks for an extension install; it
+   * supersedes {@link GraphBackend.ensureTrigramExtension}, which said the same
+   * thing for one extension.
+   *
+   * Like `executeDdl`, implementations MUST run the statement at the
+   * top-level backend, never inside `transaction(...)`: the 23505 aborts the
+   * enclosing transaction, so a retry issued inside one would only collect
+   * `25P02` on the way out. That is why this member is absent from
+   * {@link TransactionBackend}.
+   */
+  ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
+
   // === Transaction ===
   /** Runs TypeGraph operations inside a backend-owned transaction. */
   transaction: <T>(
@@ -1782,7 +3858,11 @@ export type GraphBackend = Readonly<{
 
   // === Lifecycle ===
   close: (this: void) => Promise<void>;
-}>;
+}> &
+  DurableEdgeBatchMembers;
+
+/** Policy for provisioning physical schema inside a caller-owned transaction. */
+export type SchemaProvisioning = "dml-only" | "transactional";
 
 /**
  * Adapter-native transaction interoperability layered on top of the portable
@@ -1790,6 +3870,8 @@ export type GraphBackend = Readonly<{
  */
 export type AdapterBackend<TNativeTransaction> = GraphBackend &
   Readonly<{
+    /** Whether caller-owned schema transactions may provision physical storage. */
+    schemaProvisioning: SchemaProvisioning;
     /**
      * Runs TypeGraph operations and exposes the exact adapter-native handle
      * bound to the same transaction.
@@ -1807,7 +3889,41 @@ export type AdapterBackend<TNativeTransaction> = GraphBackend &
       this: void,
       externalTransaction: TNativeTransaction,
     ) => TransactionBackend;
+    /**
+     * Adopt a caller-owned native transaction for a schema change. The adapter
+     * proves the transaction is active and acquires its schema-write fence on
+     * that literal session before returning the privileged CAS target. It
+     * refuses with `BaseSchemaMigrationError` unless the base-schema marker,
+     * read on that same session, is this release's: a root-connection read
+     * would wait for the connection the caller's transaction holds. It
+     * never opens, commits, retries, or rolls back the caller's transaction.
+     * Optional because drivers without active-session evidence must refuse.
+     */
+    adoptSchemaWriteTransaction?: (
+      this: void,
+      externalTransaction: TNativeTransaction,
+      graphId: string,
+      options: Readonly<{ waitBudgetMs: number }>,
+    ) => Promise<AdoptedSchemaWriteTransaction>;
   }>;
+
+/**
+ * The schema-write facet available only after adoption earned its fence.
+ * The caller owns the native transaction and remains responsible for its commit
+ * or rollback.
+ */
+export type AdoptedSchemaWriteTransaction = Readonly<{
+  backend: SchemaWriteTransactionBackend &
+    Readonly<{
+      commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+      ensureVectorSlotContributions?: (
+        this: void,
+        slots: readonly VectorSlot[],
+        options?: Readonly<{ onDrift?: "throw" | "skip" }>,
+      ) => Promise<void>;
+    }>;
+  activeSchema: SchemaVersionRow | undefined;
+}>;
 
 export type BackendIdentity = Pick<
   GraphBackend,
@@ -1816,41 +3932,66 @@ export type BackendIdentity = Pick<
   | "tableNames"
   | "fulltextStrategy"
   | "vectorStrategy"
+  | "fenceSql"
 >;
 
 export type NodeEntityReadBackend = Pick<
   GraphBackend,
-  "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind"
+  | "getNode"
+  | "getNodes"
+  | "findNodesByKind"
+  | "findNodesAcrossKinds"
+  | "countNodesByKind"
 >;
 
 export type NodeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertNode"
+  | "insertNodeIfAbsent"
+  | "insertNodeIfAbsentWithSchemaFence"
+  | "insertNodeWithSchemaFence"
+  | "commands"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "upsertHeterogeneousNodes"
+  | "updateResolvedNodesBatch"
+  | "compareAndSetNode"
+  | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"
+  | "hardDeleteNodesBatch"
+  // A read, but a locking one, so it belongs to the write surface rather than
+  // to the portable read projections built from the read types.
+  | "lockNodes"
 >;
 
 export type EdgeEntityReadBackend = Pick<
   GraphBackend,
   | "getEdge"
   | "getEdges"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
+  | "findEdgesConnectedToNodes"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
+  | "findEdgesAcrossKinds"
+  | "findEdgesByEndpointSet"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "countEdgesByKind"
 >;
 
 export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
+  | "commands"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
+  | "insertEdgesDurableBatchReturning"
   | "updateEdge"
   | "deleteEdge"
   | "deleteEdgesBatch"
@@ -1869,6 +4010,8 @@ export type UniqueConstraintBackend = Pick<
   | "insertUnique"
   | "insertUniqueBatch"
   | "deleteUnique"
+  | "hardDeleteUniquesByNodeIds"
+  | "hardDeleteUniquesByConcreteKind"
   | "checkUnique"
   | "checkUniqueBatch"
 >;
@@ -1880,7 +4023,12 @@ export type SchemaReadBackend = Pick<
 
 export type SchemaCommitBackend = Pick<
   GraphBackend,
-  "commitSchemaVersion" | "setActiveVersion"
+  "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion"
+>;
+
+export type SchemaWriteFenceBackend = Pick<
+  GraphBackend,
+  "lockSchemaVersionForWrite" | "lockSchemaVersionAndGraphWrite"
 >;
 
 export type VectorOperationBackend = Pick<
@@ -1888,6 +4036,7 @@ export type VectorOperationBackend = Pick<
   | "upsertEmbedding"
   | "upsertEmbeddingBatch"
   | "deleteEmbedding"
+  | "deleteEmbeddingBatch"
   | "vectorSearch"
   | "createVectorIndex"
   | "dropVectorIndex"
@@ -1909,6 +4058,15 @@ export type IndexMaterializationBackend = Pick<
   | "getIndexMaterializations"
   | "recordIndexMaterialization"
 >;
+
+/** The optional catalog-introspection surface. See {@link BackendCatalogProbes}. */
+export type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+/** The optional engine-lineage surface. See {@link LineageMembers}. */
+export type LineageBackend = Pick<GraphBackend, "lineage">;
+
+/** The optional engine-native recorded-time surface. See {@link EngineRecordedTimeMembers}. */
+export type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
 
 export type ContributionMaterializationBackend = Pick<
   GraphBackend,
@@ -1933,7 +4091,9 @@ export type RemovalMaterializationBackend = Pick<
 
 export type GraphLifecycleBackend = Pick<
   GraphBackend,
-  "clearGraph" | "bootstrapTables"
+  | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
+  | "bootstrapTables"
 >;
 
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
@@ -1963,15 +4123,22 @@ export type BackendLifecycle = Pick<GraphBackend, "close">;
 
 /**
  * Read-oriented transaction projection exposed by portable transaction
- * contexts. It preserves snapshot-aware graph reads and TypeGraph-compiled
- * row queries while excluding graph writes, arbitrary raw SQL, DDL,
- * transaction adoption, and lifecycle control.
+ * contexts. It preserves snapshot-aware graph reads and SQL rendering while
+ * excluding graph writes, statement execution, DDL, transaction adoption, and
+ * lifecycle control.
+ *
+ * Statement execution (`execute`) is absent on purpose. Its compiled-query
+ * brand is a type, not a runtime check, so on a transaction it would run any
+ * SQL on the pinned session — including a `ROLLBACK TO SAVEPOINT` that
+ * releases a fence lock a later TypeGraph write in the same transaction still
+ * relies on. A transaction runs TypeGraph queries through `tx.query()`; raw
+ * SQL goes through an adapter transaction's `tx.sql`, the one raw handle a
+ * transaction context carries.
  */
 export type TransactionReadBackend = Readonly<
   BackendIdentity &
     GraphEntityReadBackend &
     SchemaReadBackend &
-    QueryExecutionBackend &
     SqlCompilationBackend
 >;
 
@@ -1990,10 +4157,25 @@ export type TransactionBackend = Readonly<
     GraphEntityReadBackend &
     GraphEntityWriteBackend &
     UniqueConstraintBackend &
+    // The edge cardinality claim relation's surface. Inline rather than a named
+    // member type: it is a different relation from `uniques` with a different
+    // key, and naming it would add a type the public surface references but no
+    // entrypoint exports.
+    Pick<
+      GraphBackend,
+      | "claimEdgeCardinality"
+      | "claimEdgeCardinalityGuarded"
+      | "claimEdgeCardinalityBatch"
+      | "purgeEdgeClaims"
+    > &
     SchemaReadBackend &
+    SchemaWriteFenceBackend &
     VectorOperationBackend &
     FulltextOperationBackend &
     IndexMaterializationBackend &
+    CatalogBackend &
+    LineageBackend &
+    RecordedTimeBackend &
     ContributionMaterializationBackend &
     RemovalMaterializationBackend &
     GraphLifecycleBackend &
@@ -2003,10 +4185,56 @@ export type TransactionBackend = Readonly<
 >;
 
 /**
+ * Transaction backend exposed only while the backend's schema-write lock is
+ * held. Unlike the ordinary top-level `executeDdl` port, this DDL primitive is
+ * explicitly transaction-scoped and must use the callback's transaction.
+ *
+ * @internal
+ */
+export type SchemaWriteTransactionBackend = TransactionBackend &
+  Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (
+      this: void,
+      slot: VectorSlot,
+    ) => Promise<void>;
+  }>;
+
+/**
+ * The target a schema-commit preflight runs against: a transaction backend
+ * that MAY also carry the schema-write DDL primitive.
+ *
+ * Optional, deliberately. Both bundled backends pass the same
+ * {@link SchemaWriteTransactionBackend} their `schemaWriteTransaction` exposes,
+ * so DDL is available there; a custom backend may implement
+ * {@link GraphBackend.commitSchemaVersionWithPreflight} over a transaction that
+ * cannot run DDL. Declaring the port as present-or-absent lets a preflight that
+ * needs it refuse with a typed error naming the capability, instead of calling
+ * `undefined` — or, far worse, skipping the DDL and continuing.
+ *
+ * @internal
+ */
+export type SchemaCommitPreflightBackend = TransactionBackend &
+  Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    /**
+     * The read-only fence audit, when the preflight target can run it.
+     * Optional for the same reason `executeSchemaDdl` is: a custom
+     * backend's `commitSchemaVersionWithPreflight` may hand back a
+     * transaction that cannot. An ontology-tightening preflight that needs
+     * it refuses with `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` rather than
+     * skipping the check.
+     */
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
+  }>;
+
+/**
  * Builds the actual runtime projection exposed as `TransactionContext.backend`.
  * This is an explicit object rather than a type-only narrowing so portable
- * callers cannot discover write or arbitrary-SQL methods on the underlying
- * transaction backend at runtime.
+ * callers cannot discover write or statement-execution methods on the
+ * underlying transaction backend at runtime.
  *
  * @internal
  */
@@ -2015,6 +4243,9 @@ export function createTransactionReadBackend(
 ): TransactionReadBackend {
   const getNodes = backend.getNodes;
   const getEdges = backend.getEdges;
+  const findNodesAcrossKinds = backend.findNodesAcrossKinds;
+  const findEdgesAcrossKinds = backend.findEdgesAcrossKinds;
+  const findActiveEdgesBySourceV1 = backend.findActiveEdgesBySourceV1;
   const compileSql = backend.compileSql;
 
   return Object.freeze({
@@ -2043,162 +4274,38 @@ export function createTransactionReadBackend(
         getEdges: (graphId: string, ids: readonly string[]) =>
           getEdges(graphId, ids),
       }),
-    countEdgesFrom: (params) => backend.countEdgesFrom(params),
+    countEdgesAtEndpoint: (params) => backend.countEdgesAtEndpoint(params),
     edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
     findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
     findNodesByKind: (params) => backend.findNodesByKind(params),
+    ...(findNodesAcrossKinds === undefined ?
+      {}
+    : {
+        findNodesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findNodesAcrossKinds(params),
+      }),
     countNodesByKind: (params) => backend.countNodesByKind(params),
     findEdgesByKind: (params) => backend.findEdgesByKind(params),
+    ...(findActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        findActiveEdgesBySourceV1: (params: FindActiveEdgesBySourceV1Params) =>
+          findActiveEdgesBySourceV1(params),
+      }),
+    ...(findEdgesAcrossKinds === undefined ?
+      {}
+    : {
+        findEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
+          findEdgesAcrossKinds(params),
+      }),
     countEdgesByKind: (params) => backend.countEdgesByKind(params),
     getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
     getSchemaVersion: (graphId, version) =>
       backend.getSchemaVersion(graphId, version),
-    execute: <T>(query: CompiledRowsSql) => backend.execute<T>(query),
     ...(compileSql === undefined ?
       {}
     : { compileSql: (query: SqlFragment) => compileSql(query) }),
   });
-}
-
-type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
-  Readonly<Record<Exclude<keyof O, keyof T>, never>>;
-
-// ============================================================
-// Managed Backend Helper
-// ============================================================
-
-/**
- * Overlays selected backend methods without copying the backend object.
- *
- * This is a decoration primitive: every non-overridden target property remains
- * reachable. Never use it to narrow a capability surface; construct an
- * explicit allowlist projection first, then decorate that projection.
- *
- * Backend wrappers use this instead of object spread so proxy backends keep
- * getters and non-enumerable members. GraphBackend functions are receiver-free
- * by contract, so delegated methods are returned unchanged.
- */
-export function createBackendOverlay<
-  T extends GraphBackend | TransactionBackend,
-  const O extends Partial<T> = Partial<T>,
->(target: T, overlay: ExactBackendOverlay<T, O>): T {
-  function hasOverlayProperty(property: PropertyKey): boolean {
-    return Object.hasOwn(overlay, property);
-  }
-
-  return new Proxy(target, {
-    get(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.get(overlay, property, overlay);
-      }
-      return Reflect.get(targetObject, property, targetObject);
-    },
-
-    has(targetObject, property) {
-      return (
-        hasOverlayProperty(property) || Reflect.has(targetObject, property)
-      );
-    },
-
-    ownKeys(targetObject) {
-      return [
-        ...new Set([
-          ...Reflect.ownKeys(targetObject),
-          ...Reflect.ownKeys(overlay),
-        ]),
-      ];
-    },
-
-    getOwnPropertyDescriptor(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        const descriptor = Reflect.getOwnPropertyDescriptor(overlay, property);
-        if (descriptor === undefined) return;
-        return { ...descriptor, configurable: true };
-      }
-      return Reflect.getOwnPropertyDescriptor(targetObject, property);
-    },
-
-    set(targetObject, property, value) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.set(overlay, property, value, overlay);
-      }
-      return Reflect.set(targetObject, property, value, targetObject);
-    },
-
-    defineProperty(targetObject, property, attributes) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.defineProperty(overlay, property, attributes);
-      }
-      return Reflect.defineProperty(targetObject, property, attributes);
-    },
-
-    deleteProperty(targetObject, property) {
-      if (hasOverlayProperty(property)) {
-        return Reflect.deleteProperty(overlay, property);
-      }
-      return Reflect.deleteProperty(targetObject, property);
-    },
-  });
-}
-
-/**
- * Wraps a GraphBackend with idempotent close that also runs a teardown
- * callback (e.g. closing the underlying database connection).
- */
-export function wrapWithManagedClose<TNativeTransaction>(
-  backend: AdapterBackend<TNativeTransaction>,
-  teardown: () => void | Promise<void>,
-): AdapterBackend<TNativeTransaction>;
-export function wrapWithManagedClose(
-  backend: GraphBackend,
-  teardown: () => void | Promise<void>,
-): GraphBackend;
-export function wrapWithManagedClose(
-  backend: GraphBackend,
-  teardown: () => void | Promise<void>,
-): GraphBackend {
-  let backendClosed = false;
-  let teardownComplete = false;
-  let closeInFlight: Promise<void> | undefined;
-
-  async function closeManagedResources(): Promise<void> {
-    const errors: unknown[] = [];
-    if (!backendClosed) {
-      try {
-        await backend.close();
-        backendClosed = true;
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-    if (!teardownComplete) {
-      try {
-        await teardown();
-        teardownComplete = true;
-      } catch (error) {
-        errors.push(error);
-      }
-    }
-
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) {
-      throw new AggregateError(
-        errors,
-        "The backend and its managed resource both failed to close.",
-      );
-    }
-  }
-
-  const closeOverlay: Pick<GraphBackend, "close"> = {
-    async close(): Promise<void> {
-      if (backendClosed && teardownComplete) return;
-      closeInFlight ??= closeManagedResources().finally(() => {
-        closeInFlight = undefined;
-      });
-      await closeInFlight;
-    },
-  };
-  return createBackendOverlay(backend, closeOverlay);
 }
 
 /**
@@ -2219,6 +4326,41 @@ export async function closeAfterFailure(
   throw provisioningError;
 }
 
+/** Options for {@link runOptionallyInTransaction}. */
+export type RunOptionallyInTransactionOptions = Readonly<{
+  /**
+   * Pass only when the toplevel backend method would recurse — pass the
+   * operation-level backend so the no-transaction path doesn't loop back
+   * through the same toplevel method.
+   */
+  fallback?: GraphBackend | TransactionBackend;
+  /**
+   * Options for the transaction this opens — most usefully
+   * `accessMode: "read_only"`, which lets a multi-statement READ declare itself
+   * to the engine instead of only promising it (SQLite issues `BEGIN` rather
+   * than reserving the single writer slot with `BEGIN IMMEDIATE`; PostgreSQL
+   * issues `BEGIN … READ ONLY`).
+   *
+   * Scopes the transaction and nothing else, so it is not honored on the
+   * fallthrough path: a backend without interactive transactions opens no
+   * transaction to configure. The callback receives an explicit execution
+   * mode (`interactive-transaction` or `sequential`), so callers never infer
+   * the execution boundary from backend object identity.
+   */
+  transaction?: TransactionOptions;
+}>;
+
+/** What {@link runOptionallyInTransaction} actually did for this invocation. */
+export type OptionalTransactionExecution =
+  | Readonly<{
+      /** The callback runs on a transaction-scoped interactive session. */
+      mode: "interactive-transaction";
+    }>
+  | Readonly<{
+      /** The callback runs sequentially without an encompassing transaction. */
+      mode: "sequential";
+    }>;
+
 /**
  * Runs `fn` inside a transaction when given a top-level backend that supports
  * one, falling through to a direct invocation otherwise. Lets call sites benefit
@@ -2226,22 +4368,27 @@ export async function closeAfterFailure(
  * backends that don't (Cloudflare D1, `drizzle-orm/neon-http` over HTTP), and
  * avoids opening nested transactions when the caller already holds a
  * transaction-scoped backend. The single-statement race window is already
- * implicit on any backend that reports `transactions: false`; callers that
+ * implicit on any backend without interactive transactions; callers that
  * cannot tolerate it must branch on the capability themselves.
- *
- * Pass `fallback` only when the toplevel backend method would recurse
- * — pass the operation-level backend so the no-tx path doesn't loop
- * back through the same toplevel method.
  */
 export async function runOptionallyInTransaction<T>(
   backend: GraphBackend | TransactionBackend,
-  fn: (target: GraphBackend | TransactionBackend) => Promise<T>,
-  fallback?: GraphBackend | TransactionBackend,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<T>,
+  options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
-  if ("transaction" in backend && backend.capabilities.transactions) {
-    return backend.transaction((tx) => fn(tx));
+  if (
+    "transaction" in backend &&
+    backend.capabilities.execution.interactiveTransactions
+  ) {
+    return backend.transaction(
+      (tx) => fn(tx, { mode: "interactive-transaction" }),
+      options?.transaction,
+    );
   }
-  return fn(fallback ?? backend);
+  return fn(options?.fallback ?? backend, { mode: "sequential" });
 }
 
 // ============================================================
@@ -2261,13 +4408,229 @@ export type InsertUniqueParams = Readonly<{
 }>;
 
 /**
- * Parameters for deleting a unique constraint entry.
+ * Parameters for releasing a unique constraint entry.
+ *
+ * Every release is scoped to the claim's OWNER — the pair
+ * `(concreteKind, nodeId)`, because a node id is unique only within its kind.
+ * The two shapes differ only in whether the claim AXIS participates:
+ *
+ *  - **Lifecycle release** (`nodeKind` absent) — "give up every claim this node
+ *    holds for this constraint and key, whatever axis it sits on". Soft delete,
+ *    an update's key-change release and the resurrect diff use it, so a claim
+ *    written under an older axis is still released by newer code.
+ *  - **Compensating release** (`nodeKind` present) — "undo exactly the row I
+ *    just claimed, at the axis I claimed it on". A failed write's rollback uses
+ *    it, so it touches neither a row that predates the write nor one another
+ *    node holds.
  */
 export type DeleteUniqueParams = Readonly<{
   graphId: string;
+  /**
+   * The claim axis (`uniques.node_kind`) the release is restricted to. Absent
+   * releases the owner's claims at every axis — see the two shapes above.
+   */
+  nodeKind?: string;
+  constraintName: string;
+  key: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
+}>;
+
+/** Parameters for permanently clearing uniqueness sidecars by node identity. */
+export type HardDeleteUniquesByNodeIdsParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
+  nodeIds: readonly string[];
+}>;
+
+/** Parameters for permanently clearing every uniqueness claim a kind owns. */
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+  graphId: string;
+  concreteKind: string;
+}>;
+
+/**
+ * Present only on a composition claim: the reserved relation-wide axis
+ * (`COMPOSITION_RELATION_NAME`), and the ORIENTED realizing edge
+ * kinds whose live rows can hold it — every edge kind the graph's
+ * `partOf`/`hasPart` declarations resolve to, tagged with which endpoint of
+ * that kind carries the part. Absent means the ordinary per-edge-kind
+ * cardinality claim.
+ *
+ * The two arms this carries (`partSide: "from"` vs `"to"`) are what let
+ * {@link file://./drizzle/operations/edge-claims.ts claimHolderTerms} render
+ * the "does a live edge already hold this part" predicate as a cross-kind,
+ * oriented OR — a plain `kind IN (...)` cannot express which endpoint of each
+ * kind is the part.
+ */
+export type CompositionClaimScope = Readonly<{
+  kind: "composition";
+  holders: readonly Readonly<{ edgeKind: string; partSide: "from" | "to" }>[];
+}>;
+
+/**
+ * One edge cardinality claim, named by the components its axis, its key and its
+ * holder-liveness predicate are all built from.
+ *
+ * The components are passed RAW rather than pre-rendered: `edgeCardinalitySpec`
+ * (`store/claims/edge-claims.ts`) is the one function that decides which
+ * endpoints the key covers and what a holder must still be, and both the
+ * TypeScript probe and the SQL builder read it. A caller that rendered the
+ * axis and key itself would be a second spelling of that decision.
+ */
+export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
+  Readonly<{
+    graphId: string;
+    edgeKind: string;
+    /** The edge that will hold the axis if this claim lands. */
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope?: CompositionClaimScope;
+  }>;
+
+/**
+ * What a claim statement decided.
+ *
+ * `refused` carries the incumbent so the caller can say which edge holds the
+ * axis; the typed refusal itself is the store's, built from
+ * `edgeCardinalityViolation`, the same owner the probe uses, so a caller
+ * cannot tell which layer refused.
+ */
+export type EdgeClaimOutcome =
+  | Readonly<{ status: "claimed" }>
+  | Readonly<{ status: "refused"; holderEdgeId: string }>;
+
+/** Parameters for the housekeeping purge of claims held by named edges. */
+export type PurgeEdgeClaimsParams = Readonly<{
+  graphId: string;
+  edgeIds: readonly string[];
+}>;
+
+/** One edge kind's declared cardinality, as the fence audit reads it. */
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    /**
+     * Present when this edge kind's declared axis is a composition axis —
+     * see {@link CompositionClaimScope}. The fence-audit reader groups and
+     * queries a composition declaration by its two oriented arms rather than
+     * by exact-kind equality, because the composition axis is relation-wide: two
+     * different realizing edge kinds contend for the SAME row.
+     */
+    scope?: CompositionClaimScope;
+  }>;
+
+/**
+ * What a constraint-fence audit asks the database about: the declarations the
+ * graph carries, one list per family.
+ *
+ * The declarations are passed rather than discovered because the backend holds
+ * no schema — and because the `uniqueConstraintNames` restriction is
+ * load-bearing rather than an optimization: the `uniques` relation also holds
+ * disjointness claims, whose `node_kind` is a pair label rather than a kind and
+ * for which no uniqueness axis can be computed. Those rows are covered by
+ * `disjointKindPairs`, from the nodes relation.
+ */
+export type ReadConstraintFenceViolationsParams = Readonly<{
+  graphId: string;
+  /** Every unique constraint name the graph declares, in any scope. */
+  uniqueConstraintNames: readonly string[];
+  /** Every declared `disjointWith` pair, each read as one intersection. */
+  disjointKindPairs: readonly (readonly [string, string])[];
+  /** Every edge kind declaring a cardinality other than `many`. */
+  edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+  /**
+   * Edge kinds whose live rows must still sit on a declared endpoint pair.
+   * Optional (and, when present, possibly empty) so a params object built
+   * before this family existed keeps compiling: an absent value means the
+   * caller does not ask for the family, and `readConstraintFenceViolations`
+   * must then omit `misassignedEdgeEndpointRows` rather than reporting a
+   * clean (and therefore reassuring) empty result for it.
+   */
+  edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
+}>;
+
+/** Every concrete `(fromKind, toKind)` pair an edge kind's declaration still admits. */
+export type EdgeEndpointAllowance = Readonly<{
+  edgeKind: string;
+  allowedPairs: readonly (readonly [string, string])[];
+}>;
+
+/** One live edge whose endpoints no declared pair admits. */
+export type MisassignedEdgeEndpointRow = Readonly<{
+  edgeKind: string;
+  edgeId: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/**
+ * One live `uniques` row that shares its `(constraint_name, key)` with at least
+ * one other live row — a candidate, not a verdict: two rows contend only when
+ * their `node_kind`s fold onto ONE claim axis, which the caller decides.
+ */
+export type ContendedUniqueRow = Readonly<{
   nodeKind: string;
   constraintName: string;
   key: string;
+  concreteKind: string;
+  nodeId: string;
+}>;
+
+/**
+ * One live edge that shares its declared cardinality's population with at least
+ * one other live edge. The endpoints are returned whole so the caller can name
+ * the claim key through the one builder that renders it.
+ *
+ * `scope` names which declaration's query produced this row — the ordinary
+ * per-edge-kind axis (`undefined`) or the reserved, relation-wide composition
+ * axis (present) — exactly as {@link EdgeCardinalityDeclaration.scope} names
+ * it for the declaration itself. The reader must never re-derive this from
+ * the row's own (possibly dirty) endpoints: which query found the row already
+ * says which axis it contends on.
+ *
+ * Required-but-nullable, not optional: a custom `readConstraintFenceViolationRows`
+ * implementation that omits the field would compile with `scope` silently
+ * `undefined` on every row, misclassifying every genuine composition row as
+ * an ordinary one — the exact drift this field exists to prevent. Spelling
+ * it `| undefined` forces a backend author to state the fact explicitly,
+ * even when the answer is "never composition" (`undefined` for every row).
+ */
+export type ContendedEdgeRow = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope: CompositionClaimScope | undefined;
+  }>;
+
+/** One node id live under BOTH kinds of a declared disjoint pair. */
+export type DisjointOverlapRow = Readonly<{
+  kinds: readonly [string, string];
+  nodeId: string;
+}>;
+
+/** Everything one constraint-fence audit read, per family. */
+export type ConstraintFenceViolationRows = Readonly<{
+  contendedUniqueRows: readonly ContendedUniqueRow[];
+  contendedEdgeRows: readonly ContendedEdgeRow[];
+  disjointOverlaps: readonly DisjointOverlapRow[];
+  /**
+   * Present whenever `edgeEndpointAllowances` was asked for (defined on the
+   * params, even if empty). A backend that cannot answer the family omits
+   * it, and the caller refuses rather than reporting a clean result.
+   */
+  misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 /**
@@ -2341,6 +4704,54 @@ export type CommitSchemaVersionParams = Readonly<{
   schemaDoc: SerializedSchema;
 }>;
 
+export type SchemaKindEmptinessProbe = Readonly<{
+  entity: "node" | "edge";
+  kind: string;
+  /** Which rows make this schema transition unsafe. Must be chosen explicitly. */
+  rows: "nonDeleted" | "all";
+}>;
+
+export type PopulatedSchemaKind = SchemaKindEmptinessProbe &
+  Readonly<{ count: number }>;
+
+export type CommitSchemaVersionIfKindsEmptyResult =
+  | Readonly<{ status: "committed"; row: SchemaVersionRow }>
+  | Readonly<{
+      status: "populated";
+      kinds: readonly PopulatedSchemaKind[];
+    }>;
+
+export type LockSchemaVersionForWriteParams = Readonly<{
+  graphId: string;
+  expectedVersion: number;
+}>;
+
+/** Parameters shared by the ordinary and fused schema-write fences. */
+export type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+/**
+ * Parameters of the fused schema + graph write fence
+ * ({@link GraphBackend.lockSchemaVersionAndGraphWrite}).
+ *
+ * `fenceRow` states what the acquirer does under the graph fence. `"advance"`
+ * is a writer that goes on to make a decision only the fence protects (an
+ * edge-acyclicity probe, a composition whole's parts closure, a match-key
+ * convergence): the statement advances the graph's row in the fences
+ * relation, behind the lock. `"leave"` is every other holder: the statement
+ * takes the lock alone and writes no row.
+ */
+export type SchemaGraphWriteFenceParams = SchemaWriteFenceParams &
+  Readonly<{ fenceRow: "advance" | "leave" }>;
+
+/**
+ * Optional schema-managed write identity for a trusted import. Supplying it
+ * acquires and validates the Store version's transaction-scoped schema fence;
+ * omitting it leaves the import outside the versioned guarantee.
+ */
+export type TrustedImportOptions = Readonly<{
+  schemaWrite?: Readonly<{ graphId: string; expectedVersion: number }>;
+}>;
+
 /**
  * Parameters for `setActiveVersion`.
  *
@@ -2356,15 +4767,38 @@ export type SetActiveVersionParams = Readonly<{
 }>;
 
 /**
- * Parameters for counting edges from a source node.
+ * Parameters for counting edges at one endpoint.
+ *
+ * One member and one statement answer both the source-side and target-side
+ * count rather than a mirrored `countEdgesTo` — two members with two SQL
+ * builders, two cache keys and two liveness spellings that would drift.
+ * `endpoint` selects which column pair (`fromKind`/`fromId` or
+ * `toKind`/`toId`) the predicate reads.
  */
-export type CountEdgesFromParams = Readonly<{
+export type CountEdgesAtEndpointParams = Readonly<{
+  graphId: string;
+  edgeKind: string;
+  /** Which endpoint column pair the predicate reads. */
+  endpoint: "from" | "to";
+  /**
+   * Deliberately not `kind` / `id`: those names, on a shape this narrow,
+   * would structurally satisfy {@link DeleteEdgeParams} /
+   * {@link HardDeleteEdgeParams} (`{graphId, id, kind?}`) and silently
+   * conscript this READ into `write-surface.ts`'s derived graph-entity WRITE
+   * surface.
+   */
+  endpointKind: string;
+  endpointId: string;
+  /** If true, only count edges where valid_to IS NULL */
+  activeOnly?: boolean;
+}>;
+
+/** Exact source key of an active `oneActive` edge population. */
+export type FindActiveEdgesBySourceV1Params = Readonly<{
   graphId: string;
   edgeKind: string;
   fromKind: string;
   fromId: string;
-  /** If true, only count edges where valid_to IS NULL */
-  activeOnly?: boolean;
 }>;
 
 /**
@@ -2418,6 +4852,15 @@ export type FindNodesByKindParams = Readonly<{
   after?: string;
 }>;
 
+/** Keyset page ordered by `(kind, id)` in the backend's own collation. */
+export type FindRowsAcrossKindsParams = Readonly<{
+  graphId: string;
+  kinds: readonly string[];
+  limit: number;
+  after?: Readonly<{ kind: string; id: string }>;
+  excludeDeleted?: boolean;
+}>;
+
 /**
  * Parameters for counting nodes by kind.
  */
@@ -2430,6 +4873,11 @@ export type CountNodesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Count at most this many rows. A backend that ignores it still returns a
+   * correct, merely larger, count.
+   */
+  limit?: number;
 }>;
 
 /**
@@ -2466,6 +4914,113 @@ export type FindEdgesByKindParams = Readonly<{
   after?: string;
 }>;
 
+/** Exact owner keys for a bounded durable edge identity lookup. */
+export type FindEdgesByMatchIdentityParams = Readonly<{
+  graphId: string;
+  identities: readonly Readonly<{
+    kind: string;
+    name: string;
+    key: string;
+  }>[];
+}>;
+
+/**
+ * The endpoint side a {@link FindEdgesByEndpointSetParams} read fans out over.
+ */
+export type EdgeEndpointSide = "from" | "to";
+
+/**
+ * Parameters for reading the edges of a SET of endpoints in one statement per
+ * bind-budget chunk — the widened form of {@link FindEdgesByKindParams}'s
+ * scalar `fromId` / `toId`.
+ *
+ * Deliberately a SEPARATE parameter type on a separate operation rather than
+ * optional fields on `FindEdgesByKindParams`. A backend that did not implement
+ * set membership would still type-check while ignoring the id list, and would
+ * then return every edge of the kind — which the caller would rebucket into a
+ * correct-looking answer at unbounded cost. Splitting the operation makes that
+ * failure unreachable: support is detected by the method's presence, before any
+ * read is issued.
+ *
+ * The shape also makes the previously-validated illegal states
+ * unrepresentable. One `side` instead of two independent id lists means both
+ * endpoints can never fan out at once; no scalar `fromId` / `toId` field means
+ * a scalar and a set can never disagree; no `limit` / `offset` / `after` means
+ * a global slice can never be requested across a read the backend splits into
+ * bind-budget chunks.
+ */
+export type FindEdgesByEndpointSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  /** Which endpoint column the id set constrains. */
+  side: EdgeEndpointSide;
+  /**
+   * Kind of the fanned-out endpoint. Required: it is the index prefix that
+   * makes the set a seek rather than a scan, so a set is always scoped to one
+   * endpoint kind and a heterogeneous page costs one read per distinct kind.
+   */
+  endpointKind: string;
+  /**
+   * Endpoint NODE ids to match — deliberately not named `ids`, which in the
+   * backend params vocabulary means edge ids (see
+   * {@link DeleteEdgesBatchParams}); the write-surface assertion in
+   * `recorded-capture/write-surface.ts` classifies params structurally and a
+   * `{ graphId, ids }` read would be misread as a write.
+   *
+   * The backend deduplicates before splitting the list across bind-budget
+   * chunks — a repeated id spanning two chunks would return its edges twice.
+   * An empty list reads nothing and yields no rows.
+   */
+  endpointIds: readonly string[];
+  /**
+   * Maximum rows per distinct endpoint id, applied inside the statement (via
+   * `ROW_NUMBER()` over the read's own ordering) rather than by the caller.
+   * Only meaningful on a backend whose `capabilities.windowFunctions` is true;
+   * callers must still cap client-side, so a backend that ignores this returns
+   * a superset rather than a wrong answer. Unlike a global `limit`, a
+   * per-endpoint cap composes with chunking: each endpoint's rows fall
+   * entirely within one chunk.
+   */
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
+}>;
+
+/**
+ * Parameters for reading several edge kinds from several endpoint kinds.
+ *
+ * The endpoint pairs are joined as a relation, so round trips are independent
+ * of the number of licensed edge-kind/endpoint-kind combinations. Large source
+ * sets may still be split to respect the backend's bind-parameter budget.
+ */
+export type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
+  graphId: string;
+  side: EdgeEndpointSide;
+  endpoints: readonly Readonly<{
+    kind: string;
+    id: string;
+    /**
+     * Optional endpoint on the opposite side of the edge. When present, the
+     * set read performs an exact directed-pair seek instead of materializing
+     * every edge incident to `kind` / `id` and leaving the caller to filter.
+     * This is particularly important for hub nodes.
+     */
+    opposite?: Readonly<{ kind: string; id: string }>;
+  }>[];
+  edgeKinds: readonly string[];
+  limitPerEndpoint?: number;
+  /** If true, exclude deleted edges. Default true. */
+  excludeDeleted?: boolean;
+  /** Temporal mode for filtering by validity period. */
+  temporalMode?: TemporalMode;
+  /** Timestamp for "current" and "asOf" temporal modes. */
+  asOf?: string;
+}>;
+
 /**
  * Parameters for counting edges by kind.
  */
@@ -2482,6 +5037,11 @@ export type CountEdgesByKindParams = Readonly<{
   temporalMode?: TemporalMode;
   /** Timestamp for "current" and "asOf" temporal modes. */
   asOf?: string;
+  /**
+   * Count at most this many rows. A backend that ignores it still returns a
+   * correct, merely larger, count.
+   */
+  limit?: number;
 }>;
 
 // ============================================================
@@ -2519,32 +5079,61 @@ export const D1_MAX_BIND_PARAMETERS = 100;
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
 /**
- * PostgreSQL's wire-protocol bound-parameter ceiling (a 16-bit count). Single
- * source of truth for {@link POSTGRES_CAPABILITIES} and the Postgres backend's
- * batch math.
+ * Safe bound-parameter ceiling shared by every bundled PostgreSQL driver.
+ * The protocol count can represent 65535, but postgres.js rejects a statement
+ * with 65534 bound values, so backend batch math uses the lower portable limit.
  */
-export const POSTGRES_MAX_BIND_PARAMETERS = 65_535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
 
 /**
  * Default capabilities for SQLite.
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
-  transactions: true, // SQLite supports transactions
+  execution: Object.freeze({
+    interactiveTransactions: true,
+    atomicBatch: "none",
+    unitOfWork: "interactive",
+  }),
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
+  clearValidTo: true,
   returning: true, // SQLite has supported RETURNING since 3.35.0
+  // The bundled schema ships both claim relations and the shared operation
+  // backend implements every claim member.
+  constraintClaims: true,
+  durableEdgeMatchIdentity: true,
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
+  recursiveTraversal: Object.freeze({ supported: true }),
+  writeFence: Object.freeze({
+    mechanism: "engine-serialized",
+  }),
 });
 
 /**
  * Default capabilities for PostgreSQL.
  */
 export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
-  transactions: true, // PostgreSQL supports transactions
+  execution: Object.freeze({
+    interactiveTransactions: true,
+    atomicBatch: "none",
+    unitOfWork: "interactive",
+  }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
+  orderedAggregates: true,
+  clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2
+  // The bundled schema ships both claim relations and the shared operation
+  // backend implements every claim member.
+  constraintClaims: true,
+  durableEdgeMatchIdentity: true,
+  atomicNodeInsertClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
+  recursiveTraversal: Object.freeze({ supported: true }),
+  writeFence: Object.freeze({
+    mechanism: "advisory",
+    drain: "table-lock",
+  }),
 });

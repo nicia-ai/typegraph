@@ -12,8 +12,14 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
+import { LEGACY_EMBEDDINGS_TABLE_NAME as LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA } from "../src/backend/drizzle/schema/sqlite";
 import { migrateLegacyEmbeddings } from "../src/backend/migrate-vectors";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { LEGACY_EMBEDDINGS_TABLE_NAME as LEGACY_EMBEDDINGS_TABLE_NAME_FROM_TABLE_NAMES } from "../src/backend/table-names";
 import { type GraphBackend } from "../src/backend/types";
 import {
   renderSqlInline,
@@ -305,10 +311,9 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
   });
 
   it("throws when the backend has no vectorStrategy", async () => {
-    const strategyless: GraphBackend = {
-      ...backend,
-      vectorStrategy: undefined,
-    };
+    const strategyless: GraphBackend = projectBackendWithout(backend, [
+      "vectorStrategy",
+    ]);
     await expect(
       migrateLegacyEmbeddings({ backend: strategyless }),
     ).rejects.toThrow(/requires a backend wired with a vectorStrategy/u);
@@ -371,18 +376,26 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
       },
     ];
     let reads = 0;
-    const wrapped: GraphBackend = {
-      ...backend,
+    const wrapped: GraphBackend = deriveBackend(backend, {
       execute: (() => {
         reads += 1;
         return Promise.resolve(reads === 1 ? malformedBatch : []);
       }) as GraphBackend["execute"],
-    };
+    });
 
     const result = await migrateLegacyEmbeddings({ backend: wrapped });
 
     expect(result.migrated).toBe(1);
     expect(result.perField).toEqual({ "Document.embedding": 1 });
     expect(result.skippedDecodeError).toEqual({ "Document.embedding": 1 });
+  });
+});
+
+describe("LEGACY_EMBEDDINGS_TABLE_NAME", () => {
+  it("resolves to one value at both addresses", () => {
+    expect(LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA).toBe(
+      LEGACY_EMBEDDINGS_TABLE_NAME_FROM_TABLE_NAMES,
+    );
+    expect(LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA).toBe(LEGACY_TABLE);
   });
 });

@@ -4,6 +4,17 @@ packages:
 
 onlyBuiltDependencies:
   - "@ladybugdb/core"
-  - better-sqlite3
   - esbuild
   - workerd
+
+ignoredBuiltDependencies:
+  - better-sqlite3
+
+# Starlight 0.43 and starlight-blog 0.30 depend on satteri ^0.10 while
+# @astrojs/markdown-satteri 0.4.10 needs ^0.11. Two versions break the docs
+# build: Vite bundles satteri's JS, and the bundle loads the native addon by
+# bare name, which resolves to whichever version pnpm hoisted. One version
+# removes that dependency on hoist order. Drop this once Starlight and
+# starlight-blog depend on satteri 0.11.
+overrides:
+  satteri: 0.11.7

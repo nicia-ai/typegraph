@@ -3,58 +3,397 @@
  */
 import { ValidationError } from "../errors";
 import { validateCanonicalIsoDate } from "../utils/date";
+import {
+  assertGraphAllocationOwner,
+  type GraphAllocationOwner,
+} from "./allocation-owner";
 import { type TemporalMode } from "./types";
 
+const RECORDED_INSTANT_VERSION = "r2";
+const ORIGIN_RECORDED_INSTANT_PATTERN =
+  /^r2:([A-Za-z0-9._~-]+):([a-f0-9]{32}):(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
+const ENGINE_INSTANT_VERSION = "e1";
+const RECORDED_REVISION_WIDTH = 16;
+/** Open interval ceiling for numeric recorded-revision columns. */
+export const RECORDED_MAX_REVISION = Number.MAX_SAFE_INTEGER;
+/** The first revision a graph records; nothing is recorded before it. */
+export const RECORDED_FIRST_REVISION = 1;
+
 /**
- * Open-ended recorded-time sentinel. Chosen so SQLite text ordering and
- * PostgreSQL `timestamptz` ordering both put every real commit instant before
- * the open interval end.
+ * Whether `revision` is one a TypeGraph recorded instant can carry: a safe
+ * integer from {@link RECORDED_FIRST_REVISION} up to, not including,
+ * {@link RECORDED_MAX_REVISION}. The one range check behind minting an
+ * instant, parsing one, and accepting a revision from an interchange
+ * document — a value any of them admitted and another refused would be stored
+ * and then unreadable.
  */
-export const RECORDED_MAX = "9999-12-31T23:59:59.999Z";
+export function isRecordedRevision(revision: number): boolean {
+  return (
+    Number.isSafeInteger(revision) &&
+    revision >= RECORDED_FIRST_REVISION &&
+    revision < RECORDED_MAX_REVISION
+  );
+}
+const RECORDED_INSTANT_PATTERN =
+  /^r1:(\d{16}):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
+/**
+ * Engine-native form: `e1:<opaque engine revision>:<canonical ISO instant>`.
+ * The revision is whatever URL-safe token the engine itself hands back from
+ * `EngineRecordedTimeMembers.revisionNow` — never parsed as a number, so the
+ * charset is deliberately the unreserved RFC 3986 set rather than digits.
+ */
+const ENGINE_INSTANT_PATTERN =
+  /^e1:([A-Za-z0-9._~-]+):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/;
 
 declare const RECORDED_INSTANT_BRAND: unique symbol;
 
 /**
- * A canonical UTC ISO-8601 recorded-time instant (`YYYY-MM-DDTHH:mm:ss.sssZ`),
- * nominally branded so it can only originate from a recorded-time source —
- * {@link Store.recordedNow} or an explicit {@link asRecordedInstant} — never an
- * ad-hoc wall-clock string.
+ * A versioned recorded-time anchor, in one of two forms sharing one grammar:
+ * TypeGraph: `r2:<graph origin>:<namespace digest>:<revision>:<recordedAt>`; engine: `e1:<revision>:<recordedAt>`.
+ * Legacy `r1:` strings remain parseable for migration, but cannot authorize reads.
  *
- * The recorded commit clock is a logical, monotonic per-graph instant that can
- * run briefly ahead of wall time under bursty same-millisecond writes, so a raw
- * `new Date().toISOString()` may sort *before* the most recent commits and
- * silently omit them. The brand turns that footgun into a compile error:
- * `store.asOfRecorded` accepts only a `RecordedInstant`, so a bare wall-clock
- * string no longer type-checks — callers reach for `await store.recordedNow()`
- * (the monotonic high-water mark) or {@link asRecordedInstant} instead.
+ * - `r2:<graph origin>:<namespace digest>:0000000000000001:YYYY-MM-DDTHH:mm:ss.sssZ` — TypeGraph's own form. The
+ *   fixed-width logical revision is strictly monotonic per graph and makes
+ *   every commit addressable even when many commits share one wall-clock
+ *   millisecond.
+ * - `e1:<engine revision>:YYYY-MM-DDTHH:mm:ss.sssZ` — engine-native form,
+ *   minted by a backend that supplies `GraphBackend.recordedTime`. The
+ *   revision is an opaque token the engine itself assigns, never a TypeGraph
+ *   counter; ordering between two engine-native anchors compares the
+ *   timestamp only (see {@link compareRecordedInstants}).
+ *
+ * Either form's timestamp is a non-decreasing physical wall-time high-water
+ * mark used by diagonal valid-time reads: same-millisecond commits repeat it,
+ * and backward clock corrections hold it at the previous value until wall
+ * time catches up. The string round-trips through plain string checkpoint
+ * columns without a custom serializer.
  */
 export type RecordedInstant = string & {
   readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
+/**
+ * A recorded instant ANOTHER graph minted, carried into this one by an
+ * archival restore of its identity transitions: the source graph's revision
+ * and wall time, kept verbatim. It has a {@link RecordedInstant}'s string form
+ * but names a position on the source's recorded axis, so it carries a
+ * different brand value and `store.asOfRecorded` does not accept it — a read
+ * anchored on it would answer about this graph at a revision this graph never
+ * allocated for that event.
+ */
+export type RestoredRecordedInstant = string & {
+  readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
+
+/**
+ * The parsed halves of a TypeGraph-owned (`r2:` or legacy `r1:`) recorded instant. Not
+ * exported on its own — callers narrow {@link RecordedInstantParts} by
+ * `kind` rather than naming either variant directly.
+ */
+type TypeGraphRecordedInstantParts = Readonly<{
+  kind: "typegraph";
+  /** Absent only on legacy r1 anchors, which cannot authorize a recorded read. */
+  origin?: string;
+  namespace?: string;
+  revision: number;
+  recordedAt: string;
+}>;
+
+/**
+ * The parsed halves of an engine-native (`e1:`) recorded instant. Not
+ * exported on its own — see {@link TypeGraphRecordedInstantParts}.
+ */
+type EngineRecordedInstantParts = Readonly<{
+  kind: "engine";
+  revision: string;
+  recordedAt: string;
+}>;
+
+/**
+ * The parsed halves of a {@link RecordedInstant}, discriminated by which
+ * ownership form minted it. {@link parseRecordedInstant} is the one owner of
+ * this grammar for both forms — a caller that needs the TypeGraph-only
+ * numeric revision (or the engine-only opaque one) narrows on `kind` rather
+ * than re-deriving the parse.
+ */
+export type RecordedInstantParts =
+  TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
+
+function invalidRecordedInstant(value: string, path: string): ValidationError {
+  return new ValidationError(
+    `${path} must be a canonical versioned recorded instant.`,
+    {
+      issues: [
+        {
+          path,
+          message: `Expected ${RECORDED_INSTANT_VERSION}:<origin>:<namespace>:<${RECORDED_REVISION_WIDTH}-digit revision>:YYYY-MM-DDTHH:mm:ss.sssZ or ${ENGINE_INSTANT_VERSION}:<engine revision>:YYYY-MM-DDTHH:mm:ss.sssZ, got "${value}"`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        "Persist the exact string returned by store.recordedNow(); migrate preview-schema checkpoints with migrateLegacyRecordedTime() and migrateRecordedAnchor().",
+    },
+  );
+}
+
+export function parseRecordedInstant(
+  value: string,
+  path = "RecordedInstant",
+): RecordedInstantParts {
+  const boundMatch = ORIGIN_RECORDED_INSTANT_PATTERN.exec(value);
+  const typeGraphMatch =
+    boundMatch === null ?
+      RECORDED_INSTANT_PATTERN.exec(value)
+    : [boundMatch[0], boundMatch[3], boundMatch[4]];
+  if (typeGraphMatch !== null) {
+    const revisionText = typeGraphMatch[1];
+    const recordedAt = typeGraphMatch[2];
+    if (revisionText === undefined || recordedAt === undefined) {
+      throw invalidRecordedInstant(value, path);
+    }
+    const revision = Number(revisionText);
+    if (!isRecordedRevision(revision)) {
+      throw invalidRecordedInstant(value, path);
+    }
+    validateCanonicalIsoDate(recordedAt, path);
+    const origin = boundMatch?.[1];
+    const namespace = boundMatch?.[2];
+    return {
+      kind: "typegraph",
+      revision,
+      recordedAt,
+      ...(origin === undefined || namespace === undefined ?
+        {}
+      : { origin, namespace }),
+    };
+  }
+  const engineMatch = ENGINE_INSTANT_PATTERN.exec(value);
+  if (engineMatch !== null) {
+    const revision = engineMatch[1];
+    const recordedAt = engineMatch[2];
+    if (revision === undefined || recordedAt === undefined) {
+      throw invalidRecordedInstant(value, path);
+    }
+    validateCanonicalIsoDate(recordedAt, path);
+    return { kind: "engine", revision, recordedAt };
+  }
+  throw invalidRecordedInstant(value, path);
+}
+
 export function assertValidRecordedInstant(value: string, path: string): void {
-  validateCanonicalIsoDate(value, path);
-  if (value >= RECORDED_MAX) {
+  parseRecordedInstant(value, path);
+}
+
+/**
+ * Splits an optional recorded anchor into its parsed halves — the revision
+ * (a numeric TypeGraph counter or an opaque engine token, discriminated by
+ * `kind`) that a recorded read narrows to, and the wall time that valid-time
+ * windows are measured against. Compilers that consult both halves parse once
+ * through this instead of per predicate.
+ */
+export function optionalRecordedInstantParts(
+  value: string | undefined,
+  path = "RecordedInstant",
+): RecordedInstantParts | undefined {
+  return value === undefined ? undefined : parseRecordedInstant(value, path);
+}
+
+/** Construct an owner-bound instant for an externally managed recorded relation. Ownership is attested by its reader. */
+export function recordedInstant(
+  coordinate: Readonly<{
+    revision: number;
+    wallTime: string;
+    owner: GraphAllocationOwner;
+  }>,
+): RecordedInstant {
+  // JavaScript callers must also refuse a missing owner rather than minting a legacy token.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  if (coordinate.owner === undefined)
     throw new ValidationError(
-      `${path} must be before the recorded-time open sentinel ${RECORDED_MAX}.`,
+      "A recorded instant requires an allocation owner.",
+      { issues: [{ path: "owner", message: "Expected GraphAllocationOwner" }] },
+    );
+  return createRecordedInstant(
+    coordinate.revision,
+    coordinate.wallTime,
+    coordinate.owner,
+  );
+}
+
+/** Mints an origin-bound TypeGraph anchor, or an unbound legacy anchor for migration. */
+export function createRecordedInstant(
+  revision: number,
+  recordedAt: string,
+  owner?: GraphAllocationOwner,
+): RecordedInstant {
+  if (!isRecordedRevision(revision)) {
+    throw new ValidationError(
+      "createRecordedInstant revision must be a valid recorded revision.",
       {
         issues: [
           {
-            path,
-            message: `Expected a timestamp before ${RECORDED_MAX}, got "${value}"`,
+            path: "createRecordedInstant.revision",
+            message: `Expected a safe integer from ${String(RECORDED_FIRST_REVISION)} through ${String(RECORDED_MAX_REVISION - 1)}, got ${String(revision)}`,
+          },
+        ],
+      },
+    );
+  }
+  const revisionText = revision
+    .toString()
+    .padStart(RECORDED_REVISION_WIDTH, "0");
+  return asRecordedInstant(
+    owner === undefined ?
+      `r1:${revisionText}:${recordedAt}`
+    : `${RECORDED_INSTANT_VERSION}:${owner.origin}:${owner.namespace}:${revisionText}:${recordedAt}`,
+  );
+}
+
+/**
+ * Mints an engine-native (`e1:`) recorded instant from the revision an
+ * `EngineRecordedTimeMembers.revisionNow` call returned. `revision` is opaque
+ * and never parsed as a number, but it must still be non-empty and safe to
+ * embed in the colon-delimited grammar, so it is restricted to the RFC 3986
+ * unreserved charset (letters, digits, `. _ ~ -`).
+ */
+export function createEngineRecordedInstant(
+  revision: string,
+  recordedAt: string,
+): RecordedInstant {
+  if (!/^[A-Za-z0-9._~-]+$/.test(revision)) {
+    throw new ValidationError(
+      "createEngineRecordedInstant revision must be a non-empty URL-safe token.",
+      {
+        issues: [
+          {
+            path: "createEngineRecordedInstant.revision",
+            message: `Expected one or more of [A-Za-z0-9._~-], got ${JSON.stringify(revision)}`,
+          },
+        ],
+      },
+    );
+  }
+  return asRecordedInstant(
+    `${ENGINE_INSTANT_VERSION}:${revision}:${recordedAt}`,
+  );
+}
+
+/**
+ * Returns the canonical UTC wall-time component of a recorded anchor. Works
+ * for both ownership forms — every {@link RecordedInstantParts} variant
+ * carries `recordedAt`.
+ *
+ * The value is non-decreasing per graph, but it is not the commit-order key;
+ * use the complete {@link RecordedInstant} when ordering or replaying commits.
+ */
+export function recordedInstantWallTime(instant: RecordedInstant): string {
+  return parseRecordedInstant(instant).recordedAt;
+}
+
+/** Full ownership coordinate; raw origin alone is insufficient for comparing allocations. */
+export function recordedInstantOwner(
+  instant: RecordedInstant,
+): GraphAllocationOwner | undefined {
+  const parts = parseRecordedInstant(instant);
+  return (
+      parts.kind === "typegraph" &&
+        parts.origin !== undefined &&
+        parts.namespace !== undefined
+    ) ?
+      { origin: parts.origin, namespace: parts.namespace }
+    : undefined;
+}
+
+/**
+ * Returns the strict per-graph logical revision carried by a TypeGraph-owned
+ * (`r2:` or legacy `r1:`) anchor. TypeGraph's numeric revision is meaningless for an
+ * engine-native (`e1:`) anchor, so this refuses one rather than returning a
+ * number parsed from an opaque token.
+ *
+ * @throws {ValidationError} when `instant` is an engine-native anchor.
+ */
+export function recordedInstantRevision(instant: RecordedInstant): number {
+  const parts = parseRecordedInstant(instant);
+  if (parts.kind !== "typegraph") {
+    throw new ValidationError(
+      "recordedInstantRevision requires a TypeGraph-owned recorded instant.",
+      {
+        issues: [
+          {
+            path: "recordedInstantRevision.instant",
+            message: `Expected a TypeGraph anchor, got an engine-native (e1) anchor with opaque revision "${parts.revision}"`,
           },
         ],
       },
       {
         suggestion:
-          "Use a real recorded-time commit instant, not the open-interval sentinel.",
+          "Use recordedInstantWallTime(instant) for a value that works on both anchor forms.",
       },
     );
   }
+  return parts.revision;
 }
 
 /**
- * Brands a canonical UTC ISO-8601 string as a {@link RecordedInstant}.
+ * Compares two recorded anchors of the SAME ownership form.
+ *
+ * For TypeGraph-owned (`r2:` or legacy `r1:`) anchors, comparison is by logical revision:
+ * revisions are local to a graph, so only compare anchors produced by the
+ * same graph, and the physical wall-time component deliberately does not
+ * participate. For engine-native (`e1:`) anchors there is no shared numeric
+ * counter to compare — the engine's revision token is opaque — so comparison
+ * falls back to the canonical ISO timestamp, which is lexicographically
+ * ordered.
+ *
+ * Caveat for engine-native anchors: the timestamp has millisecond
+ * resolution, so two distinct engine revisions minted within the same
+ * millisecond compare equal here even though they are not the same commit.
+ * TypeGraph-owned anchors have no such gap — their logical revision is a
+ * strict per-commit counter — so this caveat is specific to the
+ * timestamp-only fallback, not a general property of recorded-instant
+ * comparison.
+ *
+ * @throws {ValidationError} when ownership forms differ.
+ * @throws {GraphAllocationMismatchError} when allocation owners differ.
+ */
+export function compareRecordedInstants(
+  left: RecordedInstant,
+  right: RecordedInstant,
+): -1 | 0 | 1 {
+  const leftParts = parseRecordedInstant(left);
+  const rightParts = parseRecordedInstant(right);
+  if (leftParts.kind !== rightParts.kind) {
+    throw new ValidationError(
+      "compareRecordedInstants requires both anchors to share the same recorded-time ownership form.",
+      {
+        issues: [
+          {
+            path: "compareRecordedInstants",
+            message: `Got a "${leftParts.kind}" anchor and a "${rightParts.kind}" anchor.`,
+          },
+        ],
+      },
+    );
+  }
+  if (leftParts.kind === "typegraph" && rightParts.kind === "typegraph") {
+    const leftOwner = recordedInstantOwner(left),
+      rightOwner = recordedInstantOwner(right);
+    if (leftOwner !== undefined)
+      assertGraphAllocationOwner(leftOwner, rightOwner);
+    else if (rightOwner !== undefined)
+      assertGraphAllocationOwner(rightOwner, leftOwner);
+    if (leftParts.revision < rightParts.revision) return -1;
+    if (leftParts.revision > rightParts.revision) return 1;
+    return 0;
+  }
+  if (leftParts.recordedAt < rightParts.recordedAt) return -1;
+  if (leftParts.recordedAt > rightParts.recordedAt) return 1;
+  return 0;
+}
+
+/**
+ * Brands a canonical versioned anchor string as a {@link RecordedInstant}.
  *
  * The escape hatch for an instant that round-trips through untyped storage:
  * captured from {@link Store.recordedNow}, persisted as a plain string, read
@@ -64,7 +403,7 @@ export function assertValidRecordedInstant(value: string, path: string): void {
  * real captured commit; it only guarantees the value is well-formed enough to
  * compare correctly against the recorded relations.
  *
- * @throws {ValidationError} when `value` is not a canonical UTC ISO-8601 string.
+ * @throws {ValidationError} when `value` is not a canonical versioned anchor.
  */
 export function asRecordedInstant(value: string): RecordedInstant {
   assertValidRecordedInstant(value, "asRecordedInstant");
@@ -149,6 +488,27 @@ export function withRecordedCoordinate(
     ...coordinate,
     recorded: { asOf: recordedAsOf },
   };
+}
+
+/**
+ * THE diagonal recorded coordinate: the recorded-time relation at the
+ * anchor's logical revision, read from the valid instant the anchor itself
+ * was recorded at. One constructor for `store.asOfRecorded(T)` and for
+ * identity replay, so a replayed step and a recorded view pinned to that
+ * step's own anchor are the same read by construction.
+ *
+ * @param suggestion - Caller-specific remediation hint for an invalid anchor.
+ */
+export function recordedDiagonalCoordinate(
+  recordedAsOf: RecordedInstant,
+  suggestion?: string,
+): ReadCoordinate {
+  const validCoordinate = resolveReadCoordinate(
+    "asOf",
+    recordedInstantWallTime(recordedAsOf),
+    suggestion,
+  );
+  return withRecordedCoordinate(validCoordinate, recordedAsOf);
 }
 
 /**

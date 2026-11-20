@@ -24,10 +24,10 @@ export const META_EDGE_RELATED_TO = "relatedTo" as const;
 /** Same class, different representation */
 export const META_EDGE_EQUIVALENT_TO = "equivalentTo" as const;
 
-/** Same individual (for deduplication) */
+/** Deprecated type-level equivalence alias */
 export const META_EDGE_SAME_AS = "sameAs" as const;
 
-/** Explicitly different individuals */
+/** Deprecated decorative type-level non-identity relation */
 export const META_EDGE_DIFFERENT_FROM = "differentFrom" as const;
 
 /** Mutually exclusive types */
@@ -65,3 +65,24 @@ export const ALL_META_EDGE_NAMES = [
 ] as const;
 
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
+
+// ============================================================
+// Structural Subsumption Meta-Edges
+// ============================================================
+
+/**
+ * The meta-edges the structural-subsumption contract applies to:
+ * `subClassOf` (always one direction), and `equivalentTo`/`sameAs` (mutual
+ * subsumption in both directions). The one owner of "is this relation a
+ * subsumption relation" — `src/registry/build-validated.ts` and
+ * `src/schema/migration.ts` both classify relations against this set rather
+ * than re-spelling the membership test.
+ */
+export function isSubsumptionMetaEdge(metaEdge: string): boolean {
+  return metaEdge === META_EDGE_SUB_CLASS_OF || isEquivalenceMetaEdge(metaEdge);
+}
+
+/** Whether `metaEdge` declares mutual subsumption: `equivalentTo` or `sameAs`. */
+export function isEquivalenceMetaEdge(metaEdge: string): boolean {
+  return metaEdge === META_EDGE_EQUIVALENT_TO || metaEdge === META_EDGE_SAME_AS;
+}

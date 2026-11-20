@@ -22,7 +22,9 @@
  *      removed kind are also cascading-removed.
  */
 import { type GraphDef } from "../core/define-graph";
+import { projectTargetKinds } from "../core/edge-endpoints";
 import { getTypeName } from "../ontology/types";
+import { createDataKeyedBag } from "../utils/object";
 import {
   KindHasReferentsError,
   type KindReferent,
@@ -104,17 +106,18 @@ export function planRemovals<G extends GraphDef>(
     runtimeEdgeNames.has(name),
   );
 
-  // Compile-time-edge referent check: a graph-extension kind being
-  // removed cannot remain a target of any compile-time edge or ontology
-  // relation, because the compile-time declaration would resurrect the
-  // reference on the next deploy. Pre-build an inverted index of
-  // `kindName → referents` once so the per-kind check is O(1) instead
-  // of walking all edges + ontology per removed kind.
+  // Compile-time referent check: a graph-extension kind being removed
+  // cannot remain a target of any compile-time edge or ontology relation —
+  // as an edge endpoint, or as the `via` a compile-time
+  // composition relation realizes through — because the compile-time
+  // declaration would resurrect the reference on the next deploy. Pre-build
+  // an inverted index of `kindName → referents` once so the per-kind check
+  // is O(1) instead of walking all edges + ontology per removed kind.
   const referentsByKind = buildCompileTimeReferentIndex(
     graph,
     runtimeEdgeNames,
   );
-  for (const kindName of removedNodeKinds) {
+  for (const kindName of [...removedNodeKinds, ...explicitlyRemovedEdgeKinds]) {
     const referents = referentsByKind.get(kindName);
     if (referents !== undefined && referents.length > 0) {
       throw new KindHasReferentsError(kindName, referents, graph.id);
@@ -135,22 +138,46 @@ export function planRemovals<G extends GraphDef>(
   const removedNodeKindsSet = new Set(removedNodeKinds);
   const explicitlyRemovedEdgeKindsSet = new Set(explicitlyRemovedEdgeKinds);
   const cascadeEdges = new Set<string>();
-  const updatedEdges: Record<string, ExtensionEdgeDef> = {};
+  // Data-keyed: edge kind names read out of the persisted document.
+  const updatedEdges = createDataKeyedBag<ExtensionEdgeDef>();
 
   for (const [edgeName, edgeDocument] of Object.entries(document.edges ?? {})) {
     if (explicitlyRemovedEdgeKindsSet.has(edgeName)) {
       cascadeEdges.add(edgeName);
       continue;
     }
-    const newFrom = edgeDocument.from.filter(
+    let newFrom = edgeDocument.from.filter(
       (kind) => !removedNodeKindsSet.has(kind),
     );
-    const newTo = edgeDocument.to.filter(
-      (kind) => !removedNodeKindsSet.has(kind),
-    );
-    if (newFrom.length === 0 || newTo.length === 0) {
-      cascadeEdges.add(edgeName);
-      continue;
+    const edgeTo = edgeDocument.to;
+    let newTo: readonly string[] | Record<string, readonly string[]>;
+    if (Array.isArray(edgeTo)) {
+      newTo = (edgeTo as readonly string[]).filter(
+        (kind: string): boolean => !removedNodeKindsSet.has(kind),
+      );
+      if (newFrom.length === 0 || newTo.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+    } else {
+      const updatedMap = createDataKeyedBag<readonly string[]>();
+      const targetMap = edgeTo as Readonly<Record<string, readonly string[]>>;
+      const survivingFrom: string[] = [];
+      for (const sourceKind of newFrom) {
+        const targets = (targetMap[sourceKind] ?? []).filter(
+          (kind: string): boolean => !removedNodeKindsSet.has(kind),
+        );
+        if (targets.length > 0) {
+          survivingFrom.push(sourceKind);
+          updatedMap[sourceKind] = targets;
+        }
+      }
+      if (survivingFrom.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+      newFrom = survivingFrom;
+      newTo = updatedMap;
     }
     updatedEdges[edgeName] = {
       ...edgeDocument,
@@ -160,22 +187,31 @@ export function planRemovals<G extends GraphDef>(
   }
 
   // Filter nodes — explicit removals are dropped.
-  const updatedNodes: Record<string, ExtensionNodeDef> = {};
+  // Data-keyed: node kind names read out of the persisted document.
+  const updatedNodes = createDataKeyedBag<ExtensionNodeDef>();
   for (const [nodeName, nodeDocument] of Object.entries(document.nodes ?? {})) {
     if (removedNodeKindsSet.has(nodeName)) continue;
     updatedNodes[nodeName] = nodeDocument;
   }
 
-  // Drop ontology relations referencing any removed kind. The compile-
-  // time-referent check above already rejects compile-time-side
-  // ontology referencing the removed kind, so any remaining ontology
-  // is safe to filter.
+  // Drop ontology relations referencing any removed kind — a `from`/`to`
+  // node endpoint, or the edge kind a composition relation names
+  // as its `via`: an edge cascade-dropped for losing its last endpoint
+  // orphans that relation's `via` exactly as surely as removing an endpoint
+  // node does. The compile-time-referent check above already rejects
+  // compile-time-side ontology referencing a removed kind (as an endpoint
+  // or as `via`), so any remaining ontology is safe to filter.
+  const removedEdgeKindsSet = new Set([
+    ...cascadeEdges,
+    ...explicitlyRemovedEdgeKindsSet,
+  ]);
   const survivingOntology: ExtensionOntologyRelation[] = (
     document.ontology ?? []
   ).filter(
     (relation) =>
       !removedNodeKindsSet.has(relation.from) &&
-      !removedNodeKindsSet.has(relation.to),
+      !removedNodeKindsSet.has(relation.to) &&
+      (relation.via === undefined || !removedEdgeKindsSet.has(relation.via)),
   );
 
   // Drop graph-extension indexes referencing removed kinds (relational + edge
@@ -185,8 +221,7 @@ export function planRemovals<G extends GraphDef>(
   // against the smaller node set).
   const allRemovedKinds = new Set([
     ...removedNodeKindsSet,
-    ...cascadeEdges,
-    ...explicitlyRemovedEdgeKindsSet,
+    ...removedEdgeKindsSet,
   ]);
   const survivingIndexes: ExtensionIndex[] = (document.indexes ?? []).filter(
     (index) => !allRemovedKinds.has(index.kind),
@@ -194,8 +229,15 @@ export function planRemovals<G extends GraphDef>(
 
   const newDocument: GraphExtension = Object.freeze({
     ...(document.version === undefined ? {} : { version: document.version }),
-    ...(Object.keys(updatedNodes).length === 0 ? {} : { nodes: updatedNodes }),
-    ...(Object.keys(updatedEdges).length === 0 ? {} : { edges: updatedEdges }),
+    // Spread at the boundary: these land on the returned extension document,
+    // which is public as `graph.extension`. See `createDataKeyedBag` in
+    // ../utils/object.ts.
+    ...(Object.keys(updatedNodes).length === 0 ?
+      {}
+    : { nodes: { ...updatedNodes } }),
+    ...(Object.keys(updatedEdges).length === 0 ?
+      {}
+    : { edges: { ...updatedEdges } }),
     ...(survivingOntology.length === 0 ? {} : { ontology: survivingOntology }),
     ...(survivingIndexes.length === 0 ? {} : { indexes: survivingIndexes }),
   });
@@ -229,12 +271,14 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     extensionKindNames(document);
   const runtimeOntologyKeys = buildGraphExtensionOntologyKeySet(document);
 
-  const compileNodes: Record<string, (typeof graph.nodes)[string]> = {};
+  // Data-keyed: registered node kind names.
+  const compileNodes = createDataKeyedBag<(typeof graph.nodes)[string]>();
   for (const [name, registration] of Object.entries(graph.nodes)) {
     if (runtimeNodeNames.has(name)) continue;
     compileNodes[name] = registration;
   }
-  const compileEdges: Record<string, (typeof graph.edges)[string]> = {};
+  // Data-keyed: registered edge kind names.
+  const compileEdges = createDataKeyedBag<(typeof graph.edges)[string]>();
   for (const [name, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(name)) continue;
     compileEdges[name] = registration;
@@ -248,10 +292,12 @@ export function stripGraphExtension<G extends GraphDef>(graph: G): G {
     (index) => index.origin !== "runtime",
   );
 
+  // Spread at the boundary: these become `graph.nodes` / `graph.edges` on the
+  // returned (public) `GraphDef`.
   return Object.freeze({
     ...graph,
-    nodes: compileNodes,
-    edges: compileEdges,
+    nodes: { ...compileNodes },
+    edges: { ...compileEdges },
     ontology: compileOntology,
     indexes: compileIndexes.length === 0 ? undefined : compileIndexes,
     extension: undefined,
@@ -277,24 +323,20 @@ function buildCompileTimeReferentIndex<G extends GraphDef>(
 
   for (const [edgeName, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(edgeName)) continue;
-    const reg = registration as {
-      from?: readonly { kind: string }[];
-      to?: readonly { kind: string }[];
-    };
     const referent: KindReferent = {
       type: "compile-time-edge",
       name: edgeName,
     };
     const seen = new Set<string>();
-    for (const endpoint of reg.from ?? []) {
+    for (const endpoint of registration.from) {
       if (seen.has(endpoint.kind)) continue;
       seen.add(endpoint.kind);
       append(endpoint.kind, referent);
     }
-    for (const endpoint of reg.to ?? []) {
-      if (seen.has(endpoint.kind)) continue;
-      seen.add(endpoint.kind);
-      append(endpoint.kind, referent);
+    for (const toKind of projectTargetKinds(registration.to)) {
+      if (seen.has(toKind)) continue;
+      seen.add(toKind);
+      append(toKind, referent);
     }
   }
 
@@ -311,6 +353,11 @@ function buildCompileTimeReferentIndex<G extends GraphDef>(
     };
     append(fromName, referent);
     if (toName !== fromName) append(toName, referent);
+    // A composition relation's `via` names the edge kind it is realized
+    // through — a referent exactly like an endpoint, since
+    // removing that edge would orphan the compile-time relation just the
+    // same as removing one of its node endpoints would.
+    if (relation.via !== undefined) append(relation.via, referent);
   }
 
   return index;

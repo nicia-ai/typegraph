@@ -614,9 +614,13 @@ describe("edge compilation", () => {
     expect(edge.from.map((endpoint) => endpointKind(endpoint))).toEqual([
       "Paper",
     ]);
-    expect(edge.to.map((endpoint) => endpointKind(endpoint))).toEqual([
-      "Author",
-    ]);
+    expect(
+      Array.isArray(edge.to) ?
+        (edge.to as readonly (NodeType | string)[]).map(
+          (endpoint: NodeType | string): string => endpointKind(endpoint),
+        )
+      : undefined,
+    ).toEqual(["Author"]);
   });
 
   it("preserves unresolved endpoints as raw strings for host-graph merge", () => {
@@ -655,6 +659,42 @@ describe("edge compilation", () => {
     // Resolved to NodeType references because both names are declared.
     expect(typeof relation.from).toBe("object");
     expect(typeof relation.to).toBe("object");
+  });
+
+  it("compiles a declarative sameAs relation to the internal sameAs meta-edge", () => {
+    // `sameAs` has no public factory (it was removed), but a
+    // declarative graph extension can still name it — `ALL_META_EDGE_NAMES`
+    // stays closed, not narrowed. `compileOntologyRelation` resolves the
+    // string via the internal `metaEdgesByName` record; this pins that the
+    // resolved object is actually named `sameAs`, not silently folded into
+    // `equivalentTo` by a mis-keyed lookup table.
+    const compiled = compileGraphExtension(
+      defineGraphExtension({
+        nodes: {
+          Podcast: { properties: { title: { type: "string" } } },
+          Media: { properties: { title: { type: "string" } } },
+        },
+        ontology: [{ metaEdge: "sameAs", from: "Podcast", to: "Media" }],
+      }),
+    );
+    expect(compiled.ontology).toHaveLength(1);
+    expect(requireDefined(compiled.ontology[0]).metaEdge.name).toBe("sameAs");
+  });
+
+  it("compiles a declarative differentFrom relation to the internal differentFrom meta-edge", () => {
+    const compiled = compileGraphExtension(
+      defineGraphExtension({
+        nodes: {
+          Podcast: { properties: { title: { type: "string" } } },
+          Media: { properties: { title: { type: "string" } } },
+        },
+        ontology: [{ metaEdge: "differentFrom", from: "Podcast", to: "Media" }],
+      }),
+    );
+    expect(compiled.ontology).toHaveLength(1);
+    expect(requireDefined(compiled.ontology[0]).metaEdge.name).toBe(
+      "differentFrom",
+    );
   });
 
   it("ontology endpoints that don't resolve fall through as IRI strings", () => {
@@ -1132,6 +1172,28 @@ describe("validation failures", () => {
     );
   });
 
+  /**
+   * The extension document's `properties` map is parsed JSON, so declared-field
+   * membership must be an OWN-key question. Under `in`, a field named after an
+   * `Object.prototype` member answers "declared" against the prototype, so a
+   * constraint on an undeclared `toString` was silently accepted and went on to
+   * index a field that does not exist.
+   */
+  it("rejects a unique constraint on an undeclared field named after a prototype member", () => {
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            N: {
+              properties: { id: { type: "string" } },
+              unique: [{ name: "by_to_string", fields: ["toString"] }],
+            },
+          },
+        }),
+      "UNKNOWN_UNIQUE_FIELD",
+    );
+  });
+
   it("rejects unique where predicates with unsupported ops", () => {
     expectInvalid(
       () =>
@@ -1189,6 +1251,20 @@ describe("validation failures", () => {
           },
         }),
       "INVALID_MODIFIER_TARGET",
+    );
+  });
+
+  it("rejects a node kind name containing the path-token separator", () => {
+    // Recursive walks key path tokens as `kind || U+001F || id`; the document
+    // grammar refuses the separator before compilation reaches defineNode.
+    expectInvalid(
+      () =>
+        defineGraphExtension({
+          nodes: {
+            "Show\u001FClip": { properties: { x: { type: "string" } } },
+          },
+        }),
+      "INVALID_KIND_NAME",
     );
   });
 
@@ -1385,11 +1461,11 @@ describe("document immutability", () => {
     expect(Object.isFrozen(document)).toBe(true);
     expect(Object.isFrozen(requireDefined(document.nodes))).toBe(true);
     expect(
-      Object.isFrozen(requireDefined(requireDefined(document.nodes)["N"])),
+      Object.isFrozen(requireDefined(requireDefined(document.nodes).N)),
     ).toBe(true);
     expect(
       Object.isFrozen(
-        requireDefined(requireDefined(document.nodes)["N"]).properties,
+        requireDefined(requireDefined(document.nodes).N).properties,
       ),
     ).toBe(true);
   });
@@ -1528,6 +1604,55 @@ describe("document format versioning", () => {
     expect(result.error.issues).toContainEqual(
       expect.objectContaining({
         path: "/nodes/N/displayName",
+        code: "INVALID_DOCUMENT_SHAPE",
+      }),
+    );
+  });
+
+  it("accepts cardinality and targetCardinality in STRICT mode (issue #610)", () => {
+    const result = validateGraphExtension(
+      {
+        nodes: {
+          Person: { properties: { name: { type: "string" } } },
+        },
+        edges: {
+          knows: {
+            from: ["Person"],
+            to: ["Person"],
+            properties: {},
+            cardinality: "one",
+            targetCardinality: "oneActive",
+          },
+        },
+      },
+      { strict: true },
+    );
+    expect(result.success).toBe(true);
+  });
+  // MUTATION CHECK (verified): remove `"cardinality"` and
+  // `"targetCardinality"` from `EDGE_BODY_KEYS`
+  // (`src/graph-extension/validation.ts`). This test fails — strict mode
+  // rejects both keys as unknown.
+
+  it("refuses an unknown targetCardinality value with the document-shape error", () => {
+    const result = validateGraphExtension({
+      nodes: {
+        Person: { properties: { name: { type: "string" } } },
+      },
+      edges: {
+        knows: {
+          from: ["Person"],
+          to: ["Person"],
+          properties: {},
+          targetCardinality: "atMostFive",
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error.issues).toContainEqual(
+      expect.objectContaining({
+        path: "/edges/knows/targetCardinality",
         code: "INVALID_DOCUMENT_SHAPE",
       }),
     );

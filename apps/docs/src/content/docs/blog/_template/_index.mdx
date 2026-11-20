@@ -1,0 +1,91 @@
+---
+# Copy this whole _template/ folder to start a new post, rename the folder
+# to something URL-friendly (the folder name becomes the slug, e.g.
+# blog/my-new-post/), AND rename this file from _index.mdx to index.mdx —
+# the leading underscore is deliberate: Starlight's docsLoader excludes
+# content by leading-underscore FILENAME (not parent directory), which is
+# what keeps this template out of the collection entirely — no route, not
+# in the dev-mode listing, not in RSS, and its image() fields are never
+# schema-validated (so there's no cover.png/social.png here yet; generate
+# real ones after renaming, per the instructions below). Dropping the
+# underscore when you rename to index.mdx is what makes a real post
+# routable. Delete this comment block once you've customized the rest.
+#
+# Directory-based posts (<slug>/index.mdx) route identically to a flat
+# <slug>.mdx — Starlight's docsLoader supports both — but keep everything
+# about one post together: this file, generate-images.mjs, cover.png, and
+# social.png.
+title: Post title
+# A valid YAML date. Posts are listed newest-first by this field.
+date: 2026-07-06
+# Shown in the blog index and tag/author pages. Supports basic Markdown.
+excerpt: One or two sentences summarizing the post.
+tags:
+  - announcements
+# Set featured: true to pin the post to a "Featured posts" sidebar group.
+# featured: true
+# Two images, generated together by the co-located generate-images.mjs in
+# this same folder — see that file, and src/content.config.ts for why
+# cover/social are separate fields. Customize generate-images.mjs first
+# (either edit the generic-fallback call it starts with, or replace it with
+# a bespoke diagram — see the "Step 0" decision in the blog-cover skill),
+# then:
+#   node generate-images.mjs --out-dir /tmp/blog-images
+# rasterize both SVGs to 1200x630 PNGs (e.g. via the `browse` skill: `goto
+# file://<svg.html>` + `screenshot`), and copy the results to ./cover.png
+# and ./social.png next to this file.
+#
+# `cover` is a title-free illustration — shown on the blog index and at the
+# top of the post itself.
+cover:
+  alt: "Abstract illustration of a TypeGraph node graph"
+  image: "./cover.png"
+# `social` bakes the title into the same illustration and is used ONLY for
+# the OG/Twitter share card (see src/components/starlight/Head.astro) — it
+# is never rendered on the page, so the title isn't shown twice.
+social:
+  alt: "Post title, for assistive tech and the share-card alt text"
+  image: "./social.png"
+# draft: true keeps a published (underscore-dropped) post visible in
+# `pnpm dev` but out of production builds — useful while you're still
+# writing. Remove it when the post is ready to publish.
+draft: true
+# UPDATE NOTES. A published post is a record of its time: never rewrite its
+# prose, numbers or dates. When a later release makes a statement untrue in a
+# way that would lead a reader to write code that fails or to misunderstand
+# current behavior, add a dated note with the <UpdateNote> component instead:
+#
+#   import UpdateNote from "../../../../components/blog/UpdateNote.astro";
+#
+#   <UpdateNote date="2026-11-16" version="0.75">
+#
+#   `thing()` was removed in 0.75. Use `otherThing()`; see
+#   [Batch Execution](/queries/execute#batch-execution).
+#
+#   </UpdateNote>
+#
+# - Where: immediately after the paragraph or code block it corrects, so the
+#   correction sits with the claim.
+# - What it says, in one to three sentences: what changed, since which
+#   version, and what to use now, with a link to the current docs page (check
+#   that the page and anchor exist).
+# - What it must not do: edit the original text, change its numbers or dates,
+#   or editorialize. It is a correction, not a retrospective.
+# - Props: `date` (ISO date of the update, required) and `version` (the
+#   release it refers to, optional). The body is Markdown. Keep a blank line
+#   after the opening tag and before the closing tag so the body is parsed as
+#   Markdown.
+# - Not for style, polish, or changes that do not affect what a reader would
+#   do; those leave the post as it is.
+# - Blog posts have no .md twin or llms.txt entry, so the note appears in the
+#   post's HTML only.
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+Write the post body here as Markdown. Because this is an `.mdx` file you can
+also import and use Astro components.
+
+End every post with the newsletter call-to-action so readers can subscribe:
+
+<NewsletterSignup />

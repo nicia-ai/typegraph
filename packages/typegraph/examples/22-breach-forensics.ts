@@ -23,9 +23,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type RecordedStoreView,
   type Store,
 } from "@nicia-ai/typegraph";
+import type { RecordedStoreView } from "@nicia-ai/typegraph/store";
 import { z } from "zod";
 
 import { requireDefined } from "../src/utils/presence";

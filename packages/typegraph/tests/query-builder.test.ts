@@ -18,16 +18,12 @@ import {
   avg,
   count,
   countDistinct,
-  countDistinctEdges,
-  countEdges,
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
   exists,
   field,
-  fieldRef,
   havingGt,
   havingGte,
   inSubquery,
@@ -40,14 +36,19 @@ import {
   sum,
   ValidationError,
 } from "../src";
+import { createQueryBuilder } from "../src/query";
 import {
   compileQuery,
   compileSetOperation,
   MAX_EXPLICIT_RECURSIVE_DEPTH,
 } from "../src/query/compiler";
+import { buildLateMaterializedOuterOrderBy } from "../src/query/compiler/emitter/standard-builders";
+import { compileOrderTerm } from "../src/query/order";
+import { sql as querySql } from "../src/query/sql-fragment";
+import { countDistinctEdges, countEdges, fieldRef } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
-import { toSqlWithParams } from "./sql-test-utils";
+import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 
 const Person = defineNode("Person", {
   schema: z.object({
@@ -56,6 +57,7 @@ const Person = defineNode("Person", {
     email: z.string().optional(),
     isActive: z.boolean().default(true),
     tags: z.array(z.string()).optional(),
+    created_at: z.string().optional(),
     metadata: z
       .object({
         source: z.string(),
@@ -81,6 +83,7 @@ const Company = defineNode("Company", {
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
+    created_at: z.string().optional(),
   }),
 });
 
@@ -109,6 +112,39 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+
+describe("ORDER BY SQL tokens", () => {
+  it("refuses malformed runtime direction and null-placement values", () => {
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc; SELECT 1" as "asc",
+        "last",
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc",
+        "last; SELECT 1" as "last",
+      ),
+    ).toThrow(/Invalid ORDER BY null placement/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "constructor" as "asc",
+        "last",
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
+    expect(() =>
+      compileOrderTerm(
+        querySql.raw("safe_column"),
+        "asc",
+        "__proto__" as "last",
+      ),
+    ).toThrow(/Invalid ORDER BY null placement/);
+  });
+});
 
 describe("Query Builder Basics", () => {
   it("creates a simple query for a single node kind", () => {
@@ -345,6 +381,27 @@ describe("Query Builder Basics", () => {
     expect(ast.orderBy?.[0]?.direction).toBe("asc");
   });
 
+  it("orders a declared temporal-named property through props before and after select", () => {
+    const beforeSelect = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .orderBy("p", "created_at", "asc")
+      .select((context) => context.p);
+    const afterSelect = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .select((context) => context.p)
+      .orderBy("p", "created_at", "asc");
+
+    for (const query of [beforeSelect, afterSelect]) {
+      const { sql } = toSqlWithParams(
+        compileQuery(query.toAst(), graph.id, "sqlite"),
+      );
+      expect(sql).toContain("ORDER BY json_extract");
+      expect(sql).toContain("ASC NULLS LAST");
+      expect(sql).toContain("p_props");
+      expect(sql).toContain("created_at");
+    }
+  });
+
   it("supports limit and offset for pagination", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
@@ -387,30 +444,60 @@ describe("Query Builder - Traversals", () => {
 
     expect(requireDefined(ast.traversals[0]).direction).toBe("in");
   });
+
+  it("orders a declared temporal-named edge property through props", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .to("Organization", "o")
+      .orderBy("e", "created_at", "asc")
+      .select((context) => context.o);
+    const { sql } = toSqlWithParams(
+      compileQuery(query.toAst(), graph.id, "sqlite"),
+    );
+
+    expect(sql).toContain("ORDER BY json_extract");
+    expect(sql).toContain("ASC NULLS LAST");
+    expect(sql).toContain("e_props");
+    expect(sql).toContain("created_at");
+  });
 });
 
 describe("Query Builder - Subclass Expansion", () => {
   it("expands queries to include subclasses when requested", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Organization", "o", { includeSubClasses: true })
+      .from("Organization", "o", { expansion: "subclasses" })
       .select((context) => context.o);
 
     const ast = query.toAst();
 
     expect(ast.start.kinds).toContain("Organization");
     expect(ast.start.kinds).toContain("Company");
-    expect(ast.start.includeSubClasses).toBe(true);
+    expect(ast.start.expansion).toBe("subclasses");
   });
 
-  it("does not expand subclasses by default", () => {
+  // A supertype query is polymorphic by default.
+  it("expands subclasses by default", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Organization", "o")
       .select((context) => context.o);
 
     const ast = query.toAst();
 
+    expect(ast.start.kinds).toContain("Organization");
+    expect(ast.start.kinds).toContain("Company");
+    expect(ast.start.expansion).toBe("subclasses");
+  });
+
+  it("does not expand subclasses when explicitly narrowed", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Organization", "o", { expansion: "exact" })
+      .select((context) => context.o);
+
+    const ast = query.toAst();
+
     expect(ast.start.kinds).toEqual(["Organization"]);
-    expect(ast.start.includeSubClasses).toBe(false);
+    expect(ast.start.expansion).toBe("exact");
   });
 });
 
@@ -492,14 +579,21 @@ describe("Query Compilation to SQL", () => {
 
     expect(sql).toContain("cte_o");
     expect(sql).toContain("typegraph_edges");
-    expect(sql).toContain("INNER JOIN");
+    // Bare JOIN is an inner join; the linear traversal plan omits the
+    // redundant INNER keyword.
+    expect(sql).toMatch(/\bJOIN\s+"typegraph_nodes"\s+n\s+ON/);
+    expect(sql).not.toContain("LEFT JOIN");
   });
 
   it("adds edge endpoint kind filters for outgoing traversals", () => {
+    // Pinned exact-kind: Organization is a subClassOf parent in this
+    // fixture graph, so an un-narrowed `.to()` would poly-expand to an
+    // `IN (...)` filter under the polymorphic default — this test is about the
+    // single-kind filter shape itself.
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
-      .from("Person", "p")
+      .from("Person", "p", { expansion: "exact" })
       .traverse("worksAt", "e")
-      .to("Organization", "o")
+      .to("Organization", "o", { expansion: "exact" })
       .select((context) => ({ p: context.p, o: context.o }));
 
     const sqlObject = compileQuery(query.toAst(), graph.id);
@@ -538,7 +632,62 @@ describe("Query Compilation to SQL", () => {
 
     expect(sql).toContain("n.kind = e.to_kind");
     expect(sql).toContain("cte_p.p_kind = e.from_kind");
-    expect(sql).toContain("cte_o.p_kind = cte_p.p_kind");
+    // The optimized linear plan carries the root row forward instead of
+    // joining the target CTE back to the root CTE.
+    expect(sql).toContain("cte_p.p_id = e.from_id");
+  });
+
+  it("projects a linear traversal chain from its terminal rowset without rejoining earlier CTEs", () => {
+    const knowsWithSince = defineEdge("knowsWithSince", {
+      schema: z.object({ since: z.string() }),
+    });
+    const traversalGraph = defineGraph({
+      id: "linear_projection_graph",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+      },
+      edges: {
+        knowsWithSince: {
+          type: knowsWithSince,
+          from: [Person],
+          to: [Person],
+        },
+        worksAt: {
+          type: worksAt,
+          from: [Person],
+          to: [Organization],
+        },
+      },
+    });
+    const traversalRegistry = buildKindRegistry(traversalGraph);
+    const query = createQueryBuilder<typeof traversalGraph>(
+      traversalGraph.id,
+      traversalRegistry,
+    )
+      .from("Person", "p")
+      .traverse("knowsWithSince", "e1")
+      .to("Person", "friend")
+      .traverse("worksAt", "e2")
+      .to("Organization", "company")
+      .select((context) => ({
+        starter: context.p.name,
+        since: context.e1.since,
+        friend: context.friend.name,
+        role: context.e2.role,
+        company: context.company.name,
+      }));
+
+    const sqlObject = compileQuery(query.toAst(), traversalGraph.id);
+    const { sql } = toSqlWithParams(sqlObject);
+    const finalSelect = sql.slice(sql.lastIndexOf("SELECT"));
+
+    expect(finalSelect).toMatch(/FROM\s+cte_company\b/);
+    expect(finalSelect).not.toMatch(/\bJOIN\s+cte_(?:p|friend)\b/);
+    expect(finalSelect).toContain("cte_company.p_props");
+    expect(finalSelect).toContain("cte_company.e1_props");
+    expect(finalSelect).toContain("cte_company.friend_props");
+    expect(finalSelect).toContain("cte_company.e2_props");
   });
 
   it("compiles bidirectional traversal when expand: inverse is enabled", () => {
@@ -580,6 +729,7 @@ describe("Query Compilation to SQL", () => {
     expect(sql).toContain("e.from_id");
     expect(sql).toContain("e.to_id");
     expect(sql).toContain("e.from_id = e.to_id");
+    expect(sql).toContain("e.from_kind = e.to_kind");
   });
 
   it("prunes unused traversal columns for selective projections", () => {
@@ -655,9 +805,31 @@ describe("Query Compilation to SQL", () => {
     );
     expect(sql).toContain('cte_friend."__tg_6:friend:4:name" AS "friend_name"');
     expect(sql).toContain(
-      'ORDER BY (cte_friend."__tg_6:friend:4:name" IS NULL)',
+      'ORDER BY cte_friend."__tg_6:friend:4:name" DESC NULLS FIRST',
     );
+    expect(sql).not.toContain('"__tg_6:friend:4:name" IS NULL');
     expect(sql).not.toContain("friend_props");
+
+    const outerOrderBy = buildLateMaterializedOuterOrderBy(selectiveAst);
+    expect(outerOrderBy).toBeDefined();
+    const outerOrderSql = toSqlString(requireDefined(outerOrderBy));
+    expect(outerOrderSql).toBe(
+      "ORDER BY cte_lm_topk.__lm_sk0 DESC NULLS FIRST, cte_lm_topk.__lm_sk1 DESC NULLS FIRST",
+    );
+    expect(outerOrderSql).not.toContain("IS NULL");
+
+    const malformedAst = {
+      ...selectiveAst,
+      orderBy: requireDefined(selectiveAst.orderBy).map((orderSpec, index) =>
+        index === 0 ?
+          { ...orderSpec, direction: "desc; SELECT 1" as "desc" }
+        : orderSpec,
+      ),
+    };
+    expect(() => {
+      const orderBy = buildLateMaterializedOuterOrderBy(malformedAst);
+      if (orderBy !== undefined) toSqlString(orderBy);
+    }).toThrow(/Invalid ORDER BY direction/);
   });
 
   it("does not collide CTE column names for aliases/fields that are ambiguous under naive underscore-joining", () => {
@@ -1075,7 +1247,10 @@ describe("Query Builder - Aggregations", () => {
 
     expect(ast.groupBy).toBeDefined();
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.alias).toBe("o");
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      alias: "o",
+    });
   });
 
   it("supports multiple GROUP BY fields", () => {
@@ -1108,7 +1283,10 @@ describe("Query Builder - Aggregations", () => {
     const ast = query.toAst();
 
     expect(ast.groupBy?.fields).toHaveLength(1);
-    expect(ast.groupBy?.fields[0]?.path).toEqual(["id"]);
+    expect(ast.groupBy?.fields[0]).toMatchObject({
+      __type: "field_ref",
+      path: ["id"],
+    });
   });
 
   it("field() throws error when 'props' is included in path", () => {
@@ -1598,8 +1776,8 @@ describe("Query Builder - Aggregations", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql } = toSqlWithParams(sqlObject);
 
-    // ORDER BY must use qualified column reference
-    expect(sql).toMatch(/ORDER BY.*cte_p\.p_props/);
+    // ORDER BY must use the carried root row in the final traversal CTE.
+    expect(sql).toMatch(/ORDER BY.*cte_friend\.p_props/);
   });
 });
 
@@ -1640,7 +1818,9 @@ describe("Query Builder - Optional Matches", () => {
     const sqlObject = compileQuery(query.toAst(), graph.id);
     const { sql } = toSqlWithParams(sqlObject);
 
-    expect(sql).toContain("INNER JOIN");
+    // Bare JOIN is an inner join; the linear traversal plan omits the
+    // redundant INNER keyword.
+    expect(sql).toMatch(/\bJOIN\s+"typegraph_edges"\s+e\s+ON/);
     expect(sql).not.toContain("LEFT JOIN");
   });
 
@@ -2169,6 +2349,57 @@ describe("QueryBuilder Variable-Length Paths", () => {
     ).toBe("my_path");
   });
 
+  it("replaces qualified path configuration when recursive() is called again", () => {
+    const qualified = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .recursive({
+        depth: "qualified_depth",
+        path: { alias: "qualified_path", format: "qualified" },
+      });
+
+    const defaultPath = qualified
+      .recursive({ depth: true, path: true })
+      .to("Organization", "o")
+      .select((context) => ({ org: context.o.name }));
+    const customPath = qualified
+      .recursive({ path: "legacy_path" })
+      .to("Organization", "o")
+      .select((context) => ({ org: context.o.name }));
+
+    const defaultVariableLength = requireDefined(
+      requireDefined(defaultPath.toAst().traversals[0]).variableLength,
+    );
+    expect(defaultVariableLength.pathAlias).toBe("o_path");
+    expect(defaultVariableLength.pathFormat).toBeUndefined();
+    expect(defaultVariableLength.depthAlias).toBe("o_depth");
+
+    const customVariableLength = requireDefined(
+      requireDefined(customPath.toAst().traversals[0]).variableLength,
+    );
+    expect(customVariableLength.pathAlias).toBe("legacy_path");
+    expect(customVariableLength.pathFormat).toBeUndefined();
+  });
+
+  it("validates qualified path options at runtime", () => {
+    const traversal = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e");
+
+    // eslint-disable-next-line unicorn/no-null -- Validate invalid JavaScript input.
+    expect(() => traversal.recursive({ path: null } as never)).toThrow(
+      "path must be a boolean",
+    );
+    expect(() =>
+      traversal.recursive({ path: { format: "ids" } } as never),
+    ).toThrow('path.format must be "qualified"');
+    expect(() =>
+      traversal.recursive({
+        path: { alias: 42, format: "qualified" },
+      } as never),
+    ).toThrow("path.alias must be a string");
+  });
+
   it("builds AST with recursive({ depth }) option", () => {
     const q = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
@@ -2242,10 +2473,15 @@ describe("QueryBuilder Variable-Length Paths", () => {
     const sqlObject = q.compile();
     const { sql } = toSqlWithParams(sqlObject);
 
-    // SQLite uses INSTR for cycle detection
-    expect(sql).toContain("INSTR");
-    // SQLite uses string-based path
-    expect(sql).toContain("|| n0.id ||");
+    // SQLite tracks a delimited string path and escapes each token so an id
+    // holding the delimiter stays one token. A Person -> Organization walk
+    // visits two kinds, so its tokens are kind-qualified.
+    expect(sql).toContain(
+      "'|' || replace(replace((n0.kind || ? || n0.id), '%', '%25'), '|', '%7C') || '|' AS path",
+    );
+    expect(sql).toContain(
+      "INSTR(r.path, '|' || replace(replace((n.kind || ? || n.id), '%', '%25'), '|', '%7C') || '|') = 0",
+    );
   });
 
   it("skips cycle checks when cyclePolicy('allow') is selected", () => {

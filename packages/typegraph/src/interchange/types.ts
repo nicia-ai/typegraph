@@ -9,17 +9,37 @@
  */
 import { z } from "zod";
 
+import { isRecordedRevision } from "../core/temporal";
+import type { IdentityTransitionCause } from "../identity";
 import { isCanonicalIsoDate } from "../utils/date";
+import { type Assert, type Equal } from "../utils/type-assert";
 
 // ============================================================
 // Format Version
 // ============================================================
 
 /**
- * Current interchange format version.
- * Increment for breaking changes to the format.
+ * Current interchange format version — the value every export writes.
+ *
+ * Read-side compatibility policy: the format is versioned separately from what
+ * it *accepts*. A 1.0 document is a structurally valid 2.0 document — the only
+ * 2.0 addition is the optional `identity` section — and a 2.0 document is in
+ * turn a structurally valid 3.0 document — the only 3.0 addition is the
+ * optional `identity.transitions` / `identity.retention` archival fields — so
+ * import and {@link GraphDataSchema} accept `"1.0"`, `"2.0"`, and `"3.0"` (see
+ * {@link AcceptedFormatVersionSchema}), while exports keep writing this
+ * constant. Bump this only when exports must emit a new version; add the old
+ * value to the accepted set rather than dropping read compatibility.
  */
-export const FORMAT_VERSION = "1.0" as const;
+export const FORMAT_VERSION = "3.0" as const;
+
+/**
+ * Format versions accepted on the read side (import + `GraphDataSchema.parse`).
+ * A pre-existing 1.0 or 2.0 export is a valid 3.0 document (the 3.0 change is
+ * the additive optional `identity.transitions` / `identity.retention` archival
+ * fields), so all three validate; exports always write {@link FORMAT_VERSION}.
+ */
+const AcceptedFormatVersionSchema = z.enum(["1.0", "2.0", "3.0"]);
 
 /**
  * A stored validity-window timestamp (`validFrom` / `validTo`). Must be a
@@ -41,6 +61,11 @@ const ValidityTimestampSchema = z.iso
 // Node Interchange
 // ============================================================
 
+const InterchangeNodeRefSchema = z.object({
+  kind: z.string().min(1),
+  id: z.string().min(1),
+});
+
 /**
  * Interchange format for a node.
  *
@@ -53,10 +78,13 @@ export const InterchangeNodeSchema = z.object({
   properties: z.record(z.string(), z.unknown()),
   /**
    * `undefined` (key absent): not requested (`includeTemporal: false`) —
-   * import defaults it to the import's own creation timestamp. `null`:
-   * requested and confirmed the row has no lower bound (e.g. a legacy row
-   * predating the "omitted validFrom defaults to creation time" fix) —
-   * import preserves that open-left validity instead of re-stamping it.
+   * import defaults it to the import's own creation timestamp, UNLESS the
+   * record states a `validTo` at or before that instant, in which case the row
+   * is imported with no lower bound ("ended at T, start unknown") rather than
+   * one after its own end (issue #407). `null`: requested and confirmed the row
+   * has no lower bound (e.g. a legacy row predating the "omitted validFrom
+   * defaults to creation time" fix) — import preserves that open-left validity
+   * instead of re-stamping it.
    */
   validFrom: ValidityTimestampSchema.nullable().optional(),
   validTo: ValidityTimestampSchema.optional(),
@@ -84,14 +112,8 @@ export type InterchangeNode = z.infer<typeof InterchangeNodeSchema>;
 export const InterchangeEdgeSchema = z.object({
   kind: z.string().min(1),
   id: z.string().min(1),
-  from: z.object({
-    kind: z.string().min(1),
-    id: z.string().min(1),
-  }),
-  to: z.object({
-    kind: z.string().min(1),
-    id: z.string().min(1),
-  }),
+  from: InterchangeNodeRefSchema,
+  to: InterchangeNodeRefSchema,
   properties: z.record(z.string(), z.unknown()).default({}),
   /** See {@link InterchangeNodeSchema}'s `validFrom` for the null/undefined contract. */
   validFrom: ValidityTimestampSchema.nullable().optional(),
@@ -105,6 +127,160 @@ export const InterchangeEdgeSchema = z.object({
 });
 
 export type InterchangeEdge = z.infer<typeof InterchangeEdgeSchema>;
+
+// ============================================================
+// Operational Identity Interchange
+// ============================================================
+
+export const IdentityInterchangeModeSchema = z.enum(["state", "archival"]);
+export type IdentityInterchangeMode = z.infer<
+  typeof IdentityInterchangeModeSchema
+>;
+
+export const InterchangeIdentityAssertionSchema = z.object({
+  id: z.string().min(1),
+  relation: z.enum(["same", "different"]),
+  a: InterchangeNodeRefSchema,
+  b: InterchangeNodeRefSchema,
+  validFrom: ValidityTimestampSchema,
+  validTo: ValidityTimestampSchema.optional(),
+  /**
+   * The node whose soft-delete cascade ended this assertion — the ledger's
+   * stored cause, carried so an `archival` round-trip preserves WHY each
+   * ending happened and not merely that it did. Absent on open rows and on
+   * explicit retractions; when present it names one of `a` / `b` and requires
+   * `validTo`. Import rejects both violations with an attributed error.
+   */
+  endedBy: InterchangeNodeRefSchema.optional(),
+});
+export type InterchangeIdentityAssertion = z.infer<
+  typeof InterchangeIdentityAssertionSchema
+>;
+
+/**
+ * The nine causes `IdentityTransitionCause` (`identity/transition-log.ts`)
+ * declares — spelled again here, rather than imported as a value, because that
+ * module owns internal transition-writing semantics and this schema owns only
+ * the wire shape, matching this file's existing precedent of inlining
+ * `InterchangeIdentityAssertionSchema.relation` rather than importing
+ * `IdentityRelation`. A type-level check keeps the two spellings from drifting.
+ */
+const InterchangeIdentityTransitionCauseSchema = z.enum([
+  "assert",
+  "retract",
+  "fold",
+  "detach",
+  "restore",
+  "window-end",
+  "kind-drop",
+  "schema-transition",
+  "reconcile",
+]);
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _interchangeCauseMatchesTransitionLog = Assert<
+  Equal<
+    z.infer<typeof InterchangeIdentityTransitionCauseSchema>,
+    IdentityTransitionCause
+  >
+>;
+
+/**
+ * Strict: a decision names only the evidence this format defines, so an
+ * archive carrying any other decision field is rejected rather than restored
+ * with that field silently stripped.
+ */
+const InterchangeIdentityTransitionDecisionSchema = z.strictObject({
+  branchId: z.string().optional(),
+  branchAncestry: z.array(z.string()).optional(),
+  mergePlanDigest: z.string().optional(),
+  reviewDigest: z.string().optional(),
+  sourceId: z.string().optional(),
+});
+
+/**
+ * One archived identity transition-log row: an explanation of why a class's
+ * membership changed, carried verbatim — `recordedRevision` and
+ * `recordedAt` are the SOURCE graph's own values, preserved rather than
+ * renumbered, because a restore records history, it does not relive it. See
+ * "Archival transitions and the retention watermark" in the identity
+ * documentation. Absent from `state`-mode interchange, which carries current
+ * truth only.
+ */
+export const InterchangeIdentityTransitionSchema = z.object({
+  transitionId: z.string().min(1),
+  cause: InterchangeIdentityTransitionCauseSchema,
+  // The range a recorded instant can carry, by the predicate that reads the
+  // restored row back: a revision outside it would be stored and then throw
+  // on every `transitionsOf` and `replay` that reaches it.
+  recordedRevision: z
+    .number()
+    .refine((revision) => isRecordedRevision(revision), {
+      message: "recordedRevision is outside the recorded-revision range",
+    }),
+  recordedAt: z.iso.datetime(),
+  validAt: ValidityTimestampSchema,
+  class: InterchangeNodeRefSchema,
+  priorClass: InterchangeNodeRefSchema.optional(),
+  assertionIds: z.array(z.string().min(1)),
+  decision: InterchangeIdentityTransitionDecisionSchema.optional(),
+});
+export type InterchangeIdentityTransition = z.infer<
+  typeof InterchangeIdentityTransitionSchema
+>;
+
+/**
+ * The retention cut accompanying an `archival` export: the raw
+ * `recordedRevision` below which the `transitions` section is missing rows
+ * because they had been pruned before the export — by the source graph
+ * itself, or on a graph the source had restored them from, whichever cut
+ * reaches higher (see `archivalRetentionCut`). `prunedBeforeRecordedAt` is the
+ * recorded time of the instant the cut was made at, so the pair re-forms that
+ * instant.
+ *
+ * A restore records it as the destination's RESTORED cut, a fact about the
+ * restored rows on the raw revisions they keep, and never as the
+ * destination's own watermark (see `importIdentityTransitionsIntoTarget`).
+ */
+export const InterchangeIdentityRetentionSchema = z.object({
+  prunedBeforeRevision: z.number().int().nonnegative(),
+  prunedBeforeRecordedAt: z.iso.datetime(),
+});
+export type InterchangeIdentityRetention = z.infer<
+  typeof InterchangeIdentityRetentionSchema
+>;
+
+export const InterchangeIdentitySchema = z.object({
+  profile: z.literal("typegraph-identity-v1"),
+  mode: IdentityInterchangeModeSchema,
+  assertions: z.array(InterchangeIdentityAssertionSchema),
+  /**
+   * `archival` mode only. Absent (or empty) on `state` mode — state carries
+   * current truth, never explanation. Branch cloning and state export carry
+   * nothing here either, for the same reason (`working-copy.ts`).
+   */
+  transitions: z.array(InterchangeIdentityTransitionSchema).optional(),
+  /** `archival` mode only — the cut below which `transitions` is missing pruned rows. */
+  retention: InterchangeIdentityRetentionSchema.optional(),
+});
+export type InterchangeIdentity = z.infer<typeof InterchangeIdentitySchema>;
+
+const InterchangeIdentityHeaderSchema = InterchangeIdentitySchema.omit({
+  assertions: true,
+  transitions: true,
+}).extend({
+  /**
+   * `archival` mode only: whether the `identity-transitions` chunk this
+   * stream will later emit carries at least one row. The header is the ONLY
+   * place a streaming import can learn this before that chunk arrives — by
+   * protocol it is always the LAST chunk, after nodes, edges and identity
+   * assertions have already been written — so `importGraphStream` reads it
+   * to refuse an archival-transitions restore into a `history: false` target
+   * up front, matching `importGraph`'s atomic upfront check (which reads the
+   * full `transitions` array directly, since it never streams).
+   */
+  hasTransitions: z.boolean().optional(),
+});
 
 // ============================================================
 // Import Configuration
@@ -219,11 +395,12 @@ export type GraphDataSource = z.infer<typeof GraphDataSourceSchema>;
  * plus arrays of nodes and edges to import.
  */
 export const GraphDataSchema = z.object({
-  formatVersion: z.literal(FORMAT_VERSION),
+  formatVersion: AcceptedFormatVersionSchema,
   exportedAt: z.iso.datetime(),
   source: GraphDataSourceSchema,
   nodes: z.array(InterchangeNodeSchema),
   edges: z.array(InterchangeEdgeSchema),
+  identity: InterchangeIdentitySchema.optional(),
 });
 
 export type GraphData = z.infer<typeof GraphDataSchema>;
@@ -232,6 +409,9 @@ export type GraphData = z.infer<typeof GraphDataSchema>;
 export const GraphDataHeaderSchema = GraphDataSchema.omit({
   nodes: true,
   edges: true,
+  identity: true,
+}).extend({
+  identity: InterchangeIdentityHeaderSchema.optional(),
 });
 
 export type GraphDataHeader = z.infer<typeof GraphDataHeaderSchema>;
@@ -245,6 +425,16 @@ export const GraphInterchangeChunkSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("header"), header: GraphDataHeaderSchema }),
   z.object({ type: z.literal("nodes"), nodes: z.array(InterchangeNodeSchema) }),
   z.object({ type: z.literal("edges"), edges: z.array(InterchangeEdgeSchema) }),
+  z.object({
+    type: z.literal("identity"),
+    assertions: z.array(InterchangeIdentityAssertionSchema),
+  }),
+  // Archival-only, always after every "identity" chunk (see `importStream`'s
+  // ordering guard): the class-lineage transitions those assertions caused.
+  z.object({
+    type: z.literal("identity-transitions"),
+    transitions: z.array(InterchangeIdentityTransitionSchema),
+  }),
 ]);
 
 export type GraphInterchangeChunk = z.infer<typeof GraphInterchangeChunkSchema>;
@@ -257,7 +447,7 @@ export type GraphInterchangeChunk = z.infer<typeof GraphInterchangeChunkSchema>;
  * An error that occurred during import.
  */
 export const ImportErrorSchema = z.object({
-  entityType: z.enum(["node", "edge"]),
+  entityType: z.enum(["node", "edge", "identity"]),
   kind: z.string(),
   id: z.string(),
   error: z.string(),
@@ -282,6 +472,10 @@ export const ImportResultSchema = z.object({
     updated: z.number().int().nonnegative(),
     skipped: z.number().int().nonnegative(),
   }),
+  identity: z.object({
+    created: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+  }),
   errors: z.array(ImportErrorSchema),
 });
 
@@ -291,6 +485,15 @@ export type ImportResult = z.infer<typeof ImportResultSchema>;
 // Export Options
 // ============================================================
 
+/** Largest delay JavaScript timers represent without truncation or overflow. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+// Annotated as the wider `ZodCustom` because zod 4.6 narrowed `z.instanceof`'s
+// return type to `ZodInstanceOf`, which zod 4.5 (inside our `^4.5.0` peer
+// range) does not declare; emitting it would break consumers' declarations.
+const AbortSignalSchema: z.ZodCustom<AbortSignal, AbortSignal> =
+  z.instanceof(AbortSignal);
+
 /**
  * Options for exporting graph data.
  */
@@ -299,12 +502,45 @@ export const ExportOptionsSchema = z.object({
   nodeKinds: z.array(z.string()).optional(),
   /** Filter to specific edge kinds (undefined = all) */
   edgeKinds: z.array(z.string()).optional(),
-  /** Include temporal fields (validFrom, validTo) */
+  /**
+   * Include temporal fields (validFrom, validTo). Always included for a graph
+   * with Operational Identity or with an edge kind whose `cardinality` or
+   * `targetCardinality` is `"oneActive"` (a `oneActive` composition pair
+   * included): those exports default to `true` and refuse an explicit
+   * `false`, since an ended row exported without its `validTo` would
+   * re-import as current.
+   */
   includeTemporal: z.boolean().default(false),
   /** Include metadata (version, timestamps) */
   includeMeta: z.boolean().default(false),
   /** Include soft-deleted records */
   includeDeleted: z.boolean().default(false),
+  /** Operational Identity export mode. Defaults to current state only. */
+  identityMode: IdentityInterchangeModeSchema.default("state"),
+  /**
+   * Cancels the export: whatever it had opened is settled — on a backend with
+   * `capabilities.execution.interactiveTransactions` that means its repeatable-read snapshot is
+   * rolled back and the serialized connection's stream lease released; on one
+   * without, there is no transaction and no lease, and the remaining reads are
+   * simply abandoned. Either way the consumer is rejected with an
+   * `ExportStreamCancelledError` (`code:
+   * "INTERCHANGE_EXPORT_STREAM_ABORTED"`), whose message states which of the
+   * two happened, carrying the signal's own `reason` as `cause`. Aborting
+   * before the first read refuses the export outright: nothing is opened and
+   * nothing claimed.
+   *
+   * On `exportGraph` this is a convenience — the call rejects instead of
+   * running to completion. On {@link exportGraphStream} it is the ONLY
+   * contract-grade way to stop a stream a consumer will not finish pulling:
+   * an async generator's `finally` does not run on garbage collection, so a
+   * consumer that pulls `next()` and then drops the iterator — the
+   * `Promise.race([iterator.next(), timeout])` pattern — otherwise holds the
+   * snapshot transaction, and with it the connection's exclusive stream lease,
+   * until the process exits. `break` / `throw` out of a `for await` and an
+   * explicit `iterator.return()` settle the stream cooperatively and need no
+   * signal; a race that abandons the iterator needs one.
+   */
+  signal: AbortSignalSchema.optional(),
 });
 
 /** Export options with defaults applied (output type) */
@@ -318,6 +554,20 @@ export type ExportOptionsInput = z.input<typeof ExportOptionsSchema>;
  * of node or edge entities retained for one yielded chunk.
  */
 export const ExportStreamOptionsSchema = ExportOptionsSchema.extend({
+  /**
+   * Maximum time the consumer may leave a delivered chunk unacknowledged
+   * before the export settles itself. The clock starts when a chunk is yielded
+   * and is cleared when the consumer asks for the next chunk, so time spent
+   * waiting for the backend to produce a chunk does not count as consumer
+   * idleness. On expiry, the consumer is rejected with
+   * `ExportStreamIdleTimeoutError` and any snapshot transaction and serialized
+   * connection lease are released.
+   *
+   * Omit this only when the caller guarantees a cooperative exit (`break`,
+   * `throw`, or `iterator.return()`) or supplies a signal it will abort. An
+   * abandoned async iterator is not closed by garbage collection.
+   */
+  idleTimeoutMs: z.number().int().positive().max(MAX_TIMER_DELAY_MS).optional(),
   batchSize: z.number().int().positive().default(1000),
 });
 

@@ -12,8 +12,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type AnyEdge,
-  type AnyNode,
   createStore,
   defineEdge,
   defineGraph,
@@ -21,10 +19,14 @@ import {
   type Edge,
   type Node,
   type Store,
-  type SubsetEdge,
-  type SubsetNode,
 } from "../src";
 import type { GraphBackend } from "../src/backend/types";
+import type {
+  AnyEdge,
+  AnyNode,
+  SubsetEdge,
+  SubsetNode,
+} from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================

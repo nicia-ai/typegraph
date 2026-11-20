@@ -9,10 +9,10 @@ import { IndexBuilder as IndexBuilder_2 } from 'drizzle-orm/sqlite-core';
 import { SQLWrapper } from 'drizzle-orm';
 
 // @public (undocumented)
-export function buildPostgresEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder[];
+export function buildPostgresEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[], physicalName?: (index: EdgeIndexDeclaration) => string): readonly IndexBuilder[];
 
 // @public (undocumented)
-export function buildPostgresNodeIndexBuilders(table: NodeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder[];
+export function buildPostgresNodeIndexBuilders(table: NodeIndexTable, indexes: readonly IndexDeclaration[], physicalName?: (index: NodeIndexDeclaration) => string): readonly IndexBuilder[];
 
 // @public (undocumented)
 export function buildSqliteEdgeIndexBuilders(table: EdgeIndexTable, indexes: readonly IndexDeclaration[]): readonly IndexBuilder_2[];
@@ -142,6 +142,16 @@ type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
 }>;
 
 // @public (undocumented)

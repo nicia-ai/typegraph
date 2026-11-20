@@ -1,3 +1,4 @@
+import { hasOwnKey } from "../utils/object";
 import { type JsonPointer, parseJsonPointer } from "./json-pointer";
 import { type FieldTypeInfo } from "./schema-introspector";
 
@@ -37,7 +38,7 @@ export function resolveFieldTypeInfoAtJsonPointer(
           "JSON Pointer numeric segments are only valid for arrays",
         );
       }
-      if (current.shape && segment in current.shape) {
+      if (current.shape && hasOwnKey(current.shape, segment)) {
         current = current.shape[segment];
         continue;
       }

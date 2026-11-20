@@ -6,9 +6,9 @@ import {
   type AlgorithmContext,
   assertEdgeKinds,
   assertGraphAnalyticsSupported,
-  compileNodeKindSeedFilter,
+  assertNodeKindScope,
+  assertPositiveSafeIntegerOption,
   type InternalTraversalOptions,
-  normalizeNodeKinds,
   pickTemporalOptions,
   resolveMaxIterations,
 } from "./context";
@@ -21,6 +21,7 @@ import {
   type NodeIdentityKey,
   nodeIdentityKey,
   runIterativeGraphOperation,
+  seedWorkingTableFromNodes,
 } from "./iterative-graph-operation";
 import type {
   InternalPageRankOptions,
@@ -43,6 +44,7 @@ type ResolvedPageRankOptions = Readonly<{
   tolerance: number;
   maxIterations: number;
   nodeKinds: readonly string[] | undefined;
+  topK: number | undefined;
 }>;
 
 type PageRankAlgorithm = "pageRank" | "personalizedPageRank";
@@ -92,7 +94,8 @@ function executePageRankOperation<G extends GraphDef>(
 ): Promise<readonly PageRankScore[]> {
   const algorithm: PageRankAlgorithm =
     seeds === undefined ? "pageRank" : "personalizedPageRank";
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
+  assertNodeKindScope(ctx, options.nodeKinds);
   assertGraphAnalyticsSupported(ctx, algorithm);
   const resolved = resolvePageRankOptions(options, algorithm);
   const traversalOptions: InternalTraversalOptions = {
@@ -108,14 +111,16 @@ function executePageRankOperation<G extends GraphDef>(
     algorithm,
     maxIterations: resolved.maxIterations,
     createWorkingTable,
-    initialize: (context) =>
-      initializeWorkingTable(context, resolved.nodeKinds, seeds),
+    populate: (context) => populateWorkingTable(context, resolved.nodeKinds),
+    initialize: (context, populatedRowCount) =>
+      initializeWorkingTable(context, populatedRowCount, seeds),
     runRound: (context, state) =>
       runPowerIterationRound(context, state, resolved.dampingFactor),
     hasConverged(state) {
       return state.maximumChange <= resolved.tolerance;
     },
-    extractResult: extractScores,
+    extractResult: (context, state) =>
+      extractScores(context, state, resolved.topK),
   });
 }
 
@@ -143,6 +148,8 @@ function resolvePageRankOptions<G extends GraphDef>(
     );
   }
 
+  assertPositiveSafeIntegerOption(options.topK, algorithm, "topK");
+
   return {
     dampingFactor,
     tolerance,
@@ -151,7 +158,8 @@ function resolvePageRankOptions<G extends GraphDef>(
       DEFAULT_MAX_ITERATIONS,
       algorithm,
     ),
-    nodeKinds: normalizeNodeKinds(options.nodeKinds),
+    nodeKinds: options.nodeKinds,
+    topK: options.topK,
   };
 }
 
@@ -240,25 +248,25 @@ function createWorkingTable(context: IterativeGraphRunContext): SqlFragment {
   `;
 }
 
-async function initializeWorkingTable(
+async function populateWorkingTable(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
+): Promise<number> {
+  await seedWorkingTableFromNodes(context, nodeKinds, [
+    { name: "score", value: sql.raw("0.0") },
+    { name: "next_score", value: sql.raw("0.0") },
+    { name: "personalization", value: sql.raw("0.0") },
+    { name: "out_weight", value: sql.raw("0.0") },
+  ]);
+  return countWorkingTableRows(context);
+}
+
+async function initializeWorkingTable(
+  context: IterativeGraphRunContext,
+  workingTableSize: number,
   seeds: readonly NormalizedSeed[] | undefined,
 ): Promise<IterationState> {
   const { operation, workingTable, graphId, runId } = context;
-  const nodeKindFilter = compileNodeKindSeedFilter(nodeKinds);
-  await context.executeTemporary(sql`
-    INSERT INTO ${workingTable}
-      (graph_id, run_id, node_id, node_kind, score, next_score,
-       personalization, out_weight)
-    SELECT ${graphId}, ${runId}, n.id, n.kind, 0.0, 0.0, 0.0, 0.0
-    FROM ${operation.schema.nodesTable} n
-    WHERE n.graph_id = ${graphId}
-      AND ${nodeKindFilter}
-      AND ${operation.nodeTemporalFilter}
-  `);
-
-  const workingTableSize = await countWorkingTableRows(context);
   if (workingTableSize === 0) {
     if (seeds !== undefined) {
       throw missingSeedError(seeds);
@@ -548,16 +556,19 @@ async function readMaximumChange(
 async function extractScores(
   context: IterativeGraphRunContext,
   state: IterationState,
+  topK: number | undefined,
 ): Promise<readonly PageRankScore[]> {
   const score = sql.identifier(state.activeScoreColumn);
   const nodeId = context.operation.ctx.dialect.binaryText(sql`node_id`);
   const nodeKind = context.operation.ctx.dialect.binaryText(sql`node_kind`);
+  const limitClause = topK === undefined ? sql.empty() : sql`LIMIT ${topK}`;
   const rows = await context.backend.execute<ScoreRow>(
     asCompiledRowsSql(sql`
       SELECT node_id, node_kind, ${score} AS score
       FROM ${context.workingTable}
       WHERE graph_id = ${context.graphId} AND run_id = ${context.runId}
       ORDER BY ${score} DESC, ${nodeId}, ${nodeKind}
+      ${limitClause}
     `),
   );
   return rows.map((row) => ({

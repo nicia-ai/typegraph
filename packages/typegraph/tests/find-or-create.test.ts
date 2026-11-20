@@ -1,20 +1,21 @@
 /**
  * Tests for getOrCreateBy* APIs on NodeCollection and EdgeCollection.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import {
   CardinalityError,
+  INVERTED_VALIDITY_WINDOW_CODE,
   NodeConstraintNotFoundError,
   UniquenessError,
   ValidationError,
 } from "../src/errors";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, disableTransactions } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -29,6 +30,15 @@ const Entity = defineNode("Entity", {
 });
 
 const relatedTo = defineEdge("relatedTo");
+
+/**
+ * The resurrect cases' window, stated as two fixed ORDERED instants in the past.
+ * Both endpoints are explicit on purpose: a resurrect that names only its end
+ * takes the row's creation instant as the start, so a hardcoded end silently
+ * becomes a negative-width window once the wall clock passes it.
+ */
+const RESURRECT_VALID_FROM = "2023-01-01T00:00:00.000Z";
+const RESURRECT_VALID_TO = "2024-12-31T23:59:59.999Z";
 
 const graph = defineGraph({
   id: "find_or_create_test",
@@ -710,6 +720,102 @@ describe("store.edges.*.getOrCreateByEndpoints()", () => {
       }),
     ).rejects.toThrow(CardinalityError);
   });
+
+  it("uses the resulting validTo when checking cardinality on resurrect", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const bigCo = await store.nodes.Company.create({ name: "BigCo" });
+
+    // The employment states its own historical START. Without one it would take
+    // the creation instant, and this case's fixed 2024 end — in the future when
+    // this test was written — has since drifted into the past, which stored a
+    // window of NEGATIVE width. An explicit validFrom keeps the resurrected
+    // window ordered no matter when the suite runs.
+    const endedEmployment = await store.edges.oneActiveEdge.create(
+      alice,
+      acme,
+      { label: "first" },
+      { validFrom: RESURRECT_VALID_FROM },
+    );
+    await store.edges.oneActiveEdge.delete(endedEmployment.id);
+    await store.edges.oneActiveEdge.create(alice, bigCo, { label: "second" });
+
+    const result = await store.edges.oneActiveEdge.getOrCreateByEndpoints(
+      alice,
+      acme,
+      { label: "first" },
+      { validTo: RESURRECT_VALID_TO },
+    );
+
+    expect(result.action).toBe("resurrected");
+    expect(result.edge.id).toBe(endedEmployment.id);
+    expect(result.edge.meta.validFrom).toBe(RESURRECT_VALID_FROM);
+    expect(result.edge.meta.validTo).toBe(RESURRECT_VALID_TO);
+  });
+
+  it("refuses a resurrect whose validTo precedes the stated validFrom", async () => {
+    // The companion of the case above: resurrecting straight into the ended
+    // state is sanctioned, but the pair must still be ordered. Without this the
+    // drift that case used to carry could return as accepted behavior.
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const endedEmployment = await store.edges.oneActiveEdge.create(
+      alice,
+      acme,
+      { label: "first" },
+      { validFrom: RESURRECT_VALID_FROM },
+    );
+    await store.edges.oneActiveEdge.delete(endedEmployment.id);
+
+    const revive = (): Promise<unknown> =>
+      store.edges.oneActiveEdge.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { label: "first" },
+        { validFrom: RESURRECT_VALID_TO, validTo: RESURRECT_VALID_FROM },
+      );
+
+    await expect(revive()).rejects.toThrow(ValidationError);
+    const rejection = await revive().catch((error: unknown) => error);
+    expect(
+      (rejection as ValidationError).details.issues.map((issue) => issue.code),
+    ).toContain(INVERTED_VALIDITY_WINDOW_CODE);
+
+    // Refused before any write: the tombstone is still a tombstone.
+    const stored = await store.edges.oneActiveEdge.getById(endedEmployment.id);
+    expect(stored).toBeUndefined();
+  });
+
+  it("validates temporal fields before resolving the operation branch", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    await store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+      role: "eng",
+    });
+
+    await expect(
+      store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "manager" },
+        { validFrom: "not-a-date" },
+      ),
+    ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+
+    await expect(
+      store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "manager" },
+        { validTo: "not-a-date" },
+      ),
+    ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validTo"/);
+  });
 });
 
 // ============================================================
@@ -771,6 +877,66 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     expect(requireDefined(results[1]).edge.id).toBe(existing.id);
   });
 
+  it("returns an all-found dynamic batch from one root read without a transaction", async () => {
+    const seedStore = createStore(edgeGraph, backend);
+    const alice = await seedStore.nodes.Person.create({ name: "Alice" });
+    const acme = await seedStore.nodes.Company.create({ name: "Acme" });
+    const existing = await seedStore.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+    const transaction = vi.spyOn(backend, "transaction");
+    const endpointRead = vi.spyOn(
+      backend,
+      "findEdgesByHeterogeneousEndpointSet",
+    );
+    const transactionlessStore = createStore(
+      edgeGraph,
+      disableTransactions(backend),
+    );
+
+    const results =
+      await transactionlessStore.edges.worksAt.bulkGetOrCreateByEndpoints(
+        [
+          { from: alice, to: acme, props: { role: "eng", since: 2024 } },
+          { from: alice, to: acme, props: { role: "eng", since: 2025 } },
+        ],
+        { matchOn: ["role"] },
+      );
+
+    expect(results.map((result) => result.action)).toEqual(["found", "found"]);
+    expect(results.map((result) => result.edge.id)).toEqual([
+      existing.id,
+      existing.id,
+    ]);
+    expect(endpointRead).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("does not confirm an all-found dynamic batch in a read-only transaction", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const existing = await store.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+    const transaction = vi.spyOn(backend, "transaction");
+    const endpointRead = vi.spyOn(
+      backend,
+      "findEdgesByHeterogeneousEndpointSet",
+    );
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+      [{ from: alice, to: acme, props: { role: "eng", since: 2024 } }],
+      { matchOn: ["role"] },
+    );
+
+    expect(results).toEqual([{ edge: existing, action: "found" }]);
+    expect(endpointRead).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it("within-batch duplicates (same endpoint + matchOn key)", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -790,6 +956,59 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     expect(requireDefined(results[1]).edge.id).toBe(
       requireDefined(results[0]).edge.id,
     );
+  });
+
+  it("collapses duplicate endpoint identities without treating validity as identity", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+      {
+        from: alice,
+        to: acme,
+        props: { role: "eng" },
+        validFrom: "2020-01-01T00:00:00.000Z",
+        validTo: "2021-01-01T00:00:00.000Z",
+      },
+      {
+        from: alice,
+        to: acme,
+        props: { role: "eng" },
+        validFrom: "2022-01-01T00:00:00.000Z",
+        validTo: "2023-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    expect(requireDefined(results[0]).action).toBe("created");
+    expect(requireDefined(results[1]).action).toBe("found");
+    expect(requireDefined(results[1]).edge.id).toBe(
+      requireDefined(results[0]).edge.id,
+    );
+    expect(requireDefined(results[1]).edge.meta.validFrom).toBe(
+      "2020-01-01T00:00:00.000Z",
+    );
+    expect(requireDefined(results[1]).edge.meta.validTo).toBe(
+      "2021-01-01T00:00:00.000Z",
+    );
+  });
+
+  it("validates temporal fields on within-batch duplicates", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+
+    await expect(
+      store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        { from: alice, to: acme, props: { role: "eng" } },
+        {
+          from: alice,
+          to: acme,
+          props: { role: "eng" },
+          validTo: "not-a-date",
+        },
+      ]),
+    ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validTo"/);
   });
 
   it("ifExists: update updates existing edges", async () => {
@@ -815,21 +1034,75 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const acme = await store.nodes.Company.create({ name: "Acme" });
 
-    const first = await store.edges.worksAt.create(alice, acme, {
-      role: "eng",
-      since: 2020,
-    });
+    // Both endpoints stated, for the reason RESURRECT_VALID_FROM documents: a
+    // hardcoded end with no stated start is measured against the creation
+    // instant, so it becomes a negative-width window as the clock passes it.
+    const first = await store.edges.worksAt.create(
+      alice,
+      acme,
+      {
+        role: "eng",
+        since: 2020,
+      },
+      { validFrom: RESURRECT_VALID_FROM },
+    );
     await store.edges.worksAt.delete(first.id);
 
     const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
-      { from: alice, to: acme, props: { role: "resurrected", since: 2025 } },
+      {
+        from: alice,
+        to: acme,
+        props: { role: "resurrected", since: 2025 },
+        validTo: RESURRECT_VALID_TO,
+      },
     ]);
 
     expect(results).toHaveLength(1);
     expect(requireDefined(results[0]).action).toBe("resurrected");
     expect(requireDefined(results[0]).edge.id).toBe(first.id);
     expect(requireDefined(results[0]).edge.role).toBe("resurrected");
+    expect(requireDefined(results[0]).edge.meta.validFrom).toBe(
+      RESURRECT_VALID_FROM,
+    );
+    expect(requireDefined(results[0]).edge.meta.validTo).toBe(
+      RESURRECT_VALID_TO,
+    );
     expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
+  });
+
+  it("returns live matches alongside batched tombstone resurrection", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const live = await store.edges.worksAt.create(alice, acme, {
+      role: "live",
+      since: 2020,
+    });
+    const tombstone = await store.edges.worksAt.create(alice, acme, {
+      role: "tombstone",
+      since: 2021,
+    });
+    await store.edges.worksAt.delete(tombstone.id);
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+      [
+        { from: alice, to: acme, props: { role: "live", since: 2024 } },
+        {
+          from: alice,
+          to: acme,
+          props: { role: "tombstone", since: 2025 },
+        },
+      ],
+      { matchOn: ["role"] },
+    );
+
+    expect(results.map((result) => result.action)).toEqual([
+      "found",
+      "resurrected",
+    ]);
+    expect(requireDefined(results[0]).edge).toEqual(live);
+    expect(requireDefined(results[1]).edge.id).toBe(tombstone.id);
+    expect(requireDefined(results[1]).edge.since).toBe(2025);
   });
 
   it("duplicate inputs with ifExists: update → first creates, second updates", async () => {

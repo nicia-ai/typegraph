@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  ConfigurationError,
-  NodeIndexNotFoundError,
-  ValidationError,
-} from "../../../src";
+import { ConfigurationError, ValidationError } from "../../../src";
+import { NodeIndexNotFoundError } from "../../../src/errors-entry";
 import { type IntegrationTestContext } from "./test-context";
 
 /**
@@ -274,6 +271,23 @@ export function registerBulkFindByIndexIntegrationTests(
       );
       expect((caught as ConfigurationError).details).toEqual({
         indexName: "company_id_covering",
+        kind: "Company",
+      });
+    });
+
+    it("rejects an ordered-key index as an equality lookup", async () => {
+      const store = context.getStore();
+      const caught = await store.nodes.Company.bulkFindByIndex(
+        "company_newest",
+        [{ props: { name: "Acme" } }],
+      ).catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).message).toContain(
+        'index "company_newest"',
+      );
+      expect((caught as ConfigurationError).details).toEqual({
+        indexName: "company_newest",
         kind: "Company",
       });
     });

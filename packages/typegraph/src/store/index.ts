@@ -1,12 +1,47 @@
 // Types
+export type { EngineRevision, EntityKey, LineageDelta } from "../backend/types";
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
+export type {
+  EdgeReadWindow,
+  NeighborNodeOrderField,
+  NeighborOrder,
+  NeighborOrderField,
+  NeighborReadOptions,
+  NeighborResult,
+} from "./neighbors";
+export type {
+  ReadSetEdgeDirection,
+  ReadSetEdgeReference,
+  ReadSetScope,
+} from "./read-set";
+export type { CheckedReadScope } from "./store";
+export type { StoreEvolution } from "./store";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
+  type BulkEdgeSourceGroup,
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
+  type BulkFindRuntimeEdgesFromParams,
+  type BulkFindRuntimeEdgesFromResult,
+  type BulkOperationHookContext,
+  type CompareAndSetAbsent,
+  type CompareAndSetExpected,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
   type DynamicEdgeCollection,
+  type DynamicNode,
   type DynamicNodeCollection,
+  type DynamicNodeReference,
+  type DynamicStoreViewEdgeCollection,
   type Edge,
   type EdgeBatchReads,
   type EdgeCollection,
@@ -16,14 +51,20 @@ export {
   type EdgeTemporalReads,
   type EdgeWrites,
   type GetOrCreateAction,
+  type GraphEdgeForKinds,
+  type GraphNodeReference,
   type HistoryStoreOptions,
+  type HistoryTransactionContext,
   type HookContext,
   type IfExistsMode,
   type LiveStoreOptions,
   type MeasurableAdapterTransactionContext,
+  type MeasurableHistoryTransactionContext,
   type MeasurableTransactionContext,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeCollection,
   type NodeCurrentReads,
   type NodeGetOrCreateByConstraintOptions,
@@ -35,13 +76,22 @@ export {
   type OperationHookContext,
   type QueryHookContext,
   type QueryOptions,
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedReadStoreOptions,
+  type RecordedRevisionRequest,
   type RecordedScanOptions,
   type RecordedScanPage,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
   type RecordedStoreViewNodeCollections,
+  type RuntimeBulkEdgeSourceGroup,
+  type RuntimeEdgeCollection,
+  type RuntimeEdgeFor,
+  type RuntimeNodeCollection,
+  type RuntimeNodeReferenceFor,
   type ScopedMeasure,
   type SqlAvailability,
   type StoreHooks,
@@ -60,7 +110,9 @@ export {
   type UnboundLiveStoreOptions,
   type UpdateEdgeInput,
   type UpdateNodeInput,
+  type WorkingCopyOptions,
 } from "./types";
+export { compareAndSetAbsent } from "./types";
 
 // StoreView (read-only as-of lens)
 export type {
@@ -84,14 +136,24 @@ export { RecordedStoreView, StoreView } from "./store-view";
 export type {
   AnyEdge,
   AnyNode,
+  SubgraphCompositionSelection,
+  SubgraphEdgeKey,
+  SubgraphEdgeLookup,
+  SubgraphIndex,
+  SubgraphKindSelection,
+  SubgraphNodeKey,
+  SubgraphNodeLookup,
   SubgraphOptions,
   SubgraphResult,
+  SubgraphResultEdgeKinds,
   SubsetEdge,
   SubsetNode,
 } from "./subgraph";
-export { defineSubgraphProject } from "./subgraph";
+export { defineSubgraphProject, indexSubgraph } from "./subgraph";
 
 // Store
+export type { ClaimOwner, ClaimTarget } from "./claims/axis";
+export type { ConstraintFenceViolation } from "./claims/verify";
 export type { HistoryStoreBackend } from "./history-store-backend";
 export type {
   MaterializeIndexesEntry,
@@ -110,15 +172,23 @@ export type {
   AdapterHistoryTransactionContext,
   AdapterRecordedReadStore,
   AdapterStore,
+  BatchReadBuilder,
+  EdgeCollectionLookup,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,
+  NodeCollectionLookup,
+  RebuildContributionOptions,
+  ReconciledSchema,
   RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
+  RequiredEdgeCollectionLookup,
+  RequiredNodeCollectionLookup,
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
+  StoreTransactionOptions,
 } from "./store";
 export {
   createAdapterStore,
@@ -151,8 +221,32 @@ export type {
 } from "./search";
 export { StoreSearch } from "./search-facade";
 
+// Current population and declared-schema analysis
+export type {
+  KindPopulationStatistics,
+  PropertyPopulationStatistics,
+  StoreAnalysisCursorStaleErrorDetails,
+  StoreAnalysisSchemaCoordinate,
+  StoreDescription,
+  StorePopulationStatistics,
+  StoreValidationFailure,
+  StoreValidationPage,
+  ValidateStoreOptions,
+} from "./store-analysis";
+export { StoreAnalysisCursorStaleError } from "./store-analysis";
+
 // Fulltext rebuild
+export type {
+  EvolvedTransactionOptions,
+  EvolvedTransactionOutcome,
+  PlanEvolutionOptions,
+  RefreshSchemaOptions,
+} from "./evolution";
 export type {
   RebuildFulltextOptions,
   RebuildFulltextResult,
 } from "./fulltext-rebuild";
+export type {
+  PruneRecordedInstantsOptions,
+  PruneRecordedInstantsResult,
+} from "./recorded-anchor-log";

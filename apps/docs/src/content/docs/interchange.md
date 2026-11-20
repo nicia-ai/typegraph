@@ -48,7 +48,7 @@ const jsonSchema = toJSONSchema(GraphDataSchema);
 
 ```typescript
 interface GraphData {
-  formatVersion: "1.0";
+  formatVersion: "3.0";
   exportedAt: string; // ISO datetime
   source: {
     type: "typegraph-export" | "external";
@@ -79,15 +79,133 @@ interface GraphData {
       updatedAt?: string;
     };
   }>;
+  identity?: {
+    profile: "typegraph-identity-v1";
+    mode: "state" | "archival";
+    assertions: Array<{
+      id: string;
+      relation: "same" | "different";
+      a: { kind: string; id: string };
+      b: { kind: string; id: string };
+      validFrom: string;
+      validTo?: string;
+    }>;
+    // `archival` mode only — see "Archival identity transitions" below.
+    transitions?: Array<{
+      transitionId: string;
+      cause:
+        | "assert"
+        | "retract"
+        | "fold"
+        | "detach"
+        | "restore"
+        | "window-end"
+        | "kind-drop"
+        | "schema-transition"
+        | "reconcile";
+      recordedRevision: number;
+      recordedAt: string;
+      validAt: string;
+      class: { kind: string; id: string };
+      priorClass?: { kind: string; id: string };
+      assertionIds: string[];
+      decision?: {
+        branchId?: string;
+        branchAncestry?: string[];
+        mergePlanDigest?: string;
+        reviewDigest?: string;
+        sourceId?: string;
+      };
+    }>;
+    // `archival` mode only, and only when the source has ever pruned.
+    retention?: { prunedBeforeRevision: number; prunedBeforeRecordedAt: string };
+  };
 }
 ```
 
 `validFrom` has three states: the key **absent** means it wasn't requested
 (`includeTemporal: false`, the default) — import defaults it to the
-import's own creation timestamp. An **explicit `null`** means the source
-row is confirmed to have no lower bound (open-left validity) — import
-preserves that instead of re-stamping it. A **string** is an explicit
-value, carried through unchanged.
+import's own creation timestamp, unless the record also states a `validTo`
+at or before that instant, in which case it is imported with no lower bound
+("ended at T, start unknown") rather than one past its own end. An
+**explicit `null`** means the source row is confirmed to have no lower bound
+(open-left validity) — import preserves that instead of re-stamping it. A
+**string** is an explicit value, carried through unchanged.
+
+### Format Version Compatibility
+
+Exports always write `formatVersion: "3.0"`. The read side — both
+`importGraph`/`importGraphStream` and `GraphDataSchema.parse` — additionally
+accepts `"1.0"` and `"2.0"`. A 1.0 document is structurally a valid 2.0
+document (the only 2.0 change is the additive optional `identity` section),
+and a 2.0 document is in turn a structurally valid 3.0 document (the only 3.0
+change is the additive optional `identity.transitions` / `identity.retention`
+archival fields), so pre-existing 1.0 and 2.0 exports validate and import
+unchanged. You never need to rewrite the version field of an older backup;
+validation and import handle all three.
+
+### Archival identity transitions
+
+On a `history: true` graph, `exportGraph(store, { identityMode: "archival" })`
+additionally carries every retained identity transition, plus a `retention`
+cut when rows had been pruned before the export: the raw `recordedRevision`
+below which the section is missing rows, and the recorded time of the instant
+the prune was made at. That is the source's own watermark, or the cut of an
+archive the source had itself restored, whichever is higher. State export and working-copy branch cloning carry
+neither field — a clone's own history starts at its clone revision, and
+current-truth state export is not a backup of explanation.
+
+Restoring `identity.transitions` validates shape only (a known cause, a
+well-formed reference, a `recordedRevision` a recorded instant can carry —
+an integer from 1, below `Number.MAX_SAFE_INTEGER` — in a non-decreasing
+sequence, and a `transitionId` that names one row only) and inserts every row
+verbatim. `importGraph` validates the whole
+section before writing anything; `importGraphStream` validates each
+`identity-transitions` chunk when it arrives, in order across chunks as well as
+within one, after the stream's earlier chunks have committed. A restore never
+re-derives membership or touches the target's closure. Every restored row is marked internally as such — a
+restore always inserts rows this graph did not record itself, regardless of
+what the archive's own history looks like. A replay over the restored graph
+(`store.identity.replay`, see the [identity guide](/identity/#replay-and-identity-history))
+uses that marker, never a `recordedRevision` comparison, to exclude every
+restored transition from its `steps` (a restored row's revision is minted by
+the SOURCE graph's own clock and interleaves arbitrarily with the
+destination's), so `transitionsOf` answers fully while `replay` never pairs
+a restored transition with a fabricated before/after.
+
+The restore records the archive's `retention` cut as the destination's
+restored cut, and never changes the destination's own retention watermark:
+what was pruned is the restored rows' history, not any of the destination's
+own. `importGraph` and `importGraphStream` record the same cut for the same
+archive. `transitionsOf` and `replay` report it as the
+`restored-retention-truncated` reason of their `completeness`, so a restored
+lineage the source had truncated reads `partial`, as it does on the source,
+while the destination's own classes are never reported as truncated by a
+restore.
+
+A `state`-mode document naming a `transitions` section or a `retention`
+watermark is refused before anything is written, and a streamed one at its
+header. Archival
+transitions export is always whole-graph — an export's `nodeKinds` filter
+does not scope the transitions section the way it scopes assertions.
+
+A document (or stream) naming a `transitions` section, or carrying a
+non-zero `retention` watermark, into a target opened without `history:
+true` is refused with `IDENTITY_REPLAY_REQUIRES_HISTORY`, before writing any
+node, edge, or identity assertion. On the streaming protocol, the
+`identity-transitions` chunk always arrives last (after nodes, edges, and
+the `identity` assertions chunk), so `importGraphStream` reads a
+`hasTransitions` boolean on the streamed header's `identity` object — set
+whenever the export's transitions section is non-empty — to know this
+before that chunk arrives. **This is a breaking change**: restoring an
+archival export from a `history: true` source that carries retained
+transitions or a retention watermark now requires the target to also be
+opened with `history: true`; previously the transitions section did not
+exist, so nothing was silently dropped, but nothing could refuse it either.
+A zero watermark restores nothing and is accepted by any target. A stream whose
+header announces a restore but that ends without an `identity-transitions` chunk
+is refused at its end (`IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING`), since
+accepting it would drop the transitions and the watermark the header announced.
 
 ## Exporting Data
 
@@ -123,7 +241,43 @@ const withTemporal = await exportGraph(store, {
 const withDeleted = await exportGraph(store, {
   includeDeleted: true,
 });
+
+// Identity-enabled graphs export current assertions by default.
+// Include ended assertion history explicitly:
+const archival = await exportGraph(store, {
+  identityMode: "archival",
+});
+
+// A self-contained archive pairs archival identity with includeDeleted:
+const selfContainedArchive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
 ```
+
+**Archival identity and soft-deleted endpoints:** `identityMode: "archival"`
+also exports *ended* assertions, and an ended assertion can reference an
+endpoint that was later soft-deleted. A default export (`includeDeleted:
+false`) joins every assertion against its endpoints' live rows, so an
+assertion touching a soft-deleted endpoint is silently **dropped from the
+export** — not carried with a dangling reference. This is silent archive
+loss, not a dangling-endpoint problem. When the archive must stand alone
+(backup, cold storage), pair it with `includeDeleted: true` so those
+assertions and their endpoints travel with it.
+
+That pairing has its own honest trade-off: the interchange format has no
+`deletedAt` field, so a node included only because of `includeDeleted: true`
+carries no record that it was deleted. Re-importing that archive resurrects
+the node as **live**. Choose deliberately: without `includeDeleted`, a
+backup silently loses soft-deleted endpoints and the assertions referencing
+them; with it, those nodes come back alive on restore.
+
+On import, every ended assertion's endpoints must exist as node rows in the
+target (soft-deleted rows qualify) — historical reads conduct identity
+through ended assertions, so an endpoint that never existed would become a
+phantom bridge joining real nodes at past coordinates. The store's own
+exports satisfy this by construction; a hand-built document that fails it is
+recorded as an `entityType: "identity"` entry in `result.errors`.
 
 ### Export Options
 
@@ -132,17 +286,143 @@ const withDeleted = await exportGraph(store, {
 | `nodeKinds` | `string[]` | all | Filter to specific node types |
 | `edgeKinds` | `string[]` | all | Filter to specific edge types |
 | `includeMeta` | `boolean` | `false` | Include version and timestamps |
-| `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields |
+| `includeTemporal` | `boolean` | `false` | Include validFrom/validTo fields. Always on for identity-enabled graphs and graphs with a `oneActive` cardinality (see the round-trip caveat below) |
 | `includeDeleted` | `boolean` | `false` | Include soft-deleted records |
+| `identityMode` | `"state" \| "archival"` | `"state"` | Export current identity assertions, or current plus ended assertions |
+| `signal` | `AbortSignal` | none | Cancel the export: roll its snapshot transaction back and release the connection. See [Cancelling an export](#cancelling-an-export) |
+
+`exportGraphStream` also accepts `idleTimeoutMs`, a positive integer with no
+default. It bounds how long a delivered chunk may remain unacknowledged before
+the stream settles itself. The clock stops as soon as the consumer requests the
+next chunk, so a slow database read does not count as consumer idleness.
 
 **Round-trip caveat:** with the default `includeTemporal: false`, exported
 records carry no `validFrom`/`validTo`. On import, an omitted `validFrom`
-defaults to the *import's own* creation timestamp — so a plain
+defaults to the *import's own* creation timestamp (a born-already-ended record
+is the exception noted above, and keeps no lower bound) — so a plain
 `exportGraph` + `importGraph` round trip does **not** reproduce the
 source's original valid-time window; every imported record becomes valid
 from import time forward. Pass `includeTemporal: true` on export when the
 clone needs to match the source's `asOf` behavior exactly (this is what
 `branch()` does internally).
+
+Two kinds of graph are the exception: their exports default temporal fields
+on, and refuse an explicit `includeTemporal: false`.
+
+- **Identity-enabled graphs**, because assertion windows cannot be validated
+  against endpoints without the endpoint bounds
+  (`IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS`).
+- **Graphs with an active-only edge cardinality** — any edge kind whose
+  `cardinality` or `targetCardinality` is `"oneActive"`, which includes every
+  realizing edge of a `oneActive` [composition](/ontology#composition) pair.
+  Such a kind counts a row only while its window is open, so its ended rows
+  are history: the row a `reparent` leaves behind, an employment that ended.
+  Exported without its `validTo`, an ended row would re-import as current — a
+  part attached to its former whole again, or refused as a second active
+  edge (`ACTIVE_CARDINALITY_EXPORT_REQUIRES_TEMPORAL_FIELDS`).
+
+**Repair a legacy graph before exporting it.** A row an older library version
+stored with a backwards window (`valid_from > valid_to`) exports as it is stored
+and is then refused **per row** on re-import, because the import validates the
+stated pair — so an unrepaired graph does not round-trip. Run
+[`repairInvertedValidityWindows`](/schema-management#repairing-inverted-validity-windows)
+first; it normalizes those rows to the open-left shape import accepts.
+
+**`includeTemporal: true` with `onConflict: "update"`:** an update leg sends the
+document's `validTo` and never its `validFrom`, because a live row's lower bound
+is history. A document whose `validFrom` names a different instant than the
+target row holds is therefore stating a bound the import will not apply, and that
+row is reported as a per-row error carrying
+[`IMMUTABLE_VALIDITY_LOWER_BOUND`](/errors/#immutable_validity_lower_bound)
+rather than updated under a bound it ignored. This is reachable whenever a
+temporal export is replayed over rows that were created separately — the same
+document imported into a fresh graph creates those rows with their stated bounds
+and is unaffected. To update props over existing rows from a temporal export,
+either omit `validFrom` from the update document, export with
+`includeTemporal: false`, or import into a fresh graph and swap it in.
+
+On an identity-enabled graph the update leg's `validTo` goes through the same
+check a store update's does. An end that an identity assertion naming the node
+would outlive is reported as a per-row error (the
+`IdentityEndpointValidityError` message) and the row is left as it was; an end
+that lands on a member of an identity class records the `window-end`
+transition.
+
+### Cancelling an export
+
+On a backend reporting `capabilities.execution.interactiveTransactions`, an export holds one
+repeatable-read snapshot transaction for its whole life, and on a
+single-connection backend it holds that connection's exclusive
+interchange-stream lease with it. (A backend without transactions — SQLite
+`transactionMode: "none"`, the session-less HTTP Postgres drivers — opens
+neither: its export paginates statement by statement, so a write committed
+mid-stream can appear in the pages that follow. That is a declared capability
+gap, not something the stream papers over.) Every *cooperative* exit gives both back,
+because each one runs the stream's `finally`: `break` or `throw` out of a `for
+await`, and an explicit `iterator.return()`.
+
+A consumer that pulls `next()` and then simply **drops the iterator** has no
+cooperative exit. Async-generator `finally` blocks do not run on garbage
+collection, so that snapshot transaction stays open for the life of the process
+— and on a serialized connection every later export and every later import is
+then refused for a stream nobody is reading. If you might abandon an iterator,
+pass a `signal` or configure an idle timeout:
+
+```typescript
+const controller = new AbortController();
+const iterator = exportGraphStream(store, {
+  batchSize: 1000,
+  signal: controller.signal,
+  idleTimeoutMs: 30_000,
+})[Symbol.asyncIterator]();
+
+try {
+  for (;;) {
+    const next = await Promise.race([
+      iterator.next(),
+      deadline(30_000), // resolves to a sentinel, leaving the pull in flight
+    ]);
+    if (next === TIMED_OUT) {
+      // Do NOT just walk away: this is the leak. Aborting rolls the snapshot
+      // back and frees the connection.
+      controller.abort(new Error("export deadline exceeded"));
+      break;
+    }
+    if (next.done === true) break;
+    await write(next.value);
+  }
+} finally {
+  controller.abort();
+}
+```
+
+Aborting rejects the pull that is in flight — and any later pull from a consumer
+that walked away and came back — with
+[`ExportStreamCancelledError`](/errors#exportstreamcancellederror), carrying the
+signal's own reason as `cause`, so a cancelled export is never mistaken for a
+complete one. The message states what was actually settled: a snapshot rolled
+back and a connection released on a transactional backend, or merely abandoned
+reads on one that never held either. Aborting a signal *before* the first pull refuses the export
+outright: no transaction is opened and no lease claimed. Aborting one that has
+already finished does nothing, so a single controller can safely span a whole
+job. `exportGraph` accepts `signal` too — there it simply makes the call reject
+instead of running to completion.
+
+When `idleTimeoutMs` expires, a later pull rejects with
+[`ExportStreamIdleTimeoutError`](/errors#exportstreamidletimeouterror), with code
+`"INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT"`. Its `details.graphId` and
+`details.idleTimeoutMs` identify the stream and configured bound. The timeout is
+stream-only: `exportGraph` owns and promptly advances its internal consumer, so
+it accepts `signal` but not `idleTimeoutMs`. The option has no default because a
+stream may intentionally spend an unbounded amount of time processing a chunk;
+callers that cannot choose a safe idle bound should retain an `AbortController`
+and abort on their own job deadline instead.
+
+There is deliberately no garbage-collection fallback. A `FinalizationRegistry`
+cannot close this gap: any cleanup state able to settle an abandoned stream has
+to reach the stream's internals, and a registry holds its state strongly, so
+doing so would keep the abandoned stream reachable and the finalizer would never
+run. Explicit cancellation and the idle timeout are the mechanisms.
 
 ## Importing Data
 
@@ -162,10 +442,62 @@ if (result.success) {
   console.log(`Created: ${result.nodes.created} nodes, ${result.edges.created} edges`);
   console.log(`Updated: ${result.nodes.updated} nodes, ${result.edges.updated} edges`);
   console.log(`Skipped: ${result.nodes.skipped} nodes, ${result.edges.skipped} edges`);
+  console.log(`Identity: ${result.identity.created} created, ${result.identity.skipped} skipped`);
 } else {
   console.error("Import had errors:", result.errors);
 }
 ```
+
+### Durable edge match identities during import
+
+The target graph declaration, not the interchange document, determines an
+edge's durable `matchIdentity`. After validating and normalizing an incoming
+edge's properties, normal import builds the same canonical endpoint/property
+key used by collection creates and writes it with the edge row. An import
+therefore cannot bypass convergence by choosing a new edge id.
+
+An incoming create whose durable identity is already owned by a different row,
+or was claimed by an earlier edge in the same import slice, is recorded as a
+per-edge error using `EdgeMatchIdentityConflictError`. This decision is
+separate from `onConflict`, which handles an existing row with the incoming
+edge's own id; `skip` and `update` do not authorize taking another row's durable
+identity.
+
+Bundled backends discover existing owners with set-oriented exact endpoint-pair
+reads and insert claimless durable slices with bind-budgeted,
+conflict-arbitrated batch statements. A slice that also needs cardinality
+claims remains atomic. If an exceptional batch refusal cannot identify the
+losing row, TypeGraph rolls the slice back to a savepoint and retries its rows
+individually so `result.edges.created` and `result.errors` remain honest. A
+custom or non-transactional backend that cannot prove that rollback refuses
+the import with `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT`; retrying a
+possibly committed prefix could otherwise double-count or misattribute rows.
+
+These savepoints, and the ones the window-end updates and
+[composition moves](#a-composition-part-that-moved) below take, roll back every statement
+issued on the import's transaction since they were taken, not only the
+import's own. When the import writes into a transaction that other calls also
+use, await it before starting them (see
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
+
+When the document carries an `identity` section, `result.identity` reports
+`{ created, skipped }` counts for imported assertions (skipped covers an
+exact re-import of an assertion that already exists under the same id).
+A rejected assertion — an unknown endpoint, a contradiction against the
+target's existing identity truth, or a reused assertion id that names
+different truth — is recorded in `result.errors` with `entityType:
+"identity"`, `kind` set to the assertion's relation (`"same"` or
+`"different"`), and `id` set to the assertion id, mirroring how node/edge
+errors carry `kind`/`id`.
+
+**Partial-commit caveat:** identity assertions are applied one at a time, and
+a mid-batch failure (a contradiction or id conflict partway through the
+`identity.assertions` array) stops the identity import but does not roll back
+the assertions already applied before it — they remain committed. They are
+**not** reflected in `result.identity.created`, since that count is only
+reported on success; the count under-reports rather than invents a number for
+committed-but-unaccounted work. The failure that stopped the batch is the one
+error entry you see in `result.errors`.
 
 ### Import Options
 
@@ -174,7 +506,64 @@ if (result.success) {
 | `onConflict` | `"skip" \| "update" \| "error"` | required | How to handle existing entities |
 | `onUnknownProperty` | `"error" \| "strip" \| "allow"` | `"error"` | How to handle extra properties |
 | `validateReferences` | `boolean` | `true` | Verify edge endpoints exist |
-| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. |
+| `batchSize` | `number` | `1000` | Batch size for database operations. Each batch pays fixed per-round-trip costs, so undersized batches slow client/server imports; inserts are still split by the driver bind budget internally. It changes round trips and the order of create refusals in `result.errors`, never what an import commits — see [Evaluation order](#evaluation-order-and-batchsize). |
+| `refreshStatistics` | `boolean` | `true` | Refresh planner statistics (`ANALYZE`) after an import that created or updated rows |
+| `onStreamChunkError` | `"abort" \| "continue"` | `"abort"` | `importGraphStream` only: whether a chunk that reports entity-level errors stops the stream. Earlier chunks are already committed either way |
+
+An option key an entry point does not declare is refused rather than dropped:
+`importGraph`, `importGraphStream`, `exportGraph` and `exportGraphStream` throw a
+`ConfigurationError` with `details.code` `INTERCHANGE_OPTION_UNKNOWN`
+(`details.option` names the first unknown key) before reading or writing
+anything, so a misspelled `validateReference: false` cannot silently leave
+validation on. `batchSize` and `idleTimeoutMs` are `exportGraphStream` options;
+`exportGraph` refuses them.
+
+### Evaluation order and `batchSize`
+
+An import applies its edge rows in one order, the same at every `batchSize`:
+every row whose id names an existing edge is applied first — skipped,
+refused or updated, per `onConflict` — then every composition move the
+document states (see below), then every new edge is created, and last every
+row repeating an id this import creates. Within each phase rows apply in
+document order, and a later row repeating an id applies after the row it
+repeats, so it observes that row's outcome.
+
+A create can wait for that last phase: a create of a composition row whose
+part an earlier row of the document, repeating an id this import creates,
+gives a composition row a different `validTo`. A part's composition rows
+share one slot and such a repeat can free it, so that create, and every create
+after it in the document, applies with the repeats, in document order. A
+document that attaches a part, ends that attachment by repeating its id, and
+then attaches the part elsewhere therefore commits all three rows, as the
+source wrote them, instead of refusing the last one against an attachment the
+repeat has not ended yet, and creates competing for one claim keep their
+document priority. A repeat that restates the window it repeats frees nothing
+and moves no create. Every create before the first one that waits keeps its
+phase.
+
+The order matters because rows depend on each other. An update that ends a
+`oneActive` window frees the slot a create in the same document takes, so the
+create sees the end wherever either row sits in the document. Import only ever
+ends or tightens a window — it never resurrects a row or clears an end — so
+applying existing rows first can only make room for a create. The same
+document therefore commits the same rows at `batchSize: 1` and
+`batchSize: 100000`.
+
+`result.errors` lists refusals in that phase order rather than document order:
+validation refusals first, then refusals of existing rows, then of moves, then
+of creates, then of repeats of created ids together with the creates that wait
+for them, in document order. Within the create phase the order also depends on `batchSize`:
+each slice reports the refusals of the rows it writes as a batch before those
+of the rows it must write one at a time (rows checked for cycles), so at
+`batchSize: 1` create refusals follow document order and at larger sizes they
+need not. Match an error to its row by `kind` and `id`, not by position.
+
+`importGraph` classifies the whole document before it writes an edge, so it
+holds every edge row of the document, and for each row that names an existing
+edge the stored row it read, until the edge phase ends. A re-import that
+updates most of its edges therefore needs roughly twice the edge memory of the
+document itself. Use `importGraphStream` for a document too large to hold
+twice: it holds one chunk at a time.
 
 ### Trusted initial import
 
@@ -208,16 +597,57 @@ The contract is deliberately narrow:
 - The TypeGraph node and edge tables must be globally empty. A different graph
   in the same database also makes the database non-empty.
 - The caller guarantees property shapes, endpoint existence, edge endpoint
-  types, cardinality, and duplicate-free IDs. Only stream ordering and known
-  kind names are checked.
+  types, cardinality, composition, duplicate-free IDs, and duplicate-free
+  durable edge match identities. Only stream ordering and known kind names are
+  checked. Trusted import still derives each declared edge identity and stores
+  it with the row, so a collision reaches the database arbiter and rolls back
+  the complete trusted-import transaction.
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- A target graph declaring [target cardinality](/core-concepts#target-cardinality)
+  or source-side `cardinality` constraints on any edge kind is rejected with
+  `details.reason === "cardinality_unsupported"` — trusted import writes only
+  the node and edge relations, so it cannot also maintain the cardinality
+  claim rows those constraints depend on. Use `importGraphStream` for a graph
+  with constrained edge kinds; it maintains claims the same way the store's
+  normal write path does.
+- A target graph declaring any `acyclic: true` edge kind is rejected with
+  `details.reason === "acyclicity_unsupported"`: trusted import validates
+  nothing by contract and holds one transaction for the whole stream, so
+  there is no per-row point to probe the relation at, and no bounded
+  end-of-stream check that would not be a second, unbounded implementation
+  of the same predicate `importGraphStream` already enforces per row. Use
+  `importGraphStream` for a graph with an acyclic edge kind.
+- A target graph declaring any `partOf`/`hasPart` pair is rejected with
+  `details.reason === "composition_unsupported"`: trusted import writes no
+  composition claim row and does not check the composition acyclicity
+  relation, so a graph loaded this way can carry a part with two live wholes
+  or a part/whole cycle. This refusal covers `existence: "required"` pairs
+  too — trusted import cannot honor that guarantee any more than the
+  one-whole claim, so there is no separate reason code for it. Use
+  `importGraphStream` for a graph with a composition pair (`importGraph`
+  when a pair declares `existence: "required"`);
+  `store.verifyConstraintFences()` reports either problem (plus a required
+  part with no whole) after the fact if trusted import is used anyway on
+  data prepared outside TypeGraph.
+- Operational Identity-enabled target stores are rejected with
+  `details.reason === "identity_unsupported"`; identity-bearing input is
+  rejected with `details.reason === "invalid_stream"`. The trusted session
+  writes only the node and edge relations, so it cannot persist assertions or
+  materialize the derived closure — refusing both cases keeps identity truth
+  from being silently dropped. Use `importGraphStream` for an export that
+  carries Operational Identity assertions. This restriction does not apply to
+  an edge registration's `matchIdentity`, which trusted import materializes in
+  the edge relation itself.
 - Nodes must precede edges. The `meta` timestamps and node version in an
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary
   index removal, index rebuilding, and planner statistics either all commit or
   all roll back.
+- A schema-managed Store acquires and validates its schema-write fence inside
+  that transaction before loading rows. A stale managed import fails before
+  row DML; a raw Store remains explicitly outside the schema-fencing guarantee.
 
 Supported native paths are synchronous prepared-statement SQLite
 (`better-sqlite3` and Bun SQLite) and transaction-capable PostgreSQL adapters
@@ -252,6 +682,294 @@ await importGraph(store, data, { onConflict: "update" });
 // Useful for initial imports where duplicates indicate a problem
 await importGraph(store, data, { onConflict: "error" });
 ```
+
+#### An edge id held by a different edge
+
+Edge ids are unique per graph, but the import's existence probe (`getEdge` /
+`getEdges`) is keyed on `(graph_id, id)` alone. So a document edge whose id is
+already held by a row with a different **immutable identity** — its `kind` or
+either of its endpoints — finds that row. That question — *is this the same
+edge?* — is prior to *what do we do about the same edge?*, so it is answered
+**before** the conflict strategy and all three strategies answer alike: the row
+is reported as a per-row entry in `result.errors`, whose `error` message is
+prefixed `INTERCHANGE_EDGE_KIND_CONFLICT` and names each component that differs
+alongside the value the document stated. The stored row is left untouched.
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "update" });
+const identityConflicts = result.errors.filter((entry) =>
+  entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
+);
+```
+
+One prefix covers the whole class rather than a second one for endpoint
+mismatches: the condition is a single fact and the recovery is a single action,
+and a caller that had to match two prefixes to catch one condition would
+eventually match only one. The token still reads `…_KIND_CONFLICT` because it is
+the published, branchable string; it now covers every identity component.
+
+`ImportError` carries no `code` field, so the message prefix is the branchable
+token — the same `CODE: message` idiom the validity-window import refusals use.
+Give the incoming edge a distinct id, or import it under the identity the stored
+row already carries.
+
+Previously both non-`error` strategies were silent about this: `update` wrote
+the incoming edge's properties onto the *other* row with nothing in
+`result.errors`, and `skip` counted the document's edge as already present when
+no matching edge existed anywhere — so it was never created and never reported.
+Comparing `kind` alone closed only half of it: because endpoints are immutable,
+a document naming the incumbent's kind and id but different endpoints still read
+as the same edge, so `update` overwrote the incumbent's properties and silently
+retained its old endpoints. The update is additionally issued with all five
+identity components in the statement's own `WHERE`, so the check cannot be raced
+by a concurrent hard-delete-and-recreate; an update that consequently matches no
+row is reported as the same per-row error rather than aborting the import.
+
+Nodes were never affected: their probe is `getNode(graphId, kind, id)`, which is
+kind-scoped, so a cross-kind id collision simply reads as absent.
+
+#### A composition window that ends or starts later
+
+A composition edge's window may not start or end later than the write that
+states it — on import as on every [store write](/errors#compositionerror). A
+document row of a realizing edge whose `validFrom` or `validTo` lies after
+the import's clock is refused as a per-row error (`error` starts with
+`COMPOSITION_VALIDITY_FUTURE_START` or `COMPOSITION_VALIDITY_FUTURE_END`),
+whether it would insert the row or update an existing one. A past `validTo` is
+history and imports as such: an ended `oneActive` composition row is neither a
+second whole for its part nor a member of the composition relation's
+acyclicity check, so the history a `reparent` leaves behind re-imports in any
+row order.
+
+#### A required composition part with no whole
+
+Import writes every node row before any edge row, so whether a required-existence
+part (`existence: "required"`, see [Ontology](/ontology#existence-a-part-that-cannot-exist-without-a-whole))
+has its composition edge cannot be decided per row at insert time — only once
+the whole payload's edge set is known. A part created by this import is
+accepted when its composition edge arrives later in the SAME import (any
+batch), or when it is already attached on the target from before this import;
+otherwise it is reported as a per-row error on the node (`error` matches
+`/requires a whole/`) and no orphan node row survives the import.
+
+A part nothing can attach — no composition edge anywhere in the payload names
+it, and the target holds no attachment for it — is refused before its row is
+written. No other row of the import is judged against it, so the outcome does
+not depend on where the part sits in the document: a valid row sharing its
+unique value is committed whichever comes first. Every row of the document
+that would create the part is refused, a repeated one included, and an edge
+naming it is refused for its missing endpoint.
+
+A part some composition edge in the payload does name is written, and judged
+once the edges are in; if that edge turns out not to attach it (see below) its
+row is removed in the same transaction. That ordering is visible. A later row
+that collides with the part's row — the same value under a unique constraint,
+an edge that takes a slot the part's edge holds — is refused against it and
+reported naming the part, and it stays refused after the part is removed: the
+import does not judge that row again. Every other row is unaffected.
+Re-running the import without the refused part (or with a composition edge
+that attaches it) accepts the rows it displaced.
+
+"Attached" is judged on the written rows, by the same reader
+`store.verifyConstraintFences()` uses, so a composition edge in the payload is
+not enough on its own: an edge whose window does not attach the part (an
+ended `oneActive` window), or whose whole does not exist (possible with
+`validateReferences: false`), leaves the part refused. The check repeats until
+nothing changes, so a required part attached only to a part this import
+refuses is refused with it. Removing a written part removes every edge
+touching it, and each one is reported as its own per-row error on the edge.
+That includes an edge that was on the target before this import — one written
+ahead of the part under `validateReferences: false` — whose error says so. The
+`created` and `updated` counts of `result.nodes` and `result.edges` count only
+what was committed: a refused part, and each edge removed with it, comes off
+every count this import had added it to.
+
+With `onConflict: "update"`, a document whose `validTo` would end the open
+window of a live required part's composition edge is refused as a per-row
+error (`error` starts with `COMPOSITION_DETACH_REFUSED`), as the same update
+is through `store.edges.<kind>.update(...)` — unless the same document attaches
+the part again, which makes the two rows one move (see
+[A composition part that moved](#a-composition-part-that-moved)).
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "error" });
+const orphaned = result.errors.filter(
+  (entry) => entry.entityType === "node" && /requires a whole/u.test(entry.error),
+);
+```
+
+Only nodes THIS import creates are tracked this way: a required-existence node
+already live on the target that this import merely updates or leaves alone is
+never re-checked, even if it happens to have no whole (a pre-existing gap
+`store.verifyConstraintFences()` — not import — reports).
+
+`importGraphStream` cannot make this check: every chunk commits on its own,
+and a part's composition edge arrives in a later chunk than the part itself.
+A streamed import into a graph that declares any required-existence part kind
+is therefore refused before any chunk is read, with a `ConfigurationError`
+whose `details.code` is `IMPORT_STREAM_REQUIRED_COMPOSITION_UNSUPPORTED`. Use
+`importGraph` for such a graph. `branch()` and the other working-copy clones
+switch to a materialized `importGraph` for these graphs on their own.
+
+#### A composition part that moved
+
+A source whose part moved to another whole re-imports with `onConflict:
+"update"` as a move, whatever order its rows arrive in:
+
+- **`oneActive` pair.** The move exports as two rows: the old attachment with
+  the `validTo` that ended it, and a new attachment. When the document holds
+  exactly one row ending a part's current attachment and exactly one row
+  creating an attachment for it, import applies the two as **one move**: both
+  land or neither does. A required part moves this way too: the end is not
+  refused as a detach, because the same move attaches the part again.
+- **`one` pair.** A `one` move deletes the old row, so its export carries the
+  new attachment alone, and the target still holds the old one. The new row
+  would give the part a second whole, so it is refused per row as
+  `COMPOSITION_WHOLE_OCCUPIED`, like any other, and the part stays where it
+  was. To replay such a move, `reparent` the part on the target. The same
+  refusal applies on a `oneActive` pair whose document omits the ended row.
+
+A required part's move must abut: the new attachment's `validFrom` must be
+the `validTo` that ends the old one, the one instant `reparent` gives both
+halves. A new attachment that opens later would leave the part with no whole
+on valid-time reads in between. A new attachment that states no `validFrom`
+is judged as opening at the instant `importGraph` judges the move, and is
+written with that instant when the move is accepted, so it abuts an end at
+that instant and leaves a gap after an earlier one. Both rows of a move that
+leaves a gap are refused before anything is written, each with
+`COMPOSITION_MOVE_GAP`, naming the part, both windows and the gap, and the part
+keeps its current whole. A new attachment that overlaps the old one is refused
+as `COMPOSITION_WINDOW_OVERLAP`, as before. An end at the old attachment's own
+`validFrom` leaves a zero-width window, which holds the part at no instant and
+overlaps nothing, so a new attachment opening before it leaves no gap; it is
+judged, as any attachment is, against the part's other rows. An optional part
+may move across a gap: it has no whole in between. `importGraphStream`
+refuses a graph that declares a required part before it reads any chunk (see
+above), so this refusal is `importGraph`'s.
+
+Every move a document states is applied together, as `bulkReparent` applies
+its moves: every old attachment is ended before any new one is written. So moves that depend on each other land
+whatever order the document lists them in: two parts exchanging a slot a
+whole-side `targetCardinality` bounds, or a hierarchy that inverts (a part
+moves under another that the same document moves out from under it).
+
+Each move is still applied whole or not at all. A move that cannot land — one
+of its rows refused (a window that overlaps the part's history, a cycle), or a
+moved part left without the whole the move gave it once the rest of the import
+is written (a whole this import creates and then removes as a required part it
+could not attach, or one that is not live under `validateReferences: false`)
+— is taken out of the set and the rest is applied again without it: its
+refused row reports its own error, and its other rows a per-row error prefixed
+`INTERCHANGE_COMPOSITION_MOVE_INCOMPLETE`. The part keeps its current whole.
+
+The same holds for a part whose rows do not pair as one move: two rows
+attaching it, a row ending it twice, or a row whose id the document repeats.
+Whenever a row ends a part's attachment and another row of the document
+attaches the part again, the end is not written unless one of those rows
+attaches the part, whatever stage refuses them: an invalid property, a whole
+that does not exist or whose own row this import refuses, a refusal when the
+row is created, or an id that names a stored edge import cannot write as a new
+attachment (an ended edge, which import never reopens; a deleted edge, which
+it skips without an error; or another part's edge). The row ending the part's
+attachment is then refused with the same prefix rather than written alone, and
+the part keeps the whole it held before that end. Whether a row ended the
+attachment is decided from what its write did: only a row applied as an update
+over an open window attaching the part ends it, so a refused row, or a repeat
+that creates ended history, ends nothing. When rows end the part's attachment
+in turn, the end written last is refused first, so the part keeps the last
+whole a row of the document actually gave it. A row restating the edge being
+ended, or a row whose own window is already ended, does not attach the part
+again, so it leaves a lone end in place. A required part's lone end is refused as
+`COMPOSITION_DETACH_REFUSED` when nothing else refuses it first.
+
+A refused row costs one more pass over the moves (not over the rest of the
+import) when its move had already written its other half. A moved part found
+without its whole costs one more pass over the import's edge writes, and so
+does each end found written alone. None is needed when every row ending the
+attachment ends the stored edge attaching the part and every other attaching
+row is refused while the document is classified or names a stored edge: those
+ends are refused before anything is written. A
+backend whose transaction offers no savepoint cannot take such a pass back, so
+the import aborts with `IMPORT_COMPOSITION_MOVE_REQUIRES_SAVEPOINT` instead.
+Failures that depend on each other — a chain of moves, each into the slot the
+one before it frees, whose first link is refused — are found one link per pass,
+so such a chain costs passes in proportion to its length and move writes in
+proportion to its length squared. Every pass runs inside the import's
+transaction, which holds the per-graph write lock throughout: on SQLite a chain
+of 200 such failures took about 10 seconds, so one of 2,000 would hold the
+write lock for more than 15 minutes.
+
+`importGraphStream` commits each chunk on its own, and the "document" every
+rule above speaks of is the chunk: the two halves of a `oneActive` move that
+land in different chunks are not paired, and an earlier chunk stays committed
+when a later one is refused. Chunk boundaries are yours to choose, so keep a
+move's rows in one chunk (or import with `importGraph`) when the move must be
+atomic.
+
+#### An edge that would close a cycle
+
+An edge kind declaring `acyclic: true` is checked per row, sequentially:
+each row's acyclicity probe runs inside the same savepoint-guarded attempt
+as its insert, so a row that would close a cycle rolls back to the
+savepoint and is reported as that row's per-row error while the rest of
+the import commits — the same per-row recovery every other declared
+constraint gets. Rows of an acyclic kind never join the batched slice
+insert other rows in the same chunk use: the in-batch cardinality/endpoint
+overlay intercepts simple counts and existence checks, not a recursive
+reachability query, so it cannot see an in-batch cycle. This is the one
+place import trades throughput for correctness on purpose — acyclic kinds
+import one row at a time.
+
+`importGraph` / `importGraphStream` additionally takes the per-graph write
+lock for the duration of each chunk whenever the target graph declares any
+`acyclic: true` edge kind, and refuses the whole import up front — before
+the first chunk, with `details.constraint: "edgeAcyclicity"` — on a backend
+with no transactions. See [Backend Setup](/backend-setup) for the full
+fence-reason table.
+
+#### An update target that changed under the import
+
+`onConflict: "update"` is a read-then-write pair: the import probes the stored
+row, validates the document's validity window against that row's `valid_from`,
+and then writes. Every part of that verdict is restated in the UPDATE's own
+`WHERE` — for edges the five identity components above, and for **both** nodes
+and edges the effective validity lower bound, whenever the window check actually
+read it. A concurrent hard-delete-and-recreate between the probe and the write
+therefore matches no row instead of landing a decision computed for a row that
+is gone (which would have ignored a `validFrom` the document stated, or
+persisted a `validTo` below the new row's `validFrom`).
+
+The bound is read — and so restated — when the document states a `validFrom` to
+compare against it, or a lone `validTo` to check for an inverted window. A
+document that states **neither** makes no claim about the row's window, so its
+properties update is not fenced on the bound and a concurrent recreate that only
+moved the bound does not refuse it. This matches `store.nodes.*.update` exactly:
+a write asserts what its decision read, and nothing more.
+
+A write that matches no row is reported per row, so an import whose earlier
+rows are already written is not aborted for it:
+
+```typescript
+const result = await importGraph(store, data, { onConflict: "update" });
+const raced = result.errors.filter(
+  (entry) =>
+    entry.error.startsWith("INTERCHANGE_NODE_UPDATE_TARGET_CHANGED") ||
+    entry.error.startsWith("INTERCHANGE_EDGE_KIND_CONFLICT"),
+);
+```
+
+`INTERCHANGE_NODE_UPDATE_TARGET_CHANGED` is the node-side prefix;
+edges reuse `INTERCHANGE_EDGE_KIND_CONFLICT`, whose message now also names the
+validity lower bound. Re-export the source and retry.
+
+A node update refused this way leaves no partial trace, and neither does one
+refused for a uniqueness conflict. The row write and the uniqueness transition
+are one unit: the new keys are claimed first (the claim is what decides the
+conflict), the row write follows, and the old keys are released only once it
+lands — with the claims given back if it does not. Fulltext and embedding
+sidecars are written only after the row update reports a match. So a row that
+`result.errors` reports is a row the import did not change, even though the
+transaction around it commits.
 
 ### Unknown Property Handling
 
@@ -385,7 +1103,7 @@ function transformExternalData(externalRecords: ExternalRecord[]): GraphData {
   const validatedNodes = nodes.map((node) => InterchangeNodeSchema.parse(node));
 
   return {
-    formatVersion: "1.0",
+    formatVersion: "2.0",
     exportedAt: new Date().toISOString(),
     source: {
       type: "external",
@@ -418,6 +1136,36 @@ if (!result.success) {
 }
 ```
 
+### Serialized-connection refusals
+
+Row-level failures are reported in `result.errors`, but one class of failure is
+thrown instead: two long-lived interchange streams cannot share a single
+serialized database connection, so whichever starts second is refused with a
+typed `ConfigurationError`. The lease is exclusive — one stream of any kind per
+connection — and every long-lived import claims it, so `importGraph`,
+`importGraphStream`, `trustedImportGraph`, and `trustedImportGraphStream` can all
+throw it, as can `exportGraphStream` when an import already holds the connection
+— there, on the stream's first pull, since the claim begins when the snapshot
+transaction opens rather than when the iterable is constructed. The codes (`INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`,
+`INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS`) and the `details.requested` /
+`details.heldBy` pairing they carry are documented in
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes).
+
+Which connections count as serialized is read off the driver, so a driver
+TypeGraph cannot identify is left unmarked and a stream pair on it can still
+wedge. `createSqliteBackend` and `createPostgresBackend` take a
+`serializedResource` declaration for both directions of that gap —
+`{ mode: "shared", resource: client }` marks a connection TypeGraph cannot see,
+`{ mode: "independent" }` escapes a detection that is wrong for your topology.
+The escape hatch lifts the shared-resource refusal between two distinct backends
+only: one SQLite backend exporting into **itself** stays refused with
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`, because that is one handle holding
+the one snapshot transaction its own import needs. That surviving refusal is
+SQLite-only, so on PostgreSQL a backend declared independent may export into
+itself. See
+[Serialized connections](/backend-setup#serialized-connections).
+
 ## Best Practices
 
 ### Validate Before Import
@@ -438,9 +1186,13 @@ await importGraph(store, result.data, options);
 
 ### Use Transactions for Consistency
 
-Import operations use transactions when the backend supports them. For backends
-without transaction support, consider smaller batch sizes to minimize partial
-failure impact.
+Import operations use transactions when the backend supports them. When the
+Store carries a reconciled schema version, every import batch acquires and
+validates the same schema-write fence as collection writes; a stale managed
+Store fails before row DML. A raw Store remains outside that guarantee. On a raw
+Store without transaction support, consider smaller batch sizes to minimize
+partial-failure impact; a managed Store on that backend fails closed on its
+first write.
 
 ### Test with `onConflict: "error"` First
 
@@ -470,6 +1222,8 @@ logger.info("Import completed", {
   edgesCreated: result.edges.created,
   edgesUpdated: result.edges.updated,
   edgesSkipped: result.edges.skipped,
+  identityCreated: result.identity.created,
+  identitySkipped: result.identity.skipped,
   errorCount: result.errors.length,
 });
 ```

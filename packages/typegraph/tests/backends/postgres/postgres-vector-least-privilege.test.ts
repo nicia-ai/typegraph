@@ -14,6 +14,9 @@
  *
  * Skipped unless `POSTGRES_URL` is set (or `scripts/test-postgres.sh`).
  */
+import { randomUUID } from "node:crypto";
+
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import {
@@ -28,24 +31,30 @@ import {
 import { z } from "zod";
 
 import {
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineGraph,
   defineNode,
   embedding,
-  pgvectorStrategy,
   StoreNotInitializedError,
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
+import { pgvectorStrategy } from "../../../src/backend/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { createVerifiedStore } from "../../../src/schema";
 import { requireDefined } from "../../../src/utils/presence";
+import { errorChain } from "../../../src/utils/sql-errors";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
-const LEAST_PRIV_ROLE = "tg_vec_lp_runtime";
+const LEAST_PRIV_ROLE = `tg_vec_lp_runtime_${randomUUID().replaceAll("-", "")}`;
+const LEAST_PRIV_ROLE_IDENTIFIER = `"${LEAST_PRIV_ROLE}"`;
 const LEAST_PRIV_PASSWORD = "lp_runtime_pw";
 
 const Document = defineNode("Doc", {
@@ -68,10 +77,25 @@ const PER_FIELD_TABLE = pgvectorStrategy.tableName(
   "embedding",
 );
 const CONTRIB_MAT_TABLE = "typegraph_contribution_materializations";
+const AdoptedVectorExtension = defineGraphExtension({
+  nodes: {
+    RuntimeAddedVector: {
+      properties: {
+        vector: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 3 },
+          optional: true,
+        },
+      },
+    },
+  },
+});
 
 let ownerPool: Pool | undefined;
 let leastPrivPool: Pool | undefined;
-let postgresAvailable = false;
+let leastPrivRoleCreated = false;
+let publicCreateRevoked = false;
 
 /** A Pool authenticating as the USAGE-only role against the same database. */
 function leastPrivConnection(): Pool {
@@ -87,56 +111,71 @@ function leastPrivConnection(): Pool {
 
 beforeAll(async () => {
   if (!process.env["POSTGRES_URL"]) return;
-  try {
-    ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
-    await ownerPool.query("SELECT 1");
-    // Base typegraph_* tables for the shared test database.
-    await ownerPool.query(generatePostgresMigrationSQL());
+  ownerPool = new Pool({ connectionString: TEST_DATABASE_URL });
+  await ownerPool.query("SELECT 1");
+  // Base typegraph_* tables for this suite's database.
+  await ownerPool.query(generatePostgresMigrationSQL());
 
-    // (Re)create the least-privilege runtime role: USAGE + full DML, but no
-    // CREATE on schema public — the exact prod `nicia_app` shape.
-    await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE}`).catch(() => {
-      // The role may not exist yet (first run) — nothing to drop.
-    });
-    await ownerPool.query(`DROP ROLE IF EXISTS ${LEAST_PRIV_ROLE}`);
-    await ownerPool.query(
-      `CREATE ROLE ${LEAST_PRIV_ROLE} LOGIN PASSWORD '${LEAST_PRIV_PASSWORD}'`,
-    );
-    await ownerPool.query(`GRANT USAGE ON SCHEMA public TO ${LEAST_PRIV_ROLE}`);
-    await ownerPool.query(
-      `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${LEAST_PRIV_ROLE}`,
-    );
-    // DML on tables the owner creates later (the per-field vector table).
-    await ownerPool.query(
-      `ALTER DEFAULT PRIVILEGES IN SCHEMA public ` +
-        `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${LEAST_PRIV_ROLE}`,
-    );
-    // The crux: deny DDL. (Legacy databases grant CREATE to PUBLIC.)
+  // The role name is unique per test process because PostgreSQL roles are
+  // cluster-global while grants and DROP OWNED are database-local. A fixed
+  // name cannot be cleaned up safely when another database still grants it
+  // privileges, and collides when worktrees run this suite concurrently.
+  await ownerPool.query(
+    `CREATE ROLE ${LEAST_PRIV_ROLE_IDENTIFIER} LOGIN PASSWORD '${LEAST_PRIV_PASSWORD}'`,
+  );
+  leastPrivRoleCreated = true;
+  await ownerPool.query(
+    `GRANT USAGE ON SCHEMA public TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  await ownerPool.query(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  // DML on tables the owner creates later (the per-field vector table).
+  await ownerPool.query(
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA public ` +
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+  // The crux: deny DDL. (Legacy databases grant CREATE to PUBLIC.)
+  const publicSchemaPrivileges = await ownerPool.query<{
+    public_has_create: boolean;
+  }>(`
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_namespace AS namespace
+      CROSS JOIN LATERAL aclexplode(
+        COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))
+      ) AS privilege
+      WHERE namespace.nspname = 'public'
+        AND privilege.grantee = 0
+        AND privilege.privilege_type = 'CREATE'
+    ) AS public_has_create
+  `);
+  if (publicSchemaPrivileges.rows[0]?.public_has_create === true) {
     await ownerPool.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC`);
-    await ownerPool.query(
-      `REVOKE CREATE ON SCHEMA public FROM ${LEAST_PRIV_ROLE}`,
-    );
-
-    leastPrivPool = leastPrivConnection();
-    await leastPrivPool.query("SELECT 1");
-    postgresAvailable = true;
-  } catch {
-    postgresAvailable = false;
+    publicCreateRevoked = true;
   }
+  await ownerPool.query(
+    `REVOKE CREATE ON SCHEMA public FROM ${LEAST_PRIV_ROLE_IDENTIFIER}`,
+  );
+
+  leastPrivPool = leastPrivConnection();
+  await leastPrivPool.query("SELECT 1");
 });
 
 afterAll(async () => {
   if (leastPrivPool) await leastPrivPool.end();
-  if (ownerPool && postgresAvailable) {
-    // Restore PUBLIC's CREATE so we don't leave the shared test database
-    // more restrictive than other suites expect, then drop the role.
-    await ownerPool.query(`GRANT CREATE ON SCHEMA public TO PUBLIC`);
-    await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE}`).catch(() => {
-      // The role may not exist yet (first run) — nothing to drop.
-    });
-    await ownerPool.query(`DROP ROLE IF EXISTS ${LEAST_PRIV_ROLE}`);
+  if (ownerPool) {
+    if (publicCreateRevoked) {
+      // Restore PUBLIC's CREATE so the database is left as provisioned, in
+      // case an operator inspects or reuses it after the run.
+      await ownerPool.query(`GRANT CREATE ON SCHEMA public TO PUBLIC`);
+    }
+    if (leastPrivRoleCreated) {
+      await ownerPool.query(`DROP OWNED BY ${LEAST_PRIV_ROLE_IDENTIFIER}`);
+      await ownerPool.query(`DROP ROLE ${LEAST_PRIV_ROLE_IDENTIFIER}`);
+    }
+    await ownerPool.end();
   }
-  if (ownerPool) await ownerPool.end();
 });
 
 describe.runIf(process.env["POSTGRES_URL"])(
@@ -150,21 +189,22 @@ describe.runIf(process.env["POSTGRES_URL"])(
       return createPostgresBackend(drizzle(pool));
     }
 
-    function runtimeBackend(): ReturnType<typeof createPostgresBackend> {
+    function runtimeBackend(
+      schemaProvisioning: "dml-only" | "transactional" = "dml-only",
+    ): ReturnType<typeof createPostgresBackend> {
       const pool = leastPrivConnection();
       transientPools.push(pool);
-      return createPostgresBackend(drizzle(pool));
+      return createPostgresBackend(drizzle(pool), { schemaProvisioning });
     }
 
     beforeEach(async () => {
-      if (!postgresAvailable || !ownerPool) return;
+      const pool = requireDefined(ownerPool);
       // Start each test genuinely un-provisioned for this graph.
-      await ownerPool.query(`DROP TABLE IF EXISTS "${PER_FIELD_TABLE}"`);
-      await ownerPool.query(
-        `DELETE FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`,
-        [VecGraph.id],
-      );
-      await ownerPool.query(`DELETE FROM typegraph_nodes WHERE graph_id = $1`, [
+      await pool.query(`DROP TABLE IF EXISTS "${PER_FIELD_TABLE}"`);
+      await pool.query(`DELETE FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`, [
+        VecGraph.id,
+      ]);
+      await pool.query(`DELETE FROM typegraph_nodes WHERE graph_id = $1`, [
         VecGraph.id,
       ]);
     });
@@ -182,6 +222,89 @@ describe.runIf(process.env["POSTGRES_URL"])(
           `CREATE TABLE tg_lp_probe (id text)`,
         ),
       ).rejects.toMatchObject({ code: "42501" });
+    });
+
+    it("pins the adopted schema fence to the caller transaction and refuses DDL under a DML-only role", async () => {
+      const pool = leastPrivConnection();
+      transientPools.push(pool);
+      const db = drizzle(pool);
+      const backend = createPostgresBackend(db, {
+        schemaProvisioning: "transactional",
+      });
+      const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
+      const slot = {
+        graphId: VecGraph.id,
+        nodeKind: "Doc",
+        fieldPath: "embedding",
+        dimensions: 4,
+        metric: "cosine",
+        indexType: "none",
+      } as const;
+      const failure = await db
+        .transaction(async (nativeTx) => {
+          const adopted = await adopt(nativeTx, VecGraph.id, {
+            waitBudgetMs: 2000,
+          });
+          const heldLocks = await nativeTx.execute<{
+            advisory_count: number;
+          }>(sql`
+            SELECT count(*)::integer AS advisory_count FROM pg_locks
+            WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+              AND granted AND mode = 'ExclusiveLock'
+          `);
+          expect(heldLocks.rows[0]?.advisory_count).toBeGreaterThan(0);
+          await requireDefined(adopted.backend.ensureVectorSlotContributions)(
+            [slot],
+            {
+              onDrift: "throw",
+            },
+          );
+        })
+        .then(
+          () => "unexpected success",
+          (error: unknown) => error,
+        );
+      expect(
+        [...errorChain(failure)].some(
+          (link) =>
+            typeof link === "object" &&
+            link !== null &&
+            "code" in link &&
+            link.code === "42501",
+        ),
+      ).toBe(true);
+      const marker = await requireDefined(ownerPool).query(
+        `SELECT 1 FROM ${CONTRIB_MAT_TABLE} WHERE graph_id = $1`,
+        [VecGraph.id],
+      );
+      expect(marker.rowCount).toBe(0);
+    });
+
+    it("refuses a DML-only role's physical evolution before adopting its fence", async () => {
+      await createStoreWithSchema(VecGraph, ownerBackend());
+      const backend = runtimeBackend();
+      const [store] = await createAdapterStoreWithSchema(VecGraph, backend);
+      const before = await backend.getActiveSchema(VecGraph.id);
+      const plan = await store.planEvolution(AdoptedVectorExtension);
+      expect(plan.status).toBe("change");
+      await backend.transactionWithNative(async (target, nativeTx) => {
+        await expect(
+          store.withEvolvedTransaction(nativeTx, plan, () =>
+            Promise.resolve("unreached"),
+          ),
+        ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+        const heldLocks = await target.execute<{
+          advisory_count: number;
+        }>(
+          asCompiledRowsSql(portableSql`
+          SELECT count(*)::integer AS advisory_count FROM pg_locks
+          WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+            AND granted AND mode = 'ExclusiveLock'
+        `),
+        );
+        expect(heldLocks[0]?.advisory_count).toBe(0);
+      });
+      expect(await backend.getActiveSchema(VecGraph.id)).toEqual(before);
     });
 
     it("owner provisions; the USAGE-only role then upserts + searches with zero DDL", async () => {

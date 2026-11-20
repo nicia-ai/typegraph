@@ -1,21 +1,96 @@
-import { type GraphBackend } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
-import { ConfigurationError } from "../../errors";
-import { type SqlSchema } from "../../query/compiler/schema";
-import type { SqlDialect } from "../../query/dialect/types";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../../backend/advisory-lock-namespaces";
+import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind";
+import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import {
+  requireWriteFence,
+  resolveFenceStatements,
+  resolveWriteFencePlan,
+  type WriteFencePlan,
+} from "../../backend/capabilities/write-fence";
+import {
+  assertFencedSnapshotIsFresh,
+  graphCommandCoordinationAcquisition,
+  mintGraphCommandCoordination,
+  normalizeGraphCommandIsolation,
+  readGraphWriteFenceAcquisition,
+} from "../../backend/command-contract";
+import { postgresFenceSql } from "../../backend/drizzle/postgres-fence-sql";
+import type {
+  GraphBackend,
+  GraphCommandCoordination,
+  GraphCommandIsolation,
+  GraphWriteFenceAcquisition,
+} from "../../backend/types";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+  RECORDED_FIRST_REVISION,
+  RECORDED_MAX_REVISION,
+  type RecordedInstant,
+} from "../../core/temporal";
+import { ConfigurationError, TransactionConflictError } from "../../errors";
+import {
+  recordedAnchorsTable,
+  type SqlSchema,
+} from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
-import { nowIso } from "../../utils/date";
+import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
 import { generateId } from "../../utils/id";
-import { requireDefined } from "../../utils/presence";
+import { decodeRevisionColumn } from "../../utils/revision-column";
+import {
+  isSerializationFailure,
+  withRecordedRelationsPrecondition,
+} from "../../utils/sql-errors";
+import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
+type RecordedClockParts = Readonly<{ recordedAt: string; revision: number }>;
+export type AllocatedRecordedCommit = RecordedClockParts &
+  Readonly<{ instant: string }>;
 type RevisionOriginRow = Readonly<{ origin: unknown }>;
+export type RevisionOriginState = Readonly<{
+  origin: string | undefined;
+  isolation: GraphCommandIsolation | undefined;
+}>;
+type RecordedClockState = Readonly<{
+  clock: ClockRow | undefined;
+  originRow: RevisionOriginRow | undefined;
+}>;
+
+/** One clock/origin observation; presence is separate from persisted values. */
+async function readRecordedClockState(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<RecordedClockState> {
+  const [row] = await target.execute<
+    ClockRow &
+      RevisionOriginRow &
+      Readonly<{
+        clock_graph_id: unknown;
+        origin_graph_id: unknown;
+      }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at,
+        origins.graph_id AS origin_graph_id, origins.origin
+      FROM (SELECT 1) seed
+      LEFT JOIN ${schema.recordedClockTable} clock ON clock.graph_id = ${graphId}
+      LEFT JOIN ${schema.revisionOriginsTable} origins ON origins.graph_id = ${graphId}
+    `),
+  );
+  return {
+    clock: typeof row?.clock_graph_id === "string" ? row : undefined,
+    originRow: typeof row?.origin_graph_id === "string" ? row : undefined,
+  };
+}
 
 type RecordedClockBackend = Pick<
   GraphBackend,
-  "dialect" | "execute" | "executeStatement"
+  "capabilities" | "dialect" | "execute" | "executeStatement"
 >;
 
 type RevisionOriginBackend = Pick<
@@ -26,22 +101,31 @@ type RevisionOriginBackend = Pick<
 /**
  * Floor sentinel used only to seed-and-lock a graph's clock row before the
  * read/advance/write sequence on SQLite-family backends. Always overwritten by
- * the real commit within the same transaction; chosen so every real wall-clock
- * instant sorts after it on both text and timestamp ordering.
+ * the real commit within the same transaction. Revision zero is reserved for
+ * this internal row and is never exposed as a valid recorded instant.
  */
-const RECORDED_MIN = "1970-01-01T00:00:00.000Z";
-const RECORDED_MAX_TIME = new Date(RECORDED_MAX).getTime();
+const RECORDED_MIN_REVISION = 0;
+const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
-const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
-  "typegraph:recorded-graph-write";
-
-const USES_RECORDED_GRAPH_ADVISORY_LOCK = {
-  postgres: true,
-  sqlite: false,
-} as const satisfies Record<SqlDialect, boolean>;
 
 /**
- * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
+ * `resolveFenceStatements(postgresFenceSql)`, hoisted once: the bundled
+ * PostgreSQL spelling's derived standalone-statement forms, for the two
+ * functions below that render this module's advisory locks' actual SQL text
+ * for a caller that needs it directly rather than through a resolved plan —
+ * a test driving a raw connection, or a competing manual lock.
+ */
+const postgresFenceStatements = resolveFenceStatements(postgresFenceSql);
+
+/**
+ * Renders the bundled PostgreSQL spelling of this module's two advisory
+ * locks, for a caller that needs the actual SQL text rather than a resolved
+ * plan — a test driving a raw connection, or a competing manual lock. The
+ * lock SITES themselves (`lockRecordedClock`, `acquireRecordedGraphWriteLock`)
+ * never call these: they consume `fence.sql.*` from their own resolved
+ * {@link resolveWriteFencePlan}, so a backend with a different lock spelling
+ * is honored instead of overridden by this module's PostgreSQL default.
+ *
  * Keep lock namespaces tied to acquire order, not to feature names:
  *
  * - recorded graph writes take `typegraph:recorded-graph-write` before any row
@@ -52,29 +136,21 @@ const USES_RECORDED_GRAPH_ADVISORY_LOCK = {
  * Sharing one key across those two acquire-order positions creates a circular
  * wait under ordinary concurrent load.
  */
-function graphAdvisoryLockSql(namespace: string, graphId: string): SqlFragment {
-  return sql`
-    SELECT pg_advisory_xact_lock(
-      hashtext(${namespace}),
-      hashtext(${graphId})
-    )
-  `;
-}
-
 export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
-  return graphAdvisoryLockSql(RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE, graphId);
+  return postgresFenceStatements.acquireKeyed(
+    RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
+    graphId,
+  );
 }
 
 export function recordedGraphWriteAdvisoryLockSql(
   graphId: string,
 ): SqlFragment {
-  return graphAdvisoryLockSql(
+  return postgresFenceStatements.acquireKeyedWithIsolation(
     RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
     graphId,
   );
 }
-
-declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
 
 /**
  * Compile-time evidence that the per-graph write-lock discipline was
@@ -86,17 +162,38 @@ declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
  * "sidecar write before lock" is a compile error rather than a lock-order
  * inversion found in review.
  */
+declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
+
 export type GraphWriteLock = Readonly<{
   [GRAPH_WRITE_LOCK_BRAND]: true;
+  coordination: GraphCommandCoordination | undefined;
 }>;
 
-// The brand is compile-time only (a `unique symbol` with no runtime value —
-// see the `declare const` above), so the token carries no actual per-call
-// data and every acquisition can share this one frozen empty instance.
-const GRAPH_WRITE_LOCK_EVIDENCE = Object.freeze({}) as GraphWriteLock;
+const UNCOORDINATED_GRAPH_WRITE_LOCK = Object.freeze({
+  coordination: undefined,
+}) as GraphWriteLock;
 
-function graphWriteLockEvidence(): GraphWriteLock {
-  return GRAPH_WRITE_LOCK_EVIDENCE;
+function acquiredGraphWriteLock(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  acquisition: GraphWriteFenceAcquisition,
+): GraphWriteLock {
+  return Object.freeze({
+    coordination: mintGraphCommandCoordination(
+      target.commands,
+      graphId,
+      acquisition,
+    ),
+  }) as GraphWriteLock;
+}
+
+/** Record a graph write fence acquired by a combined backend primitive. */
+export function acquiredGraphWriteLockFromCombinedFence(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  acquisition: GraphWriteFenceAcquisition,
+): GraphWriteLock {
+  return acquiredGraphWriteLock(target, graphId, acquisition);
 }
 
 /**
@@ -106,7 +203,7 @@ function graphWriteLockEvidence(): GraphWriteLock {
  * on a history store.
  */
 export function uncapturedGraphWriteLock(): GraphWriteLock {
-  return graphWriteLockEvidence();
+  return UNCOORDINATED_GRAPH_WRITE_LOCK;
 }
 
 /**
@@ -120,14 +217,17 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * delegate's own writes, `runInWriteTransaction`, provenance) then skips the
  * `SqlFragment` once the graph's lock is held.
  *
- * Keyed weakly by the backend object: the delegate is created per
- * transaction, so memo lifetime equals lock lifetime. NOT savepoint-aware —
- * a manual `SAVEPOINT` rolled back across the first acquisition releases the
- * lock but not the memo entry. That matches the capture session's touch
- * state (also not savepoint-scoped); manual savepoints inside a recorded
- * transaction are outside the capture contract.
- */
-/**
+ * Keyed weakly by the backend object: the delegate is created per transaction,
+ * so memo lifetime equals lock lifetime. The recorded savepoint coordinator
+ * checkpoints and restores this memo with captured touches. No other
+ * savepoint can sit between two writes of a Store-owned history transaction:
+ * its callback holds no raw SQL handle (`tx.sql` is withheld under capture,
+ * and `tx.backend` executes no statements). A `withRecordedTransaction`
+ * callback can open one through the caller's own handle; rolling such a
+ * savepoint back over TypeGraph writes is outside the capture contract, as
+ * the limitations guide states, because it would undo writes and fence
+ * evidence this memo and the captured touches still remember.
+ *
  * Single-flight per graph: the memo stores the IN-FLIGHT acquisition
  * promise, not just completed acquisitions, so concurrent same-transaction
  * writers (`Promise.all` over captured writes) coalesce onto one advisory
@@ -135,13 +235,34 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * acquisition evicts its entry so a retry is not poisoned (in practice a
  * failed statement has aborted the Postgres transaction anyway).
  */
-export type RecordedGraphLockMemo = Map<string, Promise<void>>;
+export type RecordedGraphLockMemo = Map<
+  string,
+  Promise<GraphWriteFenceAcquisition>
+>;
 
 export function createRecordedGraphLockMemo(): RecordedGraphLockMemo {
   return new Map();
 }
 
 const recordedGraphLockMemos = new WeakMap<object, RecordedGraphLockMemo>();
+/**
+ * Seeds the registered single-flight memo after another statement acquired the
+ * same transaction-scoped graph lock.
+ *
+ * The combined schema/graph fence is the only caller: it invokes this only
+ * after its statement succeeds. An existing entry is never replaced — it may
+ * be an in-flight acquisition whose rejection must retain the ordinary
+ * eviction/error semantics.
+ */
+export function memoizeAcquiredRecordedGraphWriteLock(
+  backend: object,
+  graphId: string,
+  acquisition: GraphWriteFenceAcquisition,
+): void {
+  const memo = recordedGraphLockMemos.get(backend);
+  if (memo === undefined || memo.has(graphId)) return;
+  memo.set(graphId, Promise.resolve(acquisition));
+}
 
 export function registerRecordedGraphLockMemo(
   backend: object,
@@ -150,124 +271,323 @@ export function registerRecordedGraphLockMemo(
   recordedGraphLockMemos.set(backend, memo);
 }
 
-async function acquireRecordedGraphWriteLock(
-  target: Pick<GraphBackend, "execute">,
-  graphId: string,
-): Promise<void> {
-  await target.execute(
-    asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
-  );
+/** The operation a stale-snapshot refusal of the graph write fence names. */
+const GRAPH_WRITE_FENCE_OPERATION = "per-graph write fence";
+
+/**
+ * THE one owner of what a failed graph-write fence statement raises, shared by
+ * the portable acquisitions below and the fused schema + graph fence
+ * (`write-transaction.ts`).
+ *
+ * A deciding acquisition advances the graph's fence row, so a session at a
+ * snapshot isolation whose snapshot predates another decider's commit is
+ * refused by the engine with a serialization failure — on purpose: the
+ * decision that session would go on to make reads a graph it can no longer
+ * see. That refusal is reported as a {@link TransactionConflictError} carrying
+ * the driver error as `cause`, so the owner of the transaction recognizes it
+ * whichever driver raised it: `runRetriedUnit` re-runs a unit the library
+ * owns, and a caller that owns the transaction re-runs it from the top. Any
+ * other failure propagates unchanged.
+ */
+export async function acquiringGraphWriteFence<T>(
+  target: object,
+  acquire: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await acquire();
+  } catch (error) {
+    if (!isSerializationFailure(error, target)) throw error;
+    throw new TransactionConflictError(
+      { operation: GRAPH_WRITE_FENCE_OPERATION, attempts: 1 },
+      { cause: error },
+    );
+  }
 }
 
+type GraphWriteFenceTarget = Pick<
+  GraphBackend,
+  "capabilities" | "commands" | "dialect" | "execute"
+>;
+
+type KeyedGraphWriteFence = Extract<WriteFencePlan, { kind: "lock" | "row" }>;
+
+async function executeGraphWriteFenceStatement(
+  target: Pick<GraphBackend, "execute">,
+  statement: SqlFragment,
+): Promise<GraphWriteFenceAcquisition> {
+  const rows = await acquiringGraphWriteFence(target, () =>
+    target.execute<Readonly<Record<string, unknown>>>(
+      asCompiledRowsSql(statement),
+    ),
+  );
+  return readGraphWriteFenceAcquisition(rows[0]);
+}
+
+/**
+ * The keyed fence a recorded-graph acquisition takes on `target`, or
+ * `undefined` when nothing is taken: a writer slot — or, under
+ * `caller-serialized`, the deployment's own serialization promise — can
+ * serialize ordinary row work, but neither is an advisory acquisition bound to
+ * this graph/port, and it cannot authorize the PostgreSQL convergence command.
+ */
+function keyedRecordedGraphFence(
+  target: Pick<GraphBackend, "capabilities" | "dialect">,
+  operation: string,
+): KeyedGraphWriteFence | undefined {
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(plan, operation, "keyed");
+  switch (fence.kind) {
+    case "engine-serialized":
+    case "caller-serialized": {
+      return undefined;
+    }
+    case "lock":
+    case "row": {
+      return fence;
+    }
+    default: {
+      return fence satisfies never;
+    }
+  }
+}
+
+/**
+ * Takes the per-graph write fence: the keyed exclusion and the session's
+ * isolation fact, and nothing else. Under an advisory `lock` plan the graph's
+ * fence row is left alone — a holder that only captures history, advances a
+ * revision or writes a claim-backed constraint decides nothing the row could
+ * protect, so it pays for no row write. A holder that goes on to make a
+ * lock-only decision takes {@link lockRecordedGraphDecision} instead, or on
+ * top of this.
+ */
 export async function lockRecordedGraphWrite(
-  target: Pick<GraphBackend, "dialect" | "execute">,
+  target: GraphWriteFenceTarget,
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  if (!USES_RECORDED_GRAPH_ADVISORY_LOCK[target.dialect]) {
-    return graphWriteLockEvidence();
-  }
+  const fence = keyedRecordedGraphFence(target, "recorded graph write");
+  if (fence === undefined) return uncapturedGraphWriteLock();
+  const acquire = (): Promise<GraphWriteFenceAcquisition> =>
+    executeGraphWriteFenceStatement(
+      target,
+      fence.sql.acquireKeyedWithIsolation(
+        RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+        graphId,
+      ),
+    );
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
-    await acquireRecordedGraphWriteLock(target, graphId);
-    return graphWriteLockEvidence();
+    return acquiredGraphWriteLock(target, graphId, await acquire());
   }
   let pending = effectiveMemo.get(graphId);
   if (pending === undefined) {
-    pending = acquireRecordedGraphWriteLock(target, graphId).catch(
-      (error: unknown) => {
-        effectiveMemo.delete(graphId);
-        throw error;
-      },
-    );
+    pending = acquire().catch((error: unknown) => {
+      effectiveMemo.delete(graphId);
+      throw error;
+    });
     effectiveMemo.set(graphId, pending);
   }
-  await pending;
-  return graphWriteLockEvidence();
+  const acquisition = await pending;
+  return acquiredGraphWriteLock(target, graphId, acquisition);
 }
 
-function failInvalidClockTimestamp(value: unknown): never {
-  throw new ConfigurationError(
-    "Recorded clock row contained an invalid timestamp",
-    { value },
+function advancedFenceRow(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  lock: GraphWriteLock,
+): boolean {
+  return (
+    lock.coordination !== undefined &&
+    graphCommandCoordinationAcquisition(
+      target.commands,
+      lock.coordination,
+      graphId,
+    ).fenceRow === "advanced"
   );
 }
 
 /**
- * A `YYYY-MM-DD[ T]HH:MM:SS[.fff]` timestamp carrying no timezone designator
- * (no trailing `Z` and no `±HH:MM` offset). `new Date()` would parse such a
- * value in the host's *local* zone, so it must be pinned to UTC explicitly.
+ * The per-graph write fence of a holder about to make a LOCK-ONLY DECISION —
+ * an edge-acyclicity probe, a composition whole's parts closure, a match-key
+ * convergence: the keyed exclusion AND the advance of the graph's fence row.
+ *
+ * Every decider advances the row and only deciders do. That is what lets a
+ * decider at a snapshot isolation be trusted: its row write fails with a
+ * serialization failure when another decider committed after its snapshot.
+ * And it is why a decider at read committed must advance the row too — it is
+ * the "other decider" of someone else's stale snapshot.
+ *
+ * `held` is the fence evidence the caller already works under. Evidence that
+ * the row was advanced is returned as it is, at no statement. Evidence of the
+ * exclusion alone is upgraded by re-issuing the deciding acquisition, which
+ * re-enters the exclusion this transaction holds and advances the row behind
+ * it. With no `held`, this is the acquisition itself, in one statement.
+ *
+ * Two cases yield evidence with no advanced row: a serialized engine or
+ * deployment, which has no stale snapshot to detect, and an advisory fence
+ * naming no fences relation, on which
+ * {@link assertFencedSnapshotIsFresh} then refuses a snapshot isolation. A
+ * `held` lock carrying no coordination is a frame that holds no keyed fence —
+ * a serialized engine's, or a lock-free plan-time read; it is returned
+ * unchanged rather than fenced late, out of lock order.
  */
-const ZONELESS_DATETIME_PATTERN =
-  /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
-const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
-
-function normalizeOffsetDesignator(offset: string): string {
-  if (offset.toUpperCase() === "Z") return "Z";
-  if (/^[+-]\d{2}$/.test(offset)) return `${offset}:00`;
-  if (/^[+-]\d{4}$/.test(offset)) {
-    return `${offset.slice(0, 3)}:${offset.slice(3)}`;
+export async function lockRecordedGraphDecision(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  held?: GraphWriteLock,
+): Promise<GraphWriteLock> {
+  // Decided before the plan is resolved: evidence with no coordination is a
+  // frame that holds no keyed fence, whatever its target could take.
+  if (held !== undefined && held.coordination === undefined) return held;
+  const fence = keyedRecordedGraphFence(target, "recorded graph write");
+  if (fence === undefined) return held ?? uncapturedGraphWriteLock();
+  if (held !== undefined && advancedFenceRow(target, graphId, held)) {
+    return held;
   }
-  return offset;
+  const memo = recordedGraphLockMemos.get(target);
+  const memoized = memo?.get(graphId);
+  if (memoized !== undefined) {
+    const lock = acquiredGraphWriteLock(target, graphId, await memoized);
+    if (advancedFenceRow(target, graphId, lock)) return lock;
+  }
+  const { acquireKeyedSnapshotFence } = fence.sql;
+  if (acquireKeyedSnapshotFence === undefined) {
+    return held ?? lockRecordedGraphWrite(target, graphId);
+  }
+  const pending = executeGraphWriteFenceStatement(
+    target,
+    acquireKeyedSnapshotFence(
+      RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+      graphId,
+    ),
+  );
+  if (memo === undefined) {
+    return acquiredGraphWriteLock(target, graphId, await pending);
+  }
+  // The memo is what a later frame of this transaction reads, and what the
+  // recorded savepoint coordinator checkpoints: a rollback to a savepoint
+  // taken before this statement restores the entry it replaced, so the row
+  // advance that rollback undid is not remembered as done.
+  const memoizedPending = pending.catch((error: unknown) => {
+    if (memo.get(graphId) === memoizedPending) {
+      if (memoized === undefined) memo.delete(graphId);
+      else memo.set(graphId, memoized);
+    }
+    throw error;
+  });
+  memo.set(graphId, memoizedPending);
+  return acquiredGraphWriteLock(target, graphId, await memoizedPending);
 }
 
 /**
- * Milliseconds since the epoch for a recorded-clock timestamp string. A
- * zoneless timestamp is interpreted as UTC — not the host's local zone — so
- * `recordedNow()` never drifts by the server's offset (or by a DST transition)
- * on a backend whose driver yields a naive timestamp for the recorded columns.
- * Timezone-aware and date-only strings are parsed as-is (already unambiguous).
+ * THE gate of a decision the per-graph write fence alone protects — a read
+ * with no claim row behind it, such as the edge-acyclicity probe or a whole
+ * delete's parts closure. Called before that read, by every site that makes
+ * one.
+ *
+ * It does the two things such a decision needs, in order, so no site can do
+ * one without the other: advance the graph's fence row under `held`
+ * ({@link lockRecordedGraphDecision}), then require that this session observes
+ * the deciders that held the fence before it
+ * ({@link assertFencedSnapshotIsFresh}).
+ *
+ * @throws TransactionConflictError when another decider committed after this
+ *   session's snapshot
+ * @throws ConfigurationError carrying `refusal.code` when the fence cannot
+ *   show this session's snapshot to be fresh
  */
-function clockTimestampMs(value: string): number {
-  if (ZONELESS_DATETIME_PATTERN.test(value)) {
-    return Date.parse(`${value.replace(" ", "T")}Z`);
+export async function fenceLockOnlyDecision(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  held: GraphWriteLock,
+  refusal: Readonly<{ code: string; subject: string }>,
+): Promise<void> {
+  const lock = await lockRecordedGraphDecision(target, graphId, held);
+  assertFencedSnapshotIsFresh(
+    target.commands,
+    graphId,
+    lock.coordination,
+    refusal,
+  );
+}
+
+function failInvalidClock(value: unknown, cause?: unknown): never {
+  throw new ConfigurationError(
+    "Recorded clock row contained an invalid revision or wall time",
+    { value },
+    {
+      cause,
+      suggestion:
+        "Run migrateLegacyRecordedTime() before using recorded-time tables created by the timestamp-only preview schema.",
+    },
+  );
+}
+
+function recordedClockRevision(value: unknown): number {
+  const revision = decodeRevisionColumn(value);
+  if (
+    typeof revision !== "number" ||
+    !Number.isSafeInteger(revision) ||
+    revision < RECORDED_MIN_REVISION ||
+    revision >= RECORDED_MAX_REVISION
+  ) {
+    return failInvalidClock(value);
   }
-  const offsetMatch = OFFSET_DATETIME_PATTERN.exec(value);
-  if (offsetMatch) {
-    const [, date, time, offset] = offsetMatch;
-    return Date.parse(
-      `${date}T${time}${normalizeOffsetDesignator(requireDefined(offset))}`,
-    );
-  }
-  return Date.parse(value);
+  return revision;
+}
+
+function recordedClockWallTime(value: unknown): string {
+  return canonicalizeDatabaseTimestamp(value) ?? failInvalidClock(value);
+}
+
+function recordedClockParts(row: ClockRow): RecordedClockParts | undefined {
+  const revision = recordedClockRevision(row.revision);
+  if (revision === RECORDED_MIN_REVISION) return undefined;
+  return { revision, recordedAt: recordedClockWallTime(row.recorded_at) };
+}
+
+function revisionAfter(clockRevision: number | undefined): number {
+  return clockRevision === undefined ?
+      RECORDED_FIRST_REVISION
+    : clockRevision + 1;
 }
 
 /**
- * Canonicalizes a recorded-clock value (a driver `Date` or an ISO string) to a
- * canonical UTC ISO string. Both branches guard against an unrepresentable
- * instant: a `Date` whose `getTime()` is `NaN` would otherwise make
- * `toISOString()` throw a bare `RangeError`, masking the typed
- * {@link ConfigurationError} the string branch already raises for an
- * unparseable value. Exported for focused unit coverage of that guard.
+ * The revision the graph's next recorded commit will be allocated — the
+ * committed clock plus one, or the first revision when the graph has no clock
+ * row yet. It is also the highest floor that can truthfully be stated over the
+ * graph's own history: nothing on this graph's axis exists at or above it, and
+ * everything the graph records afterwards lands at or above it. One owner for
+ * the allocation itself and for every reader that reasons about that floor.
  */
-export function toCanonicalIso(value: unknown): string {
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) return failInvalidClockTimestamp(value);
-    return value.toISOString();
-  }
-  if (typeof value === "string") {
-    const timestamp = clockTimestampMs(value);
-    if (Number.isNaN(timestamp)) return failInvalidClockTimestamp(value);
-    return new Date(timestamp).toISOString();
-  }
-  return failInvalidClockTimestamp(value);
+export async function readNextRecordedRevision(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number> {
+  const clock = await readRecordedClockParts(target, schema, graphId);
+  return revisionAfter(clock?.revision);
 }
 
-/**
- * The next monotonic recorded-commit instant (ms since epoch) for a graph: the
- * wall clock, or one millisecond past the previous commit when the wall clock
- * has not advanced. Returned as a number so the caller range-checks it against
- * the open sentinel before formatting — one parse in, one format out.
- */
-function nextRecordedCommitTime(previous: string | undefined): number {
-  // `nowIso()` (not `Date.now()`) so a mocked wall clock still drives capture;
-  // `Date.parse` of its canonical-Z string avoids the extra Date allocation +
-  // re-parse of `new Date(nowIso()).getTime()` on this per-commit hot path.
-  const wallTime = Date.parse(nowIso());
-  return previous === undefined ? wallTime : (
-      Math.max(wallTime, Date.parse(previous) + 1)
-    );
+function nextRecordedCommitParts(
+  previous: RecordedClockParts | undefined,
+): RecordedClockParts {
+  const wallTime = nowIso();
+  const revision = revisionAfter(previous?.revision);
+  if (previous === undefined) return { revision, recordedAt: wallTime };
+
+  return {
+    revision,
+    // Keep diagonal replay cumulative across backward clock corrections without
+    // manufacturing a new millisecond for same-ms commits. Throughput can make
+    // this component repeat, never run ahead of the greatest observed wall time.
+    recordedAt: nonDecreasingWallTime(wallTime, previous.recordedAt),
+  };
+}
+
+function nonDecreasingWallTime(current: string, previous: string): string {
+  if (current < previous) return previous;
+  return current;
 }
 
 /**
@@ -280,21 +600,39 @@ export async function readRecordedClock(
   target: Pick<GraphBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
-): Promise<string | undefined> {
+): Promise<RecordedInstant | undefined> {
+  const state = await readRecordedClockState(target, schema, graphId);
+  if (state.clock === undefined || state.originRow === undefined)
+    return undefined;
+  const parts = recordedClockParts(state.clock);
+  if (parts === undefined) return undefined;
+  const origin = revisionOriginFromRow(state.originRow, graphId);
+  return createRecordedInstant(
+    parts.revision,
+    parts.recordedAt,
+    await recordedAnchorOwner(schema, origin),
+  );
+}
+
+async function readRecordedClockParts(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<RecordedClockParts | undefined> {
   const rows = await target.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schema.recordedClockTable}
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
-  return first === undefined ? undefined : toCanonicalIso(first.recorded_at);
+  const row = rows[0];
+  return row === undefined ? undefined : recordedClockParts(row);
 }
 
 /**
  * Reads the durable, random origin assigned to one graph's revision clock.
- * The origin namespaces an otherwise timestamp-only revision anchor, so a
+ * The origin namespaces an otherwise graph-local revision anchor, so a
  * branch cannot mistake another store's coincident clock value for its base.
  */
 export async function readRevisionOrigin(
@@ -302,14 +640,45 @@ export async function readRevisionOrigin(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string | undefined> {
-  const rows = await target.execute<RevisionOriginRow>(
+  const state = await readRevisionOriginState(target, schema, graphId);
+  return state.origin;
+}
+
+/** Return the origin and any requested isolation evidence from the same session SELECT. */
+export async function readRevisionOriginState(
+  target: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+  isolationExpression?: SqlFragment,
+): Promise<RevisionOriginState> {
+  const rows = await target.execute<
+    RevisionOriginRow & Readonly<{ transaction_isolation: unknown }>
+  >(
     asCompiledRowsSql(sql`
-      SELECT origin
+      SELECT origin${isolationExpression === undefined ? sql`` : sql`, ${isolationExpression} AS transaction_isolation`}
       FROM ${schema.revisionOriginsTable}
       WHERE graph_id = ${graphId}
     `),
   );
-  const first = rows[0];
+  return {
+    origin: revisionOriginFromRow(rows[0], graphId),
+    isolation: normalizeGraphCommandIsolation(rows[0]?.transaction_isolation),
+  };
+}
+
+/** One validation of persisted origin state for readers and allocators. */
+function revisionOriginFromRow(
+  first: RevisionOriginRow,
+  graphId: string,
+): string;
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined;
+function revisionOriginFromRow(
+  first: RevisionOriginRow | undefined,
+  graphId: string,
+): string | undefined {
   if (first === undefined) return undefined;
   if (typeof first.origin !== "string" || first.origin.length === 0) {
     throw new ConfigurationError(
@@ -321,17 +690,21 @@ export async function readRevisionOrigin(
 }
 
 /**
- * Returns a graph's durable revision-origin nonce, creating it exactly once.
- * The unique graph-id row makes concurrent first readers converge on the
- * winner's origin rather than manufacturing incompatible anchors.
+ * Ensures the origins relation exists and refuses a backend that cannot
+ * bootstrap it. Runs the same `ensureRevisionOriginsTable` DDL member
+ * {@link ensureRevisionOrigin} bootstraps from — exported separately (rather
+ * than folded into a single ensure-and-write call) because that member is a
+ * schema-DDL operation, never projected onto an open `transaction()` handle:
+ * a caller that needs a row change inside a transaction (`Store.clear()`
+ * pairing this with {@link resetRevisionOrigin}) must ensure the table on
+ * the ROOT backend, BEFORE opening that transaction, then touch the row
+ * inside it.
  */
-export async function ensureRevisionOrigin(
+export async function ensureRevisionOriginsRelation(
   target: RevisionOriginBackend,
-  schema: SqlSchema,
-  graphId: string,
-): Promise<string> {
-  const ensureTable = target.ensureRevisionOriginsTable;
-  if (ensureTable === undefined) {
+  verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
+): Promise<void> {
+  if (!verdict.supported) {
     throw new ConfigurationError(
       "Revision tracking requires a backend that can bootstrap revision origins.",
       { dialect: target.dialect },
@@ -341,10 +714,60 @@ export async function ensureRevisionOrigin(
       },
     );
   }
+  if (ENSURED_ORIGINS_RELATIONS.has(target)) return;
+  const { ensureRevisionOriginsTable: ensureTable } =
+    recordedRevisionOriginsMembers(target, verdict);
   await ensureTable();
+  ENSURED_ORIGINS_RELATIONS.add(target);
+}
+
+/**
+ * Backends whose origins relation this process has already ensured. The
+ * relation is DDL (`CREATE TABLE IF NOT EXISTS`) and a table never goes
+ * away once created, so ensuring it once per backend object is enough; the
+ * origin ROW is read fresh on every call because `Store.clear()` rotates
+ * it, and that freshness is what callers of {@link ensureRevisionOrigin}
+ * pay for — not a DDL round trip per mint.
+ */
+const ENSURED_ORIGINS_RELATIONS = new WeakSet<object>();
+
+/**
+ * Returns a graph's durable revision-origin nonce, creating it exactly once.
+ * The unique graph-id row makes concurrent first readers converge on the
+ * winner's origin rather than manufacturing incompatible anchors.
+ */
+export async function ensureRevisionOrigin(
+  target: RevisionOriginBackend,
+  verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
+  await ensureRevisionOriginsRelation(target, verdict);
+  return ensureRevisionOriginRow(target, schema, graphId);
+}
+
+/**
+ * The row-only half of {@link ensureRevisionOrigin}: reads or mints the origin
+ * row without touching relation DDL, so it is safe on an open transaction whose
+ * origins relation already exists (every bundled backend installs it with the
+ * base schema). The unique graph-id row still makes concurrent minters converge.
+ */
+export async function ensureRevisionOriginRow(
+  target: Pick<GraphBackend, "dialect" | "execute" | "executeStatement">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;
+  return initializeRevisionOriginRow(target, schema, graphId);
+}
 
+/** Mint after an observed absence, then reread the winner of concurrent initialization. */
+async function initializeRevisionOriginRow(
+  target: Pick<GraphBackend, "dialect" | "execute" | "executeStatement">,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<string> {
   await executeStatement(
     target,
     sql`
@@ -361,19 +784,114 @@ export async function ensureRevisionOrigin(
   );
 }
 
-async function writeRecordedClock(
+/**
+ * Deletes a graph's durable revision-origin row so the next
+ * {@link ensureRevisionOrigin} call mints a fresh nonce. Row-write only
+ * (`execute`/`executeStatement`, the same narrow surface
+ * {@link readRecordedClock} needs) — deliberately NOT the DDL-capable
+ * {@link RevisionOriginBackend} `ensureRevisionOrigin` takes, so this is
+ * safe to call on an open `transaction()` handle. A caller whose origins
+ * table might not exist yet must call {@link ensureRevisionOriginsRelation}
+ * on the root backend first (`Store.clear()` does, before opening its
+ * transaction).
+ *
+ * `Store.clear()` calls this inside the same transaction as `clearGraph`:
+ * the recorded clock (and, for a non-capturing revision-tracked store, its
+ * immediate reseed) restarts numbering from the same low values every
+ * clear, so leaving the origin row untouched would let a graph repopulated
+ * to the same revision COUNT after a clear silently reconstruct the exact
+ * `base@V` anchor a pre-clear branch forked from — schema half unchanged,
+ * origin unchanged, revision numbering coincidentally realigned. Rotating
+ * the origin here is what makes that recurrence impossible: every mint
+ * after this point draws a new random nonce, so no later anchor can equal
+ * one minted before the clear.
+ */
+export async function resetRevisionOrigin(
   target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
-  recordedAt: string,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
-      INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-      VALUES (${graphId}, ${recordedAt})
-      ON CONFLICT (graph_id) DO UPDATE SET recorded_at = ${recordedAt}
+      DELETE FROM ${schema.revisionOriginsTable}
+      WHERE graph_id = ${graphId}
     `,
+  );
+}
+
+/**
+ * Persists a graph's clock row, SELF-FENCED against a backward move.
+ *
+ * The per-graph revision is the total order every recorded instant is read
+ * back in, so lowering it re-issues instants that were already handed out —
+ * silent corruption of recorded-time ordering, not a loud failure. The row
+ * therefore refuses the write itself instead of trusting whoever computed the
+ * value: the conflict update applies only when the proposed revision strictly
+ * advances the stored one. A caller that read the clock outside the lock and
+ * lost the race becomes a no-op here (and is refused by
+ * {@link assertRecordedClockAdvanced}) rather than a rollback of the clock.
+ *
+ * One predicate for both dialects: SQLite and PostgreSQL share the
+ * `ON CONFLICT ... DO UPDATE ... WHERE` form and the `excluded.` alias for the
+ * proposed row. The stored row is qualified by table name so neither engine has
+ * to resolve a bare `revision` against two candidate rows.
+ */
+async function writeRecordedClock(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  parts: RecordedClockParts,
+): Promise<void> {
+  await executeStatement(
+    target,
+    sql`
+      INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+      VALUES (${graphId}, ${parts.revision}, ${parts.recordedAt})
+      ON CONFLICT (graph_id) DO UPDATE
+      SET revision = excluded.revision, recorded_at = excluded.recorded_at
+      WHERE ${schema.recordedClockTable}.revision < excluded.revision
+    `,
+  );
+}
+
+/**
+ * Confirms the fenced UPSERT actually took the allocated revision.
+ *
+ * Runs only on the `previousRevision` path — the one where the caller, not this
+ * module, supplied the clock's previous value. There the fence alone is not
+ * enough: it protects the ROW, but the allocated instant has already been
+ * computed from the caller's claim and would be returned as if committed,
+ * stamping rows with an instant the clock never reached. An allocation that the
+ * row declined is refused here instead of reported.
+ *
+ * WHY THE OTHER ARM NEEDS NO RE-READ, and why that is a property rather than an
+ * assumption: when `previousRevision` is absent the value is read by
+ * {@link readRecordedClockState} AFTER {@link lockRecordedClock}, inside the
+ * same transaction that then writes — a real fence on both dialects
+ * (`pg_advisory_xact_lock`; SQLite's seed-UPSERT or the enclosing
+ * `BEGIN IMMEDIATE`). Those constructs are transaction-scoped, so the fence
+ * would be vacuous on a backend with no transactions — but such a backend can
+ * never reach here: `assertRevisionTrackableBackend` refuses
+ * `revisionTracking` (and therefore `history`, which implies it) at Store
+ * construction unless `capabilities.execution.interactiveTransactions` is set. Adding the re-read to
+ * that arm would put an unfalsifiable extra SELECT on every captured write.
+ */
+async function assertRecordedClockAdvanced(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  revision: number,
+): Promise<void> {
+  const stored = await readRecordedClockParts(target, schema, graphId);
+  if (stored?.revision === revision) return;
+  throw new ConfigurationError(
+    "Recorded commit allocation was refused: the supplied previous revision was stale, so the write would have moved the graph's revision clock backward.",
+    { graphId, allocatedRevision: revision, storedRevision: stored?.revision },
+    {
+      suggestion:
+        "Read the previous revision inside the same transaction that allocates the commit (omit previousRevision), or hold the per-graph write lock across the read and the allocation.",
+    },
   );
 }
 
@@ -386,14 +904,22 @@ async function lockRecordedClock(
   // Serialize the read/advance/write sequence per graph. Without this,
   // concurrent transactions can read the same previous clock value and
   // allocate the same recorded instant.
-  switch (target.dialect) {
-    case "postgres": {
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(plan, "recorded clock allocation", "keyed");
+  switch (fence.kind) {
+    case "lock":
+    case "row": {
       await target.execute(
-        asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
+        asCompiledRowsSql(
+          fence.sql.acquireKeyed(
+            RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
+            graphId,
+          ),
+        ),
       );
       return;
     }
-    case "sqlite": {
+    case "engine-serialized": {
       // SQLite: the seed-UPSERT exists only to take the clock row's write lock
       // before reading when the enclosing transaction did NOT already hold one.
       // Bundled transactions open BEGIN IMMEDIATE, so the lock is already held.
@@ -401,57 +927,111 @@ async function lockRecordedClock(
       await executeStatement(
         target,
         sql`
-          INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at)
-          VALUES (${graphId}, ${RECORDED_MIN})
-          ON CONFLICT (graph_id) DO UPDATE SET recorded_at = recorded_at
+          INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+          VALUES (${graphId}, ${RECORDED_MIN_REVISION}, ${RECORDED_MIN_TIME})
+          ON CONFLICT (graph_id) DO UPDATE SET revision = revision
         `,
       );
       return;
     }
+    case "caller-serialized": {
+      // Unlike `engine-serialized`, this is never conditional on
+      // `ownsWriteLock`: the seed-UPSERT above exists to take a row-level
+      // write lock SQLite's `BEGIN IMMEDIATE` might not already hold, which
+      // is a proof about that one engine's transaction, not about this
+      // declaration. `caller-serialized` is the deployment's own promise
+      // that no other client writes to this database at all, so there is no
+      // concurrent writer for a seed row to exclude regardless of which
+      // transaction opened this one.
+      return;
+    }
     default: {
-      target.dialect satisfies never;
+      fence satisfies never;
     }
   }
 }
 
-export async function allocateRecordedCommit(
+/**
+ * Narrows a parsed `previousRevision` to TypeGraph's own numeric clock shape.
+ * This module allocates ONLY TypeGraph-owned commits — an engine-native
+ * backend never touches a TypeGraph clock at all, so it never reaches
+ * `allocateRecordedCommit` — so a caller-supplied `previousRevision` that
+ * parses as an engine-native (`e1`) anchor can only be a caller mistake.
+ */
+function requireTypeGraphClockParts(
+  parts: ReturnType<typeof parseRecordedInstant>,
+): RecordedClockParts {
+  if (parts.kind !== "typegraph") {
+    throw new ConfigurationError(
+      "allocateRecordedCommit's previousRevision must be a TypeGraph-owned recorded instant.",
+      { revisionKind: parts.kind },
+    );
+  }
+  return parts;
+}
+
+async function allocateRecordedCommitInternal(
   target: RecordedClockBackend,
   schema: SqlSchema,
   graphId: string,
   ownsWriteLock: boolean,
   previousRevision?: string,
-): Promise<string> {
+  retainAnchor = false,
+): Promise<AllocatedRecordedCommit> {
   await lockRecordedClock(target, schema, graphId, ownsWriteLock);
+  const state = await readRecordedClockState(target, schema, graphId);
   const previous =
-    previousRevision ?? (await readRecordedClock(target, schema, graphId));
-  const recordedCommitTime = nextRecordedCommitTime(previous);
-  if (
-    !Number.isFinite(recordedCommitTime) ||
-    recordedCommitTime >= RECORDED_MAX_TIME
-  ) {
+    previousRevision === undefined ?
+      state.clock === undefined ?
+        undefined
+      : recordedClockParts(state.clock)
+    : requireTypeGraphClockParts(
+        parseRecordedInstant(previousRevision, "previous recorded revision"),
+      );
+  const { revision, recordedAt } = nextRecordedCommitParts(previous);
+  if (revision >= RECORDED_MAX_REVISION) {
     throw new ConfigurationError(
-      `Recorded commit clock reached the open sentinel ${RECORDED_MAX}`,
-      { graphId, recordedCommitTime },
+      `Recorded commit clock reached the open revision sentinel ${RECORDED_MAX_REVISION}`,
+      { graphId, revision },
       {
         suggestion:
-          "Use a graph with a normal recorded-time clock; the open sentinel is reserved for relation intervals.",
+          "Start a new graph before exhausting the per-graph recorded revision space.",
       },
     );
   }
-  const recordedCommit = new Date(recordedCommitTime).toISOString();
-  await writeRecordedClock(target, schema, graphId, recordedCommit);
-  return recordedCommit;
+  const origin =
+    revisionOriginFromRow(state.originRow, graphId) ??
+    (await initializeRevisionOriginRow(target, schema, graphId));
+  const instant = createRecordedInstant(
+    revision,
+    recordedAt,
+    await recordedAnchorOwner(schema, origin),
+  );
+  await writeRecordedClock(target, schema, graphId, { revision, recordedAt });
+  if (retainAnchor && target.capabilities.recordedAnchorLookup === true) {
+    await executeStatement(
+      target,
+      sql`
+        INSERT INTO ${recordedAnchorsTable(schema)} (graph_id, origin, revision, recorded_at)
+        VALUES (${graphId}, ${origin}, ${revision}, ${recordedAt})
+      `,
+    );
+  }
+  if (previousRevision !== undefined) {
+    await assertRecordedClockAdvanced(target, schema, graphId, revision);
+  }
+  return { instant, revision, recordedAt };
 }
 
 /**
  * Advances the durable graph revision after a successful live-store write.
  *
- * Revision tracking deliberately reuses the monotonic per-graph clock already
+ * Revision tracking deliberately reuses the monotonic per-graph revision already
  * owned by recorded-time capture. The write path holds the graph write lock
  * before this runs. Callers additionally state whether their SQLite
  * transaction owns the write lock so `allocateRecordedCommit` can skip its
  * redundant seed-UPSERT only on bundled `BEGIN IMMEDIATE` paths. It preserves
- * monotonicity even when wall-clock milliseconds repeat. History capture calls
+ * monotonicity independently of wall-clock behavior. History capture calls
  * `allocateRecordedCommit` during its own flush instead, so a captured write
  * remains one revision rather than being advanced twice.
  */
@@ -462,11 +1042,34 @@ export async function advanceRevisionClock(
   ownsWriteLock: boolean,
   previousRevision?: string,
 ): Promise<string> {
-  return allocateRecordedCommit(
+  const commit = await allocateRecordedCommit(
     target,
     schema,
     graphId,
     ownsWriteLock,
     previousRevision,
+  );
+  return commit.instant;
+}
+
+/** All allocator entry points translate missing upgraded relations consistently. */
+export function allocateRecordedCommit(
+  target: RecordedClockBackend,
+  schema: SqlSchema,
+  graphId: string,
+  ownsWriteLock: boolean,
+  previousRevision?: string,
+  retainAnchor = false,
+): Promise<AllocatedRecordedCommit> {
+  return withRecordedRelationsPrecondition(
+    allocateRecordedCommitInternal(
+      target,
+      schema,
+      graphId,
+      ownsWriteLock,
+      previousRevision,
+      retainAnchor,
+    ),
+    { dialect: target.dialect, surface: "recorded-allocation" },
   );
 }

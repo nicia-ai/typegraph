@@ -4,31 +4,67 @@
 import { type z } from "zod";
 
 import {
+  type BackendValidityEndMutation,
   type EdgeRow,
+  type EngineRevision,
   type NodeRow,
   type TransactionBackend,
   type TransactionReadBackend,
 } from "../backend/types";
-import { type GraphDef } from "../core/define-graph";
+import {
+  type AllNodeTypes,
+  type EdgeKinds,
+  type GraphDef,
+  type GraphIdentityConfig,
+  type NodeKinds,
+} from "../core/define-graph";
+import type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
 import { type RecordedInstant } from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
   type EdgeRegistration,
   type EdgeType,
+  type JsonScalar,
   type KindEntity,
   type NodeId,
   type NodeRegistration,
   type NodeType,
   type TemporalMode,
 } from "../core/types";
+import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
+import type { PolymorphicNodeType } from "../ontology/types";
 import type { TraversalExpansion } from "../query/ast";
-import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
+import type {
+  DynamicEdgeAccessor,
+  DynamicNodeAccessor,
+  DynamicNodeKind,
+  DynamicNodeType,
+  InitialQueryBuilder,
+} from "../query/builder";
+import type { DefaultAliasExpansionAxis } from "../query/builder/alias-expansion";
+import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
+import type {
+  AssignableNodeKinds,
+  BatchableQuery,
+  CompositionWholeKinds,
+  NodeAccessor,
+  NodeCandidateQuery,
+  OneStatementBatchReads,
+  OneStatementBatchResults,
+  SubsumedNodeType,
+} from "../query/builder/types";
 import {
   type ExternalRecordedReadSource,
   type SqlSchema,
 } from "../query/compiler/schema";
 import type { Predicate } from "../query/predicates";
+import type { CompositionViaRef } from "../registry/composition-relation";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import type {
   CURRENT_ONLY_READ_NAMES,
@@ -39,6 +75,52 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+import type { NeighborReadOptions, NeighborResult } from "./neighbors";
+import type { NodeDeletePolicy } from "./operations/node-write-pipeline";
+import type { ReadSetScope } from "./read-set";
+import type {
+  BatchReadBuilder,
+  EdgeCollectionLookup,
+  RequiredEdgeCollectionLookup,
+} from "./store";
+import type {
+  StoreDescription,
+  StoreValidationPage,
+  ValidateStoreOptions,
+} from "./store-analysis";
+import type {
+  SubgraphCompositionSelection,
+  SubgraphOptions,
+  SubgraphProjectFor,
+  SubgraphResult,
+  SubgraphResultEdgeKinds,
+} from "./subgraph";
+
+/**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation = BackendValidityEndMutation;
+
+/**
+ * Compare-and-set absence marker. `undefined` is deliberately not overloaded:
+ * it can disappear while an object is assembled or serialized, whereas this
+ * marker always states the caller's predicate explicitly.
+ */
+export const compareAndSetAbsent: unique symbol = typeGraphGlobalSymbol(
+  "compare-and-set-absent-v1",
+);
+
+/** Explicitly requires that a compare-and-set property is not stored. */
+export type CompareAndSetAbsent = typeof compareAndSetAbsent;
+
+/** Scalar-only exact predicates accepted by {@link NodeCollection.compareAndSet}. */
+export type CompareAndSetExpected<Props> = Readonly<{
+  [Property in keyof Props]?:
+    | Extract<Exclude<Props[Property], undefined>, JsonScalar>
+    | CompareAndSetAbsent;
+}>;
 
 // ============================================================
 // Row-to-Meta Field Mapping
@@ -105,15 +187,259 @@ export type Node<N extends NodeType = NodeType> = Readonly<{
   Readonly<z.infer<N["schema"]>>;
 
 /**
+ * One node named by its kind and id, on the composition surfaces: the whole a
+ * part is attached to, and the parts a whole's delete cascaded through.
+ */
+export type CompositionNodeRef = Readonly<{ kind: string; id: string }>;
+
+/**
+ * One part a composition whole's delete cascades through: the part itself, the
+ * whole it was directly a part of, and the composition edge kind that bound the
+ * two. Reversed, the list names every part after its whole, so once the
+ * deleted root is restored (the root is not in the list) it gives the order to
+ * re-attach parts in and the `partOf: { whole, via: viaEdgeKind }` each one
+ * takes. Neither the parts' props nor the composition edges' props are
+ * carried, and a part re-created under a new id replaces its old id wherever
+ * that id is a later entry's `whole`.
+ */
+export type CompositionCascadedPart = CompositionNodeRef &
+  Readonly<{
+    /**
+     * The part's own immediate whole: the deleted node for a direct part, an
+     * intermediate part for one deeper in the closure.
+     */
+    whole: CompositionNodeRef;
+    /** The composition edge kind that realized this part's membership. */
+    viaEdgeKind: string;
+  }>;
+
+/**
+ * What `nodes.<Kind>.delete(id)` would do to a live node, computed by the same
+ * planner the delete runs and with every write skipped. See
+ * {@link NodeCollection.planDelete}.
+ */
+export type NodeDeletePlan = Readonly<{
+  /**
+   * The parts the delete would cascade through, in the order the delete would
+   * report them as `cascadedParts`: leaf-first, then by kind, then id, within
+   * one level of the closure. Empty for a node with no live parts.
+   */
+  cascadedParts: readonly CompositionCascadedPart[];
+  /**
+   * Every edge the delete would remove, sorted by id: the composition edges
+   * the cascade consumes, and the edges each deleted node's `onDelete`
+   * (`cascade` / `disconnect`, or a `restrict` node's composition edges)
+   * removes alongside it.
+   */
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
+ * Options for `nodes.<Kind>.delete(id, options)`. See
+ * {@link NodeCollection.delete}.
+ */
+export type NodeDeleteOptions = Readonly<{
+  /**
+   * The plan `planDelete(id)` returned, which this delete must still match.
+   * The delete computes its own plan, under its own lock and inside its own
+   * transaction, and refuses with `NodeDeletePlanMismatchError` before any
+   * write when the two differ or when the node is no longer live.
+   *
+   * Required once options are passed: `planDelete` answers `undefined` for a
+   * node there is nothing to delete, and that answer is not an expectation.
+   * Omit the options for an unguarded delete.
+   */
+  expect: NodeDeletePlan;
+}>;
+
+/**
+ * The edge that holds a part after an attachment write.
+ *
+ * Not a schema-typed {@link Edge}: the realizing kind is chosen at runtime
+ * (`via` may be a string), so the structural fields are what every caller
+ * can rely on. `validFrom` / `validTo` are omitted when the row has no
+ * bound on that side.
+ */
+export type CompositionHeldEdge = Readonly<{
+  id: string;
+  kind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+  validFrom?: string;
+  validTo?: string;
+}>;
+
+export type CompositionAttachmentProps<Via> =
+  [Via] extends [AnyEdgeType] ? z.input<Via["schema"]>
+  : Record<string, unknown>;
+
+/** The shape every composition `whole` takes: only `kind` and `id` are read. */
+export type CompositionWholeInput = Readonly<{ kind: string; id: string }>;
+
+/**
+ * What `partOf.whole` accepts for a part of kind `K` in graph `G`: a
+ * `{ kind, id }` reference (or node) of one of the
+ * {@link CompositionWholeKinds} the ontology declares for `K`, or the
+ * {@link PolymorphicNodeReference} a polymorphic query row or widened edge
+ * endpoint of one of those kinds carries, whose `kind` is the general
+ * `string`.
+ */
+export type CompositionWholeReference<G extends GraphDef, K extends string> =
+  | Readonly<{ kind: CompositionWholeKinds<G, K>; id: string }>
+  | PolymorphicNodeReference<KindNodeTypes<G, CompositionWholeKinds<G, K>>>;
+
+/**
+ * Where a part attaches, and how — the value every attachment surface takes
+ * (`create`, `bulkCreate`, `getOrCreateByConstraint`,
+ * `bulkGetOrCreateByConstraint`, and `reparent`).
+ *
+ * `whole` names the whole: a node you already hold, a `{ kind, id }`
+ * reference, or a polymorphic query row. Only its `kind` and `id` are ever
+ * read, so a whole node whose own schema has a property called `via` or
+ * `props` never leaks into the attachment. On a typed collection `whole` is
+ * limited at compile time by {@link CompositionWholeReference} to the whole
+ * kinds the graph's ontology declares for this part kind; the runtime refusal
+ * (`COMPOSITION_WHOLE_NOT_DECLARED`) covers everything the type cannot see.
+ *
+ * `via` names the realizing edge, and is required only when the part kind
+ * declares MORE THAN ONE composition pair toward that whole kind: omitting
+ * it there is refused (`COMPOSITION_VIA_AMBIGUOUS`) rather than resolved by
+ * sort order, and naming an edge kind that realizes no declared pair between
+ * the two is refused too (`COMPOSITION_VIA_NOT_DECLARED`). Pass the edge's
+ * TYPE when you have it — a typo is then a compile error, and `props` is
+ * checked against that edge's schema, the same check
+ * `store.edges.<via>.create` applies. A kind string keeps `props` as
+ * `Record<string, unknown>` because the schema is not in scope.
+ * {@link compositionViaKind} is the one owner of the type-or-string
+ * distinction.
+ *
+ * `validFrom` / `validTo` are the realizing edge's validity window, not the
+ * part node's. A node's own `validFrom` / `validTo` on `create` are never
+ * copied onto the edge. Omit both to use the edge insert's own default.
+ *
+ * Any other top-level key is refused with `ValidationError`, so a
+ * misspelled option is never silently dropped.
+ */
+export type CompositionAttachment<
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Readonly<{
+  whole: Whole;
+  via?: Via;
+  props?: CompositionAttachmentProps<Via>;
+  /** The realizing edge's lower bound. `null` requests no lower bound. */
+  validFrom?: string | null;
+  /** The realizing edge's upper bound. Independent of the part node's window. */
+  validTo?: string;
+}>;
+
+/**
+ * Options for {@link NodeCollection.reparent}: the destination attachment,
+ * and the one instant the move happens at.
+ *
+ * A move has one instant — the incumbent's window ends where the new edge's
+ * begins — and `at` is its only spelling, so there is no `validFrom` here.
+ * There is no `validTo` either: a move opens the new attachment, and bounding
+ * a membership is a window edit on the realizing edge, not part of moving.
+ */
+export type NodeReparentOptions<
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Omit<CompositionAttachment<Via, Whole>, "validFrom" | "validTo"> &
+  Readonly<{
+    /**
+     * The instant a `oneActive` incumbent window ends and the new edge's
+     * `validFrom` begins, so the two halves abut. Omitted, the clock is read
+     * once.
+     */
+    at?: string;
+  }>;
+
+/**
+ * The attachment that holds after {@link NodeCollection.reparent}.
+ * `moved` is false when the part already held this whole through the same
+ * realizing edge (no write, no history). `edge` is that holding edge either way.
+ */
+export type NodeReparentResult<
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+> = Readonly<{
+  edge: Via extends AnyEdgeType ? Edge<Via> : Edge;
+  moved: boolean;
+}>;
+
+/**
  * Input for creating a node.
  */
 export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id?: string; // Optional - will generate ULID if not provided
   props: z.infer<N["schema"]>;
-  validFrom?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
   validTo?: string;
+  /** The whole (and realizing edge) this create attaches its part to. */
+  partOf?: CompositionAttachment;
 }>;
+
+/**
+ * Options for {@link NodeCollection.create}. Extracted (rather than left as
+ * `create`'s inline options object) so `partOf`'s docblock is written once
+ * for every entry point that accepts it.
+ */
+export type NodeCreateOptions<
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Readonly<{
+  id?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
+  validTo?: string;
+  /**
+   * The whole a required part is created under, atomically with the node, in
+   * one write plan: a lost composition claim or a dead/missing whole aborts
+   * the node create too. Accepted on an optional-existence kind as a
+   * convenience (the same one write); never required for one. Runtime-checked
+   * against the graph's declared composition pairs — `ConfigurationError`
+   * (`COMPOSITION_WHOLE_NOT_DECLARED`) when no pair exists from this kind to
+   * `partOf.whole.kind`. See {@link CompositionAttachment} for `via` and
+   * `props`.
+   */
+  partOf?: CompositionAttachment<Via, Whole>;
+}>;
+
+/** One caller-identified member of the closed heterogeneous node upsert batch. */
+export type HeterogeneousNodeUpsertInput<
+  G extends GraphDef,
+  K extends NodeKinds<G> = NodeKinds<G>,
+> = {
+  [P in K]: G["nodes"][P] extends Readonly<{ type: infer N extends NodeType }> ?
+    Readonly<{
+      kind: P;
+      id: NodeId<N>;
+      props: z.input<N["schema"]>;
+    }>
+  : never;
+}[K];
+
+type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> =
+  G["nodes"][K] extends Readonly<{ type: infer N extends NodeType }> ? Node<N>
+  : never;
+
+/** Ordered postimages returned by the recorded heterogeneous batch. */
+export type HeterogeneousNodeUpsertResult<
+  G extends GraphDef,
+  Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+> = {
+  readonly [I in keyof Entries]: Entries[I] extends (
+    Readonly<{
+      kind: infer K extends NodeKinds<G>;
+    }>
+  ) ?
+    HeterogeneousNodeForKind<G, K>
+  : never;
+};
 
 /**
  * Input for updating a node.
@@ -122,8 +448,8 @@ export type UpdateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id: NodeId<N>;
   props: Partial<z.infer<N["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Edge Instance Types
@@ -168,7 +494,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   toKind: string;
   toId: string;
   props: z.infer<E["schema"]>;
-  validFrom?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -178,8 +505,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   id: EdgeId<E>;
   props: Partial<z.infer<E["schema"]>>;
-  validTo?: string;
-}>;
+}> &
+  ValidityEndMutation;
 
 // ============================================================
 // Query Options
@@ -219,23 +546,67 @@ export type HookContext = Readonly<{
   graphId: string;
   /** Timestamp when operation started */
   startedAt: Date;
+  /**
+   * 1-based try number that produced this context. Always `1` outside a
+   * `store.transaction(fn, { retry: { attempts } })` call; inside one, a
+   * value above 1 marks a replay of the same logical operation after an
+   * earlier attempt hit a transaction conflict, so a listener can tell a
+   * retried attempt from a genuinely new operation. Absent means `1`: a
+   * context built outside the store (a test fixture, a forwarded literal)
+   * need not carry it.
+   */
+  attempt?: number;
 }>;
 
 /**
- * Query hook context with SQL information.
+ * Context for one SQL statement a query builder submits to the backend.
+ *
+ * A single logical query can emit more than one context, for example when a
+ * selective projection falls back to a full-row fetch. Backend-internal setup
+ * statements are not exposed as separate query-hook events.
  */
 export type QueryHookContext = HookContext &
   Readonly<{
-    /** The SQL query being executed */
+    /** The SQL statement being executed */
     sql: string;
     /** Query parameters */
     params: readonly unknown[];
   }>;
 
 /**
+ * What an operation LEARNED while it ran, folded onto the context
+ * `onOperationEnd` receives. `onOperationStart` cannot carry any of it — the
+ * facts do not exist yet when the operation begins.
+ */
+export type OperationOutcomeFacts = Readonly<{
+  /**
+   * The composition parts a whole's delete cascaded through, each with the
+   * whole it was directly a part of and the edge kind that bound it
+   * ({@link CompositionCascadedPart}), in the cascade's own delete order:
+   * LEAF-FIRST — every part before the whole it belongs to — and then a
+   * deterministic order by kind, then id,
+   * within one level of the closure. Two sibling parts of one whole have no order
+   * between them to respect, so they are sorted rather than left in the order
+   * the cascade's reads returned them, which makes this list comparable for
+   * equality across runs and backends. Taken from the plan the cascade already
+   * computed, so it names exactly the parts this delete removed.
+   *
+   * Present — and EMPTY when nothing cascaded, including for a kind that
+   * declares no composition pair at all — on a node hard delete, and on a
+   * node delete that took the portable write path; absent on a node delete
+   * the fused single-statement program ran (which is never a composition
+   * participant's: that program declines a composition whole or part
+   * outright) and on every non-delete operation. So "did a cascade happen"
+   * is the array's CONTENTS, never its presence.
+   */
+  cascadedParts?: readonly CompositionCascadedPart[];
+}>;
+
+/**
  * Operation hook context for CRUD operations.
  */
 export type OperationHookContext = HookContext &
+  OperationOutcomeFacts &
   Readonly<{
     /** Operation type */
     operation: "create" | "update" | "delete";
@@ -248,10 +619,27 @@ export type OperationHookContext = HookContext &
   }>;
 
 /**
+ * Context for one set-based collection mutation. The `operation` union is the
+ * exhaustive list of what `onBulkOperationStart` / `onBulkOperationEnd`
+ * observe, so a batch method absent from it (every `bulk*`, including
+ * `bulkDelete` and `bulkHardDelete`) emits no bulk event.
+ */
+export type BulkOperationHookContext = HookContext &
+  Readonly<{
+    operation: "compareAndSet" | "updateWhere";
+    entity: "node";
+    kind: string;
+  }>;
+
+/**
  * Observability hooks for monitoring store operations.
  *
- * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip
- * per-item operation hooks for throughput. Query hooks still fire normally.
+ * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
+ * `bulkDelete`, `bulkHardDelete`) skip per-item operation hooks for
+ * throughput, and the bulk
+ * hooks below do not stand in for them — those fire only for node
+ * `compareAndSet` and `updateWhere`. A batch method emits no hook events at all,
+ * neither per-item nor bulk. Query hooks still fire normally.
  *
  * @example
  * ```typescript
@@ -272,15 +660,17 @@ export type OperationHookContext = HookContext &
  * ```
  */
 export type StoreHooks = Readonly<{
-  /** Called before a query is executed */
+  /** Called before each query-builder statement is submitted to the backend. */
   onQueryStart?: (ctx: QueryHookContext) => void;
-  /** Called after a query completes successfully */
+  /** Called after each submitted query-builder statement succeeds. */
   onQueryEnd?: (
     ctx: QueryHookContext,
     result: Readonly<{ rowCount: number; durationMs: number }>,
   ) => void;
   /** Called before a CRUD operation starts */
   onOperationStart?: (ctx: OperationHookContext) => void;
+  /** Called before a set-based collection mutation starts. */
+  onBulkOperationStart?: (ctx: BulkOperationHookContext) => void;
   /**
    * Called after a CRUD operation completes AND is durably committed. For a
    * top-level operation that is when its own transaction commits; for an
@@ -289,16 +679,44 @@ export type StoreHooks = Readonly<{
    * reported through `onError` instead. (Inside an adopted transaction —
    * `withTransaction` / `withRecordedTransaction` — the commit belongs to
    * the caller and cannot be observed, so this fires when the operation
-   * completes within the still-open transaction.)
+   * completes within the still-open transaction.) Operations inside a
+   * TypeGraph-owned savepoint wait until that savepoint is released; rolling
+   * it back reports them through `onError` with the rollback cause.
+   *
+   * A composition whole's delete cascades to its parts (see
+   * [Composition Cascade](https://typegraph.dev/limitations#composition-cascade))
+   * inside the SAME transaction, but each cascaded part delete is not itself
+   * a caller-issued operation: this hook fires exactly once, for the whole's
+   * own delete. The parts it removed are named on THIS context's
+   * `cascadedParts` (see {@link OperationOutcomeFacts}) — a consumer using
+   * hooks for cache invalidation or audit reads them from there rather than
+   * re-deriving the closure. `onOperationStart` never carries them: the
+   * cascade has not been planned when the operation begins.
    */
   onOperationEnd?: (
     ctx: OperationHookContext,
-    result: Readonly<{ durationMs: number }>,
+    result: Readonly<{
+      durationMs: number;
+      /** The authoritative effect, or `unknown` when the command reports none. */
+      outcome: "written" | "unchanged" | "unknown";
+    }>,
+  ) => void;
+  /**
+   * Called after a set-based mutation durably commits. Inside
+   * `store.transaction`, emission is deferred until the enclosing commit.
+   * Adopted transactions follow the same savepoint rule as `onOperationEnd`.
+   */
+  onBulkOperationEnd?: (
+    ctx: BulkOperationHookContext,
+    result: Readonly<{ affectedCount: number; durationMs: number }>,
   ) => void;
   /**
    * Called when an operation fails — including an operation that completed
    * inside a `store.transaction` whose commit then failed and rolled it
-   * back.
+   * back. Must not throw: an exception this hook raises while a
+   * transaction's failure is being reported is discarded, so the failure
+   * being reported — not the hook's exception — is what the caller and any
+   * enclosing retry owner receive.
    */
   onError?: (ctx: HookContext, error: Error) => void;
 }>;
@@ -336,6 +754,8 @@ export type BaseStoreOptions = Readonly<{
    * revision-tracking contract.
    */
   revisionTracking?: boolean;
+  /** Disable journal-backed changed-key lineage for short-lived working copies. */
+  revisionJournal?: false;
   /**
    * Automatic planner-statistics refresh after large autocommit bulk
    * writes (bulkCreate and bulkInsert on nodes and edges). Stale statistics after a
@@ -351,9 +771,9 @@ export type BaseStoreOptions = Readonly<{
    */
   autoRefreshStatistics?: false | number;
   /**
-   * Skip the write for an `upsertById` (or `bulkUpsertById` item) whose
-   * validated props are value-identical to the existing live row. Default
-   * off.
+   * Skip the write for an `upsertById`, `bulkUpsertById` item, or endpoint
+   * get-or-create update whose validated props are value-identical to the
+   * existing live row. Default off.
    *
    * Enable this for at-least-once / replay materializers. An event log that
    * re-delivers a byte-identical change would otherwise rewrite the row anyway:
@@ -374,7 +794,12 @@ export type BaseStoreOptions = Readonly<{
    * **no write at all**: no `updateNode`, no recorded-time capture, no history
    * row, no revision-anchor advance, and no `update` operation hooks (nothing
    * happened, so nothing is reported). It resolves with the **existing** node,
-   * preserving its original `validFrom` / `updatedAt` / `version`.
+   * preserving its original `validFrom` / `updatedAt` / `version`. An endpoint
+   * get-or-create reports action `"found"` when its requested update is
+   * coalesced; `"updated"` always means an UPDATE actually ran.
+   * Node `getOrCreateByConstraint` updates are outside this option's scope and
+   * still write on every `ifExists: "update"` match; replay projectors that
+   * need coalescing should use `upsertById` for nodes.
    *
    * Receipt shape is unchanged and needs no new signal: a coalesced upsert
    * still counts as one write intent (`writes.total` includes it), but
@@ -385,12 +810,13 @@ export type BaseStoreOptions = Readonly<{
    *
    * A write is coalesced only when **all** of the following hold; otherwise the
    * normal write happens:
-   *   1. An existing row is found for the id (else it is a create).
+   *   1. A value to compare against is known for the id: an existing row, or —
+   *      for a repeated id in one bulk batch — the value an earlier item in that
+   *      batch already queued (a create or an update).
    *   2. That row is not soft-deleted (a deleted row resurrects — a real
    *      change — and is never coalesced).
-   *   3. The caller passed no explicit `validFrom` / `validTo` (an explicit
-   *      temporal override is a deliberate request and is never coalesced;
-   *      applied per item in the bulk path).
+   *   3. Any requested `validFrom` / `validTo` names the window already stored;
+   *      a changed or inapplicable temporal request reaches the write path.
    *   4. The new props, merged over the stored props and run through the
    *      kind's Zod schema (defaults applied, values normalized), are deeply
    *      value-identical to the stored props (key order aside).
@@ -405,6 +831,23 @@ export type BaseStoreOptions = Readonly<{
   queryDefaults?: Readonly<{
     /** Default traversal ontology expansion mode (default: "inverse"). */
     traversalExpansion?: TraversalExpansion;
+    /**
+     * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when
+     * an alias states no `expansion` (default: `"subclasses"` — a supertype
+     * query is polymorphic by default). Pass `"exact"` to restore the earlier
+     * exact-kind behavior for query aliases. `"narrower"` is not a store-wide
+     * default (see {@link DefaultAliasExpansionAxis}).
+     * This setting does NOT apply to `search()` or the collection APIs
+     * (`find`, `count`, `updateWhere`, `compareAndSet`). `search()` has its
+     * own default, {@link SEARCH_EXPANSION_DEFAULT} (`"exact"`), so a store
+     * opened with `queryDefaults.expansion: "subclasses"` is not polymorphic
+     * everywhere. The two defaults are different constants on purpose.
+     *
+     * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+     * own options bag under `exactOptionalPropertyTypes`, the same way the
+     * per-alias `expansion` option does.
+     */
+    expansion?: DefaultAliasExpansionAxis | undefined;
   }>;
 }>;
 
@@ -446,23 +889,55 @@ export type HistoryStoreOptions = BaseStoreOptions &
 export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 
 /**
+ * The subset of a store's construction options that describe its own
+ * observable behavior rather than its recorded-time configuration: hooks,
+ * upsert coalescing, the SQL schema (custom table names), the auto-refresh-
+ * statistics threshold, query defaults, and an externally-bound recorded-read
+ * relation. `Store.workingCopyOptions` is the one place these are read off a
+ * live store, so a working-copy strategy that needs them never re-derives
+ * them from private construction state.
+ *
+ * `history` and `revisionTracking` are deliberately excluded: a working-copy
+ * strategy decides those for itself (a fork mirrors the base's own
+ * `historyEnabled`/`revisionTrackingEnabled`). A working copy allocated from
+ * a live base store carries its `queryDefaults`, so a query answers alike on
+ * the store and on its working copy; a durable copy reopened later starts
+ * from library defaults unless the caller passes `reopenOptions`. A clone
+ * carries nothing else from this set — see `cloneWorkingCopyStrategy`'s doc
+ * comment.
+ */
+export type WorkingCopyOptions = Omit<
+  LiveStoreOptions,
+  "history" | "revisionTracking"
+>;
+
+/**
  * A mutable handle to the current `Store`, used by `store.evolve(...)`
  * so long-lived consumers can dereference through the ref and pick up
- * the new store after each evolve call. `current` is overwritten by
- * `evolve()` atomically with the schema commit when the ref is passed
- * via `evolve(extension, { ref })`.
+ * the new Store after each evolve call. When the ref is passed via
+ * `evolve(extension, { ref })`, `current` is overwritten with the replacement
+ * before a successful call resolves.
  *
- * **Mid-request semantics.** `ref.current` flips on the *next* call
- * after evolve, not mid-handler. Dereference once at request entry and
- * reuse the captured `Store` for the duration:
+ * **Request semantics.** Dereference once at request entry only when that
+ * request will not change the schema. A schema-changing call such as
+ * `evolve()` returns the Store for the resulting schema and updates
+ * `ref.current`; a Store captured before that call remains pinned to the old
+ * schema. Use the returned Store (or dereference `ref.current` again) for every
+ * subsequent operation in the same request:
  *
  * ```ts
  * async function handleRequest(): Promise<void> {
- *   const store = ref.current; // capture once
- *   const tag = await store.nodes.Tag?.create({ label: "..." });
- *   // ...further work on the same `store`...
+ *   const store = ref.current;
+ *   const evolved = await store.evolve(extension, { ref });
+ *   await evolved.materializeIndexes();
+ *   // ref.current === evolved
  * }
  * ```
+ *
+ * A `StoreRef` tracks only schema changes made by calls that receive that ref.
+ * When another process or isolate can commit a schema version, compare
+ * `getCommittedSchemaVersion()` with the cached version before reuse and call
+ * `createVerifiedStore()` or `createVerifiedAdapterStore()` when it changes.
  *
  * Pure dereferenceable handle — no event/subscription machinery. If
  * consumers need eventing, they wrap the ref themselves.
@@ -523,16 +998,48 @@ export type TransactionReceipt = Readonly<{
     nodes: Readonly<Record<string, number>>;
     /** Completed edge write intents by edge kind. */
     edges: Readonly<Record<string, number>>;
-    /** Sum of all node and edge write intents. */
+    /** Completed identity assertion and retraction write intents. */
+    identity: IdentityWriteSummary;
+    /** Sum of all node, edge, and identity write intents. */
     total: number;
   }>;
   /**
+   * Every composition part a node delete inside this transaction cascaded
+   * through, in the order the deletes ran: each delete's own closure —
+   * leaf-first, then deterministically by kind, then id, within one level —
+   * concatenated in the order the deletes were issued. Empty when the
+   * transaction deleted no composition whole. Taken from the same plan the
+   * cascade executed, so it never names a part the cascade did not delete, and
+   * the order is fixed by the closure rather than by the order any read
+   * returned its rows.
+   *
+   * Not a write COUNT: a cascaded part is not a write intent at the
+   * collection surface (`writes.nodes` counts the whole's own `delete` call
+   * alone), so it is reported as refs beside the counters rather than folded
+   * into them.
+   */
+  cascadedParts: readonly CompositionCascadedPart[];
+  /**
    * The recorded commit instant allocated for this store's graph by this
-   * transaction. Undefined when history capture is off, the transaction is
-   * read-only, or no captured writes were flushed. **Always undefined on a
+   * transaction. Under TypeGraph-owned capture, an explicit
+   * {@link RecordedRevisionRequest} allocates this instant without entity
+   * writes. Otherwise it is undefined when history capture is off, the
+   * transaction is read-only, or no captured writes were flushed. **Always undefined on a
    * scoped receipt from {@link ScopedMeasure}** (`tx.measure`) — the recorded
    * instant is a per-transaction flush concern allocated once when the whole
    * transaction's capture flushes, unknowable mid-transaction.
+   *
+   * Engine-native history does not support explicit revision requests. Under
+   * an engine-native store (one whose backend tracks recorded time
+   * itself; see {@link GraphBackend.recordedTime}), "no captured writes were
+   * flushed" instead means no node, edge, or identity write inside the
+   * transaction actually changed a row: a delete of a missing id, an
+   * `insertNodeIfAbsent` that found the row, and a coalesced no-op upsert
+   * all leave this undefined, matching a read-only transaction, even though
+   * each reached the collection surface as a completed write intent. A
+   * transaction whose only effect is a raw `tx.sql` statement also leaves
+   * this undefined, since the engine's own revision advancing is not
+   * something a graph-entity write observed.
    */
   recorded?: RecordedInstant;
 }>;
@@ -562,9 +1069,72 @@ export type NodeGetOrCreateByConstraintResult<N extends NodeType> = Readonly<{
 /**
  * Options for node getOrCreateByConstraint operations.
  */
-export type NodeGetOrCreateByConstraintOptions = Readonly<{
+export type NodeGetOrCreateByConstraintOptions<
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Readonly<{
   /** Existing record behavior. Default: "return" */
   ifExists?: IfExistsMode;
+  /**
+   * The attachment this call GUARANTEES the resolved node holds when it
+   * returns — a postcondition, not a create-only option.
+   *
+   * On `"created"` / `"resurrected"` it is applied exactly as a plain
+   * create's `partOf` is. On `"found"` / `"updated"` it is CHECKED: a node
+   * whose live whole, and whose realizing edge kind, already equal the
+   * resolved attachment satisfies it; a node with a DIFFERENT live whole, or
+   * the same whole through another realizing edge, refuses with
+   * `CompositionError` (`situation: "existing"`) naming both sides;
+   * a node with no live whole has the attachment written now, whatever the
+   * pair's declared `existence` (a REQUIRED part found unattached is
+   * repaired on the same terms — see `applyExistingPartOfPostcondition`).
+   *
+   * A satisfied match writes no edge, so stated `props` are never applied to
+   * it — but they are still validated, and still honored as a postcondition:
+   * omitted, or valid and canonically equal to the edge's live stored props,
+   * the call is idempotent; valid but DIFFERENT refuses with
+   * `CompositionError` (`situation: "props"`) naming both, rather
+   * than silently keeping the stored value. Update the realizing edge
+   * directly (`store.edges.<via>.update(...)`) to actually change it.
+   *
+   * An attachment this graph cannot resolve at all — an undeclared whole
+   * kind, an unknown `via`, an omitted `via` where the part declares more
+   * than one pair toward that whole kind — is a `CompositionConfigurationError`
+   * on every action alike, decided before the match is even read.
+   *
+   * `bulkGetOrCreateByConstraint` takes the same attachment per item
+   * ({@link NodeBulkGetOrCreateByConstraintItem}). Use `reparent` to MOVE a
+   * part that already has a different whole — this option never silently
+   * re-homes one.
+   */
+  partOf?: CompositionAttachment<Via, Whole>;
+}>;
+
+/**
+ * Options for `bulkGetOrCreateByConstraint`: the batch-wide existing-record
+ * behavior. The attachment is per item
+ * ({@link NodeBulkGetOrCreateByConstraintItem}), as on `bulkCreate`.
+ */
+export type NodeBulkGetOrCreateByConstraintOptions = Readonly<{
+  /** Existing record behavior, for every item. Default: "return" */
+  ifExists?: IfExistsMode;
+}>;
+
+/**
+ * One `bulkGetOrCreateByConstraint` item: the properties to match (and create
+ * or update with) and, optionally, the attachment the resolved node must hold
+ * — the postcondition {@link NodeGetOrCreateByConstraintOptions.partOf}
+ * describes, per item, so one batch can place parts under different wholes.
+ * Two items that resolve to the same constraint key must state the same
+ * attachment (or none); a batch where they differ is refused.
+ */
+export type NodeBulkGetOrCreateByConstraintItem<
+  Props,
+  Via extends CompositionViaRef | undefined = CompositionViaRef | undefined,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Readonly<{
+  props: Props;
+  partOf?: CompositionAttachment<Via, Whole>;
 }>;
 
 /**
@@ -579,6 +1149,176 @@ export type NodeBulkFindByIndexOptions = Readonly<{
    * across calls. Use this to bound fan-out on low-selectivity index keys.
    */
   limitPerInput?: number;
+}>;
+
+/**
+ * Per-endpoint fan-out cap shared by the live and view forms of the edge
+ * bulk endpoint reads.
+ */
+export type EdgeBulkFindOptions = Readonly<{
+  /**
+   * Maximum number of edges returned for each input endpoint. When omitted,
+   * every input's edge set is unbounded. Must be a positive integer.
+   *
+   * The cap keeps each input's leading edges under the same ordering
+   * `findFrom` / `findTo` return, so it bounds fan-out without reordering
+   * anything.
+   */
+  limitPerInput?: number;
+}>;
+
+/**
+ * Options for the edge bulk endpoint reads: the temporal coordinate every
+ * edge read accepts, plus the per-endpoint fan-out cap.
+ */
+export type EdgeBulkFindEndpointOptions = QueryOptions & EdgeBulkFindOptions;
+
+/** A node reference whose kind and branded id remain correlated. */
+export type GraphNodeReference<G extends GraphDef> = {
+  [K in NodeKinds<G>]: Readonly<{
+    kind: K;
+    id: NodeId<G["nodes"][K]["type"]>;
+  }>;
+}[NodeKinds<G>];
+
+/**
+ * The widened `{ kind, id }` a polymorphic read carries for a node of type
+ * `N`: a `string` kind and the widened `NodeId` brand of
+ * {@link PolymorphicNodeType}, for each member of `N`. Both polymorphic
+ * producers emit it: a default read of a kind the ontology affects
+ * ({@link SubsumedNodeType}), and any alias stated
+ * `{ expansion: "subclasses" }`, whatever the static hierarchy says, since a
+ * runtime extension can add subclasses the compile-time graph never names.
+ *
+ * The one owner of the widened reference every node-reference input accepts,
+ * so an endpoint read off a widened edge (`{ kind: edge.toKind, id: edge.toId }`),
+ * the same reference narrowed by `kind`, and a polymorphic query row all pass
+ * back into the next read without a cast. It requires a branded id, so an
+ * unbranded `{ kind: string, id: string }` or an unrelated kind's id is
+ * refused, but its `kind` is a `string`, so it cannot guarantee that the kind
+ * and the id belong together. The runtime reads the `(kind, id)` pair as
+ * stated: when the same id exists under two kinds, a mislabelled reference
+ * names the other kind's node.
+ */
+export type PolymorphicNodeReference<N extends NodeType> =
+  N extends NodeType ?
+    Readonly<{ kind: string; id: NodeId<PolymorphicNodeType<N>> }>
+  : never;
+
+/**
+ * A node reference the graph-wide endpoint reads (`bulkFindEdgesFrom`,
+ * `bulkFindEdgesTo`, `neighbors`, `countNeighbors`) accept: a
+ * {@link GraphNodeReference}, or the {@link PolymorphicNodeReference} a
+ * widened edge endpoint or polymorphic query row carries. A `kind` the
+ * graph does not register is refused at runtime with `KindNotFoundError`.
+ */
+export type GraphNodeReferenceInput<G extends GraphDef> =
+  GraphNodeReference<G> | PolymorphicNodeReference<AllNodeTypes<G>>;
+
+type NodeReferenceGroup<R> =
+  R extends Readonly<{ kind: infer K extends string; id: infer I }> ?
+    Readonly<{ kind: K; ids: readonly I[] }>
+  : never;
+
+/**
+ * A kind-grouped source list for a heterogeneous bulk edge read: one
+ * {@link GraphNodeReferenceInput} shape with its ids gathered under one
+ * `kind`.
+ */
+export type BulkEdgeSourceGroup<G extends GraphDef> = NodeReferenceGroup<
+  GraphNodeReferenceInput<G>
+>;
+
+/** Runtime edge union narrowed to the selected graph edge kinds. */
+export type GraphEdgeForKinds<G extends GraphDef, K extends EdgeKinds<G>> = {
+  [P in K]: EdgeInGraph<
+    G,
+    G["edges"][P]["type"],
+    G["edges"][P]["from"][number],
+    G["edges"][P]["to"] extends readonly (infer N extends NodeType)[] ? N
+    : G["edges"][P]["to"] extends (
+      Record<string, readonly (infer N extends NodeType)[]>
+    ) ?
+      N
+    : NodeType
+  >;
+}[K];
+
+/** Kind-discriminated node union over the selected graph node kinds. */
+export type GraphNodeForKinds<G extends GraphDef, K extends NodeKinds<G>> = {
+  [P in K]: Node<G["nodes"][P]["type"]>;
+}[K];
+
+/**
+ * Resolves a `{ kind, id }` reference to the node it names, through the
+ * node collection `getNodeCollectionOrThrow(kind)` returns, so the read
+ * follows that collection's temporal model (or the view's pin).
+ *
+ * A reference whose `kind` is one of the graph's node kinds, such as a
+ * {@link GraphNodeReference}, resolves to that kind's node. A reference whose
+ * `kind` is the general `string`, such as an endpoint read off an edge whose
+ * declared kind has subclasses, resolves to the kind-discriminated union of
+ * the graph's node types plus the base `Node` of a kind added at runtime.
+ * Narrowing the reference's `kind` before the call
+ * (`if (edge.toKind === "Engineer")`) resolves straight to that kind's typed
+ * node; narrowing the result's `kind` rules out the other compile-time kinds
+ * but keeps the runtime-kind arm, whose properties are untyped. The kind is
+ * matched exactly: a reference naming a supertype with a subclass node's id
+ * resolves to `undefined`.
+ *
+ * Returns `undefined` when no node with that id exists under that kind, and
+ * rejects with `KindNotFoundError` when the kind is not registered in the
+ * graph.
+ */
+export interface NodeReferenceLookup<G extends GraphDef> {
+  <const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  (
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+}
+
+/** Input for {@link Store.bulkFindEdgesFrom}. */
+export type BulkFindEdgesFromParams<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  sources: readonly BulkEdgeSourceGroup<G>[];
+  edgeKinds: readonly K[];
+}>;
+
+/**
+ * One source bucket returned by {@link Store.bulkFindEdgesFrom}. `source` is
+ * the reference the caller passed in, so it is typed as the input is.
+ */
+export type BulkFindEdgesFromResult<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  source: GraphNodeReferenceInput<G>;
+  edges: readonly GraphEdgeForKinds<G, K>[];
+}>;
+
+/** Input for {@link Store.bulkFindEdgesTo}. */
+export type BulkFindEdgesToParams<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  targets: readonly BulkEdgeSourceGroup<G>[];
+  edgeKinds: readonly K[];
+}>;
+
+/**
+ * One target bucket returned by {@link Store.bulkFindEdgesTo}. `target` is
+ * the reference the caller passed in, so it is typed as the input is.
+ */
+export type BulkFindEdgesToResult<
+  G extends GraphDef,
+  K extends EdgeKinds<G>,
+> = Readonly<{
+  target: GraphNodeReferenceInput<G>;
+  edges: readonly GraphEdgeForKinds<G, K>[];
 }>;
 
 /**
@@ -618,7 +1358,38 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
     matchOn?: readonly (keyof z.input<E["schema"]>)[];
     /** Existing record behavior. Default: "return" */
     ifExists?: IfExistsMode;
-  }>;
+    /**
+     * Valid-time start for a created or RESURRECTED edge — on a resurrection it
+     * asserts the complete window, so an omitted `validTo` reopens the revived
+     * row.
+     *
+     * A live edge's stored lower bound is history, so an in-place update
+     * (`ifExists: "update"`) cannot store this: one naming a different instant is
+     * REFUSED with `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`, and one restating the
+     * bound the edge holds is accepted. Ignored when an existing edge is returned
+     * (`ifExists: "return"`), which writes nothing at all — there the window
+     * describes the edge to create if none is found.
+     */
+    validFrom?: string | null;
+    /**
+     * How an `ifExists: "update"` write treats a stated `validFrom` that differs
+     * from the live edge's stored lower bound. Default: `"refuse"`.
+     *
+     * `"preserve"` makes `validFrom` create/resurrection-only input: it is still
+     * validated, but a live update keeps the stored lower bound while applying
+     * properties and `validTo`.
+     */
+    onImmutableLowerBound?: "preserve" | "refuse";
+    /**
+     * Valid-time end for a created, updated, or resurrected edge. `validTo` is
+     * ignored when the operation returns an existing edge without writing;
+     * `clearValidTo` instead requires `ifExists: "update"` on a live match and
+     * is refused with `CLEAR_VALID_TO_REQUIRES_UPDATE` under return mode. May
+     * not precede the row's effective start; see
+     * `INVERTED_VALIDITY_WINDOW_CODE`.
+     */
+  }> &
+    ValidityEndMutation;
 
 // ============================================================
 // Collection Interfaces
@@ -628,20 +1399,45 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
  * A collection of nodes of a specific type.
  *
  * Provides ergonomic CRUD operations for a single node type.
+ *
+ * `Whole` is what `partOf.whole` accepts on this collection's attachment
+ * surfaces: `store.nodes.<K>` binds {@link CompositionWholeReference} — only
+ * the whole kinds the ontology declares for `K` — and the runtime-kind
+ * collections bind {@link CompositionWholeInput}. It defaults to
+ * {@link CompositionWholeInput}, so a helper typed by the node type and
+ * constraint names alone (`NodeCollection<typeof Section, "title">`) both
+ * accepts `store.nodes.Section` and can attach through it; the compile-time
+ * narrowing to declared whole kinds is then the caller's to restate, and the
+ * runtime refusal (`COMPOSITION_WHOLE_NOT_DECLARED`) stays authoritative.
+ *
+ * The attachment-taking members (`create`, `bulkCreate`, `reparent`,
+ * `bulkReparent`, `getOrCreateByConstraint`, `bulkGetOrCreateByConstraint`)
+ * are declared as methods, not function-valued properties, so their
+ * parameters compare bivariantly: that is what lets a collection bound to the
+ * narrow {@link CompositionWholeReference} be passed where the default wide
+ * `Whole` is expected.
  */
 export type NodeCollection<
   N extends NodeType,
   CN extends string = string,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
 > = Readonly<{
   /**
    * Create a new node.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
-  create: (
+  create<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
     props: z.input<N["schema"]>,
-    options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
-  ) => Promise<Node<N>>;
+    options?: NodeCreateOptions<Via, Whole>,
+  ): Promise<Node<N>>;
 
   /** Get a node by ID */
   getById: (
@@ -655,15 +1451,167 @@ export type NodeCollection<
     options?: QueryOptions,
   ) => Promise<readonly (Node<N> | undefined)[]>;
 
-  /** Update a node */
+  /**
+   * Update a node's properties and optionally set or clear its validity end.
+   * Omitting both end options preserves the stored window.
+   */
   update: (
     id: NodeId<N>,
     props: Partial<z.input<N["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
+    options?: ValidityEndMutation,
   ) => Promise<Node<N>>;
 
-  /** Delete a node (soft delete - sets deletedAt timestamp) */
-  delete: (id: NodeId<N>) => Promise<void>;
+  /**
+   * Applies a property patch only while the current live row still has
+   * caller-supplied exact property values. The identity and values participate in
+   * the same set-based statement as the update, so a preceding read cannot
+   * open a compare-and-set race. Returns `false` on a missing row or predicate
+   * mismatch; neither case writes history or advances the row version.
+   *
+   * This is the narrow escape hatch for exceptional state recovery. It does
+   * not widen schema-declared transition rules: callers state the exceptional
+   * precondition at the call site and the complete after-image still passes
+   * ordinary TypeGraph validation, uniqueness, history, and sidecar handling.
+   */
+  compareAndSet: (
+    id: NodeId<N>,
+    params: Readonly<{
+      expected: CompareAndSetExpected<z.input<N["schema"]>>;
+      patch: Partial<z.input<N["schema"]>>;
+    }>,
+  ) => Promise<boolean>;
+
+  /**
+   * Updates every current node selected by the supplied selectors in one
+   * set-based write. A same-store candidate query can provide correlated
+   * cross-kind selection; relationship clauses are independent EXISTS
+   * predicates and are ANDed with each other and with `where`.
+   */
+  updateWhere: (
+    params: Readonly<{
+      patch: Partial<z.input<N["schema"]>>;
+      /**
+       * A Store-created query selecting candidate nodes of this collection's
+       * kind. The query is intersected with `where`/`exists` when supplied.
+       */
+      candidates?: NodeCandidateQuery;
+      where?: (
+        accessor: string extends N["kind"] ? DynamicNodeAccessor
+        : NodeAccessor<N>,
+      ) => Predicate;
+      exists?: readonly Readonly<{
+        edgeKind: string;
+        direction: "out" | "in";
+        relatedKind: string;
+        whereEdge?: (accessor: DynamicEdgeAccessor) => Predicate;
+        whereRelated?: (accessor: DynamicNodeAccessor) => Predicate;
+      }>[];
+      all?: true;
+    }>,
+  ) => Promise<Readonly<{ affectedCount: number }>>;
+
+  /**
+   * Moves this composition part to a new whole, atomically: the old
+   * attachment is retired and the new one created in one transaction under
+   * one per-graph fence, so neither the one-whole-per-part claim nor
+   * `existence: "required"` ever observes an intermediate state. Neither
+   * half is expressible on its own — the create refuses while the old edge
+   * holds the claim, and the delete refuses while a required part is live.
+   *
+   * The part keeps its id, its properties, and every descendant beneath it.
+   * The FINAL state is what is validated: one whole, acyclicity over the
+   * oriented composition union, and a required part never left detached.
+   *
+   * How the old attachment is retired follows its declared population: a
+   * `population: "one"` edge is deleted, a `population: "oneActive"` edge
+   * has its window ended at the move instant, leaving the previous
+   * membership readable as valid-time history.
+   *
+   * Reparenting to the whole the part already holds (through the same
+   * realizing edge) is a no-op (no write, no history), not a refusal — but a
+   * stated `attachment.props` is still validated and still honored as a
+   * postcondition on that no-op: omitted, or valid and canonically equal to
+   * the edge's live stored props, the no-op stands; valid but DIFFERENT
+   * refuses with `CompositionError` (`situation: "props"`) rather
+   * than silently keeping the stored value. The result's `edge` is the
+   * holding edge either way; `moved` is false on that no-op.
+   *
+   * `at` is the move instant (see {@link NodeReparentOptions}). Refuses
+   * with `ConfigurationError` (`COMPOSITION_NOT_A_PART`) on a kind that
+   * declares no `partOf`/`hasPart` pair at all,
+   * (`COMPOSITION_WHOLE_NOT_DECLARED`) on an undeclared target pair,
+   * (`COMPOSITION_VIA_AMBIGUOUS` / `COMPOSITION_VIA_NOT_DECLARED`) on an
+   * unresolvable `via`, and with `NodeNotFoundError` when the part is
+   * missing or already deleted.
+   */
+  reparent<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
+    id: NodeId<N>,
+    options: NodeReparentOptions<Via, Whole>,
+  ): Promise<NodeReparentResult<Via>>;
+
+  /**
+   * Moves several parts in one transaction. Every item's verdict is reached
+   * before the first write, so a refusal leaves every part where it was,
+   * including when the caller catches it inside `store.transaction(...)`.
+   * The batch is judged on the state it produces as a whole: two moves that
+   * close a cycle between them are refused, and a part may move under one
+   * the same batch moves out from under it, in either item order. A part
+   * listed twice is refused with a `ValidationError`. Each item is
+   * {@link NodeReparentOptions} plus the part id.
+   */
+  bulkReparent<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
+    items: readonly Readonly<{
+      id: NodeId<N>;
+      options: NodeReparentOptions<Via, Whole>;
+    }>[],
+  ): Promise<readonly NodeReparentResult<Via>[]>;
+
+  /**
+   * Delete a node (soft delete - sets deletedAt timestamp). A no-op for a
+   * node that is absent or already deleted.
+   *
+   * `options.expect` guards the delete with a plan from
+   * {@link NodeCollection.planDelete}, for a preview the caller confirms
+   * before deleting, possibly in a later request. The delete computes its own
+   * plan with the same planner inside its transaction (for a composition
+   * whole, under the per-graph write lock the delete takes) and compares the
+   * two: the same parts (each with its `whole` and `viaEdgeKind`, so a
+   * reparented part counts as changed) and the same `removedEdgeIds`, in any
+   * order. A difference refuses with `NodeDeletePlanMismatchError`
+   * (`situation: "changed"`, naming the parts and edge ids added to and
+   * dropped from the plan) before any node, edge, sidecar, history or revision
+   * write and before `onOperationEnd`; a node that is absent or already
+   * deleted refuses the same way (`situation: "notLive"`) instead of being a
+   * no-op. A guarded delete always takes the portable delete path, never a
+   * fused single-statement command.
+   *
+   * The comparison covers the parts and edges the delete planned. For a
+   * composition whole no concurrent attach or reparent can change that plan
+   * before the delete runs it. Any other kind takes no per-graph lock, so
+   * every concurrent write can change the answer up to the comparison, and
+   * the comparison sees it at `READ COMMITTED`. A write that takes no
+   * per-graph lock (for a whole: a detach, a part's own delete, or an edge of
+   * a kind with no cardinality or acyclicity constraint; for any other kind:
+   * every write) can also commit after the comparison and before the delete's
+   * statements. The delete then treats it exactly as an unguarded delete
+   * does: at `READ COMMITTED` an edge created on a node it deletes is removed
+   * with that node under `cascade` / `disconnect`, or refuses the delete with
+   * `RestrictedDeleteError` under `restrict` (inside a caller's transaction,
+   * after the cascade's earlier writes); at PostgreSQL `REPEATABLE READ` or
+   * `SERIALIZABLE` the delete's snapshot does not see such an edge, and it
+   * stays live on the deleted node, as it does for every delete. SQLite
+   * admits no concurrent writer.
+   *
+   * An `options` object of the wrong shape, or one without a plan in
+   * `expect`, is refused with `ValidationError`.
+   */
+  delete: (id: NodeId<N>, options?: NodeDeleteOptions) => Promise<void>;
 
   /**
    * Permanently delete a node from the database.
@@ -674,9 +1622,62 @@ export type NodeCollection<
    * **Warning:** This operation is irreversible and should be used carefully.
    * Consider using soft delete (`delete()`) for most use cases.
    *
+   * Takes no `expect` guard: {@link NodeCollection.planDelete} plans the soft
+   * delete, and a hard delete also purges a tombstoned node and the
+   * soft-deleted edge rows at each deleted node, which that plan does not
+   * name. An options argument (from an untyped caller) is refused with
+   * `ValidationError` rather than ignored.
+   *
    * @throws Error if edges are still connected to this node (delete edges first)
    */
   hardDelete: (id: NodeId<N>) => Promise<void>;
+
+  /**
+   * Plans `delete(id)` without writing: the parts its composition cascade
+   * would delete and the edges it would remove, decided by the same planner
+   * the delete runs. `undefined` when the node is absent or already deleted,
+   * where `delete(id)` is a no-op.
+   *
+   * A delete the planner refuses is refused here with the same error the
+   * delete throws (`RestrictedDeleteError` for an `onDelete: "restrict"` node,
+   * or a cascaded part, that still has an ordinary edge;
+   * `CompositionCycleError` for a cycle in the stored parts), so a preview is
+   * read exactly like the delete it previews.
+   *
+   * To act on a preview someone confirms later, possibly in another request,
+   * pass it back as `delete(id, { expect: plan })`: the delete refuses with
+   * `NodeDeletePlanMismatchError` before any write when its own plan differs
+   * (see {@link NodeCollection.delete}). No lock spans two requests; the
+   * guard is what makes that flow safe.
+   *
+   * On a transaction's collections (`tx.nodes.<Kind>.planDelete`), the plan
+   * of a composition whole is read under the per-graph write lock its delete
+   * takes, held until the transaction ends, so no concurrent attach or
+   * reparent can add a part before a `delete(id)` later in the same
+   * transaction. Writes that take no per-graph lock still can change the
+   * answer: a concurrent detach or part delete drops that part from the later
+   * delete's cascade, and a concurrent ordinary edge changes `removedEdgeIds`
+   * or a restrict verdict. Any other kind's delete takes no per-graph lock, so
+   * every concurrent write can. Passing the plan as `expect` turns a change
+   * the delete can see (every committed change at `READ COMMITTED`) into a
+   * refusal. On the store's collections the plan is an unlocked, best-effort
+   * read.
+   *
+   * Neither form writes a graph, sidecar, history or revision row. The
+   * transactional form takes the lock the delete takes, which for a
+   * composition whole on PostgreSQL advances the graph's fence row as the
+   * delete does. It therefore fails the way that delete's fence fails: under
+   * PostgreSQL `REPEATABLE READ` or `SERIALIZABLE`, a snapshot taken before a
+   * concurrent attach fails with a serialization failure
+   * (`TransactionConflictError` inside your transaction), and a custom backend
+   * whose fence advances no fence row refuses at those levels with
+   * `ConfigurationError` (`COMPOSITION_CASCADE_REQUIRES_FRESH_SNAPSHOT`).
+   * Inside `store.transaction(fn, { accessMode: "read_only" })` the
+   * transactional form refuses before any statement, for every kind, with
+   * `UnsupportedBackendCapabilityError`; use `store.nodes.<Kind>.planDelete`
+   * there for an unlocked preview.
+   */
+  planDelete: (id: NodeId<N>) => Promise<NodeDeletePlan | undefined>;
 
   /**
    * Find nodes matching criteria.
@@ -703,11 +1704,15 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   createFromRecord: (
     data: Record<string, unknown>,
-    options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+    options?: NodeCreateOptions,
   ) => Promise<Node<N>>;
 
   /**
@@ -716,13 +1721,31 @@ export type NodeCollection<
    * If a node with the given ID exists, updates it with the provided props.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing. Set
+   * `onImmutableLowerBound: "preserve"` for event materializers whose
+   * `validFrom` is create/resurrection input: a live update then preserves the
+   * stored lower bound while still applying props and `validTo`.
    */
   upsertById: (
     id: string,
     props: z.input<N["schema"]>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      validFrom?: string | null;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -732,13 +1755,29 @@ export type NodeCollection<
    * the data shape is determined at runtime, not compile time.
    * The return type is fully typed — only the input gate is relaxed.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An
+   * update to a LIVE row stores no lower bound, because that row's is already
+   * history, so one naming a different instant is REFUSED (`ValidationError`
+   * carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing. Set
+   * `onImmutableLowerBound: "preserve"` for create/resurrection-only input.
    */
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?: Readonly<{ validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      validFrom?: string | null;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }> &
+      ValidityEndMutation,
   ) => Promise<Node<N>>;
 
   /**
@@ -747,16 +1786,19 @@ export type NodeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
-  bulkCreate: (
-    items: readonly Readonly<{
-      props: z.input<N["schema"]>;
-      id?: string;
-      validFrom?: string;
-      validTo?: string;
-    }>[],
-  ) => Promise<Node<N>[]>;
+  bulkCreate<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
+    items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+      NodeCreateOptions<Via, Whole>)[],
+  ): Promise<Node<N>[]>;
 
   /**
    * Create or update multiple nodes in a batch.
@@ -764,15 +1806,64 @@ export type NodeCollection<
    * For each item, if a node with the given ID exists, updates it.
    * Otherwise, creates a new node with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * Items are applied in order, so a **repeated id** within one batch is
+   * last-write-wins: the first item creates or updates the row, and every later
+   * copy is an update over the value the earlier item wrote — the same final row
+   * the equivalent sequence of `upsertById` calls produces. This holds whether
+   * or not the row existed before the batch.
+   *
+   * `validFrom` applies when the upsert CREATES the row and when it RESURRECTS
+   * a tombstoned one — both write a fresh validity window — defaulting to the
+   * operation's timestamp when omitted. That default is dropped when a stated
+   * `validTo` at or before the write instant would leave the row readable at no
+   * coordinate: NO lower bound is stored ("ended at T, start unknown") and
+   * `meta.validFrom` reads back as `undefined`. A RESURRECTION takes the same
+   * exception, decided against the instant it samples, so one stated window
+   * reaches ONE stored shape whether the id is fresh or names a tombstone. An update to a LIVE row stores no lower
+   * bound, because that row's is already history, so one naming a different
+   * instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing. Per-item
+   * `onImmutableLowerBound: "preserve"` makes the bound create/resurrection
+   * input while a live update preserves the stored lower bound.
+   *
+   * **Limitation — a batch cannot hand a unique value from one row to
+   * another.** Item order settles which value each id ends up with, but the
+   * writes themselves are grouped: every create runs before every update. So a
+   * batch where one item RELEASES a `unique` constraint value and a later item
+   * CLAIMS it — `[{ id: "a", props: { email: "moved@x" } }, { id: "b", props:
+   * { email: "shared@x" } }]` where `a` currently holds `"shared@x"` and `b` is
+   * new — checks `b`'s create while `a` still reserves the value, and the whole
+   * batch fails with a `UniquenessError`. The equivalent sequence of
+   * single `upsertById` calls succeeds. A batch states the set of rows it wants,
+   * not a script to reach them by; the failure is loud rather than silent, and
+   * the workaround is to split the handoff across two batches (release, then
+   * claim) or to apply those items as sequential `upsertById` calls.
    */
   bulkUpsertById: (
+    items: readonly (Readonly<{
+      id: string;
+      props: z.input<N["schema"]>;
+      validFrom?: string | null;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }> &
+      ValidityEndMutation)[],
+  ) => Promise<Node<N>[]>;
+
+  /**
+   * Replaces complete node documents by id.
+   *
+   * Missing ids are created. Tombstones are resurrected with a freshly stamped
+   * validity window. Live rows preserve their stored validity window. Unlike
+   * `bulkUpsertById`, every `props` value is a complete replacement: omitted
+   * optional fields are removed rather than merged from the stored document.
+   * Duplicate ids are refused because replacement describes a set, not an
+   * ordered script.
+   */
+  bulkReplaceById: (
     items: readonly Readonly<{
       id: string;
       props: z.input<N["schema"]>;
-      validFrom?: string;
-      validTo?: string;
     }>[],
   ) => Promise<Node<N>[]>;
 
@@ -783,13 +1874,17 @@ export type NodeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
       id?: string;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
     }>[],
   ) => Promise<void>;
@@ -798,9 +1893,44 @@ export type NodeCollection<
    * Delete multiple nodes by ID.
    *
    * Atomic when the backend supports transactions. Silently ignores IDs
-   * that don't exist.
+   * that don't exist. Takes no `expect` guard; an options argument (from an
+   * untyped caller) is refused with `ValidationError` rather than ignored.
    */
   bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
+
+  /**
+   * Permanently delete multiple nodes by ID.
+   *
+   * Leaves exactly the state that calling `hardDelete()` once per id, in
+   * first-occurrence order, inside one transaction leaves, and fails with the
+   * refusal that loop would reach first (`RestrictedDeleteError`,
+   * `CompositionCycleError`, …) with nothing deleted. Absent ids, ids present
+   * only under another node kind, and repeated ids are ignored. Each node's
+   * `onDelete` applies as in `hardDelete()`, against the graph the earlier ids'
+   * deletes leave: a `restrict` node connected to a later node of the batch
+   * refuses, while one connected only to an earlier node does not. A history
+   * store captures each removed row's pre-image without recording a delete
+   * row.
+   *
+   * Every node is judged before the first row is removed. A node whose delete
+   * cascades to no composition parts and that no identity assertion or class
+   * names is removed set-wise, with its connected edges, uniqueness, fulltext
+   * and embedding rows, in a bounded number of statements per bind-budget
+   * chunk; a composition whole with parts and an Operational Identity
+   * participant go through the same path as `hardDelete()` and cost what it
+   * costs. On its own the call is one write transaction; inside
+   * `store.transaction()` its writes run behind a savepoint, so a caught
+   * failure among them keeps none of them. On a raw store over a driver
+   * without interactive transactions the statements are separate, and a later
+   * statement's failure leaves the earlier ones applied. Like every batch
+   * method it fires no operation hooks. Takes no options; an options argument
+   * (from an untyped caller) is refused with `ValidationError` rather than
+   * ignored.
+   *
+   * **Warning:** This operation is irreversible. Consider `bulkDelete()` for
+   * most use cases.
+   */
+  bulkHardDelete: (ids: readonly NodeId<N>[]) => Promise<void>;
 
   /**
    * Find a node by uniqueness constraint.
@@ -867,11 +1997,14 @@ export type NodeCollection<
    * @param props - Full properties for create, or merge source for update
    * @param options - Existing record behavior (default: "return")
    */
-  getOrCreateByConstraint: (
+  getOrCreateByConstraint<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
     constraintName: CN,
     props: z.input<N["schema"]>,
-    options?: NodeGetOrCreateByConstraintOptions,
-  ) => Promise<NodeGetOrCreateByConstraintResult<N>>;
+    options?: NodeGetOrCreateByConstraintOptions<Via, Whole>,
+  ): Promise<NodeGetOrCreateByConstraintResult<N>>;
 
   /**
    * Batch version of getOrCreateByConstraint.
@@ -879,13 +2012,18 @@ export type NodeCollection<
    * Results are returned in the same order as the input items.
    * Atomic when the backend supports transactions.
    */
-  bulkGetOrCreateByConstraint: (
+  bulkGetOrCreateByConstraint<
+    const Via extends CompositionViaRef | undefined =
+      CompositionViaRef | undefined,
+  >(
     constraintName: CN,
-    items: readonly Readonly<{
-      props: z.input<N["schema"]>;
-    }>[],
-    options?: NodeGetOrCreateByConstraintOptions,
-  ) => Promise<NodeGetOrCreateByConstraintResult<N>[]>;
+    items: readonly NodeBulkGetOrCreateByConstraintItem<
+      z.input<N["schema"]>,
+      Via,
+      Whole
+    >[],
+    options?: NodeBulkGetOrCreateByConstraintOptions,
+  ): Promise<NodeGetOrCreateByConstraintResult<N>[]>;
 }>;
 
 /**
@@ -901,12 +2039,60 @@ export type NodeCollection<
 export type NodeRef<N extends NodeType = NodeType> =
   Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
 
+type KindNodeTypes<G extends GraphDef, K> =
+  K extends keyof G["nodes"] ? G["nodes"][K]["type"] : never;
+
+type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
+  N extends NodeType ?
+    KindNodeTypes<G, Exclude<AssignableNodeKinds<G, N["kind"]>, N["kind"]>>
+  : never;
+
+/**
+ * What a typed edge method accepts for an endpoint declared as `N` in graph
+ * `G`: a {@link NodeRef} of `N` or of a kind the runtime admits in its place
+ * ({@link AssignableNodeKinds}: a `subClassOf` descendant or an
+ * `equivalentTo` kind), or the {@link PolymorphicNodeReference} a widened edge
+ * endpoint or a polymorphic query row over one of those kinds carries, whose
+ * `kind` is the general `string`. That arm's id brand names the declared
+ * kind, so an unrelated kind's id is refused even when its properties match,
+ * but it cannot tie the id to the stated `kind`. The runtime endpoint check
+ * reads the `(kind, id)` pair as stated and refuses a kind the edge does not
+ * admit with `EndpointError`.
+ */
+export type EdgeEndpointRef<G extends GraphDef, N extends NodeType> =
+  | NodeRef<N | AssignableNodeTypes<G, N>>
+  | PolymorphicNodeReference<N | AssignableNodeTypes<G, N>>;
+
+/**
+ * An edge read in graph `G`: each declared endpoint typed by
+ * {@link SubsumedNodeType}, so an endpoint kind with `subClassOf`
+ * descendants or `equivalentTo` kinds reads back with a `string` kind and a
+ * widened `NodeId` brand.
+ */
+export type EdgeInGraph<
+  G extends GraphDef,
+  E extends AnyEdgeType,
+  From extends NodeType,
+  To extends NodeType,
+> = Edge<E, SubsumedNodeType<G, From>, SubsumedNodeType<G, To>>;
+
+/**
+ * A graph whose ontology declares no relation: the context of an edge
+ * collection type named without a graph, where nothing widens or admits
+ * anything beyond the declared kinds.
+ */
+type GraphWithoutOntology = GraphDef<
+  Record<string, NodeRegistration>,
+  Record<string, EdgeRegistration>,
+  readonly []
+>;
+
 /**
  * Options for creating an edge.
  */
 type EdgeCreateOptions = Readonly<{
   id?: string;
-  validFrom?: string;
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -944,44 +2130,168 @@ type EdgeCreateArguments<E extends AnyEdgeType> =
  * const edges = await store.edges.worksAt.findFrom(alice);
  * ```
  */
+type EdgeEndpointPairTypes = Readonly<{
+  from: NodeType;
+  to: NodeType;
+}>;
+
+type EdgeBulkCreateItem<
+  Pairs extends EdgeEndpointPairTypes,
+  Schema extends z.ZodObject<z.ZodRawShape>,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    Readonly<{
+      from: EdgeEndpointRef<G, Pairs["from"]>;
+      to: EdgeEndpointRef<G, Pairs["to"]>;
+      props?: z.input<Schema>;
+      id?: string;
+      validFrom?: string | null;
+      validTo?: string;
+    }>
+  : never;
+
+type EdgeBulkUpsertItem<
+  E extends AnyEdgeType,
+  Pairs extends EdgeEndpointPairTypes,
+  Id extends string,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    Readonly<{
+      id: Id;
+      from: EdgeEndpointRef<G, Pairs["from"]>;
+      to: EdgeEndpointRef<G, Pairs["to"]>;
+      props?: z.input<E["schema"]>;
+      validFrom?: string | null;
+    }> &
+      ValidityEndMutation
+  : never;
+
+type EdgeBulkInsertItem<
+  Pairs extends EdgeEndpointPairTypes,
+  Schema extends z.ZodObject<z.ZodRawShape>,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    Readonly<{
+      from: EdgeEndpointRef<G, Pairs["from"]>;
+      to: EdgeEndpointRef<G, Pairs["to"]>;
+      props?: z.input<Schema>;
+      id?: string;
+      validFrom?: string | null;
+      validTo?: string;
+    }>
+  : never;
+
+type EdgeBulkGetOrCreateItem<
+  E extends AnyEdgeType,
+  Pairs extends EdgeEndpointPairTypes,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    Readonly<{
+      from: EdgeEndpointRef<G, Pairs["from"]>;
+      to: EdgeEndpointRef<G, Pairs["to"]>;
+      props: z.input<E["schema"]>;
+      validFrom?: string | null;
+      onImmutableLowerBound?: "preserve" | "refuse";
+    }> &
+      ValidityEndMutation
+  : never;
+
+type EdgeCreateArgumentsTuple<
+  E extends AnyEdgeType,
+  Pairs extends EdgeEndpointPairTypes,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    [
+      from: EdgeEndpointRef<G, Pairs["from"]>,
+      to: EdgeEndpointRef<G, Pairs["to"]>,
+      ...args: EdgeCreateArguments<E>,
+    ]
+  : never;
+
+type EdgeFindByEndpointsArguments<
+  E extends AnyEdgeType,
+  Pairs extends EdgeEndpointPairTypes,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    [
+      from: EdgeEndpointRef<G, Pairs["from"]>,
+      to: EdgeEndpointRef<G, Pairs["to"]>,
+      options?: EdgeFindByEndpointsOptions<E>,
+      temporal?: QueryOptions,
+    ]
+  : never;
+
+type EdgeGetOrCreateByEndpointsArguments<
+  E extends AnyEdgeType,
+  Pairs extends EdgeEndpointPairTypes,
+  G extends GraphDef,
+> =
+  Pairs extends EdgeEndpointPairTypes ?
+    [
+      from: EdgeEndpointRef<G, Pairs["from"]>,
+      to: EdgeEndpointRef<G, Pairs["to"]>,
+      props: z.input<E["schema"]>,
+      options?: EdgeGetOrCreateByEndpointsOptions<E>,
+    ]
+  : never;
+
+/**
+ * Typed edge operations. InputId controls accepted ID arguments only; returned
+ * edges retain their schema-derived ID brand. Prefer DynamicEdgeCollection<E>
+ * for runtime endpoint dispatch instead of spelling its parameters manually.
+ */
 export type EdgeCollection<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
 > = Readonly<{
   /**
    * Create a new edge.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    *
    * @param from - Source node (must be one of the allowed 'from' types)
    * @param to - Target node (must be one of the allowed 'to' types)
    * @param args - Edge properties (optional if schema is empty) and creation options
    */
   create: (
-    from: NodeRef<From>,
-    to: NodeRef<To>,
-    ...args: EdgeCreateArguments<E>
-  ) => Promise<Edge<E, From, To>>;
+    ...args: EdgeCreateArgumentsTuple<E, Pairs, G>
+  ) => Promise<EdgeInGraph<G, E, From, To>>;
 
   /** Get an edge by ID */
   getById: (
-    id: EdgeId<E>,
+    id: InputId,
     options?: QueryOptions,
-  ) => Promise<Edge<E, From, To> | undefined>;
+  ) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
 
   /** Get multiple edges by ID, preserving input order (undefined for missing) */
   getByIds: (
-    ids: readonly EdgeId<E>[],
+    ids: readonly InputId[],
     options?: QueryOptions,
-  ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
+  ) => Promise<readonly (EdgeInGraph<G, E, From, To> | undefined)[]>;
 
-  /** Update an edge's properties */
+  /**
+   * Update an edge's properties and optionally set or clear its validity end.
+   * Reopening a `oneActive` edge rechecks cardinality before the write.
+   */
   update: (
-    id: EdgeId<E>,
+    id: InputId,
     props: Partial<z.input<E["schema"]>>,
-    options?: Readonly<{ validTo?: string }>,
-  ) => Promise<Edge<E, From, To>>;
+    options?: ValidityEndMutation,
+  ) => Promise<EdgeInGraph<G, E, From, To>>;
 
   /**
    * Find edges from a specific node.
@@ -993,9 +2303,9 @@ export type EdgeCollection<
    * endpoint's edges at another temporal coordinate.
    */
   findFrom: (
-    from: NodeRef<From>,
+    from: EdgeEndpointRef<G, From>,
     options?: QueryOptions,
-  ) => Promise<Edge<E, From, To>[]>;
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /**
    * Find edges to a specific node.
@@ -1003,47 +2313,93 @@ export type EdgeCollection<
    * Temporal semantics mirror {@link EdgeCollection.findFrom}.
    */
   findTo: (
-    to: NodeRef<To>,
+    to: EdgeEndpointRef<G, To>,
     options?: QueryOptions,
-  ) => Promise<Edge<E, From, To>[]>;
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
+
+  /**
+   * Find the edges from a SET of source nodes in one read.
+   *
+   * `findFrom` with a widened endpoint predicate and nothing else: the same
+   * temporal model, the same soft-delete filtering, and the same per-source
+   * ordering — but `from_id IN (...)` instead of `from_id = ?`, so a page of
+   * N sources costs one statement per distinct source kind and bind-budget
+   * chunk rather than N singleton statements.
+   *
+   * Results are grouped per input: the outer array is parallel to `froms`
+   * (index `i` holds the edges of `froms[i]`), and repeated inputs each get
+   * their own copy of the same edge set. Empty input returns `[]`; a source
+   * with no edges gets an empty array. Large inputs are split across
+   * statements to respect the backend's bound-parameter budget, which is
+   * invisible in the result.
+   *
+   * Requires a backend implementing `findEdgesByEndpointSet` — both bundled
+   * Drizzle backends do. On one that does not, this **refuses** with a
+   * `ConfigurationError` rather than looping `findFrom` per input: asking for
+   * a bulk read is asking for set-oriented statements, and silently issuing N
+   * singleton statements is the cost surprise the method exists to remove.
+   *
+   * @param froms - Source nodes to read the edges of
+   * @param options - Temporal coordinate plus optional `limitPerInput`
+   * @throws {ConfigurationError} when the backend cannot read an endpoint set
+   */
+  bulkFindFrom: (
+    froms: readonly EdgeEndpointRef<G, From>[],
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly EdgeInGraph<G, E, From, To>[][]>;
+
+  /**
+   * Find the edges into a SET of target nodes in one read.
+   *
+   * Mirrors {@link EdgeCollection.bulkFindFrom} on the `to` endpoint.
+   */
+  bulkFindTo: (
+    tos: readonly EdgeEndpointRef<G, To>[],
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly EdgeInGraph<G, E, From, To>[][]>;
 
   /**
    * Deferred variant of `findFrom` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
    * the same temporal `options` as {@link EdgeCollection.findFrom}.
+   *
+   * Batching these still issues one statement per call — it does not merge
+   * the reads, and whether they share a connection is up to the adapter. It
+   * is not a snapshot: PostgreSQL's default read-committed isolation lets a
+   * later read observe a commit the earlier ones did not. To read edges for
+   * many sources in one statement, traverse from them in a single query.
    */
   batchFindFrom: (
-    from: NodeRef<From>,
+    from: EdgeEndpointRef<G, From>,
     options?: QueryOptions,
-  ) => BatchableQuery<Edge<E, From, To>>;
+  ) => BatchableQuery<EdgeInGraph<G, E, From, To>>;
 
   /**
    * Deferred variant of `findTo` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` instead of executing immediately. Accepts
-   * the same temporal `options` as {@link EdgeCollection.findTo}.
+   * the same temporal `options` as {@link EdgeCollection.findTo}. Costs one
+   * statement per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindTo: (
-    to: NodeRef<To>,
+    to: EdgeEndpointRef<G, To>,
     options?: QueryOptions,
-  ) => BatchableQuery<Edge<E, From, To>>;
+  ) => BatchableQuery<EdgeInGraph<G, E, From, To>>;
 
   /**
    * Deferred variant of `findByEndpoints` for use with `store.batch()`.
    *
    * Returns a `BatchableQuery` that yields a 0-or-1 element array
-   * (matching `findByEndpoints`' at-most-one semantics).
+   * (matching `findByEndpoints`' at-most-one semantics). Costs one statement
+   * per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindByEndpoints: (
-    from: NodeRef<From>,
-    to: NodeRef<To>,
-    options?: EdgeFindByEndpointsOptions<E>,
-    temporal?: QueryOptions,
-  ) => BatchableQuery<Edge<E, From, To>>;
+    ...args: EdgeFindByEndpointsArguments<E, Pairs, G>
+  ) => BatchableQuery<EdgeInGraph<G, E, From, To>>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
-  delete: (id: EdgeId<E>) => Promise<void>;
+  delete: (id: InputId) => Promise<void>;
 
   /**
    * Permanently delete an edge from the database.
@@ -1054,24 +2410,24 @@ export type EdgeCollection<
    * **Warning:** This operation is irreversible and should be used carefully.
    * Consider using soft delete (`delete()`) for most use cases.
    */
-  hardDelete: (id: EdgeId<E>) => Promise<void>;
+  hardDelete: (id: InputId) => Promise<void>;
 
   /** Find edges matching endpoint and pagination criteria */
   find: (
     filter?: Readonly<{
-      from?: NodeRef<From>;
-      to?: NodeRef<To>;
+      from?: EdgeEndpointRef<G, From>;
+      to?: EdgeEndpointRef<G, To>;
       limit?: number;
       offset?: number;
     }>,
     temporal?: QueryOptions,
-  ) => Promise<Edge<E, From, To>[]>;
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /** Count edges matching criteria */
   count: (
     filter?: Readonly<{
-      from?: NodeRef<From>;
-      to?: NodeRef<To>;
+      from?: EdgeEndpointRef<G, From>;
+      to?: EdgeEndpointRef<G, To>;
     }>,
     temporal?: QueryOptions,
   ) => Promise<number>;
@@ -1082,18 +2438,15 @@ export type EdgeCollection<
    * More efficient than calling create() multiple times.
    * Use `bulkInsert` for the dedicated fast path that skips returning results.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkCreate: (
-    items: readonly Readonly<{
-      from: NodeRef<From>;
-      to: NodeRef<To>;
-      props?: z.input<E["schema"]>;
-      id?: string;
-      validFrom?: string;
-      validTo?: string;
-    }>[],
-  ) => Promise<Edge<E, From, To>[]>;
+    items: readonly EdgeBulkCreateItem<Pairs, E["schema"], G>[],
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /**
    * Create or update multiple edges in a batch.
@@ -1101,19 +2454,43 @@ export type EdgeCollection<
    * For each item, if an edge with the given ID exists, updates it.
    * Otherwise, creates a new edge with that ID.
    *
-   * `validFrom` only applies on the create branch, defaulting to the
-   * operation's creation timestamp when omitted; it has no effect on update.
+   * Items are applied in order, so a **repeated id** within one batch is
+   * last-write-wins: the first item creates or updates the edge, and every later
+   * copy is an update over the value the earlier item wrote. This holds whether
+   * or not the edge existed before the batch. An update never repoints an edge,
+   * so every item's `from` / `to` must exactly restate the endpoints already
+   * owned by that id (including an earlier item in the same batch). A mismatch
+   * is refused with `ValidationError` carrying
+   * `EDGE_IDENTITY_MISMATCH_CODE`; it is never silently ignored.
+   *
+   * `validFrom` applies when the upsert CREATES the edge and when it RESURRECTS
+   * a tombstoned one. A create writes a fresh validity window, defaulting to the
+   * operation's timestamp when omitted — unless a stated `validTo` at or before
+   * that instant would leave the row readable at no coordinate, in which case NO
+   * lower bound is stored ("ended at T, start unknown") and `meta.validFrom`
+   * reads back as `undefined`. A resurrection stamps nothing: an edge RETAINS
+   * its stored lower bound unless the item names a new one, so a `validTo`
+   * before the retained bound is REFUSED rather than stamped over. An update to
+   * a LIVE row stores no lower bound, because that row's is already history, so
+   * one naming a different instant is REFUSED (`ValidationError` carrying
+   * `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`) rather than ignored. Restating the
+   * bound the row already holds is accepted and changes nothing.
+   *
+   * **Limitation — a batch cannot hand a constrained slot from one edge to
+   * another.** Item order settles the final props, but the writes are grouped:
+   * every create runs before every update. So a batch where one item frees the
+   * slot a `cardinality` constraint allows and a later item claims it — ending
+   * the lone `oneActive` edge from a source while creating its replacement —
+   * checks the create while the old edge is still active, and the whole batch
+   * fails with a `CardinalityError`. Applying the update first, as
+   * separate `update` / `create` calls, succeeds. A batch states the set of
+   * edges it wants, not a script to reach them by; the failure is loud rather
+   * than silent, and the workaround is to split the handoff across two batches
+   * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
-    items: readonly Readonly<{
-      id: EdgeId<E>;
-      from: NodeRef<From>;
-      to: NodeRef<To>;
-      props?: z.input<E["schema"]>;
-      validFrom?: string;
-      validTo?: string;
-    }>[],
-  ) => Promise<Edge<E, From, To>[]>;
+    items: readonly EdgeBulkUpsertItem<E, Pairs, InputId, G>[],
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /**
    * Insert multiple edges without returning results.
@@ -1122,17 +2499,14 @@ export type EdgeCollection<
    * with `returnResults: false`, the intent is unambiguous: no results
    * are returned and the operation is wrapped in a transaction.
    *
-   * `validFrom` defaults to the operation's creation timestamp when omitted.
+   * `validFrom` defaults to the operation's creation timestamp when omitted —
+   * unless a stated `validTo` at or before that instant would leave the row
+   * readable at no coordinate, in which case the row is stored with NO lower
+   * bound ("ended at T, start unknown") and `meta.validFrom` reads back as
+   * `undefined`. A future `validTo` is unaffected.
    */
   bulkInsert: (
-    items: readonly Readonly<{
-      from: NodeRef<From>;
-      to: NodeRef<To>;
-      props?: z.input<E["schema"]>;
-      id?: string;
-      validFrom?: string;
-      validTo?: string;
-    }>[],
+    items: readonly EdgeBulkInsertItem<Pairs, E["schema"], G>[],
   ) => Promise<void>;
 
   /**
@@ -1140,8 +2514,41 @@ export type EdgeCollection<
    *
    * Atomic when the backend supports transactions. Silently ignores IDs
    * that don't exist.
+   *
+   * The batch runs as one transaction, checking each id's kind against the
+   * authoritative row as it goes. An id owned by another edge kind is
+   * refused with `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`;
+   * because the whole batch is one transaction, that refusal rolls back
+   * every delete already applied for an earlier id in the same batch.
    */
-  bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
+  bulkDelete: (ids: readonly InputId[]) => Promise<void>;
+
+  /**
+   * Permanently delete multiple edges by ID.
+   *
+   * Leaves exactly the state that calling `hardDelete()` once per id inside
+   * one transaction leaves: live and soft-deleted edges are removed, absent
+   * ids and repeated ids are ignored, cardinality claims are released, and a
+   * history store captures each removed edge's pre-image without recording a
+   * delete row. An id owned by another edge kind refuses the whole batch with
+   * `ValidationError` carrying `EDGE_IDENTITY_MISMATCH_CODE`, and a delete
+   * that would leave a live required composition part without its whole
+   * refuses with `CompositionExistenceError`; every id is resolved and judged
+   * before the first row is removed, so either refusal deletes nothing.
+   *
+   * Its delete issues one kind-asserting statement per bind-budget chunk when
+   * the backend implements `hardDeleteEdgesBatch`, and one per edge
+   * otherwise. On its own the call is one write transaction; inside
+   * `store.transaction()` its writes run behind a savepoint, so a caught
+   * failure among them keeps none of them. On a raw store over a driver
+   * without interactive transactions the chunks are separate statements, and
+   * a later chunk's failure leaves the earlier ones deleted. Like every batch
+   * method it fires no operation hooks.
+   *
+   * **Warning:** This operation is irreversible. Consider `bulkDelete()` for
+   * most use cases.
+   */
+  bulkHardDelete: (ids: readonly InputId[]) => Promise<void>;
 
   /**
    * Find an edge by endpoints and optional property fields.
@@ -1160,11 +2567,8 @@ export type EdgeCollection<
    *   `temporalMode` / `asOf` to read the edge as of another coordinate.
    */
   findByEndpoints: (
-    from: NodeRef<From>,
-    to: NodeRef<To>,
-    options?: EdgeFindByEndpointsOptions<E>,
-    temporal?: QueryOptions,
-  ) => Promise<Edge<E, From, To> | undefined>;
+    ...args: EdgeFindByEndpointsArguments<E, Pairs, G>
+  ) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
 
   /**
    * Get an existing edge by endpoints and optional property fields, or create a new one.
@@ -1173,17 +2577,35 @@ export type EdgeCollection<
    * property fields, only edges whose properties match on those fields are considered.
    * Soft-deleted matches are resurrected when cardinality allows.
    *
+   * `validFrom` applies on the create and RESURRECT branches. A create defaults
+   * it to the operation's creation timestamp when omitted — unless a stated
+   * `validTo` at or before that instant would leave the row readable at no
+   * coordinate, in which case no lower bound is stored ("ended at T, start
+   * unknown"). A resurrection stamps nothing: an edge RETAINS its stored lower
+   * bound unless the call names a new one, so a `validTo` before the retained
+   * bound is REFUSED rather than stamped over. On the `ifExists: "update"`
+   * branch a live edge's lower bound is history and cannot be stored, so a
+   * `validFrom` naming a different instant is REFUSED (`ValidationError`
+   * carrying `IMMUTABLE_VALIDITY_LOWER_BOUND_CODE`); restating the bound the
+   * edge holds is accepted. A returned existing edge (`ifExists: "return"`)
+   * writes nothing and judges nothing — the window options describe the row to
+   * create if none is found. `validTo` applies on create, update, and
+   * resurrection, but not when an existing edge is returned without a write.
+   *
    * @param from - Source node
    * @param to - Target node
    * @param props - Full properties for create, or merge source for update
    * @param options - Match criteria and conflict resolution
    */
   getOrCreateByEndpoints: (
-    from: NodeRef<From>,
-    to: NodeRef<To>,
-    props: z.input<E["schema"]>,
-    options?: EdgeGetOrCreateByEndpointsOptions<E>,
-  ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>>;
+    ...args: EdgeGetOrCreateByEndpointsArguments<E, Pairs, G>
+  ) => Promise<
+    EdgeGetOrCreateByEndpointsResult<
+      E,
+      SubsumedNodeType<G, From>,
+      SubsumedNodeType<G, To>
+    >
+  >;
 
   /**
    * Batch version of getOrCreateByEndpoints.
@@ -1192,13 +2614,18 @@ export type EdgeCollection<
    * Atomic when the backend supports transactions.
    */
   bulkGetOrCreateByEndpoints: (
-    items: readonly Readonly<{
-      from: NodeRef<From>;
-      to: NodeRef<To>;
-      props: z.input<E["schema"]>;
-    }>[],
-    options?: EdgeGetOrCreateByEndpointsOptions<E>,
-  ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
+    items: readonly EdgeBulkGetOrCreateItem<E, Pairs, G>[],
+    options?: Pick<
+      EdgeGetOrCreateByEndpointsOptions<E>,
+      "matchOn" | "ifExists"
+    >,
+  ) => Promise<
+    EdgeGetOrCreateByEndpointsResult<
+      E,
+      SubsumedNodeType<G, From>,
+      SubsumedNodeType<G, To>
+    >[]
+  >;
 }>;
 
 // ============================================================
@@ -1225,20 +2652,70 @@ export type ConstraintNames<R extends NodeRegistration> =
 type EdgeFromTypes<R extends EdgeRegistration> =
   R["from"] extends readonly (infer N)[] ? N : never;
 
+type ExtractTargets<T> =
+  T extends readonly (infer N extends NodeType)[] ? N
+  : T extends Record<string, readonly (infer N extends NodeType)[]> ? N
+  : never;
+
 /**
  * Extract the union of 'to' node types from an EdgeRegistration.
  */
-type EdgeToTypes<R extends EdgeRegistration> =
-  R["to"] extends readonly (infer N)[] ? N : never;
+type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
+
+type ExtractAllowedPairs<From, To> =
+  To extends readonly (infer ToNode extends NodeType)[] ?
+    {
+      from: From extends readonly (infer FromNode extends NodeType)[] ? FromNode
+      : NodeType;
+      to: ToNode;
+    }
+  : To extends Record<string, readonly NodeType[]> ?
+    {
+      [K in keyof To & string]: {
+        from: Extract<
+          From extends readonly (infer FromNode extends NodeType)[] ? FromNode
+          : NodeType,
+          { kind: K }
+        >;
+        to: To[K] extends readonly (infer ToNode extends NodeType)[] ? ToNode
+        : NodeType;
+      };
+    }[keyof To & string]
+  : { from: NodeType; to: NodeType };
+
+/**
+ * Extract the allowed endpoint pairs from an EdgeRegistration.
+ */
+type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<
+  R["from"],
+  R["to"]
+>;
+
+type EdgeFromNodeTypes<R extends EdgeRegistration> =
+  EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType;
+
+type EdgeToNodeTypes<R extends EdgeRegistration> =
+  EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType;
 
 /**
  * Create a type-safe EdgeCollection from an EdgeRegistration.
  * Extracts the edge type and from/to node types automatically.
+ *
+ * In graph `G` (what `store.edges.<kind>` passes), the endpoints follow
+ * `G`'s subsumption: edges read back as {@link EdgeInGraph} and endpoint
+ * arguments take an {@link EdgeEndpointRef}. Without `G`, the declared kinds
+ * are taken exactly.
  */
-export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
+export type TypedEdgeCollection<
+  R extends EdgeRegistration,
+  G extends GraphDef = GraphWithoutOntology,
+> = EdgeCollection<
   R["type"],
-  EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType,
-  EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
+  EdgeFromNodeTypes<R>,
+  EdgeToNodeTypes<R>,
+  EdgeAllowedPairs<R>,
+  EdgeId<R["type"]>,
+  G
 >;
 
 // ============================================================
@@ -1253,13 +2730,14 @@ export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
 export type GraphNodeCollections<G extends GraphDef> = {
   [K in keyof G["nodes"] & string]-?: NodeCollection<
     G["nodes"][K]["type"],
-    ConstraintNames<G["nodes"][K]>
+    ConstraintNames<G["nodes"][K]>,
+    CompositionWholeReference<G, K>
   >;
 };
 
 /** Mapped type of all edge collections for a graph. */
 export type GraphEdgeCollections<G extends GraphDef> = {
-  [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K]>;
+  [K in keyof G["edges"] & string]-?: TypedEdgeCollection<G["edges"][K], G>;
 };
 
 // ============================================================
@@ -1273,9 +2751,9 @@ export type NodeTemporalReads<
 > = Pick<NodeCollection<N, CN>, (typeof NODE_TEMPORAL_READ_NAMES)[number]>;
 
 /**
- * Current-state-only node reads (constraint / index lookups). No temporal
- * axis, so a {@link StoreView} delegates them on a `current` pin and refuses
- * them on a temporal pin.
+ * Current-state-only node reads (constraint / index lookups, delete plans).
+ * No temporal axis, so a {@link StoreView} delegates them on a `current` pin
+ * and refuses them on a temporal pin.
  */
 export type NodeCurrentReads<
   N extends NodeType,
@@ -1283,18 +2761,22 @@ export type NodeCurrentReads<
 > = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 /** Node writes — never available on a read-only {@link StoreView}. */
-export type NodeWrites<N extends NodeType, CN extends string = string> = Pick<
-  NodeCollection<N, CN>,
-  (typeof NODE_WRITE_NAMES)[number]
->;
+export type NodeWrites<
+  N extends NodeType,
+  CN extends string = string,
+  Whole extends CompositionWholeInput = CompositionWholeInput,
+> = Pick<NodeCollection<N, CN, Whole>, (typeof NODE_WRITE_NAMES)[number]>;
 
 /** Temporal-aware edge reads — a {@link StoreView} pins these. */
 export type EdgeTemporalReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
 > = Pick<
-  EdgeCollection<E, From, To>,
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
   (typeof EDGE_TEMPORAL_READ_NAMES)[number]
 >;
 
@@ -1306,14 +2788,26 @@ export type EdgeBatchReads<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
+> = Pick<
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
+  (typeof EDGE_BATCH_READ_NAMES)[number]
+>;
 
 /** Edge writes — never available on a read-only {@link StoreView}. */
 export type EdgeWrites<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-> = Pick<EdgeCollection<E, From, To>, (typeof EDGE_WRITE_NAMES)[number]>;
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
+  G extends GraphDef = GraphWithoutOntology,
+> = Pick<
+  EdgeCollection<E, From, To, Pairs, InputId, G>,
+  (typeof EDGE_WRITE_NAMES)[number]
+>;
 
 /**
  * The read-only node surface a {@link StoreView} exposes for one node kind.
@@ -1359,55 +2853,88 @@ export type StoreViewEdgeCollection<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
+  Pairs extends EdgeEndpointPairTypes = {
+    from: From;
+    to: To;
+  },
+  G extends GraphDef = GraphWithoutOntology,
 > = Readonly<{
   /** Get an edge by ID at the view's pinned coordinate. */
-  getById: (id: EdgeId<E>) => Promise<Edge<E, From, To> | undefined>;
+  getById: (id: EdgeId<E>) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
 
   /** Get multiple edges by ID, preserving input order (undefined for missing). */
   getByIds: (
     ids: readonly EdgeId<E>[],
-  ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
+  ) => Promise<readonly (EdgeInGraph<G, E, From, To> | undefined)[]>;
 
   /** Find edges matching endpoint and pagination criteria. */
   find: (
     filter?: Readonly<{
-      from?: NodeRef<From>;
-      to?: NodeRef<To>;
+      from?: EdgeEndpointRef<G, From>;
+      to?: EdgeEndpointRef<G, To>;
       limit?: number;
       offset?: number;
     }>,
-  ) => Promise<Edge<E, From, To>[]>;
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /** Count edges matching criteria at the view's pinned coordinate. */
   count: (
-    filter?: Readonly<{ from?: NodeRef<From>; to?: NodeRef<To> }>,
+    filter?: Readonly<{
+      from?: EdgeEndpointRef<G, From>;
+      to?: EdgeEndpointRef<G, To>;
+    }>,
   ) => Promise<number>;
 
   /** Find edges from a specific node at the view's pinned coordinate. */
-  findFrom: (from: NodeRef<From>) => Promise<Edge<E, From, To>[]>;
+  findFrom: (
+    from: EdgeEndpointRef<G, From>,
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
 
   /** Find edges to a specific node at the view's pinned coordinate. */
-  findTo: (to: NodeRef<To>) => Promise<Edge<E, From, To>[]>;
+  findTo: (
+    to: EdgeEndpointRef<G, To>,
+  ) => Promise<EdgeInGraph<G, E, From, To>[]>;
+
+  /** Find the edges from a set of source nodes at the view's pinned coordinate. */
+  bulkFindFrom: (
+    froms: readonly EdgeEndpointRef<G, From>[],
+    options?: EdgeBulkFindOptions,
+  ) => Promise<readonly EdgeInGraph<G, E, From, To>[][]>;
+
+  /** Find the edges into a set of target nodes at the view's pinned coordinate. */
+  bulkFindTo: (
+    tos: readonly EdgeEndpointRef<G, To>[],
+    options?: EdgeBulkFindOptions,
+  ) => Promise<readonly EdgeInGraph<G, E, From, To>[][]>;
 
   /** Find the edge between two endpoints at the view's pinned coordinate. */
   findByEndpoints: (
-    from: NodeRef<From>,
-    to: NodeRef<To>,
-    options?: EdgeFindByEndpointsOptions<E>,
-  ) => Promise<Edge<E, From, To> | undefined>;
+    ...args: Pairs extends EdgeEndpointPairTypes ?
+      [
+        from: EdgeEndpointRef<G, Pairs["from"]>,
+        to: EdgeEndpointRef<G, Pairs["to"]>,
+        options?: EdgeFindByEndpointsOptions<E>,
+      ]
+    : never
+  ) => Promise<EdgeInGraph<G, E, From, To> | undefined>;
 }>;
 
 /**
  * Read-only view edge collection derived from an `EdgeRegistration`,
  * extracting the edge type and from/to node types — the read-only
- * counterpart of {@link TypedEdgeCollection}.
+ * counterpart of {@link TypedEdgeCollection}, typing endpoints in graph `G`
+ * the same way.
  */
-export type TypedStoreViewEdgeCollection<R extends EdgeRegistration> =
-  StoreViewEdgeCollection<
-    R["type"],
-    EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType,
-    EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
-  >;
+export type TypedStoreViewEdgeCollection<
+  R extends EdgeRegistration,
+  G extends GraphDef = GraphWithoutOntology,
+> = StoreViewEdgeCollection<
+  R["type"],
+  EdgeFromNodeTypes<R>,
+  EdgeToNodeTypes<R>,
+  EdgeAllowedPairs<R>,
+  G
+>;
 
 /** Mapped type of all read-only view node collections for a graph. */
 export type StoreViewNodeCollections<G extends GraphDef> = {
@@ -1419,9 +2946,36 @@ export type StoreViewNodeCollections<G extends GraphDef> = {
 /** Mapped type of all read-only view edge collections for a graph. */
 export type StoreViewEdgeCollections<G extends GraphDef> = {
   [K in keyof G["edges"] & string]-?: TypedStoreViewEdgeCollection<
-    G["edges"][K]
+    G["edges"][K],
+    G
   >;
 };
+
+/** Options for bounded incident-edge paging at a recorded coordinate. */
+export type RecordedAdjacencyOptions<K extends string = string> = Readonly<{
+  /** Historical edge rows of selected kinds examined per page (1–1,000, default 100). */
+  candidateLimit?: number;
+  after?: string;
+  direction?: "out" | "in" | "both";
+  edgeKinds?: readonly K[];
+}>;
+
+/** An incident edge and its opposite, kind-qualified endpoint. */
+export type RecordedAdjacencyEntry<
+  G extends GraphDef,
+  K extends EdgeKinds<G> = EdgeKinds<G>,
+> = Readonly<{
+  edge: GraphEdgeForKinds<G, K>;
+  neighbor: GraphNodeReference<G>;
+}>;
+
+/** A candidate-bounded page; empty data can still have a continuation. */
+export type RecordedAdjacencyPage<T> = Readonly<{
+  data: readonly T[];
+  nextCursor: string | undefined;
+  /** More historical candidates remain; they may all be invisible. */
+  hasNextPage: boolean;
+}>;
 
 /** Options for one bounded, forward-only recorded-time collection scan. */
 export type RecordedScanOptions = Readonly<{
@@ -1456,24 +3010,33 @@ export type RecordedStoreViewEdgeCollection<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
+  Pairs extends EdgeEndpointPairTypes = {
+    from: From;
+    to: To;
+  },
+  G extends GraphDef = GraphWithoutOntology,
 > = Pick<
-  StoreViewEdgeCollection<E, From, To>,
+  StoreViewEdgeCollection<E, From, To, Pairs, G>,
   (typeof RECORDED_POINT_READ_NAMES)[number]
 > &
   Readonly<{
     /** Scan one bounded page at the view's pinned coordinate. */
     scan: (
       options?: RecordedScanOptions,
-    ) => Promise<RecordedScanPage<Edge<E, From, To>>>;
+    ) => Promise<RecordedScanPage<EdgeInGraph<G, E, From, To>>>;
   }>;
 
 /** Recorded-time edge collection derived from an `EdgeRegistration`. */
-export type TypedRecordedStoreViewEdgeCollection<R extends EdgeRegistration> =
-  RecordedStoreViewEdgeCollection<
-    R["type"],
-    EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType,
-    EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType
-  >;
+export type TypedRecordedStoreViewEdgeCollection<
+  R extends EdgeRegistration,
+  G extends GraphDef = GraphWithoutOntology,
+> = RecordedStoreViewEdgeCollection<
+  R["type"],
+  EdgeFromNodeTypes<R>,
+  EdgeToNodeTypes<R>,
+  EdgeAllowedPairs<R>,
+  G
+>;
 
 /** Mapped type of all recorded-time node reconstructing-read collections. */
 export type RecordedStoreViewNodeCollections<G extends GraphDef> = {
@@ -1485,7 +3048,8 @@ export type RecordedStoreViewNodeCollections<G extends GraphDef> = {
 /** Mapped type of all recorded-time edge reconstructing-read collections. */
 export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
   [K in keyof G["edges"] & string]-?: TypedRecordedStoreViewEdgeCollection<
-    G["edges"][K]
+    G["edges"][K],
+    G
   >;
 };
 
@@ -1522,14 +3086,69 @@ export const TRANSACTION_RUNTIME: unique symbol = typeGraphGlobalSymbol(
   "transaction-runtime-v1",
 );
 
-type TransactionRuntime = Readonly<{
+export type TransactionRuntime = Readonly<{
   backend: TransactionBackend;
-  runNodeOperationHooks: <T>(
-    operation: "create" | "update" | "delete",
-    kind: string,
-    id: string,
-    fn: () => Promise<T>,
-  ) => Promise<T>;
+  /**
+   * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
+   * this SAME transaction's node-operation context — the buffered hook
+   * runner and attempt number `#buildTransactionContext` already built for
+   * `nodes`/`edges` on this context, not a freshly-minted immediate-hook
+   * context. `StoreRuntime.deleteNodeWithPolicy` builds exactly such a fresh
+   * context and is correct only OUTSIDE a `store.transaction` callback; a
+   * caller invoking that Store-scoped variant from inside one (as
+   * `graph-merge`'s merge apply once did) would report `onOperationEnd` for a
+   * delete the instant it runs, even when the transaction it is part of
+   * later rolls back. A caller already inside a `store.transaction` callback
+   * — today, merge apply — reaches this transaction-scoped variant instead,
+   * via {@link file://./runtime-port.ts transactionDeleteNodeWithPolicy}.
+   */
+  deleteNodeWithPolicy: (
+    work: Readonly<{ kind: string; id: string }>,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
+  /**
+   * Revives one soft-deleted node with its stored props through this SAME
+   * transaction's node-operation context — the inverse of a soft delete via
+   * {@link file://./runtime-port.ts transactionReviveNode}.
+   */
+  reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
+  /**
+   * Takes the fences a managed write on this transaction takes, in the write
+   * path's own order and through its own frame, without writing: the
+   * schema-version fence, then the per-graph write lock. For a caller that
+   * must read under those fences BEFORE its first write, or that reads and
+   * never writes — today, provenance's retraction transitions and its
+   * commit-time assert. Taking the graph lock alone and writing afterwards
+   * would acquire the two in the reverse order.
+   *
+   * A transaction opened with `accessMode: "read_only"` cannot hold the schema
+   * fence, so it is refused before any statement, naming `refusal.operation`
+   * and offering `refusal.suggestion`.
+   */
+  acquireWriteFences: (
+    refusal: Readonly<{ operation: string; suggestion: string }>,
+  ) => Promise<void>;
+  /**
+   * Takes the fences a multi-statement read on this transaction needs so no
+   * graph write commits between its statements, without writing. In a
+   * transaction that can write, these are {@link acquireWriteFences}'s
+   * fences, in their order, so a write that follows the read cannot take the
+   * schema-version fence after the graph lock. In a transaction opened with
+   * `accessMode: "read_only"`, which never writes and cannot hold the schema
+   * fence, it is the per-graph write lock alone. The transaction's own
+   * read-only flag decides, so no caller re-derives it — today's caller is
+   * provenance's `holding(tx)`.
+   */
+  acquireReadFences: () => Promise<void>;
+  /**
+   * The write gate every write on this transaction's collections and
+   * identity facade passes first (the receipt recorder's `assertWritable`),
+   * for a caller that writes through the transaction's backend directly —
+   * today, `applyMergePlanInTransaction`. Refuses, naming `operation`,
+   * a transaction opened with `accessMode: "read_only"` and one whose
+   * callback has returned; issues no statement either way.
+   */
+  assertWritable: (operation: string) => void;
 }>;
 
 /**
@@ -1554,6 +3173,10 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
   [TRANSACTION_RUNTIME]: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
+  /** Runtime endpoint validation with the selected edge's property schema retained. */
+  getEdgeCollection: EdgeCollectionLookup<G>;
+  /** Like getEdgeCollection, throwing KindNotFoundError when absent. */
+  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
   /** Read-only backend projection bound to the same graph transaction. */
   backend: TransactionReadBackend;
   /**
@@ -1561,15 +3184,176 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
    * `Store.getNodeCollection`. Returns `undefined` when `kind` is not
    * registered in this graph.
    */
-  getNodeCollection: (kind: string) => DynamicNodeCollection | undefined;
-}>;
+  getNodeCollection: <const K extends string>(
+    kind: K,
+  ) => DynamicNodeCollection<K> | undefined;
+  /** Reads the node a `{ kind, id }` reference names, mirroring `Store.getNodeByRef`. */
+  getNodeByRef: NodeReferenceLookup<G>;
+}> &
+  (G["identity"] extends GraphIdentityConfig ?
+    Readonly<{ identity: IdentityFacade<G> }>
+  : Readonly<Record<never, never>>);
 
 /**
- * A portable transaction context containing only TypeGraph-owned graph
- * operations. Managed Stores use this surface so adapter-native handles never
- * enter their public contract.
+ * A portable transaction context containing TypeGraph-owned collections and
+ * transaction-bound graph reads. Managed Stores use this surface so
+ * adapter-native handles never enter their public contract.
  */
-export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
+export type TransactionContext<G extends GraphDef> = TransactionCollections<G> &
+  Readonly<{
+    query: () => InitialQueryBuilder<G, "open">;
+    /** Describes current population through this transaction's pinned session. */
+    describe: () => Promise<StoreDescription>;
+    /** Validates current records through this transaction's pinned session. */
+    validateStore: (
+      options: ValidateStoreOptions,
+    ) => Promise<StoreValidationPage>;
+    batchOnce: <const Queries extends OneStatementBatchReads>(
+      build: (read: BatchReadBuilder<G>) => Queries,
+      options?: BatchOnceOptions,
+    ) => Promise<OneStatementBatchResults<Queries>>;
+    neighbors: <const K extends EdgeKinds<G>>(
+      source: GraphNodeReferenceInput<G>,
+      options: NeighborReadOptions<G, K>,
+    ) => Promise<readonly NeighborResult<G, K>[]>;
+    countNeighbors: <const K extends EdgeKinds<G>>(
+      source: GraphNodeReferenceInput<G>,
+      options: Omit<NeighborReadOptions<G, K>, "limit" | "orderBy">,
+    ) => Promise<number>;
+    subgraph: <
+      const EK extends EdgeKinds<G>,
+      const NK extends NodeKinds<G> = NodeKinds<G>,
+      const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+      const C extends SubgraphCompositionSelection | undefined = undefined,
+    >(
+      root: GraphNodeReferenceInput<G>,
+      options: SubgraphOptions<G, EK, NK, P, C>,
+    ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
+    /**
+     * Refuses this transaction when anything the caller read changed after
+     * `anchor`: optimistic concurrency with a declared read set, validated
+     * inside the transaction that writes the result. Writes nothing.
+     *
+     * `anchor` is the {@link EngineRevision} `store.lineageRevisionNow()`
+     * minted before the reads; `scopes` declares what was read (see
+     * {@link ReadSetScope}). The method takes the store's canonical write
+     * fence (schema-version fence, then the graph write lock, with evidence
+     * that this session's reads observe every earlier writer), then asks the
+     * store's lineage source, on this transaction's session, which declared
+     * scopes changed since `anchor`. Any recorded change counts, including
+     * one a later write reversed. Holding the graph write lock until commit,
+     * no other store writer can commit between the check and this
+     * transaction's own writes.
+     *
+     * ## Caller contract
+     *
+     * - Capture the anchor BEFORE reading. An anchor captured after a read
+     *   misses a change that landed in between; one captured before can only
+     *   cause a false refusal.
+     * - Call this before the transaction's own writes. On a revision-tracked
+     *   store without history, earlier writes made by this same transaction
+     *   can read as changes and refuse it falsely.
+     * - On {@link ReadSetChangedError}, re-read under a fresh anchor and
+     *   retry. On {@link ReadSetUnverifiableError}, retrying with the same
+     *   anchor cannot succeed.
+     *
+     * ## Limits
+     *
+     * - Writes that bypass the store (a raw backend write, an engine-side
+     *   mutation, or a second Store over the same graph opened without
+     *   history or revisionTracking) take no fence, allocate no revision and
+     *   leave no evidence, so they are not seen. Every writer of the graph
+     *   must be a history or revision-tracked Store.
+     * - Identity assertions are not covered: an assertion that changes class
+     *   membership without changing a node or edge row is not a change here,
+     *   and an identity write in the span does not refuse the fence.
+     * - Validity expiry is not covered: a row whose validity window closes
+     *   between the read and the commit changes what a current read returns
+     *   without any write.
+     * - Edge neighbourhoods off the history path: a revision-tracked store
+     *   records a changed edge's kind and id, not its endpoints, and an edge
+     *   id can be hard-deleted and reused at other endpoints. An `edgesAt`
+     *   scope there counts every changed edge of its kind, wherever it is.
+     *   Sound, but it refuses when an edge of that kind changed at another
+     *   node. History stores answer neighbourhoods exactly.
+     * - A revision-tracked store's journal triggers are verified when its
+     *   `lineageRevisionNow()` mints the anchor, not again inside this
+     *   transaction; an anchor minted by another Store over the same graph
+     *   is not verified against this one's journal. Dropping, disabling or
+     *   partially installing the triggers is a change made outside the
+     *   store, like a write that bypasses it.
+     * - Cost under the graph write lock: on a history store, row and
+     *   neighbourhood scopes are index seeks, while a kind scope reads that
+     *   kind's recorded versions and a whole-graph scope the graph's, so
+     *   their cost grows with that history. Off the history path, the fence
+     *   reads every change since the anchor, so its cost grows with the span,
+     *   not with the read set.
+     *
+     * @example
+     * ```typescript
+     * const anchor = await store.lineageRevisionNow();
+     * if (anchor === undefined) throw new Error("this store has no lineage");
+     * const source = await store.nodes.Source.getById(sourceId);
+     * if (source === undefined) throw new Error("source not found");
+     * // ... long computation ...
+     * await store.transaction(async (tx) => {
+     *   await tx.assertUnchangedSince(anchor, [
+     *     { node: source },
+     *     { edgesAt: source, direction: "out", kind: "premiseOf" },
+     *   ]);
+     *   await tx.nodes.Summary.create(summarize(source));
+     * });
+     * ```
+     *
+     * @throws KindNotFoundError when a scope names a kind the graph does not
+     *   register.
+     * @throws ConfigurationError (`details.code` `READ_SET_SCOPE_INVALID`)
+     *   when a scope is not an object, names no target or several, carries a key its target
+     *   does not define, or has a malformed reference or direction.
+     * @throws UnsupportedBackendCapabilityError when the transaction is
+     *   `accessMode: "read_only"`, or the store has no lineage source
+     *   (`lineage`), or its writers do not take the graph write fence
+     *   (`graphWriteFence`: neither TypeGraph-owned history nor
+     *   `revisionTracking`), or the session cannot prove its reads observe
+     *   every earlier writer (`observedReadCommittedIsolation`).
+     * @throws ReadSetUnverifiableError when the lineage source cannot bound
+     *   the changes since `anchor` (an unknown or pre-`clear()` anchor, or a
+     *   revision in the span that left no evidence).
+     * @throws ReadSetChangedError listing every changed scope with the node
+     *   and edge keys that changed in it: at most the first 100 of each in
+     *   `(kind, id)` order, with `nodesTruncated` / `edgesTruncated` set when
+     *   more changed.
+     */
+    assertUnchangedSince: (
+      anchor: EngineRevision,
+      scopes: readonly ReadSetScope<G>[],
+    ) => Promise<void>;
+  }>;
+
+/**
+ * Requests a recorded revision even when a history transaction makes no entity
+ * changes. Repeated requests are idempotent. Receipt-enabled transactions
+ * expose the allocated instant on their terminal {@link TransactionReceipt},
+ * after capture flushes.
+ */
+export type RecordedRevisionRequest = Readonly<{
+  requestRecordedRevision: () => void;
+}>;
+
+/** The narrow, one-statement write envelope available only to recorded transactions. */
+export type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
+  writeNodeUpsertBatch: <
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    entries: Entries,
+  ) => Promise<HeterogeneousNodeUpsertResult<G, Entries>>;
+}>;
+
+/** A portable transaction context bound to a history-enabled Store. */
+export type HistoryTransactionContext<G extends GraphDef> =
+  TransactionContext<G> &
+    RecordedRevisionRequest &
+    RecordedHeterogeneousNodeWriteBatch<G>;
 
 /**
  * A transaction context exposed by an {@link AdapterStore}. In addition to the
@@ -1581,7 +3365,7 @@ export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
 export type AdapterTransactionContext<
   G extends GraphDef,
   TNativeTransaction,
-> = TransactionCollections<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
+> = TransactionContext<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
 
 /**
  * Scoped write measurement, available only on the receipt-enabled transaction
@@ -1623,6 +3407,13 @@ export type MeasurableTransactionContext<G extends GraphDef> =
       measure: ScopedMeasure<MeasurableTransactionContext<G>>;
     }>;
 
+/** Receipt-enabled transaction context for a history-enabled Store. */
+export type MeasurableHistoryTransactionContext<G extends GraphDef> =
+  HistoryTransactionContext<G> &
+    Readonly<{
+      measure: ScopedMeasure<MeasurableHistoryTransactionContext<G>>;
+    }>;
+
 /** Receipt-enabled transaction context for an {@link AdapterStore}. */
 export type MeasurableAdapterTransactionContext<
   G extends GraphDef,
@@ -1637,6 +3428,23 @@ export type MeasurableAdapterTransactionContext<
 // ============================================================
 // Dynamic Collection Types (widened for runtime dispatch)
 // ============================================================
+
+/**
+ * A node returned by a runtime string-keyed collection.
+ *
+ * Its nominal node-type brand proves the value passed through the dynamic
+ * collection API while its properties remain runtime-schema-shaped.
+ */
+export type DynamicNode<K extends string = string> = Node<DynamicNodeType<K>>;
+
+declare const DYNAMIC_NODE_REFERENCE_BRAND: unique symbol;
+
+/** A nominal lightweight reference returned by runtime-aware identity reads. */
+export type DynamicNodeReference<K extends string = string> = Readonly<{
+  kind: DynamicNodeKind<K>;
+  id: NodeId<DynamicNodeType<K>>;
+  [DYNAMIC_NODE_REFERENCE_BRAND]: true;
+}>;
 
 /**
  * Replace branded `NodeId` / `EdgeId` with plain `string` in each
@@ -1674,16 +3482,16 @@ type UnbrandRecord<T extends Record<string, unknown>> = {
  * A node collection with widened generics for runtime string-keyed access.
  *
  * This is the return type of `store.getNodeCollection(kind)`. It exposes
- * the full `NodeCollection` API but with `NodeType` and `string` constraint
- * names instead of the specific generic parameters, since the concrete type
- * is not known at compile time.
+ * the full `NodeCollection` API but with a nominal `DynamicNodeType` and
+ * `string` constraint names instead of the specific generic parameters, since
+ * the concrete type is not known at compile time.
  *
  * ID parameters accept plain `string` instead of branded `NodeId<N>`, since
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicNodeCollection = WidenBrandedIds<
-  NodeCollection<NodeType, string>
+export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
+  NodeCollection<DynamicNodeType<K>, string, CompositionWholeInput>
 >;
 
 /**
@@ -1697,9 +3505,81 @@ export type DynamicNodeCollection = WidenBrandedIds<
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicEdgeCollection = WidenBrandedIds<
-  EdgeCollection<AnyEdgeType, NodeType, NodeType>
+export type DynamicEdgeCollection<E extends AnyEdgeType = AnyEdgeType> = Omit<
+  EdgeCollection<
+    E,
+    NodeType,
+    NodeType,
+    { from: NodeType; to: NodeType },
+    string
+  >,
+  "create"
+> &
+  Readonly<{
+    /** Create with runtime-validated endpoints and schema-typed properties. */
+    create: (
+      from: NodeRef,
+      to: NodeRef,
+      ...args: EdgeCreateArguments<E>
+    ) => Promise<Edge<E>>;
+  }>;
+
+/** Runtime endpoint reads at a view's pinned coordinate; no writes or temporal overrides. */
+export type DynamicStoreViewEdgeCollection<
+  E extends AnyEdgeType = AnyEdgeType,
+> = Omit<StoreViewEdgeCollection<E>, "getById" | "getByIds"> &
+  Readonly<{
+    getById: (id: string) => Promise<Edge<E> | undefined>;
+    getByIds: (
+      ids: readonly string[],
+    ) => Promise<readonly (Edge<E> | undefined)[]>;
+  }>;
+
+/** A node collection narrowed by Store-issued runtime-kind evidence. */
+export type RuntimeNodeCollection<T extends RuntimeNodeKind> = WidenBrandedIds<
+  NodeCollection<RuntimeNodeTypeFor<T>, string, CompositionWholeInput>
 >;
+
+/** An edge collection narrowed by Store-issued runtime-kind evidence. */
+export type RuntimeEdgeCollection<T extends RuntimeEdgeKind> =
+  DynamicEdgeCollection<RuntimeEdgeTypeFor<T>>;
+
+/** One kind-grouped source input for a token-validated heterogeneous read. */
+export type RuntimeBulkEdgeSourceGroup<T extends RuntimeNodeKind> =
+  T extends RuntimeNodeKind ? Readonly<{ kind: T; ids: readonly string[] }>
+  : never;
+
+/** A source reference narrowed to the node token that licensed it. */
+export type RuntimeNodeReferenceFor<T extends RuntimeNodeKind> =
+  T extends RuntimeNodeKind ?
+    Readonly<{
+      kind: T["kind"];
+      id: NodeId<RuntimeNodeTypeFor<T>>;
+    }>
+  : never;
+
+/** An edge value narrowed to the edge token that licensed its read. */
+export type RuntimeEdgeFor<T extends RuntimeEdgeKind> =
+  T extends RuntimeEdgeKind ? Edge<RuntimeEdgeTypeFor<T>, NodeType, NodeType>
+  : never;
+
+/** Input for {@link Store.bulkFindRuntimeEdgesFrom}. */
+export type BulkFindRuntimeEdgesFromParams<
+  NT extends RuntimeNodeKind,
+  ET extends RuntimeEdgeKind,
+> = Readonly<{
+  sources: readonly RuntimeBulkEdgeSourceGroup<NT>[];
+  edgeKinds: readonly ET[];
+}>;
+
+/** One source bucket returned by {@link Store.bulkFindRuntimeEdgesFrom}. */
+export type BulkFindRuntimeEdgesFromResult<
+  NT extends RuntimeNodeKind,
+  ET extends RuntimeEdgeKind,
+> = Readonly<{
+  source: RuntimeNodeReferenceFor<NT>;
+  edges: readonly RuntimeEdgeFor<ET>[];
+}>;
 
 // ============================================================
 // Store Projection
@@ -1713,6 +3593,13 @@ export type DynamicEdgeCollection = WidenBrandedIds<
  * so constraint-based methods like `findByConstraint` become uncallable.
  * This is intentional: unique constraints are graph-registration-level
  * details that differ between graphs sharing the same node types.
+ *
+ * Composition whole kinds are NOT erased: they are the whole kinds `G`'s
+ * ontology declares for each projected kind (see
+ * {@link CompositionWholeKinds}), so `partOf` and `reparent` stay callable
+ * on a projection with the same compile-time check `Store<G>` applies. A
+ * store of another graph is assignable only when its collection accepts at
+ * least those whole kinds.
  *
  * @example
  * ```typescript
@@ -1741,6 +3628,12 @@ export type StoreProjection<
   N extends keyof G["nodes"] & string = never,
   E extends keyof G["edges"] & string = never,
 > = Readonly<{
-  nodes: { [K in N]-?: NodeCollection<G["nodes"][K]["type"], never> };
+  nodes: {
+    [K in N]-?: NodeCollection<
+      G["nodes"][K]["type"],
+      never,
+      CompositionWholeReference<G, K>
+    >;
+  };
   edges: Pick<GraphEdgeCollections<G>, E>;
 }>;

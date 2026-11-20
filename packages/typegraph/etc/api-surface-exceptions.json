@@ -1,0 +1,778 @@
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "QueryBuilder",
+    "member": "assertFragmentRequirements",
+    "kind": "required-member-added",
+    "reason": "`QueryBuilder` is a class with ECMAScript `#private` fields, so TypeScript compares it nominally: no value can satisfy the type unless TypeGraph constructed it, and no external consumer authors one. It gains `assertFragmentRequirements`, an `@internal` method a `createFragment()` fragment calls on the builder it is applied to, so a host that lacks a declared alias, or binds it at an incompatible kind, is refused at runtime instead of running the fragment body against the wrong kind. The checker reaches it contravariantly only because a builder appears in parameter position of fragment and `pipe()` callbacks.",
+    "issue": "#863"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreRuntime",
+    "member": "endpointSetRead",
+    "kind": "required-member-added",
+    "reason": "`StoreRuntime` is the `@internal`, symbol-keyed store runtime port documented as absent from the public `Store` contract; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `endpointSetRead`, the store's already-resolved endpoint-set read verdict, so the provenance capability's backward support closure reads edges at a set of endpoints without resolving a second verdict. The checker reaches it contravariantly only because `Store<G>` itself appears in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionContext",
+    "member": "assertUnchangedSince",
+    "kind": "required-member-added",
+    "reason": "`TransactionContext` is minted only by the Store (`transaction()`, `transactionWithReceipt()`, `withRecordedTransaction()` and adopted transactions); it appears in input position only where TypeGraph accepts back a context it built itself (`applyMergePlanInTransaction(target, tx, ...)`, a merge `afterApply` callback), so no external code authors one, and every context the Store builds carries the new member. `assertUnchangedSince` is the read-set fence declared in .changeset/read-set-fence.md.",
+    "issue": "#885"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireReadFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireReadFences` so the provenance capability's `holding(tx)` takes the schema-version fence and the graph write lock through the transaction's own managed write frame in a read-write transaction, and the graph write lock alone in a read-only one, decided by the transaction's own read-only flag. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "assertWritable",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `assertWritable`, the transaction's write gate (the receipt recorder's, which refuses a write in a transaction opened with `accessMode: \"read_only\"`), so `applyMergePlanInTransaction`, which writes through the transaction backend rather than its collections, is refused before any statement too. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#913"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionRuntime",
+    "member": "acquireWriteFences",
+    "kind": "required-member-added",
+    "reason": "`TransactionRuntime` is the `@internal`, symbol-keyed transaction runtime port; it is not exported from any entrypoint, so no external consumer can name or author one. It gains `acquireWriteFences` so the provenance capability's retraction verbs and `assertHolds` take the schema-version fence and the graph write lock through the transaction's own managed write frame. The checker reaches it contravariantly only because the transaction object itself appears in parameter position.",
+    "issue": "#886"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`EdgeCollection` is minted only by the Store (`store.edges.<kind>` and `tx.edges.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the kind-scoped batch hard delete declared in .changeset/edge-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkHardDelete",
+    "kind": "required-member-added",
+    "reason": "`NodeCollection` is minted only by the Store (`store.nodes.<kind>` and `tx.nodes.<kind>`); no external code authors one, and every collection the Store builds carries the new member. It gains `bulkHardDelete`, the batch node hard delete declared in .changeset/node-bulk-hard-delete.md. The checker reaches it contravariantly only because `Store<G>` and the transaction context that expose the collections appear in parameter position on public functions such as `applyMergePlan`, which over-approximates a hand-authored `Store`-shaped value.",
+    "issue": "#460"
+  }
+]

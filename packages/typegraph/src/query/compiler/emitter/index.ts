@@ -32,6 +32,7 @@ export {
   buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,

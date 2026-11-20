@@ -1,0 +1,70 @@
+/**
+ * Stable identity-service entry point.
+ *
+ * The implementation is divided by responsibility behind this facade so
+ * consumers do not depend on its internal module layout.
+ */
+export {
+  readIdentityAssertionPageAtTarget,
+  readIdentityAssertionsByIdsAtTarget,
+  readIdentityAssertionsForInterchange,
+  readIdentityAssertionsTouchingAtTarget,
+} from "./interchange-read";
+export { toTransferAssertion } from "./row-codec";
+export { UnionFind } from "./service-components";
+export {
+  createIdentityFacade,
+  createIdentityReadFacade,
+} from "./service-facade";
+export {
+  applyIdentityChangesForContext,
+  createIdentityTransitionShapeCheck,
+  IDENTITY_IMPORT_FAILED_ASSERTION,
+  IDENTITY_IMPORT_PROGRESS,
+  importIdentityAssertionsIntoTarget,
+  importIdentityTransitionsIntoTarget,
+  isIdentityTransitionRestore,
+} from "./service-interchange-write";
+export type {
+  IdentityFoldPlan,
+  IdentityRebuildContext,
+} from "./service-maintenance";
+export {
+  applyIdentityFold,
+  assertAffectedIdentityClassesConsistent,
+  assertIdentityFoldable,
+  deleteAssertionsTouchingKinds,
+  detachIdentityForNode,
+  diffFullRebuildTransitions,
+  foldIdentityForCreatedNodes,
+  hasAssertionsTouchingKinds,
+  liveNodeKindsSharingIds,
+  purgeAssertionsWithUnregisteredKinds,
+  rebuildIdentityClosureForContext,
+  removeIdentityKindsForContext,
+  requireNodeValidityEndCompatible,
+  snapshotIdentityClosureClasses,
+  validateIdentityForContext,
+} from "./service-maintenance";
+export { loadAssertionsByIds } from "./service-mutation";
+export {
+  loadCurrentStructuralClassComponents,
+  loadCurrentStructuralClasses,
+  lockIdentityEnablementNodes,
+  lockIdentityGraph,
+  refKey,
+} from "./service-read";
+export type {
+  IdentityImportSummary,
+  IdentityServiceContext,
+  IdentityTransferAssertion,
+} from "./service-types";
+export type {
+  IdentityTransitionCursor,
+  IdentityTransitionTransfer,
+} from "./transition-log";
+export {
+  readIdentityTransitionPageForInterchange,
+  readIdentityTransitionRetention,
+  toTransitionTransfer,
+} from "./transition-log";

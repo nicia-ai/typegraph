@@ -17,23 +17,26 @@ import {
   defineGraph,
   defineNode,
   embedding,
-  EmbeddingDimensionChangedError,
   type GraphBackend,
-  getEmbeddingDimensions,
-  libsqlVectorStrategy,
+  type Node,
+  type Store,
+} from "..";
+import { EmbeddingDimensionChangedError } from "../dist/errors-entry";
+import { getEmbeddingDimensions } from "../dist/core";
+import { libsqlVectorStrategy } from "../dist/backend/sqlite/libsql";
+import type { VectorSlot, VectorStrategy } from "../dist/backend";
+import {
   migrateLegacyEmbeddings,
   type MigrateLegacyEmbeddingsResult,
-  type Node,
-  pgvectorStrategy,
-  type ReclaimedVectorFieldEntry,
-  type ReembedVectorFieldResult,
-  sqliteVecStrategy,
-  type Store,
-  type VectorSearchHit,
-  type VectorSearchOptions,
-  type VectorSlot,
-  type VectorStrategy,
-} from "..";
+} from "../dist/maintenance";
+import { pgvectorStrategy } from "../dist/backend/postgres";
+import type {
+  ReclaimedVectorFieldEntry,
+  ReembedVectorFieldResult,
+  VectorSearchHit,
+  VectorSearchOptions,
+} from "../dist/store-entry";
+import { sqliteVecStrategy } from "../dist/backend/sqlite";
 
 const Doc = defineNode("Doc", {
   schema: z.object({
@@ -81,9 +84,14 @@ expectError<VectorSearchOptions>({ fieldPath: "embedding", limit: 10 });
 expectError<VectorSearchOptions>({ queryEmbedding, limit: 10 });
 expectError<VectorSearchOptions>({ fieldPath: "embedding", queryEmbedding });
 
-declare const vectorHits: Awaited<
-  ReturnType<typeof store.search.vector<"Doc">>
->;
+async function vectorSearchDocs() {
+  return store.search.vector("Doc", {
+    fieldPath: "embedding",
+    queryEmbedding,
+    limit: 10,
+  });
+}
+declare const vectorHits: Awaited<ReturnType<typeof vectorSearchDocs>>;
 const vectorHit = vectorHits[0]!;
 expectAssignable<Node<typeof Doc>>(vectorHit.node);
 expectType<number>(vectorHit.score);

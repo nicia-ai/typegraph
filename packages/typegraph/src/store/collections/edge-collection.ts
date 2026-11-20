@@ -5,7 +5,15 @@
  */
 import { type z } from "zod";
 
+import { endpointSetReadMembers } from "../../backend/capabilities/bind";
 import {
+  type BATCH_POINT_READ,
+  type ENDPOINT_SET_READ,
+} from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import {
+  type EdgeEndpointSide,
+  type EdgeRow as BackendEdgeRow,
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
@@ -13,15 +21,32 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
-import { UnsupportedPredicateError } from "../../errors";
+import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../../errors";
 import { type QueryBuilder } from "../../query/builder";
 import type { BatchableQuery } from "../../query/builder/types";
 import { requireDefined } from "../../utils/presence";
-import { getEdgeRowsByIds } from "../edge-fetch";
+import { encodeTupleKey } from "../../utils/tuple-key";
+import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
+import {
+  assertEdgeIdentityMatches,
+  type EdgeIdentity,
+  type EdgeIdentityExpectation,
+  edgeIdentityFromRow,
+} from "../operations/edge-identity";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
+import {
+  type ResolvedMutationSetAttempt,
+  runResolvedMutationSetConverging,
+} from "../resolved-mutation-set";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
   type Edge,
+  type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
   type EdgeFindByEndpointsOptions,
   type EdgeGetOrCreateByEndpointsOptions,
@@ -30,10 +55,20 @@ import {
   type IfExistsMode,
   type NodeRef,
   type QueryOptions,
+  type ValidityEndMutation,
 } from "../types";
 import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
+import {
+  findRepeatedUpsertIds,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
+  type UpsertWindow,
+  upsertWindowChanges,
+  windowAfterUpsertCreate,
+  windowAfterUpsertUpdate,
 } from "./coalesce";
 import {
   resolveTemporalReadParams,
@@ -62,6 +97,10 @@ export type EdgeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
   backend: GraphBackend | TransactionBackend;
+  /** Threaded `batchPointRead` verdict — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /** Threaded endpoint-set read verdict, resolved against the graph backend. */
+  endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
   defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
   /** See EdgeOperations.maybeRefreshStatisticsAfterBulk. */
@@ -78,32 +117,51 @@ export type EdgeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeUpdate: (
     input: {
       id: string;
+      identity: EdgeIdentityExpectation;
       props: Partial<Record<string, unknown>>;
       validTo?: string;
+      clearValidTo?: true;
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
-  executeUpsertUpdate: (
-    input: {
-      id: string;
-      props: Partial<Record<string, unknown>>;
-      validTo?: string;
-    },
+  executeUpsertUpdateBatch: (
+    entries: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Edge>;
+  ) => Promise<readonly Edge[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateEdgeInput[],
+    updates: readonly EdgeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
+    >
+  >;
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
+    kind: string,
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
   executeHardDelete: (
+    kind: string,
     id: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  executeHardDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
@@ -119,6 +177,10 @@ export type EdgeCollectionConfig = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
+      validFrom?: string | null;
+      validTo?: string;
+      clearValidTo?: true;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>,
   ) => Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByEndpoints: (
@@ -129,6 +191,10 @@ export type EdgeCollectionConfig = Readonly<{
       toKind: string;
       toId: string;
       props: Record<string, unknown>;
+      validFrom?: string | null;
+      validTo?: string;
+      clearValidTo?: true;
+      onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{
@@ -158,7 +224,11 @@ function buildCreateEdgeInput(
   from: NodeRef,
   to: NodeRef,
   props: Record<string, unknown>,
-  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+  options?: Readonly<{
+    id?: string;
+    validFrom?: string | null;
+    validTo?: string;
+  }>,
 ): CreateEdgeInput {
   const input: {
     kind: string;
@@ -168,7 +238,7 @@ function buildCreateEdgeInput(
     toKind: string;
     toId: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   } = {
     kind,
@@ -184,24 +254,151 @@ function buildCreateEdgeInput(
   return input;
 }
 
+/** The scalar endpoint predicate of a `findFrom` / `findTo` read. */
+type EdgeEndpointPredicate =
+  | Readonly<{ fromKind: string; fromId: string }>
+  | Readonly<{ toKind: string; toId: string }>;
+
 type EdgeUpdateInput = Readonly<{
   id: string;
+  identity: EdgeIdentityExpectation;
   props: Partial<Record<string, unknown>>;
   validTo?: string;
+  clearValidTo?: true;
+}>;
+
+/**
+ * Update input for the internal upsert path, which owns the WHOLE validity
+ * window: a resurrecting upsert rewrites both endpoints, so it must be able to
+ * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
+ * the backend defaulting the lower bound to the resurrection instant while the
+ * caller's (possibly already past) `validTo` stayed — an inverted window that
+ * no read coordinate can observe.
+ *
+ * The public `update()` API cannot reach this member: its options type exposes
+ * `validTo` only, and it builds its input through {@link buildUpdateEdgeInput}.
+ * `bulkUpsertById` and endpoint-matched upserts route through this input because
+ * both may accept `validFrom`; only the endpoint surface currently exposes the
+ * create/resurrection-only policy.
+ */
+export type UpsertUpdateEdgeInput = EdgeUpdateInput &
+  Readonly<{
+    validFrom?: string | null;
+    onImmutableLowerBound?: "preserve" | "refuse";
+  }>;
+
+/**
+ * What a batch create states beyond its own rows.
+ */
+export type EdgeCreateBatchOptions = Readonly<{
+  /**
+   * The updates the caller writes right after this batch, inside the same
+   * transaction. Every one of them is prepared before this batch's first
+   * insert, against the state the inserts leave — re-entry cardinality and
+   * composition claims counting this batch's rows, merged props, the window
+   * verdict — and the ones that resurrect join this batch's one acyclicity
+   * probe. A refusal any of them reaches then precedes every write of the
+   * combined set, instead of surfacing after this batch's rows are stored.
+   */
+  pairedUpdates?: readonly EdgeUpsertUpdateBatchEntry[];
+}>;
+
+export type EdgeUpsertUpdateBatchEntry = Readonly<{
+  input: UpsertUpdateEdgeInput;
+  clearDeleted: boolean;
+  existing?: BackendEdgeRow;
 }>;
 
 function buildUpdateEdgeInput(
+  kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validTo?: string }>,
+  options?: ValidityEndMutation,
 ): EdgeUpdateInput {
   const input: {
     id: string;
+    identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
-  } = { id, props };
+    clearValidTo?: true;
+  } = { id, identity: { kind }, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input;
+}
+
+/** Builds an {@link UpsertUpdateEdgeInput} — see that type for why upsert alone carries `validFrom`. */
+function buildUpsertUpdateEdgeInput(
+  kind: string,
+  id: string,
+  from: NodeRef,
+  to: NodeRef,
+  props: Record<string, unknown>,
+  options?: Readonly<{
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+  }>,
+): UpsertUpdateEdgeInput {
+  const input: {
+    id: string;
+    identity: EdgeIdentityExpectation;
+    props: Partial<Record<string, unknown>>;
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+  } = {
+    id,
+    identity: {
+      kind,
+      fromKind: from.kind,
+      fromId: from.id,
+      toKind: to.kind,
+      toId: to.id,
+    },
+    props,
+  };
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
+  return input;
+}
+
+/**
+ * Composite bucket key for an endpoint. Node ids are unique per kind, not
+ * globally, so the kind is part of the key — the same key shape the endpoint
+ * predicate itself uses (`from_kind` + `from_id`).
+ */
+function endpointKey(endpointKind: string, id: string): string {
+  return encodeTupleKey([endpointKind, id]);
+}
+
+/**
+ * Validates the caller-facing fan-out cap. This runs in the collection rather
+ * than only in the backend because the cap is not always pushed into SQL: on a
+ * backend without window functions it is applied in JS, where an invalid value
+ * would silently truncate instead of failing.
+ */
+function assertLimitPerInput(
+  kind: string,
+  limitPerInput: number | undefined,
+): void {
+  if (limitPerInput === undefined) return;
+  if (Number.isInteger(limitPerInput) && limitPerInput > 0) return;
+  throw new ValidationError(
+    "bulk endpoint reads require limitPerInput to be a positive integer",
+    {
+      entityType: "edge",
+      kind,
+      issues: [
+        {
+          path: "limitPerInput",
+          message: `Expected a positive integer, received ${String(limitPerInput)}`,
+          code: "invalid_value",
+        },
+      ],
+    },
+  );
 }
 
 function mapBulkEdgeInputs(
@@ -211,7 +408,7 @@ function mapBulkEdgeInputs(
     to: NodeRef;
     props?: Record<string, unknown>;
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }>[],
 ): CreateEdgeInput[] {
@@ -233,15 +430,19 @@ export function createEdgeCollection<
     graphId,
     kind,
     backend,
+    batchPointRead,
     defaultTemporalMode,
     rowToEdge,
     executeCreate: executeEdgeCreate,
     executeCreateNoReturnBatch: executeEdgeCreateNoReturnBatch,
     executeCreateBatch: executeEdgeCreateBatch,
     executeUpdate: executeEdgeUpdate,
-    executeUpsertUpdate: executeEdgeUpsertUpdate,
+    executeUpsertUpdateBatch: executeEdgeUpsertUpdateBatch,
+    executeResolvedMutationSet: executeEdgeResolvedMutationSet,
     executeDelete: executeEdgeDelete,
+    executeDeleteBatch: executeEdgeDeleteBatch,
     executeHardDelete: executeEdgeHardDelete,
+    executeHardDeleteBatch: executeEdgeHardDeleteBatch,
     temporalRowMatcher,
   } = config;
 
@@ -254,19 +455,16 @@ export function createEdgeCollection<
    * `options` win, falling back to the graph's default mode. Keeps
    * `findFrom` / `findTo` honoring the temporal model instead of silently
    * returning every non-deleted edge.
+   *
+   * The scalar and set forms of the endpoint predicate share this builder, so
+   * `bulkFindFrom` / `bulkFindTo` cannot resolve a different coordinate than
+   * the singleton reads they widen.
    */
   function buildEndpointFindParams(
-    endpoint:
-      | Readonly<{ fromKind: string; fromId: string }>
-      | Readonly<{ toKind: string; toId: string }>,
-    options: QueryOptions | undefined,
+    endpoint: EdgeEndpointPredicate,
+    temporal: TemporalReadParams,
   ): FindEdgesByKindParams {
-    return {
-      graphId,
-      kind,
-      ...endpoint,
-      ...resolveTemporalReadParams(options, defaultTemporalMode),
-    };
+    return { graphId, kind, ...endpoint, ...temporal };
   }
 
   async function findEdgesFrom(
@@ -277,7 +475,7 @@ export function createEdgeCollection<
     const rows = await target.findEdgesByKind(
       buildEndpointFindParams(
         { fromKind: from.kind, fromId: from.id },
-        options,
+        resolveTemporalReadParams(options, defaultTemporalMode),
       ),
     );
     return mapRows(rows);
@@ -289,9 +487,110 @@ export function createEdgeCollection<
     options?: QueryOptions,
   ): Promise<Edge<E>[]> {
     const rows = await target.findEdgesByKind(
-      buildEndpointFindParams({ toKind: to.kind, toId: to.id }, options),
+      buildEndpointFindParams(
+        { toKind: to.kind, toId: to.id },
+        resolveTemporalReadParams(options, defaultTemporalMode),
+      ),
     );
     return mapRows(rows);
+  }
+
+  /**
+   * Shared implementation of `bulkFindFrom` / `bulkFindTo`: `findEdgesFrom` /
+   * `findEdgesTo` with the endpoint equality widened to set membership.
+   *
+   * The edge relation's system index is keyed
+   * `(graph_id, from_kind, from_id, kind, ...)`, so the id set is issued per
+   * endpoint KIND — a set within one kind is a prefix seek, while mixing kinds
+   * would force a scan. Inputs of a single kind therefore cost one statement
+   * per bind-budget chunk rather than one statement per endpoint.
+   */
+  async function findEdgesByEndpointSet(
+    side: EdgeEndpointSide,
+    references: readonly NodeRef[],
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<Edge<E>[][]> {
+    if (references.length === 0) return [];
+
+    const method = side === "from" ? "bulkFindFrom" : "bulkFindTo";
+    const endpointReadBinding = endpointSetReadMembers(
+      backend,
+      config.endpointSetRead,
+    );
+    const endpointRead = endpointReadBinding.findEdgesByEndpointSet;
+    if (endpointRead === undefined) {
+      throw new ConfigurationError(
+        `store.edges.${kind}.${method}() requires a backend that can read a set of ` +
+          `endpoints with set-oriented statements, and this backend does not implement ` +
+          `findEdgesByEndpointSet.`,
+        {
+          code: "ENDPOINT_SET_READ_UNSUPPORTED",
+          backend: backend.dialect,
+          capability: "findEdgesByEndpointSet",
+          kind,
+          operation: method,
+        },
+        {
+          suggestion:
+            `Falling back to one findFrom/findTo per endpoint is deliberately NOT done here: ` +
+            `a caller reaching for a bulk endpoint read is asking for a set-oriented read, and ` +
+            `silently issuing N singleton statements is the cost surprise this method exists ` +
+            `to avoid. Loop over ` +
+            `findFrom/findTo explicitly if that trade is acceptable.`,
+        },
+      );
+    }
+
+    const limitPerInput = options?.limitPerInput;
+    assertLimitPerInput(kind, limitPerInput);
+
+    // Resolve the read coordinate ONCE. `current` mode materializes an `asOf`
+    // of "now", so resolving per endpoint kind would let a mixed-kind read
+    // straddle a validity boundary and return an internally inconsistent
+    // answer from a single logical read.
+    const temporal = resolveTemporalReadParams(options, defaultTemporalMode);
+
+    // The per-endpoint cap is pushed into SQL when the engine has window
+    // functions; otherwise the rows arrive uncapped and the JS slice below
+    // (which every path applies) keeps the same leading edges.
+    const limitPerEndpoint =
+      limitPerInput !== undefined && backend.capabilities.windowFunctions ?
+        { limitPerEndpoint: limitPerInput }
+      : {};
+
+    const edgesByEndpoint = new Map<string, Edge<E>[]>();
+    for (const [endpointKind, endpointIds] of groupEndpointIdsByKind(
+      references,
+    )) {
+      const rows = await endpointRead({
+        graphId,
+        kind,
+        side,
+        endpointKind,
+        endpointIds,
+        ...limitPerEndpoint,
+        ...temporal,
+      });
+      for (const edge of mapRows(rows)) {
+        const key =
+          side === "from" ?
+            endpointKey(edge.fromKind, edge.fromId)
+          : endpointKey(edge.toKind, edge.toId);
+        const bucket = edgesByEndpoint.get(key);
+        if (bucket === undefined) edgesByEndpoint.set(key, [edge]);
+        else bucket.push(edge);
+      }
+    }
+
+    // Each input position gets its own array: repeated inputs share an
+    // endpoint bucket, and callers must not see one input's mutation in
+    // another's.
+    return references.map((ref) => {
+      const bucket = edgesByEndpoint.get(endpointKey(ref.kind, ref.id)) ?? [];
+      return limitPerInput === undefined ?
+          [...bucket]
+        : bucket.slice(0, limitPerInput);
+    });
   }
 
   function buildFindByEndpointsOptions(
@@ -322,7 +621,11 @@ export function createEdgeCollection<
       from: NodeRef,
       to: NodeRef,
       props?: z.input<E["schema"]>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: Readonly<{
+        id?: string;
+        validFrom?: string | null;
+        validTo?: string;
+      }>,
     ): Promise<Edge<E>> {
       const result = await executeEdgeCreate(
         buildCreateEdgeInput(kind, from, to, props ?? {}, options),
@@ -348,7 +651,12 @@ export function createEdgeCollection<
     ): Promise<readonly (Edge<E> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      const rowsById = await getEdgeRowsByIds(backend, graphId, ids);
+      const rowsById = await getEdgeRowsByIds(
+        backend,
+        batchPointRead,
+        graphId,
+        ids,
+      );
       // Resolve the coordinate once so the whole batch observes one instant.
       const matches = temporalRowMatcher(options);
       return ids.map((id) => {
@@ -363,10 +671,10 @@ export function createEdgeCollection<
     async update(
       id: string,
       props: Partial<z.input<E["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
+      options?: ValidityEndMutation,
     ): Promise<Edge<E>> {
       const result = await executeEdgeUpdate(
-        buildUpdateEdgeInput(id, props, options),
+        buildUpdateEdgeInput(kind, id, props, options),
         backend,
       );
       return narrowEdge<E>(result);
@@ -378,6 +686,20 @@ export function createEdgeCollection<
 
     async findTo(to: NodeRef, options?: QueryOptions): Promise<Edge<E>[]> {
       return findEdgesTo(to, backend, options);
+    },
+
+    async bulkFindFrom(
+      froms: readonly NodeRef[],
+      options?: EdgeBulkFindEndpointOptions,
+    ): Promise<readonly Edge<E>[][]> {
+      return findEdgesByEndpointSet("from", froms, options);
+    },
+
+    async bulkFindTo(
+      tos: readonly NodeRef[],
+      options?: EdgeBulkFindEndpointOptions,
+    ): Promise<readonly Edge<E>[][]> {
+      return findEdgesByEndpointSet("to", tos, options);
     },
 
     batchFindFrom(
@@ -414,11 +736,11 @@ export function createEdgeCollection<
     },
 
     async delete(id: string): Promise<void> {
-      await executeEdgeDelete(id, backend);
+      await executeEdgeDelete(kind, id, backend);
     },
 
     async hardDelete(id: string): Promise<void> {
-      await executeEdgeHardDelete(id, backend);
+      await executeEdgeHardDelete(kind, id, backend);
     },
 
     async find(
@@ -497,19 +819,11 @@ export function createEdgeCollection<
         to: NodeRef;
         props?: z.input<E["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<Edge<E>[]> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        const results = await backend.transaction(async (txBackend) =>
-          executeEdgeCreateBatch(batchInputs, txBackend),
-        );
-        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-        return narrowEdges<E>(results);
-      }
       const results = await executeEdgeCreateBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowEdges<E>(results);
@@ -521,17 +835,34 @@ export function createEdgeCollection<
         from: NodeRef;
         to: NodeRef;
         props?: z.input<E["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
+        clearValidTo?: true;
       }>[],
     ): Promise<Edge<E>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "edge",
+          kind,
+          id: item.id,
+        });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "edge");
+        }
+      }
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
       ): Promise<{ results: Edge<E>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
-        const existingMap = await getEdgeRowsByIds(target, graphId, ids);
+        const existingMap = await getEdgeRowsByIds(
+          target,
+          batchPointRead,
+          graphId,
+          ids,
+        );
 
         // Coalesced items are written straight to results (the existing or
         // last-written edge) and skipped from the write batch; see the node
@@ -542,18 +873,55 @@ export function createEdgeCollection<
         const toCreate: { index: number; input: CreateEdgeInput }[] = [];
         const toUpdate: {
           index: number;
-          input: EdgeUpdateInput;
+          input: UpsertUpdateEdgeInput;
           clearDeleted: boolean;
+          existing?: BackendEdgeRow;
         }[] = [];
 
         // Batch-local running state per id so a repeated id coalesces against
-        // the value earlier items in this batch would write, preserving
-        // last-write-wins. See the node collection for the full rationale.
+        // the props AND validity window earlier items in this batch would write,
+        // preserving last-write-wins — and so a repeated id whose edge does not
+        // exist yet queues ONE create plus an update over it rather than two
+        // creates the create batch rejects as "already exists". See the node
+        // collection for the full rationale, including why `props` may be
+        // undefined while `window` is always computed.
         const pending = new Map<
           string,
-          { props: Record<string, unknown>; sourceIndex: number }
+          {
+            identity: EdgeIdentity;
+            props: Record<string, unknown> | undefined;
+            window: UpsertWindow;
+            sourceIndex: number;
+          }
         >();
         const deferred: { index: number; sourceIndex: number }[] = [];
+
+        // See the node collection: only a coalescing store reads a running
+        // value, so only it needs the repeated-id set.
+        const repeatedIds =
+          config.upsertDirtyCheck === undefined ?
+            new Set<string>()
+          : findRepeatedUpsertIds(items);
+
+        /** See the node collection's runDirtyCheck. */
+        function runDirtyCheck(
+          edgeKind: string,
+          id: string,
+          currentProps: Record<string, unknown>,
+          inputProps: Record<string, unknown>,
+        ): UpsertDirtyCheck | undefined {
+          if (config.upsertDirtyCheck === undefined) return undefined;
+          try {
+            return config.upsertDirtyCheck(
+              edgeKind,
+              id,
+              currentProps,
+              inputProps,
+            );
+          } catch {
+            return undefined;
+          }
+        }
 
         let itemIndex = 0;
         for (const item of items) {
@@ -572,6 +940,24 @@ export function createEdgeCollection<
                 item,
               ),
             });
+            // A create merges over nothing, so the dirty check run against an
+            // EMPTY base is exactly the validated props the insert will store —
+            // needed only when a later copy of this id will compare against it.
+            pending.set(item.id, {
+              identity: {
+                kind,
+                fromKind: item.from.kind,
+                fromId: item.from.id,
+                toKind: item.to.kind,
+                toId: item.to.id,
+              },
+              props:
+                repeatedIds.has(item.id) ?
+                  runDirtyCheck(kind, item.id, {}, inputProps)?.validatedProps
+                : undefined,
+              window: windowAfterUpsertCreate(item),
+              sourceIndex: itemIndex,
+            });
             itemIndex++;
             continue;
           }
@@ -581,30 +967,64 @@ export function createEdgeCollection<
               requireDefined(original).deleted_at
             : undefined;
 
-          let dirty: UpsertDirtyCheck | undefined;
-          if (config.upsertDirtyCheck !== undefined) {
-            const currentProps =
-              pendingEntry?.props ??
-              rowPropsToObject(requireDefined(original).props);
-            try {
-              // The fetched edge carries the authoritative kind (an id may
-              // resolve to a different edge kind than this collection).
-              dirty = config.upsertDirtyCheck(
+          const expectedIdentity: EdgeIdentityExpectation = {
+            kind,
+            fromKind: item.from.kind,
+            fromId: item.from.id,
+            toKind: item.to.kind,
+            toId: item.to.id,
+          };
+          const actualIdentity =
+            pendingEntry === undefined ?
+              edgeIdentityFromRow(requireDefined(original))
+            : pendingEntry.identity;
+          assertEdgeIdentityMatches(
+            item.id,
+            expectedIdentity,
+            actualIdentity,
+            "update",
+          );
+
+          const currentProps =
+            pendingEntry === undefined ?
+              rowPropsToObject(requireDefined(original).props)
+            : pendingEntry.props;
+          // The fetched edge carries the authoritative kind (an id may resolve
+          // to a different edge kind than this collection); a queued create is
+          // this collection's kind by construction.
+          const dirty =
+            currentProps === undefined ? undefined : (
+              runDirtyCheck(
                 original?.kind ?? kind,
                 item.id,
                 currentProps,
                 inputProps,
-              );
-            } catch {
-              dirty = undefined;
-            }
-          }
+              )
+            );
 
+          // The window the edge holds going into this item: the prefetched row's,
+          // or the one the batch's last queued write for this id leaves behind.
+          const currentWindow: UpsertWindow =
+            pendingEntry === undefined ?
+              {
+                valid_from: requireDefined(original).valid_from,
+                valid_to: requireDefined(original).valid_to,
+              }
+            : pendingEntry.window;
+
+          // An explicit window blocks coalescing ONLY when it would change the
+          // window already held: merge commits pass the staged survivor's window
+          // on every edge write, so a target edge staged back at itself
+          // (identical props AND identical window) must still coalesce instead of
+          // rewriting history and revision state. The comparison is
+          // shouldCoalesceUpsert's own, which reads both sides as INSTANTS —
+          // comparing the driver's text directly (what this path used to do) let
+          // an identical re-stated window coalesce on one dialect and write on
+          // another.
           const coalesce =
             dirty?.unchanged === true &&
             deletedAt === undefined &&
-            item.validFrom === undefined &&
-            item.validTo === undefined;
+            !upsertWindowChanges(item, currentWindow);
 
           if (coalesce) {
             if (pendingEntry === undefined) {
@@ -620,39 +1040,85 @@ export function createEdgeCollection<
           } else {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateEdgeInput(item.id, inputProps, item),
+              input: buildUpsertUpdateEdgeInput(
+                kind,
+                item.id,
+                item.from,
+                item.to,
+                inputProps,
+                item,
+              ),
               clearDeleted: deletedAt !== undefined,
+              ...(pendingEntry === undefined && original !== undefined ?
+                { existing: original }
+              : {}),
             });
-            if (dirty !== undefined) {
-              pending.set(item.id, {
-                props: dirty.validatedProps,
-                sourceIndex: itemIndex,
-              });
-            }
+            pending.set(item.id, {
+              identity: actualIdentity,
+              props: dirty?.validatedProps,
+              // A resurrection rewrites both bounds only when it NAMES the lower
+              // one (buildUpdateEdge's clearDeleted leg); omitting `validFrom`
+              // keeps the stored window, exactly like a live-row update.
+              window:
+                deletedAt !== undefined && item.validFrom !== undefined ?
+                  windowAfterUpsertCreate(item)
+                : windowAfterUpsertUpdate(currentWindow, item),
+              sourceIndex: itemIndex,
+            });
           }
           itemIndex++;
         }
 
-        if (toCreate.length > 0) {
-          const createInputs = toCreate.map((entry) => entry.input);
-          const created = await executeEdgeCreateBatch(createInputs, target);
+        const createInputs = toCreate.map((entry) => entry.input);
+        const updateEntries = toUpdate.map((entry) => ({
+          input: entry.input,
+          clearDeleted: entry.clearDeleted,
+          ...(entry.existing === undefined ? {} : { existing: entry.existing }),
+        }));
+        const mutationAttempt = await executeEdgeResolvedMutationSet(
+          createInputs,
+          updateEntries,
+          target,
+        );
+        if (mutationAttempt.outcome === "unsupported") {
+          if (toCreate.length > 0) {
+            const created = await executeEdgeCreateBatch(createInputs, target, {
+              pairedUpdates: updateEntries,
+            });
+            for (const [index, entry] of toCreate.entries()) {
+              results[entry.index] = narrowEdge<E>(
+                requireDefined(created[index]),
+              );
+            }
+          }
+
+          if (toUpdate.length > 0) {
+            const updated = await executeEdgeUpsertUpdateBatch(
+              updateEntries,
+              target,
+            );
+            for (const [updateIndex, entry] of toUpdate.entries()) {
+              const result = requireDefined(updated[updateIndex]);
+              results[entry.index] = narrowEdge<E>(result);
+            }
+          }
+        } else {
+          const mutationSet = mutationAttempt.value;
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowEdge<E>(
-              requireDefined(created[index]),
+              requireDefined(mutationSet.created[index]),
+            );
+          }
+          for (const [index, entry] of toUpdate.entries()) {
+            results[entry.index] = narrowEdge<E>(
+              requireDefined(mutationSet.updated[index]),
             );
           }
         }
 
-        // Hookless individual updates (executeEdgeUpsertUpdate is already hookless)
-        for (const entry of toUpdate) {
-          const result = await executeEdgeUpsertUpdate(entry.input, target, {
-            clearDeleted: entry.clearDeleted,
-          });
-          results[entry.index] = narrowEdge<E>(result);
-        }
-
         // Items that coalesced against an in-batch write take that write's
-        // result (now filled). Its sourceIndex is always a write slot.
+        // result (now filled). Its sourceIndex is always a write slot — a
+        // queued create or a queued update, both filled above.
         for (const { index, sourceIndex } of deferred) {
           results[index] = requireDefined(results[sourceIndex]);
         }
@@ -660,10 +1126,27 @@ export function createEdgeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } =
-        backend.capabilities.transactions && "transaction" in backend ?
-          await backend.transaction(async (txBackend) => upsertAll(txBackend))
-        : await upsertAll(backend);
+      // INVARIANT: the prefetch that feeds every coalesce decision and the
+      // writes those decisions elect run against ONE target — so an item is
+      // skipped only on evidence taken inside the transaction that would have
+      // written it, never on an autocommit read taken before it (the defect
+      // `upsertById` had on the node side).
+      //
+      // `runOwnedMutationSetTransaction` opens a transaction if this backend
+      // has one (and replays it when the per-graph write fence refuses its
+      // snapshot): already inside `store.transaction(...)` the
+      // target IS the caller's transaction and no nested one opens, and on a
+      // backend without interactive transactions there is nothing to open, so
+      // the decision is exactly as fenced as that backend's writes are — which
+      // is to say not at all, matching the atomicity it already cannot offer.
+      const { results, mutations } = await runResolvedMutationSetConverging(
+        "edge",
+        backend,
+        () =>
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
+      );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
       // mutations count toward the threshold. A no-op inside a caller
@@ -678,38 +1161,23 @@ export function createEdgeCollection<
         to: NodeRef;
         props?: z.input<E["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<void> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => {
-          await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
-        });
-        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
-        return;
-      }
-
       await executeEdgeCreateNoReturnBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
     async bulkDelete(ids: readonly string[]): Promise<void> {
       if (ids.length === 0) return;
-      const deleteAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<void> => {
-        for (const id of ids) {
-          await executeEdgeDelete(id, target);
-        }
-      };
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => deleteAll(txBackend));
-        return;
-      }
-      await deleteAll(backend);
+      await executeEdgeDeleteBatch(kind, ids, backend);
+    },
+
+    async bulkHardDelete(ids: readonly string[]): Promise<void> {
+      if (ids.length === 0) return;
+      await executeEdgeHardDeleteBatch(kind, ids, backend);
     },
 
     async findByEndpoints(
@@ -736,14 +1204,26 @@ export function createEdgeCollection<
       props: z.input<E["schema"]>,
       options?: EdgeGetOrCreateByEndpointsOptions<E>,
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>> {
-      const getOrCreateOptions: {
-        matchOn?: readonly string[];
-        ifExists?: IfExistsMode;
-      } = {};
-      if (options?.matchOn !== undefined)
-        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
-      if (options?.ifExists !== undefined)
-        getOrCreateOptions.ifExists = options.ifExists;
+      assertValidityEndMutation(options ?? {}, {
+        entityType: "edge",
+        kind,
+      });
+      const getOrCreateOptions = {
+        ...(options?.matchOn !== undefined && {
+          matchOn: options.matchOn as readonly string[],
+        }),
+        ...(options?.ifExists !== undefined && {
+          ifExists: options.ifExists,
+        }),
+        ...(options?.validFrom !== undefined && {
+          validFrom: options.validFrom,
+        }),
+        ...(options?.validTo !== undefined && { validTo: options.validTo }),
+        ...(options?.clearValidTo === true && { clearValidTo: true as const }),
+        ...(options?.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: options.onImmutableLowerBound,
+        }),
+      };
 
       const result = await config.executeGetOrCreateByEndpoints(
         kind,
@@ -763,10 +1243,24 @@ export function createEdgeCollection<
         from: NodeRef;
         to: NodeRef;
         props: z.input<E["schema"]>;
+        validFrom?: string | null;
+        validTo?: string;
+        clearValidTo?: true;
+        onImmutableLowerBound?: "preserve" | "refuse";
       }>[],
-      options?: EdgeGetOrCreateByEndpointsOptions<E>,
+      options?: Pick<
+        EdgeGetOrCreateByEndpointsOptions<E>,
+        "matchOn" | "ifExists"
+      >,
     ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "edge",
+          kind,
+        });
+      }
 
       const mappedItems = items.map((item) => ({
         fromKind: item.from.kind,
@@ -774,16 +1268,22 @@ export function createEdgeCollection<
         toKind: item.to.kind,
         toId: item.to.id,
         props: item.props,
+        ...(item.validFrom !== undefined && { validFrom: item.validFrom }),
+        ...(item.validTo !== undefined && { validTo: item.validTo }),
+        ...(item.clearValidTo === true && { clearValidTo: true as const }),
+        ...(item.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: item.onImmutableLowerBound,
+        }),
       }));
 
-      const getOrCreateOptions: {
-        matchOn?: readonly string[];
-        ifExists?: IfExistsMode;
-      } = {};
-      if (options?.matchOn !== undefined)
-        getOrCreateOptions.matchOn = options.matchOn as readonly string[];
-      if (options?.ifExists !== undefined)
-        getOrCreateOptions.ifExists = options.ifExists;
+      const getOrCreateOptions = {
+        ...(options?.matchOn !== undefined && {
+          matchOn: options.matchOn as readonly string[],
+        }),
+        ...(options?.ifExists !== undefined && {
+          ifExists: options.ifExists,
+        }),
+      };
 
       const getOrCreateAll = async (
         target: GraphBackend | TransactionBackend,
@@ -800,11 +1300,10 @@ export function createEdgeCollection<
         }));
       };
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
+      // The operation owns its transaction boundary. This lets exact-root
+      // atomic convergence dispatch before a derived transaction target hides
+      // the bundled backend proof; the portable implementation still enters
+      // `runWritePlan` and receives the same all-or-nothing boundary.
       return getOrCreateAll(backend);
     },
   };

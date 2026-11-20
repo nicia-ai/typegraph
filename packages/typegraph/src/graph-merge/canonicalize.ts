@@ -1,3 +1,4 @@
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Canonical survivor selection + commutative property union (design §6.4 rule 3
@@ -55,6 +56,15 @@ import { asBranchId } from "./types";
 export const BASE_PROVENANCE_BRANCH: BranchId =
   asBranchId("__committed_base__");
 
+/**
+ * Reserved branch id for the live incremental target staged as a synthetic
+ * branch. Lives beside {@link BASE_PROVENANCE_BRANCH} so survivor selection
+ * can recognize target-contributed members.
+ */
+export const COMMITTED_TARGET_BRANCH: BranchId = asBranchId(
+  "__committed_target__",
+);
+
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
 
@@ -82,6 +92,12 @@ export type ClusterMember = Readonly<{
   kind: string;
   branchId: BranchId;
   props: Readonly<Record<string, JsonValue>>;
+  // The row's valid-time window. null explicitly preserves an open-left start.
+  // A `validTo` on a staged member means the
+  // branch authored the node as ALREADY ENDED — the commit must not resurrect
+  // it as current.
+  validFrom?: string | null;
+  validTo?: string;
 }>;
 
 /**
@@ -95,6 +111,18 @@ export type CanonicalEntity = Readonly<{
   props: Readonly<Record<string, JsonValue>>;
   resolution: EntityResolution;
   conflicts: readonly PropertyConflict[];
+  // The SURVIVOR's staged valid-time window, when the survivor is a staged
+  // member (absent for base-member survivors, whose committed window stays
+  // untouched). Carried to the commit upsert so a branch-authored window —
+  // including a deliberately ENDED one on a resurrection — survives the
+  // merge instead of being reset to merge time.
+  validFrom?: string | null;
+  validTo?: string;
+  // The effective survivor window, including committed base survivors whose
+  // window is intentionally not copied into the upsert fields above. Identity
+  // assertions remapped onto this survivor are intersected with this window.
+  endpointValidFrom?: string;
+  endpointValidTo?: string;
 }>;
 
 /**
@@ -153,6 +181,19 @@ function pickClusterSurvivor(
     return requireDefined(baseMembers[0]);
   }
 
+  // A node the live incremental target committed after the fork point is
+  // committed identity too: its id already anchors committed edges. It reaches
+  // the cluster as a staged member of the synthetic target branch rather than as
+  // a base member, so it needs the same precedence here. If a user branch's
+  // member won the id tie-break instead, the plan would repoint those committed
+  // edges, which apply refuses as an immutable-endpoint change.
+  const committedTargetMembers = members
+    .filter((member) => member.branchId === COMMITTED_TARGET_BRANCH)
+    .sort(byKey);
+  if (committedTargetMembers.length > 0) {
+    return requireDefined(committedTargetMembers[0]);
+  }
+
   // The survivor's bare id: the override's pick (mapped over the bare-id view of the
   // cluster) when it names a real member, else the minimum identity's id.
   let canonicalId: AnyNodeId | undefined;
@@ -203,7 +244,8 @@ function findPreferredMember(
   }
   return members.find(
     (member) =>
-      member.branchId === preferredBranchId && property in member.props,
+      member.branchId === preferredBranchId &&
+      hasOwnKey(member.props, property),
   );
 }
 
@@ -211,7 +253,7 @@ function memberPropertyValue(
   member: ClusterMember,
   property: string,
 ): JsonValue | undefined {
-  if (!(property in member.props)) {
+  if (!hasOwnKey(member.props, property)) {
     return undefined;
   }
   return member.props[property];
@@ -278,7 +320,7 @@ function unionProperties(
     }
   }
 
-  const props: Record<string, JsonValue> = {};
+  const props = createDataKeyedBag<JsonValue>();
   const conflicts: PropertyConflict[] = [];
 
   for (const property of [...propertyNames].sort((left, right) =>
@@ -305,7 +347,8 @@ function unionProperties(
     const baseInvolved =
       hasBaseMember &&
       members.some(
-        (member) => member.origin === "base" && property in member.props,
+        (member) =>
+          member.origin === "base" && hasOwnKey(member.props, property),
       );
 
     // Resolution math sees the FULL contributions (including the base value, so the
@@ -419,7 +462,40 @@ export function canonicalizeCluster(
     memberIds,
     kind,
     branchOrigins,
+    // The merge orchestrator replaces this with the witness selected from the
+    // post-guard surviving edge set. Canonicalization never re-derives evidence.
+    decisiveEdges: [],
   };
 
-  return { canonicalId, kind, props, resolution, conflicts };
+  // Window precedence mirrors committed-first assertion precedence: when the
+  // live incremental target itself contributed a member for the surviving
+  // identity, the target's committed window wins — a user branch's staged
+  // window must not end (or re-window) a row the target already holds.
+  // Otherwise the survivor member's own staged window rides.
+  const windowSource =
+    members.find(
+      (member) =>
+        member.branchId === COMMITTED_TARGET_BRANCH &&
+        member.kind === kind &&
+        member.id === canonicalId,
+    ) ?? survivor;
+  return {
+    canonicalId,
+    kind,
+    props,
+    resolution,
+    conflicts,
+    ...(windowSource.validFrom === undefined ?
+      {}
+    : { validFrom: windowSource.validFrom }),
+    ...(windowSource.validTo === undefined ?
+      {}
+    : { validTo: windowSource.validTo }),
+    ...(typeof windowSource.validFrom === "string" ?
+      { endpointValidFrom: windowSource.validFrom }
+    : {}),
+    ...(windowSource.validTo === undefined ?
+      {}
+    : { endpointValidTo: windowSource.validTo }),
+  };
 }

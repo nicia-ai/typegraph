@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { embedding } from "../src/core/embedding";
+import { resolveFieldTypeInfoAtJsonPointer } from "../src/query/field-type-info";
+import { type JsonPointer } from "../src/query/json-pointer";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
 
 // ============================================================
@@ -453,6 +455,94 @@ describe("getFieldTypeInfo - caching", () => {
 });
 
 // ============================================================
+// kindsDivergingFromSubsumingDeclaration
+// ============================================================
+
+function subsumedBy(parentKind: string, ...childKinds: readonly string[]) {
+  return (childKind: string, candidate: string) =>
+    candidate === parentKind && childKinds.includes(childKind);
+}
+
+describe("kindsDivergingFromSubsumingDeclaration", () => {
+  const vector = z.object({ vector: embedding(3).optional() });
+  const plainVector = z.object({ vector: z.array(z.number()).optional() });
+
+  it("names a subclass that drops the subsuming kind's embedding tag, and the builder refuses the same alias", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: vector }],
+        ["Memo", { schema: plainVector }],
+        ["Note", { schema: z.object({ text: z.string() }) }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo", "Note"),
+    );
+    const kinds = ["Doc", "Memo", "Note"];
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(kinds, "vector"),
+    ).toEqual(["Memo"]);
+    expect(
+      introspector.getSharedFieldTypeInfo(kinds, "vector"),
+    ).toBeUndefined();
+  });
+
+  it("names a subclass that adds an embedding tag the subsuming kind lacks", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: plainVector }],
+        ["Memo", { schema: vector }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo"),
+    );
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(
+        ["Doc", "Memo"],
+        "vector",
+      ),
+    ).toEqual(["Memo"]);
+  });
+
+  it("names nothing when every declaration keeps the tag, or a kind omits the field", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Doc", { schema: vector }],
+        ["Memo", { schema: vector }],
+        ["Note", { schema: z.object({ text: z.string() }) }],
+      ]),
+      undefined,
+      subsumedBy("Doc", "Memo", "Note"),
+    );
+
+    expect(
+      introspector.kindsDivergingFromSubsumingDeclaration(
+        ["Doc", "Memo", "Note"],
+        "vector",
+      ),
+    ).toEqual([]);
+  });
+
+  it("holds equivalent kinds that disagree on the tag against each other", () => {
+    const introspector = createSchemaIntrospector(
+      new Map([
+        ["Tagged", { schema: vector }],
+        ["Plain", { schema: plainVector }],
+      ]),
+      undefined,
+      (childKind, candidate) => childKind !== candidate,
+    );
+
+    expect(
+      introspector
+        .kindsDivergingFromSubsumingDeclaration(["Tagged", "Plain"], "vector")
+        .toSorted(),
+    ).toEqual(["Plain", "Tagged"]);
+  });
+});
+
+// ============================================================
 // getSharedFieldTypeInfo
 // ============================================================
 
@@ -632,6 +722,51 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
     expect(info?.shape?.["extra"]).toBeUndefined();
     expect(info?.shape?.["other"]).toBeUndefined();
   });
+
+  it("does not treat a prototype-polluted member as a shared field", () => {
+    const inheritedField = "inheritedSharedField";
+    Object.defineProperty(Object.prototype, inheritedField, {
+      configurable: true,
+      value: { valueType: "string" },
+    });
+    const prototypeKinds = new Map<string, { schema: z.ZodType }>([
+      [
+        "DeclaresPrototypeName",
+        {
+          schema: z.object({
+            metadata: z.object({
+              [inheritedField]: z.string(),
+              value: z.string(),
+            }),
+          }),
+        },
+      ],
+      [
+        "OmitsPrototypeName",
+        { schema: z.object({ metadata: z.object({ value: z.string() }) }) },
+      ],
+    ]);
+    try {
+      const prototypeIntrospector = createSchemaIntrospector(prototypeKinds);
+      const info = prototypeIntrospector.getSharedFieldTypeInfo(
+        ["DeclaresPrototypeName", "OmitsPrototypeName"],
+        "metadata",
+      );
+
+      // A vacuous pass (e.g. `info?.shape` undefined for an unrelated reason)
+      // must not be mistaken for the guarantee this test exists to pin: both
+      // `info` and `info.shape` are asserted defined, and a field the two
+      // kinds legitimately share (`value`) must still surface, so the
+      // prototype-named field's absence is proven against a shape that
+      // otherwise works, not an empty one.
+      expect(info).toBeDefined();
+      expect(info?.shape).toBeDefined();
+      expect(info?.shape?.["value"]?.valueType).toBe("string");
+      expect(Object.hasOwn(info?.shape ?? {}, inheritedField)).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, inheritedField);
+    }
+  });
 });
 
 // ============================================================
@@ -639,6 +774,41 @@ describe("getSharedFieldTypeInfo - object shape intersection", () => {
 // ============================================================
 
 describe("edge cases", () => {
+  it("does not resolve inherited node or edge fields", () => {
+    const nodeKinds = new Map([
+      ["Node", { schema: z.object({ value: z.string() }) }],
+    ]);
+    const edgeKinds = new Map([
+      ["Edge", { schema: z.object({ weight: z.number() }) }],
+    ]);
+    const introspector = createSchemaIntrospector(nodeKinds, edgeKinds);
+
+    expect(
+      introspector.getFieldTypeInfo("Node", "constructor"),
+    ).toBeUndefined();
+    expect(
+      introspector.getEdgeFieldTypeInfo("Edge", "toString"),
+    ).toBeUndefined();
+  });
+
+  it("does not traverse inherited object fields in a JSON pointer", () => {
+    const nodeKinds = new Map([
+      [
+        "Node",
+        { schema: z.object({ metadata: z.object({ value: z.string() }) }) },
+      ],
+    ]);
+    const introspector = createSchemaIntrospector(nodeKinds);
+    const metadata = introspector.getFieldTypeInfo("Node", "metadata");
+
+    expect(() =>
+      resolveFieldTypeInfoAtJsonPointer(
+        metadata,
+        "/constructor" as JsonPointer,
+      ),
+    ).toThrow(/not defined on object schema/);
+  });
+
   it("handles non-object schema", () => {
     const nodeKinds = new Map([["StringNode", { schema: z.string() }]]);
     const introspector = createSchemaIntrospector(nodeKinds);

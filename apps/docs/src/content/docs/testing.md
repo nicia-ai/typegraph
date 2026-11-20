@@ -35,7 +35,7 @@ describe("Person queries", () => {
     });
 
     const found = await store.nodes.Person.getById(alice.id);
-    expect(found?.props.name).toBe("Alice");
+    expect(found?.name).toBe("Alice");
   });
 });
 ```
@@ -172,6 +172,8 @@ it("compiles a traversal to a single statement", () => {
 ### Testing prepared queries
 
 ```typescript
+import { param } from "@nicia-ai/typegraph";
+
 it("executes prepared queries with different bindings", async () => {
   await store.nodes.Person.create({ name: "Alice" });
   await store.nodes.Person.create({ name: "Bob" });
@@ -179,7 +181,7 @@ it("executes prepared queries with different bindings", async () => {
   const prepared = store
     .query()
     .from("Person", "p")
-    .whereNode("p", (p) => p.name.eq(p.name.bind("targetName")))
+    .whereNode("p", (p) => p.name.eq(param("targetName")))
     .select((ctx) => ctx.p.name)
     .prepare();
 

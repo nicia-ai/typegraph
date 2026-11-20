@@ -16,7 +16,8 @@ Every query builder method falls into one of these categories:
 | [Filter](/queries/filter) | Reduce the result set | `whereNode()`, `whereEdge()` |
 | [Traverse](/queries/traverse) | Navigate relationships | `traverse()`, `optionalTraverse()`, `to()` |
 | [Recursive](/queries/recursive) | Variable-length paths | `recursive()` |
-| [Shape](/queries/shape) | Transform output structure | `select()`, `aggregate()` |
+| [Shape](/queries/shape) | Transform output structure | `select()`, `project()`, `map()`, `aggregate()` |
+| [Expressions](/queries/expressions) | Typed database calculations | `expr`, `project()`, expression callbacks |
 | [Aggregate](/queries/aggregate) | Summarize data | `groupBy()`, `count()`, `sum()`, `avg()` |
 | [Order](/queries/order) | Control result ordering/size | `orderBy()`, `limit()`, `offset()` |
 | [Temporal](/queries/temporal) | Time-based queries | `temporal()` |
@@ -78,6 +79,11 @@ const results = await store
 }))
 ```
 
+For new database-side projections and calculations, use typed
+[database expressions](/queries/expressions). `project()` compiles its callback to SQL, while
+`map()` transforms decoded rows in JavaScript. Existing `select()` callbacks retain their
+compatibility behavior.
+
 ## When to Use Queries vs Store API
 
 **Use the query builder** when you need:
@@ -133,14 +139,19 @@ store
 
 ### Be Specific with Kinds
 
-Unless you need subclass expansion, use exact kinds:
+Querying a kind with subclasses is polymorphic **by default** — `from`/`to`/
+`fromDynamic`/`toDynamic` include subtype rows unless you narrow. If you only
+want the exact kind, say so:
 
 ```typescript
-// More efficient: Exact kind
+// Exact kind by construction — no subclasses to expand
 .from("Podcast", "p")
 
-// Less efficient: Includes all subclasses
-.from("Media", "m", { includeSubClasses: true })
+// Polymorphic by default: includes every Media subclass (Podcast, Article, ...)
+.from("Media", "m")
+
+// Narrow it back to exactly Media rows
+.from("Media", "m", { expansion: "exact" })
 ```
 
 ### Always Paginate Large Results
@@ -151,6 +162,7 @@ const page = await store
   .from("Event", "e")
   .orderBy("e", "date", "desc")
   .limit(100)
+  .select((ctx) => ctx.e)
   .execute();
 ```
 

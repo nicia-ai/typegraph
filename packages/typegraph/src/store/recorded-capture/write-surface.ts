@@ -1,15 +1,20 @@
 import {
+  type CompareAndSetNodeParams,
   type DeleteEdgeParams,
   type DeleteEdgesBatchParams,
   type DeleteNodeParams,
   type GraphBackend,
   type HardDeleteEdgeParams,
   type HardDeleteNodeParams,
+  type HardDeleteNodesBatchParams,
+  type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
+  type ResolvedNodeUpdateBatchParams,
   type TransactionBackend,
   type UpdateEdgeParams,
   type UpdateNodeParams,
+  type UpdateNodeSetParams,
 } from "../../backend/types";
 import { type Assert, type Equal } from "../../utils/type-assert";
 
@@ -37,17 +42,27 @@ export const RECORDED_REQUIRED_WRITE_METHODS = [
   "updateEdge",
   "deleteEdge",
   "hardDeleteEdge",
+  "commands",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeNoReturn",
+  "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
   "insertNodesBatch",
   "insertNodesBatchReturning",
+  "compareAndSetNode",
+  "updateNodeSet",
+  "upsertHeterogeneousNodes",
+  "updateResolvedNodesBatch",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "insertEdgesDurableBatchReturning",
   "deleteEdgesBatch",
   "hardDeleteEdgesBatch",
+  "hardDeleteNodesBatch",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 // ============================================================
@@ -72,10 +87,15 @@ type FunctionKeys<T> = {
 
 /** First-parameter shapes that mark a backend method a graph-entity write. */
 type GraphEntityWriteParam =
+  | CompareAndSetNodeParams
   | InsertNodeParams
   | UpdateNodeParams
+  | UpdateNodeSetParams
+  | HeterogeneousNodeUpsertParams
+  | ResolvedNodeUpdateBatchParams
   | DeleteNodeParams
   | HardDeleteNodeParams
+  | HardDeleteNodesBatchParams
   | InsertEdgeParams
   | UpdateEdgeParams
   | DeleteEdgeParams
@@ -85,13 +105,15 @@ type GraphEntityWriteParam =
   | DeleteEdgesBatchParams;
 
 /** Backend methods whose signature marks them a graph-entity write. */
-type DerivedGraphEntityWriteMethod = {
-  [K in FunctionKeys<GraphBackend>]: Parameters<
-    NonNullable<GraphBackend[K]>
-  >[0] extends GraphEntityWriteParam ?
-    K
-  : never;
-}[FunctionKeys<GraphBackend>];
+type DerivedGraphEntityWriteMethod =
+  | "commands"
+  | {
+      [K in FunctionKeys<GraphBackend>]: Parameters<
+        NonNullable<GraphBackend[K]>
+      >[0] extends GraphEntityWriteParam ?
+        K
+      : never;
+    }[FunctionKeys<GraphBackend>];
 
 type ListedRecordedWriteMethod =
   | (typeof RECORDED_REQUIRED_WRITE_METHODS)[number]

@@ -7,12 +7,20 @@
     "paths": {
       "@/*": ["./src/*"],
       "@nicia-ai/typegraph": ["./src/index.ts"],
+      "@nicia-ai/typegraph/backend": ["./src/backend/index.ts"],
+      "@nicia-ai/typegraph/core": ["./src/core/index.ts"],
       "@nicia-ai/typegraph/interchange": ["./src/interchange/index.ts"],
       "@nicia-ai/typegraph/profiler": ["./src/profiler/index.ts"],
       "@nicia-ai/typegraph/schema": ["./src/schema/index.ts"],
       "@nicia-ai/typegraph/indexes": ["./src/indexes/index.ts"],
+      "@nicia-ai/typegraph/graph-extension": ["./src/graph-extension/index.ts"],
       "@nicia-ai/typegraph/graph-merge": ["./src/graph-merge/index.ts"],
       "@nicia-ai/typegraph/provenance": ["./src/provenance/index.ts"],
+      "@nicia-ai/typegraph/store": ["./src/store-entry.ts"],
+      "@nicia-ai/typegraph/query": ["./src/query-entry.ts"],
+      "@nicia-ai/typegraph/errors": ["./src/errors-entry.ts"],
+      "@nicia-ai/typegraph/identity": ["./src/identity-entry.ts"],
+      "@nicia-ai/typegraph/maintenance": ["./src/maintenance.ts"],
       "@nicia-ai/typegraph/sqlite/local": [
         "./src/backend/sqlite/local-store.ts"
       ],
@@ -31,11 +39,27 @@
       "@nicia-ai/typegraph/adapters/drizzle/postgres": [
         "./src/backend/postgres/index.ts"
       ],
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy": [
+        "./src/backend/postgres/working-copy.ts"
+      ],
       "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite": [
         "./src/backend/postgres/pglite.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/indexes": [
+        "./src/backend/drizzle/indexes.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/engine": [
+        "./src/backend/drizzle/engine/index.ts"
       ]
     }
   },
-  "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"],
+  "include": [
+    "src",
+    "tests",
+    "examples",
+    "scripts",
+    "tsup.config.ts",
+    "type-smoke/edge-endpoint-compat.ts"
+  ],
   "exclude": ["tests/do-sqlite"]
 }

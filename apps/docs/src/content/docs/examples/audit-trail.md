@@ -15,8 +15,11 @@ This example shows how to build a comprehensive audit system that:
 
 TypeGraph's temporal model provides built-in auditing capabilities:
 
-1. **Every update creates a new version** - Old data is preserved with `valid_to` timestamp
-2. **Temporal queries** - Query any point in time with `asOf` or get full history with `includeEnded`
+1. **Recorded time** - On a store opened with `history: true`, every committed write is recorded, and
+   `asOfRecorded` reads the graph as it stood at an earlier recorded instant
+2. **Valid time** - `asOf` and `includeEnded` filter rows by their validity window
+   (`validFrom` / `validTo`). An update rewrites a row in place, so these read only its current
+   properties, not earlier versions
 3. **Metadata fields** - `createdAt`, `updatedAt`, `version` are tracked automatically
 
 This example extends the built-in capabilities with:
@@ -29,7 +32,15 @@ This example extends the built-in capabilities with:
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, searchable } from "@nicia-ai/typegraph";
+import {
+  type Node,
+  type NodeId,
+  type TransactionContext,
+  defineNode,
+  defineEdge,
+  defineGraph,
+  searchable,
+} from "@nicia-ai/typegraph";
 
 // Audited entity (example: Settings)
 const Setting = defineNode("Setting", {
@@ -62,7 +73,7 @@ const AuditEntry = defineNode("AuditEntry", {
     entityId: z.string(),
     action: z.enum(["create", "update", "delete", "restore"]),
     timestamp: z.string().datetime(),
-    changes: z.record(z.object({
+    changes: z.record(z.string(), z.object({
       before: z.unknown().optional(),
       after: z.unknown().optional(),
     })).optional(),
@@ -129,8 +140,8 @@ Create a context object to track the current user and session:
 
 ```typescript
 interface AuditContext {
-  userId: string;
-  sessionId?: string;
+  userId: NodeId<typeof User>;
+  sessionId?: NodeId<typeof Session>;
   ipAddress?: string;
   userAgent?: string;
   reason?: string;
@@ -192,7 +203,7 @@ async function createSetting(
 
 ```typescript
 async function updateSetting(
-  id: string,
+  id: NodeId<typeof Setting>,
   updates: Partial<{ value: string; description: string }>
 ): Promise<Node<typeof Setting>> {
   const ctx = getAuditContext();
@@ -236,7 +247,7 @@ async function updateSetting(
 ### Delete with Audit
 
 ```typescript
-async function deleteSetting(id: string): Promise<void> {
+async function deleteSetting(id: NodeId<typeof Setting>): Promise<void> {
   const ctx = getAuditContext();
   if (!ctx) throw new Error("Audit context required");
 
@@ -274,7 +285,7 @@ interface AuditEntryInput {
 }
 
 async function createAuditEntry(
-  tx: Transaction,
+  tx: TransactionContext<typeof graph>,
   input: AuditEntryInput
 ): Promise<Node<typeof AuditEntry>> {
   const ctx = getAuditContext()!;
@@ -323,7 +334,7 @@ interface HistoryEntry {
 async function getEntityHistory(
   entityType: string,
   entityId: string
-): Promise<HistoryEntry[]> {
+): Promise<readonly HistoryEntry[]> {
   return store
     .query()
     .from("AuditEntry", "a")
@@ -334,7 +345,7 @@ async function getEntityHistory(
     .to("User", "u")
     .orderBy((ctx) => ctx.a.timestamp, "desc")
     .select((ctx) => ({
-      version: ctx.a.version,
+      version: ctx.a.meta.version,
       timestamp: ctx.a.timestamp,
       action: ctx.a.action,
       changes: ctx.a.changes,
@@ -361,7 +372,7 @@ interface UserActivity {
 async function getUserActivity(
   userId: string,
   options: { since?: Date; limit?: number } = {}
-): Promise<UserActivity[]> {
+): Promise<readonly UserActivity[]> {
   const { since, limit = 100 } = options;
 
   let query = store
@@ -402,7 +413,7 @@ interface ChangeReport {
 async function getChangesInRange(
   startDate: Date,
   endDate: Date
-): Promise<ChangeReport[]> {
+): Promise<readonly ChangeReport[]> {
   const entries = await store
     .query()
     .from("AuditEntry", "a")
@@ -453,47 +464,24 @@ async function getChangesInRange(
 
 ## Using TypeGraph's Built-in Temporal Features
 
+A setting has one stored row: `update` rewrites it in place and raises `meta.version`, so neither
+`asOf` nor `includeEnded` returns an earlier version. The audit entries above are this example's
+version history (see [Get Entity History](#get-entity-history)). To reconstruct a setting's complete
+state at an earlier time as well, open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`) and read it at a
+[recorded instant](/queries/temporal#reading-at-a-recorded-instant).
+
 ### View Entity at Point in Time
 
 ```typescript
 async function getSettingAsOf(
-  id: string,
+  id: NodeId<typeof Setting>,
   timestamp: Date
-): Promise<SettingProps | undefined> {
-  return store
-    .query()
-    .from("Setting", "s")
-    .temporal("asOf", timestamp.toISOString())
-    .whereNode("s", (s) => s.id.eq(id))
-    .select((ctx) => ctx.s)
-    .first();
-}
-```
-
-### Get All Versions
-
-```typescript
-interface SettingVersion {
-  props: SettingProps;
-  validFrom: string;
-  validTo: string | undefined;
-  version: number;
-}
-
-async function getSettingVersions(id: string): Promise<SettingVersion[]> {
-  return store
-    .query()
-    .from("Setting", "s")
-    .temporal("includeEnded")
-    .whereNode("s", (s) => s.id.eq(id))
-    .orderBy((ctx) => ctx.s.validFrom, "desc")
-    .select((ctx) => ({
-      props: ctx.s,
-      validFrom: ctx.s.validFrom,
-      validTo: ctx.s.validTo,
-      version: ctx.s.version,
-    }))
-    .execute();
+): Promise<Node<typeof Setting> | undefined> {
+  const anchor = await store.resolveRecordedInstant(timestamp.toISOString());
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Setting.getById(id);
 }
 ```
 
@@ -507,34 +495,23 @@ interface VersionDiff {
 }
 
 async function compareVersions(
-  id: string,
-  version1: number,
-  version2: number
-): Promise<VersionDiff[]> {
-  const versions = await store
-    .query()
-    .from("Setting", "s")
-    .temporal("includeEnded")
-    .whereNode("s", (s) => s.id.eq(id).and(s.version.in([version1, version2])))
-    .orderBy((ctx) => ctx.s.version, "asc")
-    .select((ctx) => ctx.s)
-    .execute();
+  id: NodeId<typeof Setting>,
+  before: Date,
+  after: Date
+): Promise<readonly VersionDiff[]> {
+  const [earlier, later] = await Promise.all([
+    getSettingAsOf(id, before),
+    getSettingAsOf(id, after),
+  ]);
 
-  if (versions.length !== 2) {
-    throw new Error("Versions not found");
+  if (earlier === undefined || later === undefined) {
+    throw new Error("Setting not recorded at both times");
   }
 
-  const [before, after] = versions;
   const diffs: VersionDiff[] = [];
-
-  const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
-
-  for (const key of allKeys) {
-    const beforeVal = before[key as keyof typeof before];
-    const afterVal = after[key as keyof typeof after];
-
-    if (JSON.stringify(beforeVal) !== JSON.stringify(afterVal)) {
-      diffs.push({ field: key, before: beforeVal, after: afterVal });
+  for (const field of ["key", "value", "category", "description"] as const) {
+    if (earlier[field] !== later[field]) {
+      diffs.push({ field, before: earlier[field], after: later[field] });
     }
   }
 
@@ -548,7 +525,7 @@ async function compareVersions(
 
 ```typescript
 async function startSession(
-  userId: string,
+  userId: NodeId<typeof User>,
   metadata: { ipAddress?: string; userAgent?: string }
 ): Promise<Node<typeof Session>> {
   return store.transaction(async (tx) => {
@@ -570,7 +547,7 @@ async function startSession(
 ### End Session
 
 ```typescript
-async function endSession(sessionId: string): Promise<void> {
+async function endSession(sessionId: NodeId<typeof Session>): Promise<void> {
   await store.nodes.Session.update(sessionId, {
     endedAt: new Date().toISOString(),
   });
@@ -582,7 +559,7 @@ async function endSession(sessionId: string): Promise<void> {
 ```typescript
 async function getSessionActivity(
   sessionId: string
-): Promise<Array<{ timestamp: string; action: string; entityType: string }>> {
+): Promise<ReadonlyArray<{ timestamp: string; action: string; entityType: string }>> {
   return store
     .query()
     .from("Session", "s")
@@ -739,6 +716,8 @@ async function searchAuditInRange(
 ### Stream to External System
 
 ```typescript
+type AuditEntryProps = Node<typeof AuditEntry>;
+
 async function* exportAuditLogs(
   since: Date,
   batchSize = 1000

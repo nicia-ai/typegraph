@@ -9,13 +9,16 @@ This example builds a product catalog system with:
 - **Product variants** (size, color, etc.)
 - **Inventory tracking** across warehouses
 - **Product relationships** (bundles, accessories, alternatives)
-- **Price history** using temporal queries
+- **Price history** using recorded time
 
 ## Schema Definition
 
 ```typescript
 import { z } from "zod";
 import {
+  type Node,
+  type NodeId,
+  asNodeId,
   defineNode,
   defineEdge,
   defineGraph,
@@ -61,7 +64,7 @@ const Variant = defineNode("Variant", {
     // that complements the product-level embedding.
     name: searchable({ language: "english" }),
     priceModifier: z.number().default(0), // Added to base price
-    attributes: z.record(z.string()), // { size: "L", color: "blue" }
+    attributes: z.record(z.string(), z.string()), // { size: "L", color: "blue" }
     isDefault: z.boolean().default(false),
   }),
 });
@@ -182,10 +185,12 @@ async function createCategory(
   );
 
   if (result.action === "created" && parentSlug) {
-    const parent = await store.nodes.Category.findByConstraint(
-      "category_slug",
-      { slug: parentSlug },
-    );
+    const parent = await store
+      .query()
+      .from("Category", "c")
+      .whereNode("c", (c) => c.slug.eq(parentSlug))
+      .select((ctx) => ctx.c)
+      .first();
     if (parent) {
       await store.edges.parentCategory.create(result.node, parent, {});
     }
@@ -213,10 +218,12 @@ interface CategoryWithPath {
 }
 
 async function getCategoryWithPath(slug: string): Promise<CategoryWithPath | undefined> {
-  const category = await store.nodes.Category.findByConstraint(
-    "category_slug",
-    { slug },
-  );
+  const category = await store
+    .query()
+    .from("Category", "c")
+    .whereNode("c", (c) => c.slug.eq(slug))
+    .select((ctx) => ctx.c)
+    .first();
   if (!category) return undefined;
 
   // Walk `parentCategory` edges up to the root. `reachable` returns each
@@ -231,7 +238,9 @@ async function getCategoryWithPath(slug: string): Promise<CategoryWithPath | und
     .toSorted((a, b) => b.depth - a.depth)
     .map((node) => node.id);
 
-  const ancestors = await store.nodes.Category.getByIds(ancestorIds);
+  const ancestors = await store.nodes.Category.getByIds(
+    ancestorIds.map((id) => asNodeId<typeof Category>(id)),
+  );
 
   return {
     id: category.id,
@@ -251,10 +260,12 @@ async function getSubcategories(
   parentSlug: string,
   includeNested = false
 ): Promise<Array<{ id: string; name: string; slug: string; depth: number }>> {
-  const parent = await store.nodes.Category.findByConstraint(
-    "category_slug",
-    { slug: parentSlug },
-  );
+  const parent = await store
+    .query()
+    .from("Category", "c")
+    .whereNode("c", (c) => c.slug.eq(parentSlug))
+    .select((ctx) => ctx.c)
+    .first();
   if (!parent) return [];
 
   // `reachable` returns descendants tagged with their depth. Cap at 1 for
@@ -268,7 +279,7 @@ async function getSubcategories(
   });
 
   const children = (await store.nodes.Category.getByIds(
-    descendants.map((node) => node.id),
+    descendants.map((node) => asNodeId<typeof Category>(node.id)),
   )).filter(
     (category): category is NonNullable<typeof category> =>
       category !== undefined && category.isActive,
@@ -361,7 +372,7 @@ interface ProductDetails {
   description: string;
   basePrice: number;
   status: string;
-  categories: Array<{ name: string; slug: string; isPrimary: boolean }>;
+  categories: ReadonlyArray<{ name: string; slug: string; isPrimary: boolean }>;
   variants: Array<{
     id: string;
     sku: string;
@@ -370,19 +381,21 @@ interface ProductDetails {
     attributes: Record<string, string>;
     inventory: number;
   }>;
-  related: Array<{ id: string; name: string; type: string }>;
+  related: ReadonlyArray<{ id: string; name: string; type: string }>;
 }
 
 async function getProductDetails(sku: string): Promise<ProductDetails | undefined> {
-  const product = await store.nodes.Product.findByConstraint(
-    "product_sku",
-    { sku },
-  );
+  const product = await store
+    .query()
+    .from("Product", "p")
+    .whereNode("p", (p) => p.sku.eq(sku))
+    .select((ctx) => ctx.p)
+    .first();
   if (!product) return undefined;
 
-  // `store.batch()` runs all three queries over a single connection with
-  // snapshot consistency — no interleaved writes between the category,
-  // variant, and related reads.
+  // `store.batch()` runs all three queries in sequence, one at a time —
+  // still three statements, and read-committed isolation means a write can
+  // land between them. It is the pool-pressure win, not a snapshot.
   const [categories, variants, related] = await store.batch(
     store
       .query()
@@ -479,7 +492,7 @@ async function updateInventory(
     .traverse("inventoryFor", "e1")
     .to("Variant", "v")
     .whereNode("v", (v) => v.id.eq(variant.id))
-    .traverse("atWarehouse", "e2", { direction: "in" })
+    .traverse("atWarehouse", "e2", { from: "i" })
     .to("Warehouse", "w")
     .whereNode("w", (w) => w.id.eq(warehouse.id))
     .select((ctx) => ctx.i)
@@ -545,17 +558,17 @@ async function reserveInventory(
 ### Low Stock Report
 
 ```typescript
-import { field, sum, havingLt } from "@nicia-ai/typegraph";
+import { expr, field, max, sum } from "@nicia-ai/typegraph";
 
 interface LowStockItem {
   productName: string;
   variantSku: string;
   variantName: string;
-  totalQuantity: number;
-  reorderPoint: number;
+  totalQuantity: number | undefined;
+  reorderPoint: number | undefined;
 }
 
-async function getLowStockItems(): Promise<LowStockItem[]> {
+async function getLowStockItems(): Promise<readonly LowStockItem[]> {
   return store
     .query()
     .from("Product", "p")
@@ -563,14 +576,18 @@ async function getLowStockItems(): Promise<LowStockItem[]> {
     .to("Variant", "v")
     .traverse("inventoryFor", "e2", { direction: "in" })
     .to("Inventory", "i")
-    .groupByNode("v")
-    .having(havingLt(sum("i", "quantity"), field("i", "reorderPoint")))
+    .groupBy("p", "name")
+    .groupBy("v", "sku")
+    .groupBy("v", "name")
+    // `havingLt()` compares an aggregate with a constant; comparing two
+    // aggregates uses the expression form.
+    .having((e) => expr.lt(expr.sum(e.i.quantity), expr.max(e.i.reorderPoint)))
     .aggregate({
       productName: field("p", "name"),
       variantSku: field("v", "sku"),
       variantName: field("v", "name"),
       totalQuantity: sum("i", "quantity"),
-      reorderPoint: field("i", "reorderPoint"),
+      reorderPoint: max("i", "reorderPoint"),
     })
     .execute();
 }
@@ -609,6 +626,8 @@ retrieval with Reciprocal Rank Fusion. RRF is rank-based, so it handles
 the score-scale mismatch between BM25 and cosine automatically:
 
 ```typescript
+type ProductProps = Node<typeof Product>;
+
 async function searchProducts(
   query: string,
   options: {
@@ -626,10 +645,12 @@ async function searchProducts(
   // candidate pool before fusion — better latency and ranking quality.
   let categoryIds: readonly string[] | undefined;
   if (categorySlug) {
-    const root = await store.nodes.Category.findByConstraint(
-      "category_slug",
-      { slug: categorySlug },
-    );
+    const root = await store
+      .query()
+      .from("Category", "c")
+      .whereNode("c", (c) => c.slug.eq(categorySlug))
+      .select((ctx) => ctx.c)
+      .first();
     if (!root) return [];
     const subtree = await store.algorithms.reachable(root.id, {
       edges: ["parentCategory"],
@@ -746,13 +767,15 @@ async function getProductsInCategory(
     pageSize?: number;
     sortBy?: "name" | "price" | "newest";
   } = {}
-): Promise<{ products: ProductProps[]; total: number }> {
+): Promise<{ products: readonly ProductProps[]; total: number }> {
   const { includeSubcategories = true, page = 1, pageSize = 20, sortBy = "name" } = options;
 
-  const root = await store.nodes.Category.findByConstraint(
-    "category_slug",
-    { slug: categorySlug },
-  );
+  const root = await store
+    .query()
+    .from("Category", "c")
+    .whereNode("c", (c) => c.slug.eq(categorySlug))
+    .select((ctx) => ctx.c)
+    .first();
   if (!root) return { products: [], total: 0 };
 
   const categoryIds = includeSubcategories
@@ -776,10 +799,10 @@ async function getProductsInCategory(
   // Apply sorting
   const sortedQuery =
     sortBy === "price"
-      ? query.orderBy((ctx) => ctx.p.basePrice, "asc")
+      ? query.orderBy("p", "basePrice", "asc")
       : sortBy === "newest"
-        ? query.orderBy((ctx) => ctx.p.createdAt, "desc")
-        : query.orderBy((ctx) => ctx.p.name, "asc");
+        ? query.orderBy("p", "meta.createdAt", "desc")
+        : query.orderBy("p", "name", "asc");
 
   const products = await sortedQuery
     .limit(pageSize)
@@ -801,44 +824,35 @@ async function getProductsInCategory(
 
 ## Price History
 
-### Track Price Changes
-
-TypeGraph's temporal model automatically tracks all changes:
-
-```typescript
-async function getPriceHistory(
-  sku: string
-): Promise<Array<{ price: number; validFrom: string; validTo: string | undefined }>> {
-  return store
-    .query()
-    .from("Product", "p")
-    .temporal("includeEnded")
-    .whereNode("p", (p) => p.sku.eq(sku))
-    .orderBy((ctx) => ctx.p.validFrom, "desc")
-    .select((ctx) => ({
-      price: ctx.p.basePrice,
-      validFrom: ctx.p.validFrom,
-      validTo: ctx.p.validTo,
-    }))
-    .execute();
-}
-```
+A product has one stored row, so changing its `basePrice` with `update` overwrites the old price. No
+temporal mode returns it afterwards: `includeEnded` returns the same single row, and `asOf` returns
+the current price of a product that was valid at the instant. Earlier prices are kept by
+[recorded time](/queries/temporal#recorded-time-bitemporal): open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`) to record every committed write.
 
 ### Price at Point in Time
 
+Resolve the date to the recorded instant at or before it, and read the product there:
+
 ```typescript
 async function getPriceAsOf(sku: string, date: Date): Promise<number | undefined> {
-  const product = await store
+  const anchor = await store.resolveRecordedInstant(date.toISOString());
+  // undefined: nothing was recorded at or before that date.
+  if (anchor === undefined) return undefined;
+
+  return store
+    .asOfRecorded(anchor)
     .query()
     .from("Product", "p")
-    .temporal("asOf", date.toISOString())
     .whereNode("p", (p) => p.sku.eq(sku))
     .select((ctx) => ctx.p.basePrice)
     .first();
-
-  return product;
 }
 ```
+
+A recorded read answers for one instant. To list every price a product has had, keep the anchors of the
+price changes you care about (`store.recordedNow()` after each update) and read the product at each, or
+record each change as its own node when you need the list itself.
 
 ## Next Steps
 

@@ -5,6 +5,7 @@ import {
   MAX_PG_IDENTIFIER_LENGTH,
   TRUNCATED_IDENTIFIER_MAX_LENGTH,
 } from "../constants";
+import { objectSchemaShape } from "../core/kind-schema";
 import {
   type AnyEdgeType,
   type KindEntity,
@@ -26,7 +27,13 @@ import {
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
 import { fnv1aBase36 } from "../utils/hash";
-import { getNodeScopeColumns } from "./compiler";
+import { hasOwnKey, isInteropProbeKey } from "../utils/object";
+import {
+  getNodeScopeColumns,
+  parseNodeIndexKeyDirection,
+  validateEdgeIndexKeysPresence,
+  validateNodeIndexKeyContract,
+} from "./node-key-contract";
 import {
   type EdgeIndexConfig,
   type EdgeIndexDeclaration,
@@ -41,6 +48,7 @@ import {
   type IndexWhereOperand,
   type NodeIndexConfig,
   type NodeIndexDeclaration,
+  type NodeIndexKey,
   type NodeIndexWhereBuilder,
   type RelationalIndexMethod,
   type SystemColumnName,
@@ -68,8 +76,9 @@ export function defineNodeIndex<N extends NodeType>(
 ): NodeIndexDeclaration {
   const scope = config.scope ?? "graphAndKind";
   const unique = config.unique ?? false;
+  const keys = normalizeNodeIndexKeysOrThrow(node, config);
   const keySystemColumns = normalizeKeySystemColumnsOrThrow(
-    config.keySystemColumns ?? [],
+    keys.length === 0 ? (config.keySystemColumns ?? []) : [],
     scope,
     unique,
   );
@@ -98,14 +107,28 @@ export function defineNodeIndex<N extends NodeType>(
       {},
     );
   assertNoOverlap(fields, coveringFields, "fields", "coveringFields");
+  const keyContractError = validateNodeIndexKeyContract({
+    keys,
+    fields,
+    coveringFields,
+    keySystemColumns: config.keySystemColumns,
+    unique,
+    scope,
+    method: config.method,
+    fieldsDeclared: config.fields !== undefined,
+  })[0];
+  if (config.keys !== undefined && keyContractError !== undefined) {
+    throw new Error(keyContractError);
+  }
 
   if (
     fields.length === 0 &&
     coveringFields.length === 0 &&
-    keySystemColumns.length === 0
+    keySystemColumns.length === 0 &&
+    keys.length === 0
   ) {
     throw new Error(
-      "Index must declare at least one of fields, coveringFields, or keySystemColumns",
+      "Index must declare at least one of keys, fields, coveringFields, or keySystemColumns",
     );
   }
 
@@ -131,6 +154,7 @@ export function defineNodeIndex<N extends NodeType>(
     fields,
     coveringFields,
     keySystemColumns,
+    keys,
   });
   const name =
     config.name ??
@@ -153,7 +177,64 @@ export function defineNodeIndex<N extends NodeType>(
     where,
     ...(method === undefined ? {} : { method }),
     ...(keySystemColumns.length === 0 ? {} : { keySystemColumns }),
+    ...(keys.length === 0 ? {} : { keys }),
   };
+}
+
+function normalizeNodeIndexKeysOrThrow<N extends NodeType>(
+  node: N,
+  config: NodeIndexConfig<N>,
+): readonly NodeIndexKey[] {
+  const inputs = config.keys;
+  if (inputs === undefined) return [];
+  const schemaIntrospector = createSchemaIntrospector(
+    new Map([[node.kind, { schema: node.schema }]]),
+  );
+  const keys: NodeIndexKey[] = [];
+
+  for (const input of inputs) {
+    const direction = parseNodeIndexKeyDirection(input.direction);
+    if (direction === undefined) {
+      throw new Error('Node index key direction must be "asc" or "desc"');
+    }
+    const hasField = hasOwnKey(input, "field");
+    const hasSystem = hasOwnKey(input, "system");
+    if (hasField === hasSystem) {
+      throw new Error(
+        "Node index key must declare exactly one of field or system",
+      );
+    }
+    if (hasSystem) {
+      const column = input.system;
+      if (column === undefined) {
+        throw new Error(
+          "Node index key must declare exactly one of field or system",
+        );
+      }
+      keys.push({ type: "system", column, direction });
+      continue;
+    }
+
+    const field = input.field;
+    if (field === undefined) throw new Error("Node index key is incomplete");
+    const normalized = normalizeNodeIndexFieldsOrThrow(
+      node,
+      [field],
+      schemaIntrospector,
+      "keys",
+      {},
+    );
+    const pointer = normalized.pointers[0];
+    if (pointer === undefined) throw new Error("Node index key is incomplete");
+    keys.push({
+      type: "field",
+      pointer,
+      valueType: normalized.valueTypes[0],
+      direction,
+    });
+  }
+
+  return keys;
 }
 
 /**
@@ -206,6 +287,8 @@ export function defineEdgeIndex<E extends AnyEdgeType>(
   edge: E,
   config: EdgeIndexConfig<E>,
 ): EdgeIndexDeclaration {
+  const edgeKeyError = validateEdgeIndexKeysPresence(config);
+  if (edgeKeyError !== undefined) throw new Error(edgeKeyError);
   const scope = config.scope ?? "graphAndKind";
   const unique = config.unique ?? false;
   const direction = config.direction ?? "none";
@@ -398,7 +481,7 @@ function createNodeWhereBuilder<N extends NodeType>(
       };
     }
 
-    if (!(key in shape)) {
+    if (!hasOwnKey(shape, key)) {
       throw new Error(
         `Unknown field "${key}" in node index WHERE clause for "${node.kind}"`,
       );
@@ -414,7 +497,10 @@ function createNodeWhereBuilder<N extends NodeType>(
     };
   }
 
-  return createWhereProxy<NodeIndexWhereBuilder<N>>((key) => getOperand(key));
+  return createWhereProxy<NodeIndexWhereBuilder<N>>(
+    (key) => getOperand(key),
+    (key) => system.has(key) || hasOwnKey(shape, key),
+  );
 }
 
 function createEdgeWhereBuilder<E extends AnyEdgeType>(
@@ -434,7 +520,7 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
       };
     }
 
-    if (!(key in shape)) {
+    if (!hasOwnKey(shape, key)) {
       throw new Error(
         `Unknown field "${key}" in edge index WHERE clause for "${edge.kind}"`,
       );
@@ -450,17 +536,33 @@ function createEdgeWhereBuilder<E extends AnyEdgeType>(
     };
   }
 
-  return createWhereProxy<EdgeIndexWhereBuilder<E>>((key) => getOperand(key));
+  return createWhereProxy<EdgeIndexWhereBuilder<E>>(
+    (key) => getOperand(key),
+    (key) => system.has(key) || hasOwnKey(shape, key),
+  );
 }
 
 function createWhereProxy<TBuilder extends object>(
   getOperand: (key: string) => IndexWhereOperand,
+  declaresField: (key: string) => boolean,
 ): TBuilder {
-  return new Proxy(Object.create(null) as TBuilder, {
+  // An ORDINARY object target, even though the target is never read: a proxy's
+  // target is what `instanceof`, `Object.getPrototypeOf` and every other
+  // internal method resolve against, and this proxy is handed to the CALLER's
+  // `where:` callback. A null-prototype target made `builder instanceof Object`
+  // answer `false` for no benefit — nothing is ever written to it, so it was
+  // not even the `__proto__`-write protection a data-keyed bag exists for.
+  return new Proxy({} as TBuilder, {
     get: (_target, property: string | symbol) => {
       if (typeof property !== "string") return;
-      if (property === "then") return;
-      if (property === "toJSON") return;
+
+      // A DECLARED field wins over the interop exemption, for the reason
+      // `isInteropProbeKey` documents: `then` and `toJSON` are legal schema
+      // field names, and refusing them here left a partial index unable to
+      // reference a field the schema declares. Only an UNDECLARED probe
+      // resolves to `undefined`, keeping the builder safe to await or
+      // stringify.
+      if (isInteropProbeKey(property) && !declaresField(property)) return;
 
       const operand = getOperand(property);
       return createIndexWhereFieldBuilder(operand);
@@ -628,14 +730,9 @@ function createSystemColumnMapForEdge(): Map<
 }
 
 function getSchemaShape(schema: z.ZodType): NodeShape | EdgeShape {
-  if (schema.type !== "object") {
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) {
     throw new Error("Index definitions require an object schema");
-  }
-
-  const def = schema.def as { shape?: Record<string, z.ZodType> };
-  const shape = def.shape;
-  if (!shape) {
-    throw new Error("Index definitions require a resolvable object shape");
   }
 
   return shape;
@@ -884,10 +981,12 @@ type DefaultNameParts = Readonly<{
    * default names to before this field existed.
    */
   keySystemColumns?: readonly string[];
+  keys?: readonly NodeIndexKey[];
 }>;
 
 function generateDefaultIndexName(parts: DefaultNameParts): string {
   const keySystemColumns = parts.keySystemColumns ?? [];
+  const keys = parts.keys ?? [];
   const hash = fnv1aBase36(
     JSON.stringify({
       kind: parts.kind,
@@ -898,6 +997,7 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
       fields: parts.fields,
       covering: parts.coveringFields,
       ...(keySystemColumns.length > 0 ? { keySystemColumns } : {}),
+      ...(keys.length > 0 ? { keys } : {}),
     }),
   );
 
@@ -914,6 +1014,17 @@ function generateDefaultIndexName(parts: DefaultNameParts): string {
     : undefined,
     keySystemColumns.length > 0 ?
       `sys_${sanitizeIdentifierComponent(keySystemColumns.join("_"))}`
+    : undefined,
+    keys.length > 0 ?
+      `keys_${sanitizeIdentifierComponent(
+        keys
+          .map((key) =>
+            key.type === "field" ?
+              `${key.pointer}_${key.direction}`
+            : `${key.column}_${key.direction}`,
+          )
+          .join("_"),
+      )}`
     : undefined,
     parts.direction === "none" ? undefined : parts.direction,
     parts.unique ? "uniq" : undefined,

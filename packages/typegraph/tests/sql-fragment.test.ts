@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  countSqlParameters,
   isSqlFragment,
   isSqlPlaceholder,
   Placeholder,
@@ -99,6 +100,22 @@ describe("SQL fragments", () => {
       sql: "SELECT $1, $2",
       params: [true, "2025-01-02T03:04:05.000Z"],
     });
+  });
+
+  // MUTATION CHECK: composing with `chunks.push(...getChunks(value))` again
+  // throws "RangeError: Maximum call stack size exceeded" here — verified and
+  // reverted.
+  it("composes a fragment with more chunks than a call accepts as arguments", () => {
+    const rowCount = 100_000;
+    const rows = Array.from(
+      { length: rowCount },
+      (_unused, index) => sql`(${index}, ${index})`,
+    );
+    const values = sql.join(rows, sql`, `);
+
+    const statement = sql`SELECT * FROM (VALUES ${values}) AS t`;
+
+    expect(countSqlParameters(statement)).toBe(rowCount * 2);
   });
 
   it("recognizes globally branded fragments from another module instance", () => {

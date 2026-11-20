@@ -1,6 +1,10 @@
 import { type SQL, sql } from "drizzle-orm";
 
-import type { InsertSchemaParams, SqlDialect } from "../../types";
+import type {
+  InsertSchemaParams,
+  SchemaWriteFenceParams,
+  SqlDialect,
+} from "../../types";
 import { quotedColumn, type Tables } from "./shared";
 
 type SchemaDialectStrategy = Readonly<{
@@ -78,6 +82,23 @@ export function buildGetActiveSchema(
     SELECT * FROM ${schemaVersions}
     WHERE ${schemaVersions.graphId} = ${graphId}
       AND ${schemaVersions.isActive} = ${strategy.booleanLiteral(true)}
+  `;
+}
+
+/** Returns one row only while the expected schema version remains active. */
+export function buildSchemaFenceProbe(
+  tables: Tables,
+  params: SchemaWriteFenceParams,
+  lockClause: SQL,
+): SQL {
+  const { schemaVersions } = tables;
+  return sql`
+    SELECT ${schemaVersions.version}
+    FROM ${schemaVersions}
+    WHERE ${schemaVersions.graphId} = ${params.graphId}
+      AND ${schemaVersions.version} = ${params.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+    ${lockClause}
   `;
 }
 

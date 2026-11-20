@@ -3,37 +3,42 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "imports": {
+    "#blog-art": "./scripts/lib/blog-art.mjs",
+    "#generic-blog-image": "./scripts/generate-blog-images.mjs"
+  },
   "scripts": {
     "predev": "node scripts/sync-changelog.mjs",
     "dev": "astro dev",
-    "prebuild": "node scripts/sync-changelog.mjs",
+    "prebuild": "node scripts/sync-changelog.mjs && node scripts/check-blog-images.mjs",
     "build": "astro build",
     "preview": "astro preview",
     "preview:cf": "wrangler dev",
     "deploy": "astro build && wrangler deploy",
-    "pretypecheck": "node scripts/sync-changelog.mjs",
+    "pretypecheck": "node scripts/sync-changelog.mjs && node scripts/check-blog-images.mjs",
     "typecheck": "astro check",
     "lint": "eslint .",
-    "sync:changelog": "node scripts/sync-changelog.mjs"
+    "sync:changelog": "node scripts/sync-changelog.mjs",
+    "check:blog-images": "node scripts/check-blog-images.mjs"
   },
   "dependencies": {
-    "@astrojs/check": "^0.9.9",
-    "@astrojs/cloudflare": "^14.1.1",
-    "@astrojs/markdown-satteri": "^0.3.3",
-    "@astrojs/starlight": "^0.41.2",
+    "@astrojs/check": "^0.9.12",
+    "@astrojs/cloudflare": "^14.4.8",
+    "@astrojs/markdown-satteri": "^0.4.10",
+    "@astrojs/starlight": "^0.43.1",
     "@astrojs/starlight-tailwind": "^5.0.0",
-    "astro": "^7.0.6",
-    "starlight-llms-txt": "^0.11.0"
+    "astro": "^7.4.12",
+    "starlight-blog": "^0.30.2"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.2",
+    "@tailwindcss/vite": "^4.3.5",
     "@typegraph/eslint-config": "workspace:*",
-    "@types/node": "^24.13.2",
-    "astro-eslint-parser": "^2.1.0",
-    "eslint": "^10.6.0",
-    "eslint-plugin-astro": "^2.1.1",
-    "tailwindcss": "^4.3.2",
+    "@types/node": "^24.13.6",
+    "astro-eslint-parser": "^3.2.0",
+    "eslint": "^10.11.0",
+    "eslint-plugin-astro": "^3.2.1",
+    "tailwindcss": "^4.3.5",
     "typescript": "^5.9.3",
-    "wrangler": "^4.107.0"
+    "wrangler": "^4.162.0"
   }
 }

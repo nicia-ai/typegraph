@@ -1,11 +1,17 @@
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
-  createBackendOverlay,
   type EdgeRow,
   type GraphBackend,
   type NodeRow,
+  type OptionalTransactionExecution,
+  type TransactionBackend,
+  type TransactionOptions,
 } from "../backend/types";
-import { type ReadCoordinate } from "../core/temporal";
+import {
+  parseRecordedInstant,
+  type ReadCoordinate,
+  type RecordedInstantParts,
+} from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
@@ -18,6 +24,7 @@ import {
   type RecordedReadBinding,
   recordedReadSqlSchema,
   requireRecordedReadBinding,
+  type SqlSchema,
 } from "../query/compiler/schema";
 import {
   compileTemporalFilter,
@@ -29,11 +36,20 @@ import { asCompiledRowsSql, type CompiledRowsSql } from "../query/sql-intent";
 import { chunk } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
+import { type GraphAllocationOwnerRead } from "./allocation-owner";
+import { readRecordedAdjacency } from "./recorded-adjacency";
+import {
+  assertRecordedAnchorOrigin,
+  type RecordedAnchorOwner,
+  requireRecordedAnchorOwner,
+} from "./recorded-anchor-origin";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
 import {
   type Edge,
   type Node,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedScanOptions,
   type RecordedScanPage,
 } from "./types";
@@ -45,6 +61,10 @@ type RecordedReadServiceParams = Readonly<{
   graphId: string;
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
+  revisionOriginSession: (
+    target: TransactionBackend,
+    execution: OptionalTransactionExecution,
+  ) => Promise<GraphAllocationOwnerRead>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
 }>;
@@ -70,6 +90,16 @@ type RecordedScanParams<T extends Readonly<{ id: string }>> = Readonly<{
 }>;
 
 export type RecordedReadService = Readonly<{
+  adjacency: (
+    root: Readonly<{ kind: string; id: string }>,
+    coordinate: ReadCoordinate,
+    edgeKinds: readonly string[],
+    options?: RecordedAdjacencyOptions,
+  ) => Promise<
+    RecordedAdjacencyPage<
+      Readonly<{ edge: Edge; neighbor: Readonly<{ kind: string; id: string }> }>
+    >
+  >;
   backendForCoordinate: (
     coordinate: ReadCoordinate,
     surface: string,
@@ -134,38 +164,89 @@ function withRelationsPrecondition<T>(
   );
 }
 
-function createRecordedReadBackend(
-  backend: GraphBackend,
+function recordedReadExecutionMembers(
+  backend: TransactionBackend,
   surface: string,
-): GraphBackend {
-  // A public AdapterStore backend is frozen. Decorate a fresh allowlist
-  // projection so Proxy invariants do not prevent the execute guards from
-  // replacing non-configurable function properties.
-  const projectedBackend = createGraphBackendProjection(backend);
-  return createBackendOverlay(projectedBackend, {
-    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> =>
-      withRelationsPrecondition(backend, backend.execute<T>(query), surface),
+  assertOrigin?: (target: TransactionBackend) => Promise<void>,
+): Pick<TransactionBackend, "execute" | "executeRaw"> {
+  return {
+    execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      await assertOrigin?.(backend);
+      const rows = await withRelationsPrecondition(
+        backend,
+        backend.execute<T>(query),
+        surface,
+      );
+      await assertOrigin?.(backend);
+      return rows;
+    },
     ...(backend.executeRaw === undefined ?
       {}
     : {
-        executeRaw: <T>(
-          sqlText: string,
+        executeRaw: async <T>(
+          text: string,
           params: readonly unknown[],
-        ): Promise<readonly T[]> =>
-          withRelationsPrecondition(
+        ): Promise<readonly T[]> => {
+          await assertOrigin?.(backend);
+          const rows = await withRelationsPrecondition(
             backend,
-            requireDefined(backend.executeRaw)<T>(sqlText, params),
+            requireDefined(backend.executeRaw)<T>(text, params),
             surface,
-          ),
+          );
+          await assertOrigin?.(backend);
+          return rows;
+        },
       }),
+  };
+}
+
+function createRecordedReadBackend(
+  backend: GraphBackend,
+  surface: string,
+  assertOrigin: (target: TransactionBackend) => Promise<void>,
+  assertSnapshotOrigin: (target: TransactionBackend) => Promise<boolean>,
+): GraphBackend {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
+    ...recordedReadExecutionMembers(backend, surface, assertOrigin),
+    transaction: async <T>(
+      fn: (target: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> => {
+      await assertOrigin(backend);
+      const result = await backend.transaction(async (target) => {
+        // The owner read resolves snapshot evidence on THIS target. A confirmed
+        // snapshot covers every subsequent read until this callback ends;
+        // the root check below still rejects retirement outside that snapshot.
+        const pinned = await assertSnapshotOrigin(target);
+        const guarded = deriveBackend(
+          target,
+          recordedReadExecutionMembers(
+            target,
+            surface,
+            pinned ? undefined : assertOrigin,
+          ),
+        );
+        return fn(guarded);
+      }, options);
+      await assertOrigin(backend);
+      return result;
+    },
   });
 }
 
-function recordedTemporalFilter(
-  backend: GraphBackend,
+/**
+ * The recorded revision a point read or scan reconstructs at, parsed once
+ * from the coordinate's `recorded.asOf` — the single place a missing
+ * recorded pin is refused, consulted by {@link createRecordedReadService}'s
+ * callers before they resolve the recorded schema. The temporal filter below
+ * re-derives the same instant through {@link compileTemporalFilter}'s own
+ * parse rather than repeating the refusal here, since by the time it runs
+ * this function has already guaranteed the coordinate carries one.
+ */
+function requireRecordedRevision(
   coordinate: ReadCoordinate,
-  tableAlias: string,
-): SqlFragment {
+): RecordedInstantParts {
   const recordedAsOf = coordinate.recorded?.asOf;
   if (recordedAsOf === undefined) {
     throw new ConfigurationError(
@@ -173,13 +254,58 @@ function recordedTemporalFilter(
       { code: "RECORDED_POINT_READ_MISSING_COORDINATE" },
     );
   }
+  return parseRecordedInstant(recordedAsOf, "coordinate.recorded.asOf");
+}
+
+function recordedTemporalFilter(
+  coordinate: ReadCoordinate,
+  tableAlias: string,
+  recordedReadBinding: RecordedReadBinding,
+): SqlFragment {
   return compileTemporalFilter({
     mode: coordinate.valid.mode,
     asOf: coordinate.valid.asOf,
-    recordedAsOf,
+    recordedAsOf: coordinate.recorded?.asOf,
     tableAlias,
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding,
   });
+}
+
+/**
+ * The ORDER BY a recorded point read applies, letting `recordedGetByIds`
+ * detect an overlapping-interval anomaly deterministically. Meaningful only
+ * for a binding whose source carries the `recorded_from`/`recorded_to`
+ * interval (`binding.carriesInterval`) — a TypeGraph-relation-backed source
+ * returns every revision of a matching row, and `recorded_from` is what
+ * separates them; a binding without that interval already scopes its source
+ * to exactly one revision, so there is no such column to order by and no
+ * anomaly the ordering could surface — `recordedGetByIds`'s per-id duplicate
+ * check still catches a genuine violation regardless of row order.
+ */
+function recordedPointReadOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.recorded_from`
+    : sql``;
+}
+
+/**
+ * The ORDER BY a recorded scan applies. `id ASC` drives pagination and
+ * dedup on every binding; the `recorded_from ASC` tiebreaker exists only to
+ * make a same-id anomaly's row order deterministic under a binding whose
+ * source carries the recorded-time interval — see
+ * {@link recordedPointReadOrderBy}.
+ */
+function recordedScanOrderBy(
+  binding: RecordedReadBinding,
+  aliasSql: SqlFragment,
+): SqlFragment {
+  return binding.carriesInterval ?
+      sql`ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC`
+    : sql`ORDER BY ${aliasSql}.id ASC`;
 }
 
 function recordedRelationInvariantError(
@@ -291,17 +417,39 @@ export function createRecordedReadService(
     mapRecordedNodeRow,
     mapRecordedEdgeRow,
   } = params;
-  const recordedSchema =
-    recordedReadBinding === undefined ? undefined : (
-      recordedReadSqlSchema(recordedReadBinding)
-    );
 
-  function schemaForRecordedRead(surface: string) {
-    return (
-      recordedSchema ??
-      recordedReadSqlSchema(
-        requireRecordedReadBinding(recordedReadBinding, surface),
-      )
+  async function revisionOrigin(
+    target: TransactionBackend = backend,
+  ): Promise<RecordedAnchorOwner | undefined> {
+    const read = await params.revisionOriginSession(target, {
+      mode: "sequential",
+    });
+    return read.owner;
+  }
+
+  async function assertOrigin(
+    coordinate: ReadCoordinate,
+    target?: TransactionBackend,
+  ): Promise<void> {
+    const parts = requireRecordedRevision(coordinate);
+    if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;
+    assertRecordedAnchorOrigin(parts, await revisionOrigin(target), graphId);
+  }
+
+  /**
+   * Resolves the recorded relation schema for `revision` — built fresh per
+   * coordinate since {@link RecordedReadSource.source} takes the revision
+   * (an engine-native binding could fold it into the source expression
+   * itself), and refuses the same way every recorded read refuses a missing
+   * binding.
+   */
+  function schemaForRecordedRead(
+    surface: string,
+    revision: RecordedInstantParts,
+  ): SqlSchema {
+    return recordedReadSqlSchema(
+      requireRecordedReadBinding(recordedReadBinding, surface),
+      revision,
     );
   }
 
@@ -309,11 +457,17 @@ export function createRecordedReadService(
     read: RecordedGetByIdsParams<T>,
   ): Promise<readonly (T | undefined)[]> {
     const { table, alias, kind, ids, coordinate, toEntity, entity } = read;
+    await assertOrigin(coordinate);
     if (ids.length === 0) return [];
 
     const uniqueIds = [...new Set(ids)];
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-point-read",
+    );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedPointReadOrderBy(binding, aliasSql);
     const chunkResults = await withRelationsPrecondition(
       backend,
       Promise.all(
@@ -325,7 +479,7 @@ export function createRecordedReadService(
                 AND ${aliasSql}.kind = ${kind}
                 AND ${aliasSql}.id IN (${sqlValueList(idChunk)})
                 AND ${temporalFilter}
-              ORDER BY ${aliasSql}.recorded_from
+              ${orderBy}
             `),
           ),
         ),
@@ -333,6 +487,7 @@ export function createRecordedReadService(
       "recorded-point-read",
     );
 
+    await assertOrigin(coordinate);
     const byId = new Map<string, T>();
     for (const rows of chunkResults) {
       for (const row of rows) {
@@ -356,6 +511,7 @@ export function createRecordedReadService(
     scan: RecordedScanParams<T>,
   ): Promise<RecordedScanPage<T>> {
     const { table, alias, kind, coordinate, options, toEntity, entity } = scan;
+    await assertOrigin(coordinate);
     const limit = validateRecordedScanLimit(options?.limit);
     const scope = recordedScanCursorScope(graphId, entity, kind, coordinate);
     const after =
@@ -363,7 +519,12 @@ export function createRecordedReadService(
         undefined
       : decodeRecordedScanCursor(options.after, scope);
     const aliasSql = sql.raw(alias);
-    const temporalFilter = recordedTemporalFilter(backend, coordinate, alias);
+    const binding = requireRecordedReadBinding(
+      recordedReadBinding,
+      "recorded-scan",
+    );
+    const temporalFilter = recordedTemporalFilter(coordinate, alias, binding);
+    const orderBy = recordedScanOrderBy(binding, aliasSql);
     const rows = await withRelationsPrecondition(
       backend,
       backend.execute<Record<string, unknown>>(
@@ -373,12 +534,13 @@ export function createRecordedReadService(
             AND ${aliasSql}.kind = ${kind}
             ${after === undefined ? sql.raw("") : sql`AND ${aliasSql}.id > ${after}`}
             AND ${temporalFilter}
-          ORDER BY ${aliasSql}.id ASC, ${aliasSql}.recorded_from ASC
+          ${orderBy}
           LIMIT ${limit + 1}
         `),
       ),
       "recorded-scan",
     );
+    await assertOrigin(coordinate);
     const entities = rows.map((row) => toEntity(row));
     for (let index = 1; index < entities.length; index += 1) {
       const previous = requireDefined(entities[index - 1]);
@@ -410,7 +572,10 @@ export function createRecordedReadService(
     ids: readonly NodeId<N>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Node<N> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "node",
       table: schema.nodesTable,
@@ -427,7 +592,10 @@ export function createRecordedReadService(
     ids: readonly EdgeId<E>[],
     coordinate: ReadCoordinate,
   ): Promise<readonly (Edge<E> | undefined)[]> {
-    const schema = schemaForRecordedRead("recorded-point-read");
+    const schema = schemaForRecordedRead(
+      "recorded-point-read",
+      requireRecordedRevision(coordinate),
+    );
     return recordedGetByIds({
       entity: "edge",
       table: schema.edgesTable,
@@ -444,7 +612,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Node<N>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "node",
       table: schema.nodesTable,
@@ -461,7 +632,10 @@ export function createRecordedReadService(
     coordinate: ReadCoordinate,
     options?: RecordedScanOptions,
   ): Promise<RecordedScanPage<Edge<E>>> {
-    const schema = schemaForRecordedRead("recorded-scan");
+    const schema = schemaForRecordedRead(
+      "recorded-scan",
+      requireRecordedRevision(coordinate),
+    );
     return recordedScan({
       entity: "edge",
       table: schema.edgesTable,
@@ -474,13 +648,42 @@ export function createRecordedReadService(
   }
 
   return {
+    adjacency: (root, coordinate, edgeKinds, options) =>
+      readRecordedAdjacency({
+        graphId,
+        backend,
+        binding: recordedReadBinding,
+        origin: revisionOrigin,
+        root,
+        coordinate,
+        edgeKinds,
+        options,
+        toEdge: (row) => rowToEdge(mapRecordedEdgeRow(row)),
+      }),
     backendForCoordinate(
       coordinate: ReadCoordinate,
       surface: string,
     ): GraphBackend {
       if (coordinate.recorded === undefined) return backend;
       requireRecordedReadBinding(recordedReadBinding, surface);
-      return createRecordedReadBackend(backend, surface);
+      return createRecordedReadBackend(
+        backend,
+        surface,
+        (target) => assertOrigin(coordinate, target),
+        async (target) => {
+          const parts = requireRecordedRevision(coordinate);
+          if (requireRecordedAnchorOwner(parts, graphId) === undefined)
+            return false;
+          // This callback is entered by backend.transaction(), so the mode
+          // records that execution boundary. Snapshot reuse additionally needs
+          // the actual target's transaction port and snapshot evidence.
+          const read = await params.revisionOriginSession(target, {
+            mode: "interactive-transaction",
+          });
+          assertRecordedAnchorOrigin(parts, read.owner, graphId);
+          return read.sharesSnapshot;
+        },
+      );
     },
 
     async nodeGetById<N extends NodeType>(

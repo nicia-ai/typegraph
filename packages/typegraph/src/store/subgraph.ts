@@ -2,28 +2,39 @@
  * Subgraph Extraction
  *
  * Extracts a typed subgraph from a root node by traversing a set of edge kinds.
- * Uses a recursive CTE for BFS traversal with cycle detection, then hydrates
- * the reachable nodes and connecting edges in two parallel queries.
+ * Both public read forms share one validation and projection plan. The direct
+ * read uses the backend's tuned hydration strategy; the composable read emits
+ * one statement so it can participate in batchOnce().
  */
+import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
+import { backendDerivationRoot } from "../backend/derive-backend";
+import {
+  normalizeRequiredRowTimestamp,
+  normalizeRowTimestamp,
+} from "../backend/row-mappers";
 import type { GraphBackend } from "../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
-import type {
-  AllNodeTypes,
-  EdgeKinds,
-  GraphDef,
-  NodeKinds,
-} from "../core/define-graph";
+import type { EdgeKinds, GraphDef, NodeKinds } from "../core/define-graph";
 import { type RecordedInstant, resolveReadCoordinate } from "../core/temporal";
 import type { KindEntity } from "../core/types";
-import type {
-  AnyEdgeType,
-  NodeId,
-  NodeType,
-  TemporalMode,
-} from "../core/types";
+import type { AnyEdgeType, NodeType, TemporalMode } from "../core/types";
+import {
+  CompositionConfigurationError,
+  ConfigurationError,
+  KindNotFoundError,
+  ValidationError,
+} from "../errors";
+import { unrecognizedOptionKeyIssues } from "../errors/validation";
 import type { RecursiveCyclePolicy } from "../query/ast";
+import {
+  type OneStatementBatchItem,
+  type OneStatementCombinedItem,
+  registerOneStatementSharing,
+} from "../query/builder/one-statement-sharing";
+import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
+import { compileKindQualifiedToken } from "../query/compiler/recursive";
 import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
@@ -31,8 +42,11 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import {
+  compileEdgeMembershipFilters,
   compileTemporalFilter,
   currentReadInstant,
+  type EdgeKindMembership,
+  recordedIntervalColumns,
 } from "../query/compiler/temporal";
 import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
@@ -46,9 +60,32 @@ import {
 } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
+import {
+  compositionEdgeKindMembers,
+  compositionViaKind,
+  compositionViaReach,
+  type CompositionViaRef,
+  partitionCompositionEdgeKindsByDirection,
+} from "../registry/composition-relation";
+import type { KindRegistry } from "../registry/kind-registry";
+import { compareCodePoints } from "../utils/compare";
 import { fnv1aBase36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
-import { buildReachableCte } from "./recursive-cte";
+import { hasOwnKey, isPlainObject } from "../utils/object";
+import { kindQualifiedToken } from "../utils/path";
+import { requireDefined } from "../utils/presence";
+import { isStatementCutShortError } from "../utils/sql-errors";
+import { type EdgeReadWindow, validateEdgeReadBounds } from "./neighbors";
+import {
+  buildExhaustiveDirectedReachableCte,
+  buildReachableCte,
+  buildWindowedEdgesCte,
+  type ReachableSeed,
+} from "./recursive-cte";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+} from "./registered-kinds";
 import { validateProjectionField } from "./reserved-keys";
 import {
   type EdgeRow,
@@ -58,7 +95,13 @@ import {
   rowToNode,
   rowToNodeMeta,
 } from "./row-mappers";
-import type { Edge, EdgeMeta, Node, NodeMeta } from "./types";
+import type {
+  Edge,
+  EdgeMeta,
+  GraphNodeReferenceInput,
+  Node,
+  NodeMeta,
+} from "./types";
 
 // ============================================================
 // Constants
@@ -209,7 +252,7 @@ export type SubgraphProject<
  *   nodes: { Task: ["title", "meta"] },
  *   edges: { uses_skill: [] },
  * });
- * const result = await store.subgraph(rootId, { edges: ["uses_skill"], project });
+ * const result = await store.subgraph(task, { edges: ["uses_skill"], project });
  * // result.nodes narrowed correctly — task.status is a type error
  * ```
  */
@@ -300,15 +343,38 @@ type SubgraphEdgeResultForKind<
 // Options & Result Types
 // ============================================================
 
+export type SubgraphCompositionSelection =
+  boolean | Readonly<{ via?: CompositionViaRef }>;
+
+function compositionRequested(
+  composition: SubgraphCompositionSelection | undefined,
+): boolean {
+  return composition === true || typeof composition === "object";
+}
+
+function compositionViaOf(
+  composition: SubgraphCompositionSelection | undefined,
+): string | undefined {
+  if (typeof composition !== "object") return undefined;
+  return composition.via === undefined ?
+      undefined
+    : compositionViaKind(composition.via);
+}
+
 export type SubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Readonly<{
   /** Edge kinds to follow during traversal. Edges not listed are not traversed. */
   edges: readonly EK[];
-  /** Maximum traversal depth from root (default: 10). */
+  /**
+   * Maximum traversal depth from root for the `edges` list above (default:
+   * 10). It does NOT bound the `composition` closure: that returns the
+   * complete owned unit at any depth — see {@link SubgraphOptions.composition}.
+   */
   maxDepth?: number;
   /**
    * Node kinds to include in the result. Nodes of other kinds are still
@@ -327,8 +393,53 @@ export type SubgraphOptions<
   /** Cycle policy — reuse RecursiveCyclePolicy (default: "prevent"). */
   cyclePolicy?: RecursiveCyclePolicy;
   /**
-   * Temporal mode applied to both nodes and edges along the traversal and in
-   * the hydrated result. Defaults to `graph.defaults.temporalMode`.
+   * Close the root over its declared composition parts — the whole-plus-parts
+   * export unit. When `true`, every composition edge kind transitively under
+   * the root's kind (`registry.compositionEdgeKindsUnder`) is added to the
+   * traversal and to the hydrated edge set, in addition to whatever `edges`
+   * already lists. `{ via }` closes over that one realizing edge instead; it
+   * must realize a pair at the root's kind itself, the rule `parts({ via })`
+   * applies, or the read refuses with `ConfigurationError`
+   * (`COMPOSITION_VIA_NOT_DECLARED`).
+   *
+   * The closure's EDGES follow ownership, not the read's validity window: the
+   * composition rows that bind a part to its whole, the same membership the
+   * delete cascade counts. An ended `population: "one"` row still binds (and
+   * is returned with its `validTo`); an ended `population: "oneActive"` row
+   * does not. `temporalMode` sets the instant ownership is evaluated at
+   * (`"asOf"` at `asOf`, every other mode now — `includeEnded` and
+   * `includeTombstones` do not widen it). NODES follow `temporalMode` at
+   * every hop, so a part the read cannot see (its own window ended or not yet
+   * started) is not returned, nor is anything reachable only through it,
+   * although a delete of the root removes them: the export is not a delete
+   * preview — `planDelete` is.
+   *
+   * This is set-level, not per-root-kind-required: a root whose kind declares
+   * no composition parts contributes nothing extra and the read still runs
+   * normally (applied, not ignored — it just has no effect for that root). A
+   * graph that declares no composition relation *at all* cannot honor the
+   * option meaningfully and refuses with `ConfigurationError`
+   * (`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if the
+   * option were absent.
+   *
+   * Composition edge kinds added this way are not necessarily members of the
+   * compile-time `edges` list, so passing `true` widens the result's edge-kind
+   * type to the graph's whole edge-kind union (see
+   * {@link SubgraphResultEdgeKinds}): every edge kind the read can return is
+   * then reachable through the result type.
+   *
+   * The closure is COMPLETE: it is bounded by its own visited set, never by
+   * `maxDepth`. A part tree deeper than the default depth still comes back
+   * whole, because a whole plus a truncated prefix of its parts is not an
+   * owned unit. `maxDepth` (and `cyclePolicy`) bound the explicit `edges`
+   * traversal alone.
+   */
+  composition?: C;
+  /**
+   * Temporal mode applied to nodes, and to the `edges` traversal and its
+   * hydrated edges. Composition edges follow ownership at the mode's instant
+   * instead — see {@link SubgraphOptions.composition}. Defaults to
+   * `graph.defaults.temporalMode`.
    */
   temporalMode?: TemporalMode;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
@@ -346,6 +457,12 @@ export type SubgraphOptions<
    * projection keys. Specifying a kind outside those sets is a compile-time error.
    */
   project?: P;
+  /**
+   * Per-edge-kind windows applied while traversing and hydrating. Each limit
+   * is partitioned by the current endpoint, so append-only edge histories can
+   * contribute only their newest N targets at every hop.
+   */
+  edgeWindows?: Readonly<Partial<Record<EK, EdgeReadWindow>>>;
 }>;
 
 /**
@@ -359,8 +476,9 @@ export type InternalSubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
-> = Omit<SubgraphOptions<G, EK, NK, P>, "recordedAsOf"> &
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> &
   Readonly<{
     recordedAsOf?: RecordedInstant;
   }>;
@@ -387,6 +505,79 @@ export type SubgraphEdgeResult<
   [Kind in EK]: SubgraphEdgeResultForKind<G, Kind, P>;
 }[EK];
 
+/**
+ * The edge-kind union a `subgraph(...)` result carries in `edges`: the
+ * declared `edges` list, widened when the call passes `composition`.
+ *
+ * `composition: true` adds `registry.compositionEdgeKindsUnder(root.kind)` to
+ * the traversal — a set the call site does not state — so the exact addition
+ * is not spelled in the call's types. Widening to every declared edge kind is
+ * the conservative reading: every kind the read can return is in the result
+ * type, and no kind outside the graph's own edges ever appears. A `via` names
+ * its one realizing edge kind. A `composition` that is absent or `false`
+ * leaves the `edges`-list typing exactly as it was. `true extends C` is the
+ * test, not `C extends true`, so an unresolved `boolean` — a flag that MIGHT
+ * be `true` at runtime — widens as well.
+ */
+export type SubgraphResultEdgeKinds<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  C extends SubgraphCompositionSelection | undefined,
+> =
+  | EK
+  | (true extends C ? EdgeKinds<G>
+    : C extends { via: infer V } ?
+      [V] extends [AnyEdgeType] ?
+        V["kind"] extends EdgeKinds<G> ?
+          V["kind"]
+        : EdgeKinds<G>
+      : EdgeKinds<G>
+    : never);
+
+/**
+ * The projection a `subgraph(...)` call may state, keyed by the edge kinds its
+ * RESULT carries ({@link SubgraphResultEdgeKinds}) rather than by the declared
+ * `edges` list. A `composition: true` call receives composition edge rows, and
+ * the executor builds its edge projection plan from that same widened kind
+ * list, so constraining the input by the narrow list alone would leave a
+ * caller unable to shrink the payload of rows it is already being handed.
+ * Without `composition` the two lists are identical, so a projection naming a
+ * kind outside `edges` stays a compile-time error.
+ */
+export type SubgraphProjectFor<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  C extends SubgraphCompositionSelection | undefined,
+> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+
+/**
+ * A node's identity inside a subgraph result. Node rows are keyed by
+ * (kind, id), so two nodes of different kinds may share an id; every lookup
+ * takes both. A node, a `GraphNodeReference`, or an edge's endpoint
+ * (`{ kind: edge.toKind, id: edge.toId }`) all fit.
+ */
+export type SubgraphNodeKey<K extends string = string> = Readonly<{
+  kind: K;
+  id: string;
+}>;
+
+/** The structural fields of a returned edge that {@link indexSubgraph} reads. */
+export type SubgraphEdgeKey = Readonly<{
+  id: string;
+  kind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
+/**
+ * The result of a `subgraph(...)` read. `EK` is the edge-kind union the result
+ * CARRIES ({@link SubgraphResultEdgeKinds} of the call's declared `edges`), so
+ * `P` is constrained by the projection over that same union — the one
+ * {@link SubgraphProjectFor} admits at the call site.
+ */
 export type SubgraphResult<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
@@ -395,17 +586,62 @@ export type SubgraphResult<
 > = Readonly<{
   /** The root node, or undefined if the root was not found or excluded. */
   root: SubgraphNodeResult<G, NK, P> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK, P>>;
-  /** Forward adjacency: fromId → edgeKind → edges to targets. */
-  adjacency: ReadonlyMap<
-    string,
-    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
-  >;
-  /** Reverse adjacency: toId → edgeKind → edges from sources. */
-  reverseAdjacency: ReadonlyMap<
-    string,
-    ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK, P>[]>
-  >;
+  /** Every returned node once, ordered by kind then id (code points). */
+  nodes: readonly SubgraphNodeResult<G, NK, P>[];
+  /**
+   * Every returned edge once, ordered by id (code points). Both endpoints are
+   * in `nodes`. Use {@link indexSubgraph} for (kind, id) lookups.
+   */
+  edges: readonly SubgraphEdgeResult<G, EK, P>[];
+}>;
+
+/**
+ * Looks up a returned node by kind and id. A literal kind narrows the result
+ * to that kind and must be a kind the result can hold; a `string` kind (such
+ * as an edge's `toKind`) returns any returned kind.
+ */
+export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <
+  const K extends string,
+>(
+  node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>,
+) => (string extends K ? N : SubgraphKindSelection<N, K>) | undefined;
+
+/**
+ * The members of `T` a subgraph lookup by `kind` K returns: literal-kind members that match K, plus members whose `kind` is the wide `string`.
+ */
+export type SubgraphKindSelection<
+  T extends Readonly<{ kind: string }>,
+  K extends string,
+> =
+  T extends unknown ?
+    string extends T["kind"] ? T
+    : T extends Readonly<{ kind: K }> ? T
+    : never
+  : never;
+
+/**
+ * Lists the returned edges leaving (`outgoing`) or entering (`incoming`) a
+ * node, optionally of one edge kind, in edge-id order.
+ */
+export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
+  <const K extends E["kind"]>(
+    node: SubgraphNodeKey,
+    edgeKind: K,
+  ): readonly SubgraphKindSelection<E, K>[];
+  (node: SubgraphNodeKey, edgeKind?: E["kind"]): readonly E[];
+}
+
+/** (kind, id) lookups over a subgraph result, built by {@link indexSubgraph}. */
+export type SubgraphIndex<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+> = Readonly<{
+  /** The returned node with this kind and id, if any. */
+  node: SubgraphNodeLookup<N>;
+  /** Returned edges whose source is this node. */
+  outgoing: SubgraphEdgeLookup<E>;
+  /** Returned edges whose target is this node. */
+  incoming: SubgraphEdgeLookup<E>;
 }>;
 
 // ============================================================
@@ -414,7 +650,7 @@ export type SubgraphResult<
 
 type SubgraphContext = Readonly<{
   graphId: string;
-  rootId: string;
+  root: ReachableSeed;
   edgeKinds: readonly string[];
   maxDepth: number;
   includeKinds: readonly string[] | undefined;
@@ -422,12 +658,21 @@ type SubgraphContext = Readonly<{
   direction: "out" | "both";
   cyclePolicy: RecursiveCyclePolicy;
   temporalMode: TemporalMode;
+  currentTimestamp: SqlFragment;
   asOf: string | undefined;
   recordedAsOf: RecordedInstant | undefined;
   dialect: DialectAdapter;
   schema: SqlSchema;
   recordedReadBinding: RecordedReadBinding | undefined;
   backend: GraphBackend;
+  edgeWindows: Readonly<Record<string, EdgeReadWindow | undefined>> | undefined;
+  /**
+   * The composition edge kinds a composition read closes over and hydrates,
+   * each with its membership rule; empty for any other read. Their rows are
+   * read by membership at the read's instant, the `edgeKinds` walk's by the
+   * read's validity window.
+   */
+  compositionMembership: readonly EdgeKindMembership[];
 }>;
 
 type SubgraphNodeFetchRow = Readonly<
@@ -454,6 +699,256 @@ type ProjectionPlan = Readonly<{
   projectedKinds: ReadonlyMap<string, KindProjectionPlan>;
 }>;
 
+type SubgraphExecutionParams<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+> = Readonly<{
+  graph: G;
+  graphId: string;
+  root: GraphNodeReferenceInput<G>;
+  backend: GraphBackend;
+  dialect: DialectAdapter;
+  schema: SqlSchema | undefined;
+  recordedReadBinding: RecordedReadBinding | undefined;
+  registry: KindRegistry;
+  options: InternalSubgraphOptions<G, EK, NK, P, C>;
+}>;
+
+type SubgraphPlan = Readonly<{
+  baseSchema: SqlSchema;
+  ctx: SubgraphContext;
+  /** `ctx` widened by the composition edge kinds a composition read also walks: the context node and edge hydration read through. */
+  readContext: SubgraphContext;
+  reachableCte: SqlFragment;
+  includedIdsCte: SqlFragment;
+  nodeProjectionPlan: ProjectionPlan;
+  /** Covers every edge kind {@link readContext} hydrates, composition kinds included. */
+  edgeProjectionPlan: ProjectionPlan;
+}>;
+
+type SubgraphSurface = "subgraph" | "batchOnce.subgraph";
+
+function buildSubgraphPlan<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+  surface: SubgraphSurface,
+): SubgraphPlan {
+  const { options } = params;
+  validateSubgraphTraversalOptions(options);
+  assertRegisteredEdgeKinds(params.graph, options.edges);
+  assertRegisteredNodeKinds(params.graph, options.includeKinds ?? []);
+  if (
+    surface === "batchOnce.subgraph" &&
+    compositionRequested(options.composition)
+  ) {
+    throw new ConfigurationError(
+      "A one-statement subgraph read cannot close over composition parts.",
+      {
+        code: "SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED",
+        surface,
+        via: compositionViaOf(options.composition),
+      },
+      {
+        suggestion:
+          "Read the composition unit with store.subgraph() or tx.subgraph() outside batchOnce(); the composition closure is a separate walk, read in its own statement.",
+      },
+    );
+  }
+  const { valid: coordinate } = resolveReadCoordinate(
+    options.temporalMode ?? params.graph.defaults.temporalMode,
+    options.asOf,
+  );
+  validateEdgeWindows(options.edgeWindows, options.edges);
+  const baseSchema = params.schema ?? DEFAULT_SQL_SCHEMA;
+  const ctx: SubgraphContext = {
+    graphId: params.graphId,
+    root: resolveSubgraphRoot(params.graph, params.graphId, params.root),
+    edgeKinds: [...options.edges],
+    maxDepth: options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
+    includeKinds:
+      options.includeKinds === undefined ?
+        undefined
+      : [...options.includeKinds],
+    excludeRoot: options.excludeRoot ?? false,
+    direction: options.direction ?? "out",
+    cyclePolicy: options.cyclePolicy ?? "prevent",
+    temporalMode: coordinate.mode,
+    currentTimestamp: currentReadInstant(),
+    asOf: coordinate.asOf,
+    // Recorded coordinates reach here only through the StoreView seam. The
+    // public API rejects them before either execution strategy is selected.
+    recordedAsOf: options.recordedAsOf,
+    dialect: params.dialect,
+    schema: recordedReadSchemaFor(
+      baseSchema,
+      options.recordedAsOf,
+      params.recordedReadBinding,
+      surface === "subgraph" ? "recorded-subgraph" : "recorded-subgraph-query",
+    ),
+    recordedReadBinding: params.recordedReadBinding,
+    backend: params.backend,
+    edgeWindows:
+      options.edgeWindows === undefined ?
+        undefined
+      : structuredClone(options.edgeWindows),
+    compositionMembership: [],
+  };
+  const introspector = getSubgraphSchemaIntrospector(params.graph);
+  const nodeProjectionPlan = buildProjectionPlan(
+    getIncludedNodeKinds(params.graph, options.includeKinds),
+    options.project?.nodes,
+    (kind, field) => introspector.getFieldTypeInfo(kind, field),
+    "node",
+  );
+  const edgeProjectionPlan = buildEdgeProjectionPlan(
+    params.graph,
+    options.edges,
+    options.project?.edges,
+  );
+  const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
+  const compositionEdgeKinds = resolveSubgraphCompositionEdgeKinds(params, ctx);
+  const plan = {
+    baseSchema,
+    ctx,
+    readContext: ctx,
+    reachableCte,
+    includedIdsCte: buildIncludedIdsCte(ctx),
+    nodeProjectionPlan,
+    edgeProjectionPlan,
+  };
+  if (compositionEdgeKinds.length === 0) return plan;
+
+  const compositionOnlyEdgeKinds = compositionEdgeKinds.filter(
+    (edgeKind) => !ctx.edgeKinds.includes(edgeKind),
+  );
+  return {
+    ...plan,
+    readContext: {
+      ...ctx,
+      compositionMembership: compositionEdgeKindMembers(
+        params.registry,
+        compositionEdgeKinds,
+      ),
+    },
+    edgeProjectionPlan: extendProjectionPlan(
+      edgeProjectionPlan,
+      buildEdgeProjectionPlan(
+        params.graph,
+        compositionOnlyEdgeKinds,
+        options.project?.edges,
+      ),
+    ),
+  };
+}
+
+/** `base` followed by `extension`, as one plan built over both kind lists in that order would be. */
+function extendProjectionPlan(
+  base: ProjectionPlan,
+  extension: ProjectionPlan,
+): ProjectionPlan {
+  return {
+    fullKinds: [...base.fullKinds, ...extension.fullKinds],
+    projectedKinds: new Map([
+      ...base.projectedKinds,
+      ...extension.projectedKinds,
+    ]),
+  };
+}
+
+/**
+ * The edge projection plan over the edge kinds a read actually hydrates. A
+ * composition read hydrates its resolved composition edge kinds too, so its
+ * plan is built from that resolved list, never from `options.edges` alone.
+ */
+function buildEdgeProjectionPlan<G extends GraphDef>(
+  graph: G,
+  edgeKinds: readonly string[],
+  projection:
+    Readonly<Record<string, readonly string[] | undefined>> | undefined,
+): ProjectionPlan {
+  const introspector = getSubgraphSchemaIntrospector(graph);
+  return buildProjectionPlan(
+    dedupeStrings(edgeKinds),
+    projection,
+    (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
+    "edge",
+  );
+}
+
+/**
+ * Validates the caller's root reference. The walk starts from exactly the node
+ * it names, so an unregistered kind is refused rather than read as empty.
+ */
+function resolveSubgraphRoot(
+  graph: GraphDef,
+  graphId: string,
+  root: unknown,
+): ReachableSeed {
+  if (
+    typeof root === "object" &&
+    root !== null &&
+    "kind" in root &&
+    "id" in root &&
+    typeof root.kind === "string" &&
+    typeof root.id === "string"
+  ) {
+    if (!Object.hasOwn(graph.nodes, root.kind)) {
+      throw new KindNotFoundError(root.kind, "node", { graphId });
+    }
+    return { kind: root.kind, id: root.id };
+  }
+  throw new ValidationError(
+    "Subgraph root must be a { kind, id } node reference",
+    {
+      issues: [
+        {
+          path: "root",
+          message: "Received an unsupported root",
+          code: "invalid_type",
+        },
+      ],
+    },
+  );
+}
+
+function buildSubgraphReachableCte(
+  ctx: SubgraphContext,
+  baseSchema: SqlSchema,
+  surface: SubgraphSurface,
+  sources?: readonly ReachableSeed[],
+): SqlFragment {
+  return buildReachableCte({
+    graphId: ctx.graphId,
+    ...(sources === undefined ? { source: ctx.root } : { sources }),
+    edgeKinds: ctx.edgeKinds,
+    maxHops: ctx.maxDepth,
+    direction: ctx.direction,
+    cyclePolicy: ctx.cyclePolicy,
+    includePath: false,
+    temporalMode: ctx.temporalMode,
+    currentTimestamp: ctx.currentTimestamp,
+    ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
+    ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
+    dialect: ctx.dialect,
+    // The recursive compiler derives the recorded relation from the pin.
+    schema: baseSchema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
+    recursiveTraversal: resolveRecursiveTraversal(ctx.backend.capabilities),
+    operation: surface,
+    ...(ctx.edgeWindows === undefined ? {} : { edgeWindows: ctx.edgeWindows }),
+  });
+}
+
 // ============================================================
 // Public API
 // ============================================================
@@ -462,161 +957,489 @@ export async function executeSubgraph<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
->(params: {
-  graph: G;
-  graphId: string;
-  rootId: NodeId<AllNodeTypes<G>>;
-  backend: GraphBackend;
-  dialect: DialectAdapter;
-  schema: SqlSchema | undefined;
-  recordedReadBinding: RecordedReadBinding | undefined;
-  options: InternalSubgraphOptions<G, EK, NK, P>;
-}): Promise<SubgraphResult<G, NK, EK, P>> {
-  const { options } = params;
-  const { valid: coordinate } = resolveReadCoordinate(
-    options.temporalMode ?? params.graph.defaults.temporalMode,
-    options.asOf,
-  );
-  const temporalMode = coordinate.mode;
-  // `recordedAsOf` reaches here only via the internal `subgraphAtCoordinate`
-  // seam; the public `store.subgraph` rejects it (typed `never`, runtime-guarded
-  // for JS callers) before this executor is reached.
-  const recordedAsOf = options.recordedAsOf;
-  const baseSchema = params.schema ?? DEFAULT_SQL_SCHEMA;
-
-  const maxDepth = Math.min(
-    options.maxDepth ?? DEFAULT_SUBGRAPH_MAX_DEPTH,
-    MAX_EXPLICIT_RECURSIVE_DEPTH,
-  );
-
-  const ctx: SubgraphContext = {
-    graphId: params.graphId,
-    rootId: params.rootId,
-    edgeKinds: options.edges,
-    maxDepth,
-    includeKinds: options.includeKinds,
-    excludeRoot: options.excludeRoot ?? false,
-    direction: options.direction ?? "out",
-    cyclePolicy: options.cyclePolicy ?? "prevent",
-    temporalMode,
-    asOf: coordinate.asOf,
-    recordedAsOf,
-    dialect: params.dialect,
-    schema: recordedReadSchemaFor(
-      baseSchema,
-      recordedAsOf,
-      params.recordedReadBinding,
-      "recorded-subgraph",
-    ),
-    recordedReadBinding: params.recordedReadBinding,
-    backend: params.backend,
-  };
-
-  const schemaIntrospector = getSubgraphSchemaIntrospector(params.graph);
-  const nodeProjectionPlan = buildProjectionPlan(
-    getIncludedNodeKinds(params.graph, options.includeKinds),
-    options.project?.nodes,
-    (kind, field) => schemaIntrospector.getFieldTypeInfo(kind, field),
-    "node",
-  );
-  const edgeProjectionPlan = buildProjectionPlan(
-    dedupeStrings(options.edges),
-    options.project?.edges,
-    (kind, field) => schemaIntrospector.getEdgeFieldTypeInfo(kind, field),
-    "edge",
-  );
-
-  const reachableCte = buildReachableCte({
-    graphId: ctx.graphId,
-    sourceId: ctx.rootId,
-    edgeKinds: ctx.edgeKinds,
-    maxHops: ctx.maxDepth,
-    direction: ctx.direction,
-    cyclePolicy: ctx.cyclePolicy,
-    includePath: false,
-    temporalMode: ctx.temporalMode,
-    ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
-    ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
-    dialect: ctx.dialect,
-    // Base schema: buildReachableCte derives the recorded swap from recordedAsOf.
-    schema: baseSchema,
-    ...(ctx.recordedReadBinding === undefined ?
-      {}
-    : { recordedReadBinding: ctx.recordedReadBinding }),
-  });
-  const includedIdsCte = buildIncludedIdsCte(ctx);
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+  const {
+    ctx,
+    readContext,
+    reachableCte,
+    includedIdsCte,
+    nodeProjectionPlan,
+    edgeProjectionPlan,
+    baseSchema,
+  } = buildSubgraphPlan(params, "subgraph");
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres
-  // the closure ids are fetched ONCE and passed to both fetches as a
-  // single text[] parameter, filtered via a hashed semi-join
+  // the closure is fetched ONCE and passed to both fetches as a pair of
+  // text[] parameters (kinds and ids), filtered via a hashed semi-join
   // (EXISTS over unnest — measured faster than `= ANY` on the same
   // closure). SQLite keeps the embedded form: its in-process traversal
   // is cheap, an id list would bind one parameter per id (bind-budget
   // pressure), and per-count SQL texts would churn the prepared-statement
   // cache.
+  //
+  // Composition cannot share that single reachable CTE: the caller's edges
+  // use one direction, while a composition relation may mix part->whole and
+  // whole->part realizing edges. Those are walked as their own closure and
+  // the two (kind, id) sets are unioned.
   let membership: SubgraphMembership;
-  const dialect = ctx.dialect.name;
-  switch (dialect) {
-    case "postgres": {
-      const includedIds = await fetchIncludedIds(
-        ctx,
-        reachableCte,
-        includedIdsCte,
-      );
-      const idsArray = textArrayParam(includedIds);
-      membership = {
-        prefix: sql``,
-        idFilter: (column) =>
-          sql`EXISTS (SELECT 1 FROM unnest(${idsArray}) AS tg_included(id) WHERE tg_included.id = ${column})`,
-        parameterDependentPlan: true,
-      };
-      break;
-    }
-    case "sqlite": {
-      membership = {
-        prefix: sql`${reachableCte}${includedIdsCte} `,
-        // SQLite: `column IN (subquery)` evaluates via a transient index —
-        // optimal as-is. (Postgres takes the parameterized text[] form above.)
-        idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
-        parameterDependentPlan: false,
-      };
-      break;
-    }
-    default: {
-      dialect satisfies never;
-      throw new Error(`Unsupported SQL dialect: ${String(dialect)}`);
+  if (readContext.compositionMembership.length > 0) {
+    const baseMembers = await fetchIncludedNodes(
+      ctx,
+      reachableCte,
+      includedIdsCte,
+    );
+    const compositionMembers = await fetchCompositionClosureNodes(
+      readContext,
+      buildSubgraphCompositionReachableCte(params, readContext, baseSchema),
+      includedIdsCte,
+    );
+    membership = nodeListMembership(
+      dedupeSeeds([...baseMembers, ...compositionMembers]),
+      ctx.dialect,
+    );
+  } else {
+    const membershipStrategy =
+      ctx.dialect.capabilities.subgraphMembershipStrategy;
+    switch (membershipStrategy) {
+      case "materialized-ids": {
+        const members = await fetchIncludedNodes(
+          ctx,
+          reachableCte,
+          includedIdsCte,
+        );
+        const kindsArray = textArrayParam(members.map((member) => member.kind));
+        const idsArray = textArrayParam(members.map((member) => member.id));
+        membership = {
+          prefix: sql``,
+          memberFilter: (kindColumn, idColumn) =>
+            sql`EXISTS (SELECT 1 FROM unnest(${kindsArray}, ${idsArray}) AS tg_included(kind, id) WHERE tg_included.kind = ${kindColumn} AND tg_included.id = ${idColumn})`,
+          parameterDependentPlan: true,
+        };
+        break;
+      }
+      case "inline-cte": {
+        membership = {
+          prefix: sql`${reachableCte}${includedIdsCte} `,
+          // `row IN (subquery)` evaluates via a transient index — optimal
+          // as-is. (The materialized-ids strategy takes the parameterized
+          // array form above instead.)
+          memberFilter: (kindColumn, idColumn) =>
+            sql`(${kindColumn}, ${idColumn}) IN (SELECT kind, id FROM included_ids)`,
+          parameterDependentPlan: false,
+        };
+        break;
+      }
+      default: {
+        membershipStrategy satisfies never;
+        throw new Error(
+          `Unsupported subgraph membership strategy: ${String(membershipStrategy)}`,
+        );
+      }
     }
   }
 
   const [nodeRows, edgeRows] = await Promise.all([
-    fetchSubgraphNodes(ctx, membership, nodeProjectionPlan),
-    fetchSubgraphEdges(ctx, membership, edgeProjectionPlan),
+    fetchSubgraphNodes(readContext, membership, nodeProjectionPlan),
+    fetchSubgraphEdges(readContext, membership, edgeProjectionPlan),
   ]);
 
-  const nodesMap = new Map<string, Node>();
-  for (const row of nodeRows) {
-    const node = mapSubgraphNodeRow(row, nodeProjectionPlan);
-    nodesMap.set(node.id, node);
+  return assembleSubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>(
+    ctx.root,
+    nodeRows.map((row) => mapSubgraphNodeRow(row, nodeProjectionPlan)),
+    edgeRows.map((row) => mapSubgraphEdgeRow(row, edgeProjectionPlan)),
+  );
+}
+
+/**
+ * The realizing edge kinds a `composition` subgraph walks from its root: every
+ * composition edge kind under the root's kind, or the one `via` names. Empty
+ * when the read asks for no composition, or the root's kind declares no parts.
+ */
+function resolveSubgraphCompositionEdgeKinds<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+  ctx: SubgraphContext,
+): readonly string[] {
+  if (!compositionRequested(params.options.composition)) return [];
+  if (params.registry.compositionEdgeKinds().length === 0) {
+    throw new CompositionConfigurationError(
+      `subgraph({ composition: true }) requires the graph to declare at least one partOf/hasPart relation, but "${params.graphId}" declares none.`,
+      { code: "COMPOSITION_NO_PARTS_DECLARED" },
+      {
+        suggestion:
+          "Declare a partOf/hasPart relation in the graph's ontology, or omit `composition` from the subgraph options.",
+      },
+    );
   }
-
-  const adjacency = new Map<string, Map<string, Edge[]>>();
-  const reverseAdjacency = new Map<string, Map<string, Edge[]>>();
-  for (const row of edgeRows) {
-    const edge = mapSubgraphEdgeRow(row, edgeProjectionPlan);
-    insertAdjacencyEntry(adjacency, edge.fromId, edge.kind, edge);
-    insertAdjacencyEntry(reverseAdjacency, edge.toId, edge.kind, edge);
+  const requestedVia = compositionViaOf(params.options.composition);
+  if (requestedVia === undefined) {
+    return params.registry.compositionEdgeKindsUnder(ctx.root.kind);
   }
+  const viaReach = compositionViaReach(
+    params.registry,
+    "parts",
+    [ctx.root.kind],
+    requestedVia,
+  );
+  if (!viaReach.realized) {
+    throw new CompositionConfigurationError(
+      `subgraph composition via "${requestedVia}" realizes no partOf/hasPart pair at root kind "${ctx.root.kind}".`,
+      {
+        code: "COMPOSITION_VIA_NOT_DECLARED",
+        via: requestedVia,
+        rootKind: ctx.root.kind,
+        declaredVia: viaReach.declaredVia,
+      },
+      {
+        suggestion:
+          "Pass via naming a realizing edge of this root's composition, or pass composition: true to include every realizing edge.",
+      },
+    );
+  }
+  return [requestedVia];
+}
 
-  const root = nodesMap.get(ctx.rootId);
+function buildSubgraphCompositionReachableCte<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+  ctx: SubgraphContext,
+  baseSchema: SqlSchema,
+): SqlFragment {
+  const { outEdgeKinds, inEdgeKinds } =
+    partitionCompositionEdgeKindsByDirection(
+      params.registry,
+      ctx.compositionMembership.map((member) => member.edgeKind),
+      "parts",
+    );
+  return buildExhaustiveDirectedReachableCte({
+    graphId: ctx.graphId,
+    source: ctx.root,
+    outEdgeKinds,
+    inEdgeKinds,
+    edgeMembership: ctx.compositionMembership,
+    temporalMode: ctx.temporalMode,
+    currentTimestamp: ctx.currentTimestamp,
+    ...(ctx.asOf !== undefined && { asOf: ctx.asOf }),
+    ...(ctx.recordedAsOf !== undefined && { recordedAsOf: ctx.recordedAsOf }),
+    dialect: ctx.dialect,
+    schema: baseSchema,
+    ...(ctx.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: ctx.recordedReadBinding }),
+    recursiveTraversal: resolveRecursiveTraversal(params.backend.capabilities),
+    operation: "subgraph",
+  });
+}
 
+/**
+ * Runs a subgraph on a pinned session (a transaction). The read is one
+ * statement unless it closes over composition parts: the closure is a second
+ * walk read in its own statement, so it runs the multi-statement executor on
+ * the same session instead.
+ */
+export async function executeSessionSubgraph<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+  return compositionRequested(params.options.composition) ?
+      executeSubgraph(params)
+    : createSubgraphRead(params).execute();
+}
+
+/** A subgraph read that can execute alone or in `store.batchOnce()`. */
+export type SubgraphRead<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+> = ExecutableOneStatementRead<SubgraphResult<G, NK, EK, P>>;
+
+/** Builds the one-statement form used by composable set-oriented reads. */
+export function createSubgraphRead<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+): SubgraphRead<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P> {
+  const plan = buildSubgraphPlan(params, "batchOnce.subgraph");
+  const {
+    ctx,
+    reachableCte,
+    includedIdsCte,
+    nodeProjectionPlan: nodePlan,
+    edgeProjectionPlan: edgePlan,
+  } = plan;
+  const query = buildOneStatementSubgraphQuery(
+    ctx,
+    reachableCte,
+    includedIdsCte,
+    nodePlan,
+    edgePlan,
+  );
+  function mapRows(
+    rows: readonly Record<string, unknown>[],
+  ): SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P> {
+    return mapOneStatementSubgraphRows<
+      G,
+      NK,
+      SubgraphResultEdgeKinds<G, EK, C>,
+      P
+    >(ctx.root, rows as readonly OneStatementSubgraphRow[], nodePlan, edgePlan);
+  }
   return {
-    root,
-    nodes: nodesMap,
-    adjacency,
-    reverseAdjacency,
-  } as unknown as SubgraphResult<G, NK, EK, P>;
+    execute: async () =>
+      mapRows(
+        await params.backend.execute<OneStatementSubgraphRow>(
+          asCompiledRowsSql(query),
+        ),
+      ),
+    compileOneStatementBatchItem: () => {
+      const item: OneStatementBatchItem<
+        SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>
+      > = {
+        query: asCompiledRowsSql(query),
+        provenance: {
+          graphId: params.graphId,
+          executionTarget: backendDerivationRoot(params.backend),
+        },
+        outputNames: oneStatementSubgraphOutputNames(nodePlan, edgePlan),
+        orderBy: [],
+        mapRows,
+      };
+      sharedSubgraphPlans.set(item, plan);
+      registerOneStatementSharing(item, {
+        kind: "subgraph",
+        owner: params.graph,
+        key: subgraphSharingKey(plan),
+        combine: combineSubgraphBatchItems,
+      });
+      return item;
+    },
+  };
+}
+
+const sharedSubgraphPlans = new WeakMap<OneStatementBatchItem, SubgraphPlan>();
+const SUBGRAPH_REQUEST_COLUMN = "typegraph_subgraph_request";
+const SHARED_MEMBERSHIPS_COLUMN = "typegraph_shared_memberships";
+
+function projectionSharingKey(plan: ProjectionPlan): unknown {
+  return {
+    fullKinds: plan.fullKinds,
+    projectedKinds: [...plan.projectedKinds],
+  };
+}
+
+function subgraphSharingKey(plan: SubgraphPlan): string {
+  const { ctx } = plan;
+  return JSON.stringify({
+    graphId: ctx.graphId,
+    schema: ctx.schema,
+    edgeKinds: ctx.edgeKinds,
+    includeKinds: ctx.includeKinds,
+    excludeRoot: ctx.excludeRoot,
+    maxDepth: ctx.maxDepth,
+    direction: ctx.direction,
+    cyclePolicy: ctx.cyclePolicy,
+    temporalMode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
+    currentTimestamp: ctx.currentTimestamp.chunks,
+    edgeWindows: ctx.edgeWindows,
+    nodes: projectionSharingKey(plan.nodeProjectionPlan),
+    edges: projectionSharingKey(plan.edgeProjectionPlan),
+  });
+}
+
+function sharedEntityKey(row: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify([row["typegraph_entity"], row["kind"], row["id"]]);
+}
+
+function combineSubgraphBatchItems(
+  items: readonly OneStatementBatchItem[],
+  sharePayloads: boolean,
+): OneStatementCombinedItem {
+  const first = requireDefined(items[0]);
+  const plans = items.map((item) =>
+    requireDefined(sharedSubgraphPlans.get(item)),
+  );
+  const {
+    ctx,
+    baseSchema,
+    nodeProjectionPlan: nodePlan,
+    edgeProjectionPlan: edgePlan,
+  } = requireDefined(plans[0]);
+  const roots = plans.map((plan) => plan.ctx.root);
+  const reachable = buildSubgraphReachableCte(
+    ctx,
+    baseSchema,
+    "batchOnce.subgraph",
+    dedupeSeeds(roots),
+  );
+  const filters: SqlFragment[] = [];
+  if (ctx.includeKinds !== undefined && ctx.includeKinds.length > 0)
+    filters.push(compileKindFilter(sql.raw("kind"), ctx.includeKinds));
+  if (ctx.excludeRoot)
+    filters.push(sql`NOT (kind = origin_kind AND id = origin_id)`);
+  const included = sql`, included_ids AS (SELECT DISTINCT origin_kind, origin_id, kind, id FROM reachable ${filters.length === 0 ? sql.empty() : sql`WHERE ${sql.join(filters, sql` AND `)}`})`;
+  const requests = roots.map(
+    (root, index) => sql`(${index}, ${root.kind}, ${root.id})`,
+  );
+  function requestMatches(kindColumn: string, idColumn: string): SqlFragment {
+    return sql`requests.root_kind = ${sql.raw(kindColumn)} AND requests.root_id = ${sql.raw(idColumn)}`;
+  }
+  const hydration = buildOneStatementSubgraphQuery(
+    ctx,
+    sql.empty(),
+    sql.empty(),
+    nodePlan,
+    edgePlan,
+    true,
+  );
+  const columns = first.outputNames;
+  const membershipPayload = ctx.dialect.orderedRowsJsonArray(
+    "typegraph_shared_ordered_membership",
+    ["request_id", "typegraph_entity", "kind", "id"],
+    "typegraph_shared_ordinal",
+  );
+  const hydratedColumns = columns.map(
+    (column) => sql`h.${sql.identifier(column)}`,
+  );
+  const membershipColumns = columns.map((column) =>
+    column === "typegraph_entity" ? sql`'membership'` : sql`NULL`,
+  );
+  // Both payload modes use one origin-keyed recursive traversal. Only the
+  // shared mode sends entities once with a separate membership envelope.
+  const commonCtes = sql`
+    ${reachable}${included},
+        typegraph_shared_requests(request_id, root_kind, root_id) AS (VALUES ${sql.join(requests, sql`, `)}),
+        typegraph_shared_hydrated AS (${hydration}),
+        typegraph_shared_membership AS (
+          SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
+          FROM typegraph_shared_hydrated h
+          JOIN included_ids included ON h.kind = included.kind AND h.id = included.id
+          JOIN typegraph_shared_requests requests ON ${requestMatches("included.origin_kind", "included.origin_id")}
+          WHERE h.typegraph_entity = 'node'
+          UNION ALL
+          SELECT requests.request_id, h.typegraph_entity, h.kind, h.id
+          FROM typegraph_shared_hydrated h
+          JOIN included_ids source_membership ON h.from_kind = source_membership.kind AND h.from_id = source_membership.id
+          JOIN included_ids target_membership ON h.to_kind = target_membership.kind AND h.to_id = target_membership.id AND source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id
+          JOIN typegraph_shared_requests requests ON ${requestMatches("source_membership.origin_kind", "source_membership.origin_id")}
+          WHERE h.typegraph_entity = 'edge'
+        )
+  `;
+  if (!sharePayloads) {
+    return {
+      query: asCompiledRowsSql(sql`
+        ${commonCtes}
+        SELECT ${sql.join(hydratedColumns, sql`, `)}, membership.request_id AS ${sql.identifier(SUBGRAPH_REQUEST_COLUMN)}
+        FROM typegraph_shared_hydrated h
+        JOIN typegraph_shared_membership membership
+          ON h.typegraph_entity = membership.typegraph_entity AND h.kind = membership.kind AND h.id = membership.id
+      `),
+      provenance: first.provenance,
+      outputNames: [...columns, SUBGRAPH_REQUEST_COLUMN],
+      payloadPartitionColumn: SUBGRAPH_REQUEST_COLUMN,
+      orderBy: [],
+      mapRows: (rows) => {
+        const requestRows: Record<string, unknown>[][] = items.map(() => []);
+        for (const row of rows)
+          requireDefined(
+            requestRows[Number(row[SUBGRAPH_REQUEST_COLUMN])],
+          ).push(row);
+        return items.map((item, index) =>
+          item.mapRows(requireDefined(requestRows[index])),
+        );
+      },
+    };
+  }
+  const query = asCompiledRowsSql(sql`
+    ${commonCtes},
+        typegraph_shared_ordered_membership AS (
+          SELECT membership.*, request_id AS typegraph_shared_ordinal
+          FROM typegraph_shared_membership membership
+        )
+        SELECT ${sql.join(hydratedColumns, sql`, `)}, NULL AS ${sql.identifier(SHARED_MEMBERSHIPS_COLUMN)}
+        FROM typegraph_shared_hydrated h
+        UNION ALL
+        SELECT ${sql.join(membershipColumns, sql`, `)}, ${membershipPayload}
+  `);
+  return {
+    query,
+    provenance: first.provenance,
+    outputNames: [...columns, SHARED_MEMBERSHIPS_COLUMN],
+    orderBy: [],
+    mapRows: (rows) => mapSharedSubgraphRows(items, rows),
+  };
+}
+
+function mapSharedSubgraphRows(
+  items: readonly OneStatementBatchItem[],
+  rows: readonly Record<string, unknown>[],
+): readonly unknown[] {
+  const entities = new Map<string, Record<string, unknown>>();
+  const requestRows: Record<string, unknown>[][] = items.map(() => []);
+  const membershipRows = rows.filter(
+    (row) => row["typegraph_entity"] === "membership",
+  );
+  for (const row of rows)
+    if (row["typegraph_entity"] !== "membership")
+      entities.set(sharedEntityKey(row), row);
+  if (membershipRows.length !== 1)
+    throw new ConfigurationError(
+      "Shared subgraph query returned an invalid membership envelope.",
+    );
+  const encoded = requireDefined(membershipRows[0])[SHARED_MEMBERSHIPS_COLUMN];
+  const memberships: unknown =
+    typeof encoded === "string" ? JSON.parse(encoded) : encoded;
+  if (!Array.isArray(memberships))
+    throw new ConfigurationError(
+      "Shared subgraph query returned invalid membership rows.",
+    );
+  for (const membership of memberships) {
+    if (typeof membership !== "object" || membership === null)
+      throw new ConfigurationError(
+        "Shared subgraph membership must be an object.",
+      );
+    const row = membership as Record<string, unknown>;
+    const index = Number(row["request_id"]);
+    if (!Number.isInteger(index) || index < 0 || index >= items.length)
+      throw new ConfigurationError(
+        "Shared subgraph membership has an invalid request index.",
+      );
+    const entity = requireDefined(
+      entities.get(sharedEntityKey(row)),
+      "Shared subgraph membership refers to a missing entity.",
+    );
+    requireDefined(requestRows[index]).push(entity);
+  }
+  // The envelope reuses hydrated rows; each public result must own nested props.
+  return items.map((item, index) =>
+    item.mapRows(structuredClone(requireDefined(requestRows[index]))),
+  );
 }
 
 // ============================================================
@@ -665,7 +1488,15 @@ function buildProjectionPlan(
   const fullKinds: string[] = [];
 
   for (const kind of kinds) {
-    const selection = projectionMap?.[kind];
+    // Own-key read: `projectionMap` is the caller's `project.nodes` /
+    // `project.edges` record and `kind` is a graph kind name, so a kind named
+    // after an `Object.prototype` member ("toString") would otherwise read the
+    // inherited function as this kind's field selection instead of "no
+    // projection declared".
+    const selection =
+      projectionMap !== undefined && hasOwnKey(projectionMap, kind) ?
+        projectionMap[kind]
+      : undefined;
     if (selection === undefined) {
       fullKinds.push(kind);
       continue;
@@ -727,10 +1558,21 @@ function dedupeStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
 }
 
+function dedupeSeeds(
+  seeds: readonly ReachableSeed[],
+): readonly ReachableSeed[] {
+  return [
+    ...new Map(
+      seeds.map((seed) => [JSON.stringify([seed.kind, seed.id]), seed]),
+    ).values(),
+  ];
+}
+
 // ============================================================
 // SQL Generation
 // ============================================================
 
+/** Declares `included_ids`: the (kind, id) pairs the read returns. */
 function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   const filters: SqlFragment[] = [];
 
@@ -739,24 +1581,102 @@ function buildIncludedIdsCte(ctx: SubgraphContext): SqlFragment {
   }
 
   if (ctx.excludeRoot) {
-    filters.push(sql`id != ${ctx.rootId}`);
+    filters.push(sql`NOT (kind = ${ctx.root.kind} AND id = ${ctx.root.id})`);
   }
 
   const whereClause =
     filters.length > 0 ? sql` WHERE ${sql.join(filters, sql` AND `)}` : sql``;
 
-  return sql`, included_ids AS (SELECT DISTINCT id FROM reachable${whereClause})`;
+  return sql`, included_ids AS (SELECT DISTINCT kind, id FROM reachable${whereClause})`;
+}
+
+/**
+ * Which edge rows a subgraph read hydrates: a row of a walked `edges` kind by
+ * the read's validity window (`edgeTemporalFilter`), a row of a composition
+ * kind by its membership at the read's instant — so the owned unit comes back
+ * with the rows that bind it, an ended `"allRows"` row (and its `validTo`)
+ * included. A kind in both lists is hydrated when either admits the row.
+ */
+function subgraphEdgeRowFilter(
+  ctx: SubgraphContext,
+  edgeTemporalFilter: SqlFragment,
+): SqlFragment {
+  const windowArm = sql`${compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds)} AND ${edgeTemporalFilter}`;
+  if (ctx.compositionMembership.length === 0) return windowArm;
+  const membershipArm = sql.join(
+    [
+      compileKindFilter(
+        sql.raw("e.kind"),
+        ctx.compositionMembership.map((member) => member.edgeKind),
+      ),
+      ...compileEdgeMembershipFilters({
+        members: ctx.compositionMembership,
+        tableAlias: "e",
+        mode: ctx.temporalMode,
+        asOf: ctx.asOf,
+        recordedAsOf: ctx.recordedAsOf,
+        recordedReadBinding: ctx.recordedReadBinding,
+      }),
+    ],
+    sql` AND `,
+  );
+  return ctx.edgeKinds.length === 0 ?
+      membershipArm
+    : sql`((${windowArm}) OR (${membershipArm}))`;
+}
+
+function buildSubgraphEdgeSource(
+  ctx: SubgraphContext,
+  edgeRowFilter: SqlFragment,
+): SqlFragment {
+  const windows = Object.entries(ctx.edgeWindows ?? {}).filter(
+    (entry): entry is [string, EdgeReadWindow] => entry[1] !== undefined,
+  );
+  if (windows.length === 0) return ctx.schema.edgesTable;
+
+  const hydratedEdgeKinds = dedupeStrings([
+    ...ctx.edgeKinds,
+    ...ctx.compositionMembership.map((member) => member.edgeKind),
+  ]);
+  const windowedEdges = buildWindowedEdgesCte(
+    ctx.schema.edgesTable,
+    ctx.direction,
+    hydratedEdgeKinds.map((kind) => [kind, ctx.edgeWindows?.[kind]]),
+    sql.join([sql`e.graph_id = ${ctx.graphId}`, edgeRowFilter], sql` AND `),
+  );
+  const physicalColumns = [
+    "graph_id",
+    "id",
+    "kind",
+    "from_kind",
+    "from_id",
+    "to_kind",
+    "to_id",
+    "props",
+    "valid_from",
+    "valid_to",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    // The row filter applied over this source reads the recorded interval too.
+    ...recordedIntervalColumns(ctx.recordedAsOf, ctx.recordedReadBinding),
+  ].map((column) => sql.raw(`windowed_edge.${column}`));
+
+  // Bidirectional windows can surface one physical edge through both
+  // orientations. Deduplicate the typed source rows before projection so
+  // UNION placeholder NULLs retain the opposite arm's database type.
+  return sql`(SELECT DISTINCT ${sql.join(physicalColumns, sql`, `)} FROM (${windowedEdges}) windowed_edge)`;
 }
 
 /**
  * How the node/edge fetches restrict rows to the traversal closure:
  * either a statement prefix re-declaring the recursive CTE with an
  * `included_ids` membership subquery (SQLite), or an empty prefix with a
- * pre-fetched id-array filter (Postgres).
+ * pre-fetched (kind, id) array filter (Postgres).
  */
 type SubgraphMembership = Readonly<{
   prefix: SqlFragment;
-  idFilter: (column: SqlFragment) => SqlFragment;
+  memberFilter: (kindColumn: SqlFragment, idColumn: SqlFragment) => SqlFragment;
   /**
    * True in id-array mode: the fetch plans depend on the array
    * cardinality, so the statements must never fall onto a prepared
@@ -780,18 +1700,385 @@ function textArrayParam(values: readonly string[]): SqlFragment {
   return sql`${`{${elements.join(",")}}`}::text[]`;
 }
 
-/** Runs the traversal once and returns the closure's node ids. */
-async function fetchIncludedIds(
+/**
+ * A portable (dialect-agnostic) `SubgraphMembership` over (kind, id) pairs
+ * already computed in JS — the shape the composition closure union needs,
+ * since neither dialect's normal membership strategy (Postgres `unnest`,
+ * SQLite's embedded CTE) has a "two closures, unioned" input.
+ *
+ * `memberFilter` is called twice per edge fetch (both endpoints), so binding
+ * parameters per pair would bind 4N with no bind-budget check — enough to
+ * exceed a Worker/D1-class backend's `maxBindParameters` on an ordinary
+ * whole-plus-parts export. The dialect's `inListParameter`/`packListValue`
+ * seam (the one `IN`-predicate compilation already uses for a parameterized
+ * list) packs each list into ONE bound value instead, so the filter binds a
+ * constant number of parameters however large the closure is. The id list
+ * keeps the filter on an indexable column; the kind-qualified token list is
+ * what makes it exact, so a same-id node of another kind is never admitted.
+ */
+function nodeListMembership(
+  members: readonly SubgraphNodeKey[],
+  dialect: DialectAdapter,
+): SubgraphMembership {
+  if (members.length === 0) {
+    return {
+      prefix: sql``,
+      memberFilter: () => sql`1 = 0`,
+      parameterDependentPlan: true,
+    };
+  }
+  const listOptions = { negated: false, elementType: undefined } as const;
+  const packedIds = dialect.packListValue(
+    dedupeStrings(members.map((member) => member.id)),
+  );
+  const packedTokens = dialect.packListValue(
+    members.map((member) => kindQualifiedToken(member.kind, member.id)),
+  );
+  return {
+    prefix: sql``,
+    memberFilter: (kindColumn, idColumn) =>
+      sql`(${dialect.inListParameter(idColumn, sql`${packedIds}`, listOptions)} AND ${dialect.inListParameter(compileKindQualifiedToken(kindColumn, idColumn), sql`${packedTokens}`, listOptions)})`,
+    parameterDependentPlan: true,
+  };
+}
+
+/**
+ * The composition closure's own fetch, and the ONE refusal its exhaustiveness
+ * argument cannot cover.
+ *
+ * The walk reaches a fixpoint on any finite graph, so it cannot return a
+ * truncated unit of its own accord — but an engine that CUT THE STATEMENT
+ * SHORT (`statement_timeout`, `pg_cancel_backend`, a compiled-in limit,
+ * `sqlite3_interrupt`) finished no walk at all, and a raw driver error is not
+ * an answer a caller can tell apart from a transport failure. Classified here
+ * the way the acyclicity probe classifies the identical case
+ * (`runAcyclicityProbe` -> `EdgeAcyclicityIndeterminateError`,
+ * `src/store/acyclicity.ts`) — through the same `isStatementCutShortError`
+ * predicate, so neither owner spells its own structural code check — which is
+ * what makes "the complete owned unit, delivered or refused, never partial"
+ * hold against the ENGINE too and not only against the recursion.
+ *
+ * Only the COMPOSITION closure is classified: the caller's own `edges`
+ * traversal is explicitly depth- and cycle-bounded and makes no completeness
+ * promise for a cut-short statement to break.
+ *
+ * @throws ConfigurationError (`COMPOSITION_UNIT_INDETERMINATE`)
+ */
+async function fetchCompositionClosureNodes(
   ctx: SubgraphContext,
   reachableCte: SqlFragment,
   includedIdsCte: SqlFragment,
-): Promise<readonly string[]> {
-  const rows = await ctx.backend.execute<{ id: string }>(
+): Promise<readonly SubgraphNodeKey[]> {
+  try {
+    return await fetchIncludedNodes(ctx, reachableCte, includedIdsCte);
+  } catch (error) {
+    if (!isStatementCutShortError(error)) throw error;
+    throw new CompositionConfigurationError(
+      `The composition closure of ${ctx.root.kind} "${ctx.root.id}" was cut short by the database before it finished, so the owned unit is unknown rather than incomplete.`,
+      {
+        code: "COMPOSITION_UNIT_INDETERMINATE",
+        rootKind: ctx.root.kind,
+        rootId: ctx.root.id,
+        graphId: ctx.graphId,
+      },
+      {
+        cause: error,
+        suggestion:
+          "Retry with a higher statement timeout (or without one). `subgraph({ composition: true })` walks the whole part tree by design and never returns a prefix of it.",
+      },
+    );
+  }
+}
+
+/** Runs the traversal once and returns the (kind, id) pairs the read returns. */
+async function fetchIncludedNodes(
+  ctx: SubgraphContext,
+  reachableCte: SqlFragment,
+  includedIdsCte: SqlFragment,
+): Promise<readonly SubgraphNodeKey[]> {
+  return ctx.backend.execute<SubgraphNodeKey>(
     asCompiledRowsSql(
-      sql`${reachableCte}${includedIdsCte} SELECT id FROM included_ids`,
+      sql`${reachableCte}${includedIdsCte} SELECT kind, id FROM included_ids`,
     ),
   );
-  return rows.map((row) => row.id);
+}
+
+type OneStatementSubgraphRow = SubgraphNodeFetchRow &
+  SubgraphEdgeFetchRow &
+  Readonly<{ typegraph_entity: "edge" | "node" }>;
+
+function projectionOutputNames(plan: ProjectionPlan): readonly string[] {
+  return [...plan.projectedKinds.values()].flatMap((kindPlan) =>
+    kindPlan.propertyFields.map((field) => field.outputName),
+  );
+}
+
+function oneStatementSubgraphOutputNames(
+  nodePlan: ProjectionPlan,
+  edgePlan: ProjectionPlan,
+): readonly string[] {
+  return [
+    "typegraph_entity",
+    "id",
+    "kind",
+    "from_kind",
+    "from_id",
+    "to_kind",
+    "to_id",
+    "props",
+    "version",
+    "valid_from",
+    "valid_to",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    ...projectionOutputNames(nodePlan),
+    ...projectionOutputNames(edgePlan),
+  ];
+}
+
+function nullProjectionColumns(plan: ProjectionPlan): readonly SqlFragment[] {
+  return projectionOutputNames(plan).map(
+    (outputName) => sql`NULL AS ${quoteIdentifier(outputName)}`,
+  );
+}
+
+function buildOneStatementSubgraphQuery(
+  ctx: SubgraphContext,
+  reachable: SqlFragment,
+  includedIds: SqlFragment,
+  nodePlan: ProjectionPlan,
+  edgePlan: ProjectionPlan,
+  sharedOrigins = false,
+): SqlFragment {
+  const instant = ctx.currentTimestamp;
+  const nodeTemporal = compileTemporalFilter({
+    mode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
+    tableAlias: "n",
+    currentTimestamp: instant,
+    recordedReadBinding: ctx.recordedReadBinding,
+  });
+  const edgeTemporal = compileTemporalFilter({
+    mode: ctx.temporalMode,
+    asOf: ctx.asOf,
+    recordedAsOf: ctx.recordedAsOf,
+    tableAlias: "e",
+    currentTimestamp: instant,
+    recordedReadBinding: ctx.recordedReadBinding,
+  });
+  const nodeColumns: SqlFragment[] = [
+    sql`'node' AS typegraph_entity`,
+    sql`n.id`,
+    sql`n.kind`,
+    sql`NULL AS from_kind`,
+    sql`NULL AS from_id`,
+    sql`NULL AS to_kind`,
+    sql`NULL AS to_id`,
+    buildFullPropsColumn("n", nodePlan),
+    ...buildMetadataColumns("n", nodePlan, [
+      "version",
+      "valid_from",
+      "valid_to",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+    ]),
+    ...buildProjectedPropertyColumns("n", nodePlan, ctx.dialect),
+    ...nullProjectionColumns(edgePlan),
+  ];
+  const edgeColumns: SqlFragment[] = [
+    sql`'edge' AS typegraph_entity`,
+    sql`e.id`,
+    sql`e.kind`,
+    sql`e.from_kind`,
+    sql`e.from_id`,
+    sql`e.to_kind`,
+    sql`e.to_id`,
+    buildFullPropsColumn("e", edgePlan),
+    sql`NULL AS version`,
+    ...buildMetadataColumns("e", edgePlan, [
+      "valid_from",
+      "valid_to",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+    ]),
+    ...nullProjectionColumns(nodePlan),
+    ...buildProjectedPropertyColumns("e", edgePlan, ctx.dialect),
+  ];
+  const edgeRowFilter = subgraphEdgeRowFilter(ctx, edgeTemporal);
+  const edgeSource = buildSubgraphEdgeSource(ctx, edgeRowFilter);
+  const edgeMembership =
+    sharedOrigins ?
+      sql`EXISTS (SELECT 1 FROM included_ids source_membership JOIN included_ids target_membership ON source_membership.origin_kind = target_membership.origin_kind AND source_membership.origin_id = target_membership.origin_id WHERE source_membership.kind = e.from_kind AND source_membership.id = e.from_id AND target_membership.kind = e.to_kind AND target_membership.id = e.to_id)`
+    : sql`(e.from_kind, e.from_id) IN (SELECT kind, id FROM included_ids) AND (e.to_kind, e.to_id) IN (SELECT kind, id FROM included_ids)`;
+  return sql`${reachable}${includedIds} SELECT ${sql.join(nodeColumns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporal} AND (n.kind, n.id) IN (SELECT kind, id FROM included_ids) UNION ALL SELECT ${sql.join(edgeColumns, sql`, `)} FROM ${edgeSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeRowFilter} AND ${edgeMembership}`;
+}
+
+function mapOneStatementSubgraphRows<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  P extends SubgraphProject<G, NK, EK> | undefined,
+>(
+  root: SubgraphNodeKey,
+  rows: readonly OneStatementSubgraphRow[],
+  nodePlan: ProjectionPlan,
+  edgePlan: ProjectionPlan,
+): SubgraphResult<G, NK, EK, P> {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const row of rows) {
+    if (row.typegraph_entity === "node") {
+      nodes.push(mapSubgraphNodeRow(row, nodePlan));
+      continue;
+    }
+    edges.push(mapSubgraphEdgeRow(row, edgePlan));
+  }
+  return assembleSubgraphResult<G, NK, EK, P>(root, nodes, edges);
+}
+
+/** Values keyed by node kind, then node id: (kind, id) without an encoded key. */
+type NodeKeyedIndex<T> = Map<string, Map<string, T>>;
+
+function nodeKeyedSlot<T>(
+  index: NodeKeyedIndex<T>,
+  kind: string,
+): Map<string, T> {
+  const existing = index.get(kind);
+  if (existing !== undefined) return existing;
+  const created = new Map<string, T>();
+  index.set(kind, created);
+  return created;
+}
+
+/** One endpoint's edges: all of them, and by edge kind, each in id order. */
+type EndpointEdges<E> = Readonly<{
+  all: readonly E[];
+  byKind: ReadonlyMap<string, readonly E[]>;
+}>;
+
+function indexEdgesByEndpoint<E extends SubgraphEdgeKey>(
+  edges: readonly E[],
+  endpoint: "source" | "target",
+): NodeKeyedIndex<EndpointEdges<E>> {
+  const grouped: NodeKeyedIndex<E[]> = new Map();
+  for (const edge of edges) {
+    const kind = endpoint === "source" ? edge.fromKind : edge.toKind;
+    const id = endpoint === "source" ? edge.fromId : edge.toId;
+    const slot = nodeKeyedSlot(grouped, kind);
+    const list = slot.get(id);
+    if (list === undefined) slot.set(id, [edge]);
+    else list.push(edge);
+  }
+  const index: NodeKeyedIndex<EndpointEdges<E>> = new Map();
+  for (const [kind, byId] of grouped) {
+    const slot = nodeKeyedSlot(index, kind);
+    for (const [id, list] of byId) {
+      const byKind = new Map<string, E[]>();
+      for (const edge of list) {
+        const kindList = byKind.get(edge.kind);
+        if (kindList === undefined) byKind.set(edge.kind, [edge]);
+        else kindList.push(edge);
+      }
+      slot.set(id, {
+        all: Object.freeze(list),
+        byKind: new Map(
+          [...byKind].map(([edgeKind, kindList]) => [
+            edgeKind,
+            Object.freeze(kindList),
+          ]),
+        ),
+      });
+    }
+  }
+  return index;
+}
+
+const NO_EDGES: readonly never[] = Object.freeze([]);
+
+function createEdgeLookup<E extends SubgraphEdgeKey>(
+  index: NodeKeyedIndex<EndpointEdges<E>>,
+): (node: SubgraphNodeKey, edgeKind?: string) => readonly E[] {
+  return (node, edgeKind) => {
+    const endpoint = index.get(node.kind)?.get(node.id);
+    if (endpoint === undefined) return NO_EDGES;
+    if (edgeKind === undefined) return endpoint.all;
+    return endpoint.byKind.get(edgeKind) ?? NO_EDGES;
+  };
+}
+
+/**
+ * Builds (kind, id) lookups over a subgraph result. The result itself stays
+ * plain data (it survives `structuredClone`, `postMessage`, and serialization);
+ * index it once where lookups are needed.
+ *
+ * @example
+ * ```ts
+ * const sg = await store.subgraph(run, { edges: ["has_task"] });
+ * const { node, outgoing } = indexSubgraph(sg);
+ * const tasks = outgoing(run, "has_task").map((edge) =>
+ *   node({ kind: edge.toKind, id: edge.toId }),
+ * );
+ * ```
+ */
+export function indexSubgraph<
+  N extends SubgraphNodeKey,
+  E extends SubgraphEdgeKey,
+>(
+  subgraph: Readonly<{ nodes: readonly N[]; edges: readonly E[] }>,
+): SubgraphIndex<N, E> {
+  const nodeIndex: NodeKeyedIndex<N> = new Map();
+  for (const node of subgraph.nodes) {
+    nodeKeyedSlot(nodeIndex, node.kind).set(node.id, node);
+  }
+  function lookupNode(key: SubgraphNodeKey): N | undefined {
+    return nodeIndex.get(key.kind)?.get(key.id);
+  }
+  return {
+    node: lookupNode as SubgraphNodeLookup<N>,
+    outgoing: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "source"),
+    ) as SubgraphEdgeLookup<E>,
+    incoming: createEdgeLookup(
+      indexEdgesByEndpoint(subgraph.edges, "target"),
+    ) as SubgraphEdgeLookup<E>,
+  };
+}
+
+function compareNodeKeys(left: SubgraphNodeKey, right: SubgraphNodeKey) {
+  return (
+    compareCodePoints(left.kind, right.kind) ||
+    compareCodePoints(left.id, right.id)
+  );
+}
+
+function assembleSubgraphResult<
+  G extends GraphDef,
+  NK extends NodeKinds<G>,
+  EK extends EdgeKinds<G>,
+  P extends SubgraphProject<G, NK, EK> | undefined,
+>(
+  root: SubgraphNodeKey,
+  nodeValues: readonly Node[],
+  edgeValues: readonly Edge[],
+): SubgraphResult<G, NK, EK, P> {
+  const nodes = nodeValues.toSorted((left, right) =>
+    compareNodeKeys(left, right),
+  );
+  const edges = edgeValues.toSorted((left, right) =>
+    compareCodePoints(left.id, right.id),
+  );
+  const rootNode = nodes.find(
+    (node) => node.kind === root.kind && node.id === root.id,
+  );
+  return {
+    root: rootNode,
+    nodes,
+    edges,
+  } as unknown as SubgraphResult<G, NK, EK, P>;
 }
 
 async function fetchSubgraphNodes(
@@ -804,7 +2091,8 @@ async function fetchSubgraphNodes(
     asOf: ctx.asOf,
     recordedAsOf: ctx.recordedAsOf,
     tableAlias: "n",
-    currentTimestamp: currentReadInstant(),
+    currentTimestamp: ctx.currentTimestamp,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const columns: SqlFragment[] = [
     sql`n.kind`,
@@ -821,7 +2109,7 @@ async function fetchSubgraphNodes(
     ...buildProjectedPropertyColumns("n", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${membership.idFilter(sql.raw("n.id"))}`;
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.nodesTable} n WHERE n.graph_id = ${ctx.graphId} AND ${nodeTemporalFilter} AND ${membership.memberFilter(sql.raw("n.kind"), sql.raw("n.id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphNodeFetchRow>(
@@ -834,14 +2122,17 @@ async function fetchSubgraphEdges(
   membership: SubgraphMembership,
   projectionPlan: ProjectionPlan,
 ): Promise<SubgraphEdgeFetchRow[]> {
-  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), ctx.edgeKinds);
-  const edgeTemporalFilter = compileTemporalFilter({
-    mode: ctx.temporalMode,
-    asOf: ctx.asOf,
-    recordedAsOf: ctx.recordedAsOf,
-    tableAlias: "e",
-    currentTimestamp: currentReadInstant(),
-  });
+  const edgeRowFilter = subgraphEdgeRowFilter(
+    ctx,
+    compileTemporalFilter({
+      mode: ctx.temporalMode,
+      asOf: ctx.asOf,
+      recordedAsOf: ctx.recordedAsOf,
+      tableAlias: "e",
+      currentTimestamp: ctx.currentTimestamp,
+      recordedReadBinding: ctx.recordedReadBinding,
+    }),
+  );
   const columns: SqlFragment[] = [
     sql`e.id`,
     sql`e.kind`,
@@ -860,12 +2151,157 @@ async function fetchSubgraphEdges(
     ...buildProjectedPropertyColumns("e", projectionPlan, ctx.dialect),
   ];
 
-  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${ctx.schema.edgesTable} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeKindFilter} AND ${edgeTemporalFilter} AND ${membership.idFilter(sql.raw("e.from_id"))} AND ${membership.idFilter(sql.raw("e.to_id"))}`;
+  const edgesSource = buildSubgraphEdgeSource(ctx, edgeRowFilter);
+  const query = sql`${membership.prefix}SELECT ${sql.join(columns, sql`, `)} FROM ${edgesSource} e WHERE e.graph_id = ${ctx.graphId} AND ${edgeRowFilter} AND ${membership.memberFilter(sql.raw("e.from_kind"), sql.raw("e.from_id"))} AND ${membership.memberFilter(sql.raw("e.to_kind"), sql.raw("e.to_id"))}`;
   if (membership.parameterDependentPlan) markForceCustomPlan(query);
 
   return ctx.backend.execute<SubgraphEdgeFetchRow>(
     asCompiledRowsSql(query),
   ) as Promise<SubgraphEdgeFetchRow[]>;
+}
+
+function validateEdgeWindows(
+  windows: Readonly<Record<string, EdgeReadWindow | undefined>> | undefined,
+  selectedEdgeKinds: readonly string[],
+): void {
+  for (const [kind, window] of Object.entries(windows ?? {})) {
+    if (!selectedEdgeKinds.includes(kind)) {
+      throw new ValidationError(
+        "Subgraph edge windows must name a traversed edge kind",
+        {
+          issues: [
+            {
+              path: `edgeWindows.${kind}`,
+              message: "Edge kind is not present in options.edges",
+            },
+          ],
+        },
+      );
+    }
+    if (window !== undefined) {
+      validateEdgeReadBounds(window, `edgeWindows.${kind}`);
+    }
+  }
+}
+
+/**
+ * Every key the object form of {@link SubgraphCompositionSelection} accepts.
+ * Any other key is refused rather than read as `composition: true`: a
+ * misspelled `via` would otherwise widen the export to every realizing edge.
+ */
+const SUBGRAPH_COMPOSITION_OPTION_KEYS = ["via"] as const;
+
+function isCompositionSelection(
+  composition: unknown,
+): composition is SubgraphCompositionSelection | undefined {
+  if (composition === undefined || typeof composition === "boolean") {
+    return true;
+  }
+  if (!isPlainObject(composition)) return false;
+  const { via } = composition;
+  return (
+    via === undefined ||
+    typeof via === "string" ||
+    (typeof via === "object" &&
+      via !== null &&
+      "kind" in via &&
+      typeof via.kind === "string")
+  );
+}
+
+function validateSubgraphTraversalOptions(
+  options: Readonly<{
+    maxDepth?: number;
+    direction?: unknown;
+    cyclePolicy?: unknown;
+    composition?: unknown;
+  }>,
+): void {
+  const maxDepth = options.maxDepth;
+  if (
+    maxDepth !== undefined &&
+    (!Number.isFinite(maxDepth) ||
+      !Number.isInteger(maxDepth) ||
+      maxDepth < 0 ||
+      maxDepth > MAX_EXPLICIT_RECURSIVE_DEPTH)
+  ) {
+    throw new ValidationError(
+      `Subgraph maxDepth must be an integer from 0 through ${MAX_EXPLICIT_RECURSIVE_DEPTH}`,
+      {
+        issues: [
+          {
+            path: "maxDepth",
+            message: `Received ${String(maxDepth)}`,
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
+  if (
+    options.direction !== undefined &&
+    options.direction !== "out" &&
+    options.direction !== "both"
+  ) {
+    throw new ValidationError('Subgraph direction must be "out" or "both"', {
+      issues: [
+        {
+          path: "direction",
+          message: "Received an unsupported direction",
+          code: "invalid_value",
+        },
+      ],
+    });
+  }
+  if (
+    options.cyclePolicy !== undefined &&
+    options.cyclePolicy !== "prevent" &&
+    options.cyclePolicy !== "allow"
+  ) {
+    throw new ValidationError(
+      'Subgraph cyclePolicy must be "prevent" or "allow"',
+      {
+        issues: [
+          {
+            path: "cyclePolicy",
+            message: "Received an unsupported cycle policy",
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
+  if (isPlainObject(options.composition)) {
+    const issues = unrecognizedOptionKeyIssues(
+      options.composition,
+      "composition",
+      SUBGRAPH_COMPOSITION_OPTION_KEYS,
+    );
+    if (issues.length > 0) {
+      throw new ValidationError(
+        `Subgraph composition does not accept ${issues.map((issue) => issue.path).join(", ")}`,
+        { issues },
+        {
+          suggestion:
+            "Pass `composition: true` for every realizing edge, or `composition: { via }` to restrict the closure to one.",
+        },
+      );
+    }
+  }
+  if (!isCompositionSelection(options.composition)) {
+    throw new ValidationError(
+      "Subgraph composition must be a boolean or { via?: edge kind or edge type }",
+      {
+        issues: [
+          {
+            path: "composition",
+            message: "Received an unsupported composition selection",
+            code: "invalid_value",
+          },
+        ],
+      },
+    );
+  }
 }
 
 function buildMetadataColumns(
@@ -940,29 +2376,6 @@ function buildProjectedPropertyColumns(
 }
 
 // ============================================================
-// Adjacency Index Builder
-// ============================================================
-
-function insertAdjacencyEntry(
-  index: Map<string, Map<string, Edge[]>>,
-  nodeId: string,
-  edgeKind: string,
-  edge: Edge,
-): void {
-  let kindMap = index.get(nodeId);
-  if (kindMap === undefined) {
-    kindMap = new Map();
-    index.set(nodeId, kindMap);
-  }
-  const edges = kindMap.get(edgeKind);
-  if (edges === undefined) {
-    kindMap.set(edgeKind, [edge]);
-  } else {
-    edges.push(edge);
-  }
-}
-
-// ============================================================
 // Result Mapping
 // ============================================================
 
@@ -979,15 +2392,35 @@ function applyProjectedFields(
   }
 }
 
+function normalizeSubgraphRowTimestamps<
+  T extends Readonly<{
+    valid_from: unknown;
+    valid_to: unknown;
+    created_at: unknown;
+    updated_at: unknown;
+    deleted_at: unknown;
+  }>,
+>(row: T) {
+  return {
+    ...row,
+    valid_from: normalizeRowTimestamp(row.valid_from, "valid_from"),
+    valid_to: normalizeRowTimestamp(row.valid_to, "valid_to"),
+    created_at: normalizeRequiredRowTimestamp(row.created_at, "created_at"),
+    updated_at: normalizeRequiredRowTimestamp(row.updated_at, "updated_at"),
+    deleted_at: normalizeRowTimestamp(row.deleted_at, "deleted_at"),
+  };
+}
+
 function mapSubgraphNodeRow(
   row: SubgraphNodeFetchRow,
   projectionPlan: ProjectionPlan,
 ): Node {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
+    const normalizedRow = normalizeSubgraphRowTimestamps(row);
     return rowToNode({
-      ...row,
-      props: normalizeProps(row.props),
+      ...normalizedRow,
+      props: normalizeProps(normalizedRow.props),
     });
   }
 
@@ -997,7 +2430,7 @@ function mapSubgraphNodeRow(
   };
 
   if (kindPlan.includeMeta) {
-    projectedNode["meta"] = rowToNodeMeta(row);
+    projectedNode["meta"] = rowToNodeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
   applyProjectedFields(projectedNode, row, kindPlan);
@@ -1010,9 +2443,10 @@ function mapSubgraphEdgeRow(
 ): Edge {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
+    const normalizedRow = normalizeSubgraphRowTimestamps(row);
     return rowToEdge({
-      ...row,
-      props: normalizeProps(row.props),
+      ...normalizedRow,
+      props: normalizeProps(normalizedRow.props),
     });
   }
 
@@ -1026,7 +2460,7 @@ function mapSubgraphEdgeRow(
   };
 
   if (kindPlan.includeMeta) {
-    projectedEdge["meta"] = rowToEdgeMeta(row);
+    projectedEdge["meta"] = rowToEdgeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
   applyProjectedFields(projectedEdge, row, kindPlan);

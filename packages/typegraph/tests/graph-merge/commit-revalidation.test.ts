@@ -13,8 +13,9 @@
  * `mergeAgainstBase()` (no branch-level precondition) gets the same
  * plan-stability guard from a token captured at plan start, so it is covered
  * here too. The serialization-retry half of the commit path is unit-tested in
- * `tx-retry.test.ts`; true multi-session SSI races need concurrent server
- * connections that in-process backends cannot produce.
+ * `transaction-retry.test.ts` (the shared retry owner) and `apply-callbacks.test.ts`
+ * (through the real merge commit path); true multi-session SSI races need
+ * concurrent server connections that in-process backends cannot produce.
  */
 
 import type { GraphBackend, Store, StoreOptions } from "@nicia-ai/typegraph";
@@ -26,6 +27,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { parseRecordedInstant } from "../../src/core/temporal";
 import {
   computeBaseVersion,
   revisionAnchorOf,
@@ -43,6 +45,7 @@ import type {
   MergeOptions,
 } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, fakeEmbedder, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -260,7 +263,20 @@ describe.each(backendMatrix())(
         });
 
         const targetVersion = await computeBaseVersion(target);
-        expect(revisionAnchorOf(targetVersion)).toBe(
+        const targetAnchor = parseRecordedInstant(
+          requireDefined(revisionAnchorOf(targetVersion)),
+        );
+        const sourceAnchor = parseRecordedInstant(
+          requireDefined(revisionAnchorOf(foreignBranch.base)),
+        );
+        expect({
+          revision: targetAnchor.revision,
+          recordedAt: targetAnchor.recordedAt,
+        }).toEqual({
+          revision: sourceAnchor.revision,
+          recordedAt: sourceAnchor.recordedAt,
+        });
+        expect(revisionAnchorOf(targetVersion)).not.toBe(
           revisionAnchorOf(foreignBranch.base),
         );
         expect(revisionOriginOf(targetVersion)).not.toBe(

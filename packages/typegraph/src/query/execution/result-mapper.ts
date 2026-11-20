@@ -3,49 +3,113 @@
  *
  * Transforms raw database rows into typed SelectContext and result objects.
  */
+import {
+  normalizeRequiredRowTimestamp,
+  normalizeRowTimestamp,
+} from "../../backend/row-mappers";
 import { type NodeType } from "../../core/types";
+import { ConfigurationError } from "../../errors";
 import { normalizePath } from "../../utils";
+import { createDataKeyedBag } from "../../utils/object";
+import { stripKindQualifiedPathTokens } from "../../utils/path";
+import { requireDefined } from "../../utils/presence";
 import { type Traversal } from "../ast";
 import type {
   AliasMap,
   EdgeAliasMap,
+  QualifiedRecursivePath,
   QueryBuilderState,
   RecursiveAliasMap,
   SelectableEdge,
   SelectableNode,
   SelectContext,
 } from "../builder/types";
+import { recursivePathTokenShape } from "../compiler/recursive-path-token";
 import { type SqlDialect } from "../dialect/types";
 
 /**
- * Transforms SQLite path columns from pipe-delimited strings to arrays.
- * PostgreSQL returns native arrays, so no transformation needed.
+ * A variable-length traversal's path column, plus whether its tokens carry the
+ * `kind || SEP || id` wrapper the compiler emits for cycle detection.
+ */
+type PathColumn = Readonly<{
+  alias: string;
+  kindQualified: boolean;
+  format: "ids" | "qualified";
+  optional: boolean;
+}>;
+
+function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
+  const scope = {
+    start: { alias: state.startAlias, kinds: state.startKinds },
+    traversals: state.traversals,
+  };
+  const columns: PathColumn[] = [];
+  for (const traversal of state.traversals) {
+    const pathAlias = traversal.variableLength?.pathAlias;
+    if (pathAlias !== undefined) {
+      columns.push({
+        alias: pathAlias,
+        kindQualified:
+          recursivePathTokenShape(scope, traversal) === "kind_qualified",
+        format:
+          traversal.variableLength?.pathFormat === "qualified" ?
+            "qualified"
+          : "ids",
+        optional: traversal.optional,
+      });
+    }
+  }
+  return columns;
+}
+
+/**
+ * Materializes path columns into the array of bare node IDs the public
+ * traversal contract promises.
+ *
+ * SQLite returns pipe-delimited strings and PostgreSQL native arrays, so the
+ * shape is normalized here. A walk that can visit more than one kind carries
+ * composite `kind || SEP || id` tokens (the compiler needs them so same-id
+ * nodes of different kinds stay distinct for cycle detection); those are
+ * stripped here so every walk produces bare-id path output on both dialects.
+ *
+ * This is the single seam where paths become caller-visible arrays — every
+ * execution path (execute, prepared, paginated, selective) funnels through it,
+ * so stripping exactly once here is safe.
  */
 export function transformPathColumns(
   rows: readonly Record<string, unknown>[],
   state: QueryBuilderState,
   _dialect: SqlDialect,
 ): readonly Record<string, unknown>[] {
-  // Find path columns from variable-length traversals
-  const pathAliases: string[] = [];
-  for (const traversal of state.traversals) {
-    if (traversal.variableLength?.pathAlias !== undefined) {
-      pathAliases.push(traversal.variableLength.pathAlias);
-    }
-  }
-
-  if (pathAliases.length === 0) return rows;
+  const pathColumns = collectPathColumns(state);
+  if (pathColumns.length === 0) return rows;
 
   const result: Record<string, unknown>[] = [];
   let changed = false;
   for (const row of rows) {
     let transformed: Record<string, unknown> | undefined;
-    for (const alias of pathAliases) {
+    for (const { alias, format, kindQualified, optional } of pathColumns) {
       const value = row[alias];
-      if (value !== undefined && !Array.isArray(value)) {
+      if (value === undefined) continue;
+      if (optional && value === null) {
         transformed ??= { ...row };
-        transformed[alias] = normalizePath(value);
+        transformed[alias] = undefined;
+        continue;
       }
+      if (format === "qualified") {
+        const path = decodeQualifiedRecursivePath(value, alias);
+        transformed ??= { ...row };
+        transformed[alias] = path;
+        continue;
+      }
+      const normalized = normalizePath(value);
+      const path =
+        kindQualified ? stripKindQualifiedPathTokens(normalized) : normalized;
+      // normalizePath returns native arrays by reference, so an already-shaped
+      // path that needs no stripping leaves the row untouched.
+      if (path === value) continue;
+      transformed ??= { ...row };
+      transformed[alias] = path;
     }
     if (transformed === undefined) {
       result.push(row);
@@ -58,32 +122,102 @@ export function transformPathColumns(
   return changed ? result : rows;
 }
 
-// Reserved keys that cannot be overwritten by user props
-const RESERVED_NODE_KEYS = new Set(["id", "kind", "meta"]);
-const RESERVED_EDGE_KEYS = new Set(["id", "kind", "fromId", "toId", "meta"]);
-
-/**
- * Converts null to undefined for consistent typing.
- * Database backends return null for missing values, but our types use undefined.
- */
-function nullToUndefined<T>(value: T | null | undefined): T | undefined {
-  return value === null ? undefined : value;
+function decodeQualifiedRecursivePath(
+  value: unknown,
+  alias: string,
+): QualifiedRecursivePath {
+  const parsed: unknown =
+    typeof value === "string" ? parseQualifiedPathJson(value, alias) : value;
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length < 2 ||
+    (parsed.length - 2) % 5 !== 0
+  )
+    throw new ConfigurationError(
+      `Invalid qualified recursive path in column "${alias}"`,
+    );
+  if (!parsed.every((entry) => typeof entry === "string"))
+    throw new ConfigurationError(
+      `Invalid qualified recursive path in column "${alias}"`,
+    );
+  const tokens = parsed as readonly string[];
+  const path: QualifiedRecursivePath[number][] = [
+    {
+      type: "node",
+      kind: requireDefined(tokens[0]),
+      id: requireDefined(tokens[1]),
+    },
+  ];
+  for (let index = 2; index < tokens.length; index += 5) {
+    const direction = tokens[index + 2];
+    if (direction !== "out" && direction !== "in")
+      throw new ConfigurationError(
+        `Invalid qualified recursive path direction in column "${alias}"`,
+      );
+    path.push(
+      {
+        type: "edge",
+        kind: requireDefined(tokens[index]),
+        id: requireDefined(tokens[index + 1]),
+        direction,
+      },
+      {
+        type: "node",
+        kind: requireDefined(tokens[index + 3]),
+        id: requireDefined(tokens[index + 4]),
+      },
+    );
+  }
+  return path;
 }
 
+function parseQualifiedPathJson(value: string, alias: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new ConfigurationError(
+      `Invalid qualified recursive path JSON in column "${alias}"`,
+      { alias },
+      {
+        cause: error,
+      },
+    );
+  }
+}
+
+// Reserved keys that cannot be overwritten by user props
+const RESERVED_NODE_KEYS: ReadonlySet<string> = new Set(["id", "kind", "meta"]);
+const RESERVED_EDGE_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "kind",
+  "fromId",
+  "toId",
+  "meta",
+]);
+
 /**
- * Assigns props to a target object, excluding reserved keys to prevent runtime
- * collisions with system fields (id, kind, meta, etc).
+ * The props to spread onto a selectable node/edge, with reserved keys dropped
+ * so user props cannot collide with system fields (id, kind, meta, …).
+ *
+ * The accumulator is a {@link createDataKeyedBag} and the caller SPREADS the
+ * result rather than assigning key-by-key onto the public object: `props` comes
+ * straight off `JSON.parse` of the row's props column, which yields `__proto__`
+ * as an ordinary own key, and `target[key] = value` would hand that key to
+ * `Object.prototype`'s setter and drop the value. Spreading (a
+ * `CreateDataProperty`, not a `Set`) carries it as an own key while leaving the
+ * public result on `Object.prototype`, exactly as `rowToNode` already does.
  */
-function assignPropsExcludingReserved(
-  target: Record<string, unknown>,
+function propsExcludingReserved(
   props: Record<string, unknown>,
-  reservedKeys: Set<string>,
-): void {
+  reservedKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  const kept = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(props)) {
     if (!reservedKeys.has(key)) {
-      target[key] = value;
+      kept[key] = value;
     }
   }
+  return kept;
 }
 
 /**
@@ -108,14 +242,25 @@ export function buildSelectableNode(
   // Metadata columns - these are now always projected in CTEs
   // Normalize null → undefined for optional fields
   const version = row[`${alias}_version`] as number;
-  const validFrom = nullToUndefined(
-    row[`${alias}_valid_from`] as string | null,
+  const validFrom = normalizeRowTimestamp(
+    row[`${alias}_valid_from`],
+    `${alias}_valid_from`,
   );
-  const validTo = nullToUndefined(row[`${alias}_valid_to`] as string | null);
-  const createdAt = row[`${alias}_created_at`] as string;
-  const updatedAt = row[`${alias}_updated_at`] as string;
-  const deletedAt = nullToUndefined(
-    row[`${alias}_deleted_at`] as string | null,
+  const validTo = normalizeRowTimestamp(
+    row[`${alias}_valid_to`],
+    `${alias}_valid_to`,
+  );
+  const createdAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_created_at`],
+    `${alias}_created_at`,
+  );
+  const updatedAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_updated_at`],
+    `${alias}_updated_at`,
+  );
+  const deletedAt = normalizeRowTimestamp(
+    row[`${alias}_deleted_at`],
+    `${alias}_deleted_at`,
   );
 
   const result: Record<string, unknown> = {
@@ -129,9 +274,9 @@ export function buildSelectableNode(
       updatedAt,
       deletedAt,
     },
+    ...propsExcludingReserved(rawProps, RESERVED_NODE_KEYS),
   };
 
-  assignPropsExcludingReserved(result, rawProps, RESERVED_NODE_KEYS);
   return result as SelectableNode<NodeType>;
 }
 
@@ -181,14 +326,25 @@ function buildSelectableEdge(
 
   // Metadata columns - these are always projected in traversal CTEs
   // Normalize null → undefined for optional fields
-  const validFrom = nullToUndefined(
-    row[`${alias}_valid_from`] as string | null,
+  const validFrom = normalizeRowTimestamp(
+    row[`${alias}_valid_from`],
+    `${alias}_valid_from`,
   );
-  const validTo = nullToUndefined(row[`${alias}_valid_to`] as string | null);
-  const createdAt = row[`${alias}_created_at`] as string;
-  const updatedAt = row[`${alias}_updated_at`] as string;
-  const deletedAt = nullToUndefined(
-    row[`${alias}_deleted_at`] as string | null,
+  const validTo = normalizeRowTimestamp(
+    row[`${alias}_valid_to`],
+    `${alias}_valid_to`,
+  );
+  const createdAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_created_at`],
+    `${alias}_created_at`,
+  );
+  const updatedAt = normalizeRequiredRowTimestamp(
+    row[`${alias}_updated_at`],
+    `${alias}_updated_at`,
+  );
+  const deletedAt = normalizeRowTimestamp(
+    row[`${alias}_deleted_at`],
+    `${alias}_deleted_at`,
   );
 
   const result: Record<string, unknown> = {
@@ -203,9 +359,9 @@ function buildSelectableEdge(
       updatedAt,
       deletedAt,
     },
+    ...propsExcludingReserved(rawProps, RESERVED_EDGE_KEYS),
   };
 
-  assignPropsExcludingReserved(result, rawProps, RESERVED_EDGE_KEYS);
   return result as SelectableEdge;
 }
 
@@ -223,17 +379,19 @@ export function buildSelectContext<
   startAlias: string,
   traversals: readonly Traversal[],
 ): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
-  // Build the start node as initial context entry
-  const context: Record<
-    string,
+  // Data-keyed: alias names chosen by the caller's query, which the kind-name
+  // pattern admits `__proto__` for. (The computed-key literal this replaced was
+  // itself safe — a computed key is a `CreateDataProperty` — but the traversal
+  // assignments below are not, so the whole bag is built the one right way.)
+  const context = createDataKeyedBag<
     | SelectableNode<NodeType>
     | SelectableEdge
     | number
     | readonly string[]
     | undefined
-  > = {
-    [startAlias]: buildSelectableNode(row, startAlias),
-  };
+  >();
+  // Build the start node as initial context entry
+  context[startAlias] = buildSelectableNode(row, startAlias);
 
   // Build traversal nodes and edges
   for (const traversal of traversals) {
@@ -253,15 +411,29 @@ export function buildSelectContext<
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
-        context[vl.depthAlias] = row[vl.depthAlias] as number;
+        context[vl.depthAlias] =
+          traversal.optional && row[vl.depthAlias] === null ?
+            undefined
+          : (row[vl.depthAlias] as number);
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = row[vl.pathAlias] as readonly string[];
+        context[vl.pathAlias] =
+          traversal.optional && row[vl.pathAlias] === null ?
+            undefined
+          : (row[vl.pathAlias] as readonly string[]);
       }
     }
   }
 
-  return context as SelectContext<Aliases, EdgeAliases, RecursiveAliases>;
+  // Spread at the boundary: the context is handed to the CALLER's `select`
+  // callback, and `select((ctx) => ctx)` returns it verbatim as the row. See
+  // `createDataKeyedBag` in ../../utils/object.ts — the spread is what keeps a
+  // `__proto__` alias an own key instead of reaching the prototype setter.
+  return { ...context } as SelectContext<
+    Aliases,
+    EdgeAliases,
+    RecursiveAliases
+  >;
 }
 
 /**

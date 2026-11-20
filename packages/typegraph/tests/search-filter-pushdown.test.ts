@@ -1,7 +1,7 @@
 /**
  * Facade search FILTER PUSHDOWN: `store.search.{vector,fulltext,hybrid}`
  * accept a `where` predicate,
- * `offset` pagination, and `includeSubClasses` — all compiled into the
+ * `offset` pagination, and `expansion` — all compiled into the
  * search statement's candidate set, not post-filtered.
  *
  * The pushdown is pinned BEHAVIORALLY: the corpus is built so the global
@@ -39,6 +39,7 @@ import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
 import { type VectorSearchOptions } from "../src/store/search";
 import { requireDefined } from "../src/utils/presence";
+import { provisionPostgresTestDatabase } from "./postgres-test-database";
 
 const GRAPH_ID = "search_pushdown";
 const FIELD_PATH = "embedding";
@@ -140,7 +141,7 @@ const EXPIRED_ARTICLE: Seed = {
   validTo: "2001-01-01T00:00:00.000Z",
 };
 
-/** Sub-kind rows: near the query, `alpha`, only visible via includeSubClasses. */
+/** Sub-kind rows: near the query, `alpha`, only visible via expansion: "subclasses". */
 const NOTES: readonly Seed[] = [
   {
     id: "note-1",
@@ -278,12 +279,13 @@ async function assertFilteredLegs(store: Store): Promise<void> {
 // Suite
 // ============================================================
 
+// Resolving this suite's own Postgres database needs a top-level await, so it
+// lives at module scope and the suite body closes over it.
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+
 describe("facade search filter pushdown", () => {
   const libsql = libsqlDescriptor();
 
-  const TEST_DATABASE_URL =
-    process.env["POSTGRES_URL"] ??
-    "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
@@ -405,7 +407,7 @@ describe("facade search filter pushdown", () => {
         vectorIds(fullOrder),
       );
 
-      // Sub-kind rows only participate with includeSubClasses.
+      // Sub-kind rows only participate with expansion: "subclasses".
       const baseOnly = await store.search.vector("Article", {
         fieldPath: FIELD_PATH,
         queryEmbedding: QUERY_EMBEDDING,
@@ -416,7 +418,7 @@ describe("facade search filter pushdown", () => {
         fieldPath: FIELD_PATH,
         queryEmbedding: QUERY_EMBEDDING,
         limit: 10,
-        includeSubClasses: true,
+        expansion: "subclasses",
       });
       expect(vectorIds(withSubs)).toEqual(
         expect.arrayContaining(["note-1", "note-2"]),
@@ -436,7 +438,7 @@ describe("facade search filter pushdown", () => {
         fieldPath: FIELD_PATH,
         queryEmbedding: QUERY_EMBEDDING,
         limit: 10,
-        includeSubClasses: true,
+        expansion: "subclasses",
         where: (article) => article.category.eq("alpha"),
       });
       expect(new Set(vectorIds(alphaWithSubs))).toEqual(
@@ -491,7 +493,7 @@ describe("facade search filter pushdown", () => {
           fieldPath: FIELD_PATH,
           queryEmbedding: QUERY_EMBEDDING,
           limit: 3,
-          includeSubClasses: true,
+          expansion: "subclasses",
         }),
       ).rejects.toThrow(
         /declare different metrics.*search the kinds separately/s,

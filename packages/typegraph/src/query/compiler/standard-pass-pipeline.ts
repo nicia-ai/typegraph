@@ -1,4 +1,5 @@
 import type {
+  FieldRef,
   FulltextMatchPredicate,
   HybridFusionOptions,
   PredicateExpression,
@@ -6,10 +7,14 @@ import type {
   VectorSimilarityPredicate,
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
+import { type DatabaseExpression } from "../expressions";
+import {
+  expressionContainsAggregate,
+  visitExpressionChildren,
+} from "./expression-inspection";
+import { visitCorrelatedExpressionFields } from "./expression-subquery-scope";
 import {
   createTemporalFilterPass,
-  resolveFulltextAwareLimit,
-  resolveVectorAwareLimit,
   runCompilerPass,
   runFulltextPredicatePass,
   runFusionConfigPass,
@@ -49,17 +54,47 @@ function isColumnPruningEnabled(ast: QueryAst): boolean {
     return true;
   }
   return ast.projection.fields.some(
-    (field) => field.source.__type === "aggregate",
+    (field) =>
+      field.source.__type === "aggregate" ||
+      (field.source.__type === "database_expression" &&
+        expressionContainsAggregate(field.source)),
   );
 }
 
-function markPredicateFieldsAsRequired(
+export function visitExpressionFields(
+  expression: DatabaseExpression,
+  visit: (field: FieldRef) => void,
+): void {
+  const node = expression.node;
+  if (node.kind === "field") {
+    visit(node.field);
+    return;
+  }
+  if (node.kind === "exists_subquery" || node.kind === "scalar_subquery") {
+    visitCorrelatedExpressionFields(
+      node.subquery,
+      expression.scopeIdentity,
+      visit,
+    );
+    return;
+  }
+  visitExpressionChildren(expression, (operand) => {
+    visitExpressionFields(operand, visit);
+  });
+}
+
+export function markPredicateFieldsAsRequired(
   requiredColumnsByAlias: Map<string, Set<string>>,
   expression: PredicateExpression,
 ): void {
   switch (expression.__type) {
     case "comparison": {
       markFieldRefAsRequired(requiredColumnsByAlias, expression.left);
+      return;
+    }
+    case "tuple_comparison": {
+      for (const field of expression.fields)
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
       return;
     }
     case "string_op":
@@ -106,6 +141,12 @@ function markPredicateFieldsAsRequired(
     case "exists": {
       return;
     }
+    case "database_expression_predicate": {
+      visitExpressionFields(expression.expression, (field) => {
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      });
+      return;
+    }
   }
 }
 
@@ -148,9 +189,13 @@ export function collectRequiredColumnsByAlias(
         const source = projectedField.source;
         if (source.__type === "field_ref") {
           markFieldRefAsRequired(requiredColumnsByAlias, source);
-        } else {
+        } else if (source.__type === "aggregate") {
           addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
           markFieldRefAsRequired(requiredColumnsByAlias, source.field);
+        } else {
+          visitExpressionFields(source, (field) => {
+            markFieldRefAsRequired(requiredColumnsByAlias, field);
+          });
         }
       }
     }
@@ -158,12 +203,24 @@ export function collectRequiredColumnsByAlias(
 
   if (ast.groupBy) {
     for (const field of ast.groupBy.fields) {
-      markFieldRefAsRequired(requiredColumnsByAlias, field);
+      if (field.__type === "field_ref") {
+        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      } else {
+        visitExpressionFields(field, (referencedField) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, referencedField);
+        });
+      }
     }
   }
 
   if (ast.orderBy) {
     for (const orderSpec of ast.orderBy) {
+      if (orderSpec.field.__type === "database_expression") {
+        visitExpressionFields(orderSpec.field, (field) => {
+          markFieldRefAsRequired(requiredColumnsByAlias, field);
+        });
+        continue;
+      }
       if (
         findSelectivePropsFieldForFieldRef(
           ast.selectiveFields,
@@ -174,6 +231,10 @@ export function collectRequiredColumnsByAlias(
       }
       markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
     }
+  }
+
+  if (ast.resultPredicate !== undefined) {
+    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.resultPredicate);
   }
 
   if (ast.having) {
@@ -204,6 +265,9 @@ function hasIdEqualityPredicate(
         isIdFieldRef(expression.left)
       );
     }
+    case "tuple_comparison": {
+      return false;
+    }
     case "and": {
       return expression.predicates.some((predicate) =>
         hasIdEqualityPredicate(predicate, alias),
@@ -221,6 +285,9 @@ function hasIdEqualityPredicate(
     case "in_subquery":
     case "vector_similarity":
     case "fulltext_match": {
+      return false;
+    }
+    case "database_expression_predicate": {
       return false;
     }
   }
@@ -252,7 +319,7 @@ function resolveTraversalCteLimit(
     return 0;
   }
 
-  if (ast.groupBy || ast.having) {
+  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
     return undefined;
   }
 
@@ -280,7 +347,8 @@ function resolveTraversalCteLimit(
   return Math.max(ast.limit, pushdownLimit);
 }
 
-function canCollapseSelectiveTraversalRowset(
+/** The last CTE carries each whole path only when every traversal extends the prior row. */
+function canCollapseLinearTraversalRowset(
   ast: QueryAst,
   vectorPredicate: VectorSimilarityPredicate | undefined,
   fulltextPredicate: FulltextMatchPredicate | undefined,
@@ -309,16 +377,17 @@ function canCollapseSelectiveTraversalRowset(
     expectedJoinFromAlias = traversal.nodeAlias;
   }
 
-  if (!ast.selectiveFields || ast.selectiveFields.length === 0) {
-    return false;
-  }
-
-  if (ast.groupBy || ast.having) {
+  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
     return false;
   }
 
   if (
-    ast.projection.fields.some((field) => field.source.__type === "aggregate")
+    ast.projection.fields.some(
+      (field) =>
+        field.source.__type === "aggregate" ||
+        (field.source.__type === "database_expression" &&
+          expressionContainsAggregate(field.source)),
+    )
   ) {
     return false;
   }
@@ -352,7 +421,7 @@ type StandardQueryPassState = Readonly<{
   logicalPlan: LogicalPlan | undefined;
   predicateIndex: PredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
-  shouldCollapseSelectiveTraversalRowset: boolean;
+  shouldCollapseLinearTraversalRowset: boolean;
   temporalFilterPass: TemporalFilterPass | undefined;
   traversalCteLimit: number | undefined;
   vectorPredicate: VectorSimilarityPredicate | undefined;
@@ -373,7 +442,7 @@ export function runStandardQueryPassPipeline(
     logicalPlan: undefined,
     predicateIndex: buildPredicateIndex(ast),
     requiredColumnsByAlias: undefined,
-    shouldCollapseSelectiveTraversalRowset: false,
+    shouldCollapseLinearTraversalRowset: false,
     temporalFilterPass: undefined,
     traversalCteLimit: undefined,
     vectorPredicate: undefined,
@@ -441,7 +510,11 @@ export function runStandardQueryPassPipeline(
   const temporalPass = runCompilerPass(state, {
     name: "temporal_filters",
     execute(currentState): TemporalFilterPass {
-      return createTemporalFilterPass(currentState.ast, ctx.readInstant);
+      return createTemporalFilterPass(
+        currentState.ast,
+        ctx.readInstant,
+        ctx.recordedReadBinding,
+      );
     },
     update(currentState, temporalFilterPass): StandardQueryPassState {
       return {
@@ -469,36 +542,36 @@ export function runStandardQueryPassPipeline(
   state = columnPruningPass.state;
 
   const selectiveTraversalRowsetPass = runCompilerPass(state, {
-    name: "selective_traversal_rowset",
+    name: "linear_traversal_rowset",
     execute(currentState): Readonly<{
       collapsedTraversalCteAlias: string | undefined;
-      shouldCollapseSelectiveTraversalRowset: boolean;
+      shouldCollapseLinearTraversalRowset: boolean;
     }> {
-      const shouldCollapseSelectiveTraversalRowset =
-        canCollapseSelectiveTraversalRowset(
+      const shouldCollapseLinearTraversalRowset =
+        canCollapseLinearTraversalRowset(
           currentState.ast,
           currentState.vectorPredicate,
           currentState.fulltextPredicate,
         );
       const lastTraversal = currentState.ast.traversals.at(-1);
       const collapsedTraversalCteAlias =
-        shouldCollapseSelectiveTraversalRowset && lastTraversal !== undefined ?
+        shouldCollapseLinearTraversalRowset && lastTraversal !== undefined ?
           `cte_${lastTraversal.nodeAlias}`
         : undefined;
 
       return {
         collapsedTraversalCteAlias,
-        shouldCollapseSelectiveTraversalRowset,
+        shouldCollapseLinearTraversalRowset,
       };
     },
     update(
       currentState,
-      { collapsedTraversalCteAlias, shouldCollapseSelectiveTraversalRowset },
+      { collapsedTraversalCteAlias, shouldCollapseLinearTraversalRowset },
     ): StandardQueryPassState {
       return {
         ...currentState,
         collapsedTraversalCteAlias,
-        shouldCollapseSelectiveTraversalRowset,
+        shouldCollapseLinearTraversalRowset,
       };
     },
   });
@@ -521,14 +594,11 @@ export function runStandardQueryPassPipeline(
   });
   state = traversalLimitPass.state;
 
-  // Compute effectiveLimit once — used by both logical plan lowering and SQL LIMIT/OFFSET.
-  // Both vector and fulltext predicates carry their own LIMITs; the tightest wins.
+  // Ranked predicates bound their candidate CTEs independently. The query limit
+  // applies to completed match rows after traversal fanout and result filtering.
   state = {
     ...state,
-    effectiveLimit: resolveFulltextAwareLimit(
-      resolveVectorAwareLimit(state.ast.limit, state.vectorPredicate),
-      state.fulltextPredicate,
-    ),
+    effectiveLimit: state.ast.limit,
   };
 
   const logicalPlanPass = runCompilerPass(state, {

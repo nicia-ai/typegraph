@@ -15,18 +15,41 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
-  type BatchableQuery,
-  createQueryBuilder,
+  avg,
+  count,
   defineEdge,
   defineGraph,
   defineNode,
   type EdgeId,
+  expr,
+  field,
+  max,
+  min,
   type NodeId,
+  param as parameter,
   type Store,
-  type TypedEdgeCollection,
+  sum,
 } from "../src";
+import { ConfigurationError } from "../src/errors";
+import { createQueryBuilder } from "../src/query";
+import type { Traversal } from "../src/query/ast";
+import type { TraversalBuilder } from "../src/query/builder/traversal-builder";
+import type { DialectAdapter } from "../src/query/dialect/types";
+import type {
+  AggregateOperator,
+  CollectExpressionNode,
+  DatabaseExpression,
+} from "../src/query/expressions";
+import {
+  type AggregateResult,
+  type BatchableQuery,
+  type CollectOptions,
+  fieldRef,
+} from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import type { Edge } from "../src/store/types";
+import type { TypedEdgeCollection } from "../src/store-entry";
+import { matchingObject } from "./test-utils";
 
 // ============================================================
 // Test Graph Definition
@@ -36,6 +59,9 @@ const Person = defineNode("Person", {
   schema: z.object({
     name: z.string(),
     age: z.number(),
+    joinedAt: z.date().optional(),
+    tags: z.array(z.string()),
+    metadata: z.object({ priority: z.number() }),
   }),
 });
 
@@ -56,6 +82,7 @@ const Project = defineNode("Project", {
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
+    salary: z.number().optional(),
   }),
 });
 
@@ -86,12 +113,528 @@ const graph = defineGraph({
 });
 
 const registry = buildKindRegistry(graph);
+const identityGraph = defineGraph({
+  id: "identity_type_test_graph",
+  nodes: graph.nodes,
+  edges: graph.edges,
+  ontology: [],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+function identityNotEnabled(): unknown {
+  return expect.objectContaining({
+    name: "ConfigurationError",
+    details: matchingObject({
+      code: "IDENTITY_NOT_ENABLED",
+      graphId: graph.id,
+    }),
+  });
+}
+
+function preserveCollectOptions<Scope extends string>(
+  options: CollectOptions<Scope>,
+): CollectOptions<Scope> {
+  return options;
+}
 
 // ============================================================
 // Type-Level Tests
 // ============================================================
 
 describe("Query Builder Type Safety", () => {
+  it("exposes only compatible shared fields in predicates and expressions", () => {
+    const Text = defineNode("Text", {
+      schema: z.object({
+        value: z.string(),
+        label: z.string().optional(),
+        details: z.object({ shared: z.string(), mismatch: z.string() }),
+      }),
+    });
+    const Count = defineNode("Count", {
+      schema: z.object({
+        value: z.number(),
+        label: z.string(),
+        details: z.object({ shared: z.string(), mismatch: z.number() }),
+      }),
+    });
+    const mixedGraph = defineGraph({
+      id: "mixed_field_types",
+      nodes: { Text: { type: Text }, Count: { type: Count } },
+      edges: {},
+    });
+    const mixedRegistry = buildKindRegistry(mixedGraph);
+    const query = createQueryBuilder<typeof mixedGraph>(
+      mixedGraph.id,
+      mixedRegistry,
+    ).from(["Text", "Count"], "node");
+
+    query.whereNode("node", (node) => {
+      expectTypeOf<
+        "value" extends keyof typeof node ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf(node.details.get("shared")).toExtend<
+        Readonly<{ eq: (value: string) => unknown }>
+      >();
+      if (false as boolean) {
+        // @ts-expect-error Nested string and number fields do not share one accessor.
+        node.details.get("mismatch");
+      }
+      return node.label.eq("shared");
+    });
+    query.project((expressions) => {
+      expectTypeOf<
+        "value" extends keyof typeof expressions.node ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf<
+        "mismatch" extends keyof typeof expressions.node.details ? true : false
+      >().toEqualTypeOf<false>();
+      if (false as boolean) {
+        // @ts-expect-error Nested string and number fields cannot be selected with $get.
+        expressions.node.details.$get("mismatch");
+      }
+      expectTypeOf(expressions.node.label).toEqualTypeOf<
+        DatabaseExpression<string | undefined, "node">
+      >();
+      return { label: expressions.node.label };
+    });
+
+    if (false as boolean) {
+      const UnionField = defineNode("UnionField", {
+        schema: z.object({ value: z.union([z.string(), z.number()]) }),
+      });
+      const singletonGraph = defineGraph({
+        id: "single_union_field",
+        nodes: { UnionField: { type: UnionField } },
+        edges: {},
+      });
+      const singletonRegistry = buildKindRegistry(singletonGraph);
+      createQueryBuilder<typeof singletonGraph>(
+        singletonGraph.id,
+        singletonRegistry,
+      )
+        .from("UnionField", "node")
+        .whereNode("node", (node) => node.value.eq("text"));
+      createQueryBuilder<typeof singletonGraph>(
+        singletonGraph.id,
+        singletonRegistry,
+      )
+        .from("UnionField", "node")
+        .project((expressions) => ({ value: expressions.node.value }));
+    }
+    void query;
+  });
+  it("types explicit multi-kind sources by their common fields and concrete result kind", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from(["Person", "Company"], "node")
+      .whereNode("node", (node) => node.name.eq("shared"))
+      .select((context) => context.node);
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    expectTypeOf<Row["kind"]>().toEqualTypeOf<"Person" | "Company">();
+    if (false as boolean) {
+      const row = undefined as unknown as Row;
+      if (row.kind === "Person") {
+        expectTypeOf(row.age).toEqualTypeOf<number>();
+        expectTypeOf(row.id).toEqualTypeOf<NodeId<typeof Person>>();
+      } else {
+        expectTypeOf(row.industry).toEqualTypeOf<string>();
+        expectTypeOf(row.id).toEqualTypeOf<NodeId<typeof Company>>();
+      }
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from(["Person", "Company"], "n")
+        .whereNode("n", (node) => {
+          expectTypeOf<
+            "age" extends keyof typeof node ? true : false
+          >().toEqualTypeOf<false>();
+          return node.name.eq("shared");
+        });
+      // @ts-expect-error An explicit source list cannot be empty.
+      createQueryBuilder<typeof graph>(graph.id, registry).from([], "n");
+      createQueryBuilder<typeof graph>(graph.id, registry).from(
+        // @ts-expect-error Every source kind must belong to the graph.
+        ["Person", "Missing"],
+        "n",
+      );
+    }
+    void query;
+  });
+  it("infers aggregate scalar values and empty-input nullability", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate({
+        name: field("person", "name"),
+        count: count("person"),
+        totalAge: sum("person", "age"),
+        averageAge: avg("person", "age"),
+        firstName: min("person", "name"),
+        lastName: max("person", "name"),
+        firstJoinedAt: min("person", "joinedAt"),
+      });
+
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+    void query;
+    expectTypeOf<Row["name"]>().toEqualTypeOf<string>();
+    expectTypeOf<Row["count"]>().toEqualTypeOf<number>();
+    expectTypeOf<Row["totalAge"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<Row["averageAge"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<Row["firstName"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<Row["lastName"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<Row["firstJoinedAt"]>().toEqualTypeOf<Date | undefined>();
+
+    const untypedMinimum = min("dynamic", "value");
+    type UntypedRow = AggregateResult<{ minimum: typeof untypedMinimum }>;
+    void untypedMinimum;
+    expectTypeOf<UntypedRow["minimum"]>().toBeUnknown();
+
+    const edgeQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .traverse("worksAt", "employment")
+      .to("Company", "company")
+      .aggregate({ minimumSalary: min("employment", "salary") });
+    type EdgeRow = Awaited<ReturnType<typeof edgeQuery.execute>>[number];
+    void edgeQuery;
+    expectTypeOf<EdgeRow["minimumSalary"]>().toEqualTypeOf<
+      number | undefined
+    >();
+
+    const collectionQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate((fields) => ({
+        names: expr.collect(
+          fields.person.name,
+          preserveCollectOptions({
+            filter: expr.gt(fields.person.age, expr.literal(18)),
+            orderBy: [{ expression: fields.person.name }],
+          }),
+        ),
+        joined: expr.collect(fields.person.joinedAt, {
+          orderBy: [{ expression: fields.person.joinedAt, nulls: "first" }],
+        }),
+      }));
+    type CollectionRow = Awaited<
+      ReturnType<typeof collectionQuery.execute>
+    >[number];
+    void collectionQuery;
+    expectTypeOf<CollectionRow["names"]>().toEqualTypeOf<readonly string[]>();
+    expectTypeOf<CollectionRow["joined"]>().toEqualTypeOf<
+      readonly (Date | undefined)[]
+    >();
+
+    const recordQuery = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "person")
+      .aggregate((fields) => ({
+        records: expr.collect(
+          {
+            name: fields.person.name,
+            joinedAt: fields.person.joinedAt,
+            active: expr.isNotNull(fields.person.joinedAt),
+          },
+          { orderBy: [{ expression: fields.person.name }] },
+        ),
+      }));
+    type RecordRow = Awaited<ReturnType<typeof recordQuery.execute>>[number];
+    void recordQuery;
+    expectTypeOf<RecordRow["records"]>().toEqualTypeOf<
+      readonly Readonly<{
+        name: string;
+        joinedAt: Date | undefined;
+        active: boolean;
+      }>[]
+    >();
+    function assertRecordCollectScopeInference(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => {
+          const fieldScoped = expr.collect(
+            { name: fields.person.name },
+            {
+              orderBy: [{ expression: expr.literal(1) }],
+            },
+          );
+          expectTypeOf(fieldScoped).toEqualTypeOf<
+            DatabaseExpression<readonly Readonly<{ name: string }>[], "person">
+          >();
+          const orderScoped = expr.collect(
+            { name: expr.literal("Ada") },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          );
+          expectTypeOf(orderScoped).toEqualTypeOf<
+            DatabaseExpression<readonly Readonly<{ name: "Ada" }>[], "person">
+          >();
+          return { fieldScoped, orderScoped };
+        });
+    }
+    void assertRecordCollectScopeInference;
+
+    const nullableEmploymentFilter = undefined as unknown as DatabaseExpression<
+      boolean | undefined,
+      "employment"
+    >;
+    const nullableFilterOptions: CollectOptions<"employment"> = {
+      filter: nullableEmploymentFilter,
+      orderBy: [{ expression: expr.literal(1) }],
+    };
+    expectTypeOf(nullableFilterOptions.filter).toEqualTypeOf<
+      DatabaseExpression<boolean | undefined, "employment"> | undefined
+    >();
+    const personFilter = undefined as unknown as DatabaseExpression<
+      boolean,
+      "person"
+    >;
+    const mismatchedFilterOptions: CollectOptions<"employment"> = {
+      // @ts-expect-error - COLLECT filter scope must match its aggregate scope
+      filter: personFilter,
+      orderBy: [{ expression: expr.literal(1) }],
+    };
+    void mismatchedFilterOptions;
+
+    type OrderedCollectionCompiler = DialectAdapter["orderedScalarJsonArray"];
+    type OrderedCollectionArguments = Parameters<OrderedCollectionCompiler>[0];
+    type LegacyPositionalCompiler = (
+      value: OrderedCollectionArguments["value"],
+      valueType: OrderedCollectionArguments["valueType"],
+      orderBy: OrderedCollectionArguments["orderBy"],
+    ) => ReturnType<OrderedCollectionCompiler>;
+    type LegacyCompilerIsCompatible =
+      LegacyPositionalCompiler extends OrderedCollectionCompiler ? true : false;
+    expectTypeOf<LegacyCompilerIsCompatible>().toEqualTypeOf<false>();
+    const compilerArgumentsWithoutFilter = {
+      filter: undefined,
+      orderBy: undefined as unknown as OrderedCollectionArguments["orderBy"],
+      value: undefined as unknown as OrderedCollectionArguments["value"],
+      valueType: "string" as const,
+    } satisfies OrderedCollectionArguments;
+    expectTypeOf(
+      compilerArgumentsWithoutFilter.filter,
+    ).toEqualTypeOf<undefined>();
+    const compilerArgumentsMissingFilter = {
+      orderBy: undefined as unknown as OrderedCollectionArguments["orderBy"],
+      value: undefined as unknown as OrderedCollectionArguments["value"],
+      valueType: "string" as const,
+    };
+    // @ts-expect-error - dialect implementations must explicitly accept the filter seam
+    const incompleteCompilerArguments: OrderedCollectionArguments =
+      compilerArgumentsMissingFilter;
+    void incompleteCompilerArguments;
+
+    type CollectIsAggregateOperator =
+      "collect" extends AggregateOperator ? true : false;
+    expectTypeOf<CollectIsAggregateOperator>().toEqualTypeOf<false>();
+    function assertExpressionNodeNarrowing(
+      node: DatabaseExpression["node"],
+    ): void {
+      if (node.kind === "collect") {
+        expectTypeOf(node).toEqualTypeOf<CollectExpressionNode>();
+        expectTypeOf(node.orderBy).toEqualTypeOf<
+          CollectExpressionNode["orderBy"]
+        >();
+        // @ts-expect-error - collection nodes have no aggregate operator
+        void node.operator;
+      }
+      if (node.kind === "aggregate") {
+        expectTypeOf(node.operator).toEqualTypeOf<AggregateOperator>();
+        // @ts-expect-error - scalar aggregate nodes carry no collection ordering
+        void node.orderBy;
+      }
+    }
+    void assertExpressionNodeNarrowing;
+
+    function assertCollectionInputTypes(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => ({
+          // @ts-expect-error - COLLECT requires at least one explicit ordering expression
+          emptyOrder: expr.collect(fields.person.name, { orderBy: [] }),
+          // @ts-expect-error - COLLECT accepts scalar operands, not arrays
+          structured: expr.collect(fields.person.tags, {
+            orderBy: [{ expression: fields.person.name }],
+          }),
+          // @ts-expect-error - COLLECT filters must be Boolean expressions
+          nonBooleanFilter: expr.collect(fields.person.name, {
+            filter: fields.person.age,
+            orderBy: [{ expression: fields.person.name }],
+          }),
+        }));
+    }
+    void assertCollectionInputTypes;
+
+    function assertRecordCollectionInputTypes(): void {
+      createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .aggregate((fields) => ({
+          // @ts-expect-error - record COLLECT requires explicit ordering
+          missingOrder: expr.collect({ name: fields.person.name }, {}),
+          // @ts-expect-error - record COLLECT requires a nonempty order tuple
+          emptyOrder: expr.collect(
+            { name: fields.person.name },
+            { orderBy: [] },
+          ),
+          // @ts-expect-error - nested object literals are not scalar field expressions
+          nestedObject: expr.collect(
+            { name: { nested: fields.person.name } },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+          arrayField: expr.collect(
+            {
+              // @ts-expect-error - array-valued field expressions are not scalar record fields
+              tags: fields.person.tags,
+            },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+          rawField: expr.collect(
+            {
+              // @ts-expect-error - scalar record fields must be DatabaseExpressions
+              name: "Ada",
+            },
+            {
+              orderBy: [{ expression: fields.person.name }],
+            },
+          ),
+        }));
+    }
+    void assertRecordCollectionInputTypes;
+  });
+
+  describe("Operational Identity capability", () => {
+    it("exposes identity traversal and facade only for enabled graph types", () => {
+      function assertIdentityGraphTypes(): void {
+        const disabledStore = undefined as unknown as Store<typeof graph>;
+        const enabledStore = undefined as unknown as Store<
+          typeof identityGraph
+        >;
+        disabledStore
+          .query()
+          .from("Person", "person")
+          // @ts-expect-error - disabled graphs cannot request identity expansion
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        // @ts-expect-error - identity is absent from a disabled graph's Store
+        void disabledStore.identity;
+
+        enabledStore
+          .query()
+          .from("Person", "person")
+          .traverse("knows", "edge", { includeIdentityMembers: true });
+        void enabledStore.identity.membersOf;
+      }
+      // The property does not exist on the disabled surface at all — the
+      // encoding `tx.identity` has always used — rather than existing with a
+      // `never` type that only errors once a member is reached.
+      expectTypeOf<
+        "identity" extends keyof Store<typeof graph> ? true : false
+      >().toEqualTypeOf<false>();
+      expectTypeOf<
+        "identity" extends keyof Store<typeof identityGraph> ? true : false
+      >().toEqualTypeOf<true>();
+      void assertIdentityGraphTypes;
+      expect(identityGraph.identity).toEqual({ sameIdAcrossKinds: "fold" });
+    });
+
+    it("infers identity capability for a compile-only builder", () => {
+      const identityRegistry = buildKindRegistry(identityGraph);
+
+      const builder = createQueryBuilder<typeof identityGraph>(
+        identityGraph.id,
+        identityRegistry,
+      )
+        .from("Person", "person")
+        .traverse("knows", "edge", { includeIdentityMembers: true })
+        .to("Person", "friend")
+        .select((context) => context.friend);
+      expect(builder.toAst().traversals[0]?.includeIdentityMembers).toBe(true);
+
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identityEnabled: true,
+        }),
+      ).toThrow(identityNotEnabled());
+    });
+
+    it("uses one error code for disabled builder identity features", () => {
+      expect(() =>
+        createQueryBuilder<typeof graph>(graph.id, registry, {
+          identitySameIdAcrossKinds: "fold",
+        }),
+      ).toThrow(identityNotEnabled());
+
+      const builder = createQueryBuilder<typeof graph>(graph.id, registry).from(
+        "Person",
+        "person",
+      );
+      const unsafeOptions = { includeIdentityMembers: true } as never;
+      const traverseWithIdentity = () =>
+        builder.traverse("knows", "edge", unsafeOptions);
+
+      expect(traverseWithIdentity).toThrow(ConfigurationError);
+      expect(traverseWithIdentity).toThrow(identityNotEnabled());
+    });
+  });
+
+  describe("TraversalBuilder constructor stability", () => {
+    type IsIdentityFlagSlot<T> =
+      [T] extends [boolean | undefined] ? true : false;
+
+    /**
+     * `TraversalBuilder` is part of the public traversal surface, so its
+     * positional parameters are a contract: a new parameter must be APPENDED,
+     * never inserted, or every caller's later arguments silently shift one slot
+     * (the way `includeIdentityMembers` once displaced `variableLength`).
+     */
+    it("pins the positional constructor parameter order", () => {
+      type Params = ConstructorParameters<typeof TraversalBuilder>;
+
+      // Six required parameters followed by six optional ones. Any insertion
+      // widens this union and fails here first.
+      expectTypeOf<Params["length"]>().toEqualTypeOf<
+        6 | 7 | 8 | 9 | 10 | 11 | 12
+      >();
+
+      expectTypeOf<Params[2]>().toEqualTypeOf<readonly string[]>();
+      expectTypeOf<Params[3]>().toEqualTypeOf<string>();
+      expectTypeOf<Params[5]>().toEqualTypeOf<string>();
+      expectTypeOf<Params[6]>().toEqualTypeOf<readonly string[] | undefined>();
+      // Slots 8 and 9 carry module-private state types, so assert only that the
+      // identity flag sits after them and not in them. Slots whose type comes
+      // from a class type parameter erase unusably under `ConstructorParameters`
+      // and are left to the arity check above.
+      expectTypeOf<IsIdentityFlagSlot<Params[8]>>().toEqualTypeOf<false>();
+      expectTypeOf<IsIdentityFlagSlot<Params[9]>>().toEqualTypeOf<false>();
+      expectTypeOf<IsIdentityFlagSlot<Params[10]>>().toEqualTypeOf<true>();
+      expectTypeOf<Params[11]>().toEqualTypeOf<
+        Traversal["compositionMembership"]
+      >();
+    });
+
+    it("carries identity expansion through recursive and edge-predicate rebuilds", () => {
+      const identityRegistry = buildKindRegistry(identityGraph);
+
+      // `recursive()` and `whereEdge()` each rebuild the TraversalBuilder
+      // positionally, so a misordered argument shows up as a dropped flag or a
+      // lost variable-length spec here.
+      const ast = createQueryBuilder<typeof identityGraph>(
+        identityGraph.id,
+        identityRegistry,
+      )
+        .from("Person", "person")
+        .traverse("manages", "edge", { includeIdentityMembers: true })
+        .whereEdge("edge", (edge) => edge.since.eq("2024"))
+        .recursive({ depth: true, path: "hops" })
+        .to("Project", "project")
+        .select((context) => context.project)
+        .toAst();
+
+      const traversal = ast.traversals[0];
+      expect(traversal?.includeIdentityMembers).toBe(true);
+      expect(traversal?.variableLength?.pathAlias).toBe("hops");
+      expect(traversal?.variableLength?.depthAlias).toBe("project_depth");
+      expect(ast.predicates).toHaveLength(1);
+    });
+  });
+
   describe("Node kind constraints", () => {
     it("accepts valid node kinds", () => {
       // These should compile without error
@@ -114,24 +657,28 @@ describe("Query Builder Type Safety", () => {
     });
 
     it("rejects invalid node kinds at compile time", () => {
-      // These produce compile errors, verified by @ts-expect-error annotations
-      createQueryBuilder<typeof graph>(graph.id, registry).from(
-        // @ts-expect-error - "InvalidKind" is not a valid node kind
-        "InvalidKind",
-        "x",
-      );
+      const invalidRegistry = registry;
+      function assertInvalidQueries(): void {
+        // These produce compile errors, verified by @ts-expect-error annotations
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry).from(
+          // @ts-expect-error - "InvalidKind" is not a valid node kind
+          "InvalidKind",
+          "x",
+        );
 
-      createQueryBuilder<typeof graph>(graph.id, registry).from(
-        // @ts-expect-error - "Peron" is a typo, not a valid node kind
-        "Peron",
-        "p",
-      );
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry).from(
+          // @ts-expect-error - "Peron" is a typo, not a valid node kind
+          "Peron",
+          "p",
+        );
 
-      createQueryBuilder<typeof graph>(graph.id, registry).from(
-        // @ts-expect-error - "person" is wrong case (node kinds are PascalCase)
-        "person",
-        "p",
-      );
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry).from(
+          // @ts-expect-error - "person" is wrong case (node kinds are PascalCase)
+          "person",
+          "p",
+        );
+      }
+      void assertInvalidQueries;
     });
   });
 
@@ -265,30 +812,33 @@ describe("Query Builder Type Safety", () => {
     });
 
     it("rejects duplicate aliases at compile time", () => {
-      // Collision with start alias "p" in to()
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e")
-        // @ts-expect-error - "p" is already used as the start alias
-        .to("Company", "p");
+      const invalidRegistry = registry;
+      function assertInvalidQueries(): void {
+        // Collision with start alias "p" in to()
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e")
+          // @ts-expect-error - "p" is already used as the start alias
+          .to("Company", "p");
 
-      // Collision with previous traversal alias "c"
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e1")
-        .to("Company", "c")
-        .traverse("knows", "e2")
-        // @ts-expect-error - "c" is already used as a traversal alias
-        .to("Person", "c");
+        // Collision with previous traversal alias "c"
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e1")
+          .to("Company", "c")
+          .traverse("knows", "e2")
+          // @ts-expect-error - "c" is already used as a traversal alias
+          .to("Person", "c");
 
-      // Collision between two from() calls (edge case - calling from twice)
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        // @ts-expect-error - "p" is already used
-        .from("Company", "p");
+        // Collision between two from() calls (edge case - calling from twice)
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          // @ts-expect-error - "p" is already used
+          .from("Company", "p");
 
-      // Verify the constraint exists
-      expect(true).toBe(true);
+        // Verify the constraint exists
+      }
+      void assertInvalidQueries;
     });
   });
 
@@ -327,6 +877,98 @@ describe("Query Builder Type Safety", () => {
     });
   });
 
+  describe("schema-aware equality and membership operands", () => {
+    it("accepts matching literals, field references, and parameters", () => {
+      const operandRegistry = registry;
+      function assertAcceptedOperands(): void {
+        const query = createQueryBuilder<typeof graph>(
+          graph.id,
+          operandRegistry,
+        ).from("Person", "person");
+        query.whereNode("person", (person) =>
+          person.name
+            .eq("Ada")
+            .and(person.name.neq(fieldRef<string>("other", ["props", "name"])))
+            .and(person.name.in(["Ada", "Grace"]))
+            .and(person.age.notIn(parameter("ages"))),
+        );
+      }
+      void assertAcceptedOperands;
+    });
+
+    it("rejects literals and field references from another schema value type", () => {
+      const operandRegistry = registry;
+      function assertRejectedOperands(): void {
+        const query = createQueryBuilder<typeof graph>(
+          graph.id,
+          operandRegistry,
+        ).from("Person", "person");
+        query.whereNode("person", (person) => {
+          // @ts-expect-error age is a number field
+          person.age.eq("old");
+          // @ts-expect-error name membership values must be strings
+          person.name.in([1, 2]);
+          // @ts-expect-error the right field reference has an incompatible value type
+          person.name.neq(fieldRef<number>("other", ["props", "age"]));
+          return person.name.eq("Ada");
+        });
+        const projects = createQueryBuilder<typeof graph>(
+          graph.id,
+          operandRegistry,
+        ).from("Project", "project");
+        projects.whereNode("project", (project) => {
+          // @ts-expect-error enum equality preserves the declared literal set
+          project.status.eq("archived");
+          return project.status.eq("active");
+        });
+      }
+      void assertRejectedOperands;
+    });
+
+    it("rejects parameter elements and structured-value comparisons", () => {
+      const operandRegistry = registry;
+      function assertRejectedOperands(): void {
+        const query = createQueryBuilder<typeof graph>(
+          graph.id,
+          operandRegistry,
+        ).from("Person", "person");
+        query.whereNode("person", (person) => {
+          // @ts-expect-error a list parameter must be the complete membership operand
+          person.name.in(["Ada", parameter("other")]);
+          // @ts-expect-error array equality cannot be compiled as a scalar literal
+          person.tags.eq(["Ada"]); // eslint-disable-line @typescript-eslint/no-unsafe-call -- Deliberate negative compile-time assertion.
+          // @ts-expect-error object membership cannot be compiled as scalar literals
+          person.metadata.notIn([{ priority: 1 }]); // eslint-disable-line @typescript-eslint/no-unsafe-call -- Deliberate negative compile-time assertion.
+          return person.name.eq("Ada");
+        });
+      }
+      void assertRejectedOperands;
+    });
+  });
+
+  describe("ordinary query terminals", () => {
+    it("exposes count and exists before selection and first after selection", () => {
+      const relation = createQueryBuilder<typeof graph>(graph.id, registry)
+        .from("Person", "person")
+        .whereNode("person", (person) => person.age.gte(18));
+      const selected = relation.select((context) => ({
+        name: context.person.name,
+        age: context.person.age,
+      }));
+
+      expect(selected.toAst().start.alias).toBe("person");
+      expectTypeOf<typeof relation.count>().returns.toEqualTypeOf<
+        Promise<number>
+      >();
+      expectTypeOf<typeof relation.exists>().returns.toEqualTypeOf<
+        Promise<boolean>
+      >();
+      expectTypeOf<typeof selected.first>().returns.toEqualTypeOf<
+        Promise<{ name: string; age: number } | undefined>
+      >();
+    });
+  });
+
   describe("whereEdge alias constraints", () => {
     it("accepts valid edge aliases in whereEdge", () => {
       const q1 = createQueryBuilder<typeof graph>(graph.id, registry)
@@ -348,34 +990,36 @@ describe("Query Builder Type Safety", () => {
     });
 
     it("rejects invalid aliases in whereEdge at compile time", () => {
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e")
-        // @ts-expect-error - "p" is a node alias, not an edge alias
-        .whereEdge("p", (edge) => edge.role.eq("Engineer"));
+      const invalidRegistry = registry;
+      function assertInvalidQueries(): void {
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e")
+          // @ts-expect-error - "p" is a node alias, not an edge alias
+          .whereEdge("p", (edge) => edge.role.eq("Engineer"));
 
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e")
-        .to("Company", "c")
-        // @ts-expect-error - "c" is a node alias, not an edge alias
-        .whereEdge("c", (edge) => edge.role.eq("Engineer"));
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e")
+          .to("Company", "c")
+          // @ts-expect-error - "c" is a node alias, not an edge alias
+          .whereEdge("c", (edge) => edge.role.eq("Engineer"));
 
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e")
-        // @ts-expect-error - "x" is not a declared edge alias
-        .whereEdge("x", (edge) => edge.role.eq("Engineer"));
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e")
+          // @ts-expect-error - "x" is not a declared edge alias
+          .whereEdge("x", (edge) => edge.role.eq("Engineer"));
 
-      createQueryBuilder<typeof graph>(graph.id, registry)
-        .from("Person", "p")
-        .traverse("worksAt", "e")
-        .whereEdge("e", (edge) => {
-          // @ts-expect-error - worksAt edges don't have a "since" property
-          return edge.since.eq("2020"); // eslint-disable-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- Deliberate negative compile-time assertion.
-        });
-
-      expect(true).toBe(true);
+        createQueryBuilder<typeof graph>(graph.id, invalidRegistry)
+          .from("Person", "p")
+          .traverse("worksAt", "e")
+          .whereEdge("e", (edge) => {
+            // @ts-expect-error - worksAt edges don't have a "since" property
+            return edge.since.eq("2020"); // eslint-disable-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access -- Deliberate negative compile-time assertion.
+          });
+      }
+      void assertInvalidQueries;
     });
   });
 

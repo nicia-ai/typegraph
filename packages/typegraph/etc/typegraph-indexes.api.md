@@ -10,7 +10,7 @@ import { z } from 'zod';
 export function andWhere(...predicates: [IndexWhereExpression, ...IndexWhereExpression[]]): IndexWhereExpression;
 
 // @public
-type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, readonly NodeType[] | undefined>;
+type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
 type DeclaredIndex = Readonly<{
@@ -96,7 +96,13 @@ export type EdgeIndexWhereBuilder<E extends AnyEdgeType> = Readonly<{
 }>;
 
 // @public
-type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     [EDGE_TYPE_BRAND]: true;
     kind: K;
     schema: S;
@@ -125,6 +131,7 @@ export function generateIndexDDL(index: RelationalIndexDeclaration, dialect: Sql
 export type GenerateIndexDdlOptions = Readonly<{
     nodesTableName?: string | undefined;
     edgesTableName?: string | undefined;
+    physicalName?: string | undefined;
     ifNotExists?: boolean | undefined;
     concurrent?: boolean | undefined;
 }>;
@@ -135,13 +142,14 @@ export function generateNodeIndexDDL(index: NodeIndexDeclaration, dialect: SqlDi
 // @public
 export function generateSystemIndexDDL(declaration: SystemIndexDeclaration, physicalTableName: string, options: Readonly<{
     concurrent: boolean;
+    dialect?: SqlDialect;
 }>): string;
 
 // @public
 export type IndexDeclaration = RelationalIndexDeclaration | VectorIndexDeclaration;
 
 // @public
-type IndexDeclarationBase = Readonly<{
+export type IndexDeclarationBase = Readonly<{
     name: string;
     origin?: IndexOrigin;
     fields: readonly JsonPointer[];
@@ -220,17 +228,17 @@ export type IndexWhereFieldBuilder<T> = Readonly<{
 export type IndexWhereInput<Builder> = IndexWhereExpression | ((where: Builder) => IndexWhereExpression);
 
 // @public (undocumented)
-type IndexWhereLiteral = Readonly<{
+export type IndexWhereLiteral = Readonly<{
     __type: "index_where_literal";
     value: string | number | boolean;
     valueType: ValueType;
 }>;
 
 // @public (undocumented)
-type IndexWhereOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
+export type IndexWhereOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 // @public (undocumented)
-type IndexWhereOperand = Readonly<{
+export type IndexWhereOperand = Readonly<{
     __type: "index_operand_system";
     column: SystemColumnName;
     valueType: ValueType | undefined;
@@ -252,7 +260,10 @@ type JsonPointerFor<T, Current extends Depth = 5> = "" | (Current extends 0 ? ""
 type JsonPointerSegmentsFor<T, Current extends Depth = 5> = readonly [] | (Current extends 0 ? readonly [] : T extends readonly (infer U)[] ? PointerSegmentsForArray<U, Current> : never) | (Current extends 0 ? readonly [] : T extends Record<string, unknown> ? PointerSegmentsForObject<T, Current> : never);
 
 // @public
-type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+type JsonScalar = null | string | number | boolean;
+
+// @public
+type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -269,25 +280,63 @@ type LiveColumn = "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "va
 type LiveEdgeColumn = LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
 // @public
+export const NODE_SYSTEM_COLUMN_NAMES: readonly ["graph_id", "kind", "id", "deleted_at", "valid_from", "valid_to", "created_at", "updated_at", "version"];
+
+// @public
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public (undocumented)
 export type NodeIndexConfig<N extends NodeType> = Readonly<{
-    fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
     coveringFields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
-    keySystemColumns?: readonly SystemColumnName[] | undefined;
-    unique?: boolean | undefined;
     name?: string | undefined;
     scope?: IndexScope | undefined;
     where?: IndexWhereInput<NodeIndexWhereBuilder<N>> | undefined;
+}> & (Readonly<{
+    keys: readonly [
+    NodeIndexKeyInput<z.infer<N["schema"]>>,
+    ...NodeIndexKeyInput<z.infer<N["schema"]>>[]
+    ];
+    fields?: never;
+    keySystemColumns?: never;
+    unique?: false | undefined;
+    method?: "btree" | undefined;
+}> | Readonly<{
+    keys?: never;
+    fields?: readonly IndexFieldInput<z.infer<N["schema"]>>[] | undefined;
+    keySystemColumns?: readonly SystemColumnName[] | undefined;
+    unique?: boolean | undefined;
     method?: RelationalIndexMethod | undefined;
-}>;
+}>);
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
+}>;
+
+// @public (undocumented)
+export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
+
+// @public (undocumented)
+export type NodeIndexKeyInput<T> = Readonly<{
+    field: IndexFieldInput<T>;
+    system?: never;
+    direction: "asc" | "desc";
+}> | Readonly<{
+    field?: never;
+    system: NodeSystemColumnName;
+    direction: "asc" | "desc";
 }>;
 
 // @public (undocumented)
@@ -305,9 +354,13 @@ export type NodeIndexWhereBuilder<N extends NodeType> = Readonly<{
     [K in keyof z.infer<N["schema"]>]-?: IndexWhereFieldBuilder<z.infer<N["schema"]>[K]>;
 }>;
 
+// @public (undocumented)
+export type NodeSystemColumnName = (typeof NODE_SYSTEM_COLUMN_NAMES)[number];
+
 // @public
 type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
     [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
     kind: K;
     schema: S;
     description: string | undefined;
@@ -355,7 +408,7 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
 type ProfileEntityType = KindEntity;
 
 // @public (undocumented)
-type RecordedColumn = "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
+type RecordedColumn = "history_id" | "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
 
 // @public (undocumented)
 type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
@@ -364,7 +417,7 @@ type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" |
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public
-type RelationalIndexMethod = "btree" | "gin" | "trigram";
+export type RelationalIndexMethod = "btree" | "gin" | "trigram";
 
 // @public
 type SqlDialect = "sqlite" | "postgres";
@@ -385,7 +438,15 @@ export type SystemIndexDeclaration = SystemIndexDeclarationFor<"nodes"> | System
 type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
     table: T;
     suffix: string;
+    binaryOrderColumns?: readonly string[];
     columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
+    predicate?: SystemIndexPredicate<SystemIndexColumnsFor<T>>;
+    dialects?: readonly [SqlDialect, ...SqlDialect[]];
+}>;
+
+// @public
+export type SystemIndexPredicate<C extends string = string> = Readonly<{
+    isNull: C;
 }>;
 
 // @public

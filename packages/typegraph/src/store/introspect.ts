@@ -19,16 +19,25 @@ import {
   type AllNodeTypes,
   type GraphDef,
 } from "../core/define-graph";
+import { projectTargetKinds } from "../core/edge-endpoints";
+import { effectiveTargetCardinality } from "../core/edge-integrity-options";
+import { canonicalAnnotations } from "../core/json-value";
 import {
   type Cardinality,
   type Collation,
   type EdgeType,
   type EndpointExistence,
+  type GraphAnnotations,
   type KindAnnotations,
   type NodeRegistration,
   type NodeType,
+  type TargetCardinality,
   type UniquenessScope,
 } from "../core/types";
+import {
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  withUniqueConstraintDefaults,
+} from "../core/unique-constraint-options";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   buildGraphExtensionOntologyKeySet,
@@ -36,8 +45,15 @@ import {
   extensionKindNames,
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
+import {
+  type CompositionExistence,
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import { type KindRegistry } from "../registry/kind-registry";
 import { serializeSchemaProperties } from "../schema/serializer";
 import { type JsonSchema } from "../schema/types";
+import { edgeKindIsInAcyclicRelation } from "./acyclicity";
 
 export type SchemaIntrospection = Readonly<{
   graphId: string;
@@ -45,6 +61,8 @@ export type SchemaIntrospection = Readonly<{
   schemaVersion: number | undefined;
   /** Hash of the active schema document, when known to the caller. */
   schemaHash: string | undefined;
+  /** Consumer-owned graph-scoped JSON metadata. */
+  annotations: GraphAnnotations | undefined;
   kinds: readonly KindIntrospection[];
   edges: readonly EdgeIntrospection[];
   ontology: readonly OntologyIntrospection[];
@@ -81,7 +99,18 @@ export type EdgeIntrospection = Readonly<{
   from: readonly string[];
   to: readonly string[];
   cardinality: Cardinality;
+  targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
+  /**
+   * Whether this edge kind's rows are enforced acyclic: declared
+   * `acyclic: true`, or a composition-realizing kind (a `partOf`/`hasPart`
+   * `via`), which the composition relation enforces acyclic across every
+   * realizing kind together. Required (never optional): introspection reports
+   * the RESOLVED value, not the declaration's sparse form — see
+   * `SerializedEdgeDef.acyclic`'s docblock for why the declaration itself is
+   * emit-when-true only.
+   */
+  acyclic: boolean;
   properties: JsonSchema;
   annotations: KindAnnotations | undefined;
   deprecated: boolean;
@@ -91,6 +120,12 @@ export type OntologyIntrospection = Readonly<{
   metaEdge: string;
   from: string;
   to: string;
+  /** The realizing edge kind name. Present only for `partOf`/`hasPart`. */
+  via?: string;
+  /** Which end of the edge is the part. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
+  /** Whether the part must have a live whole. Meaningful only alongside `via`. */
+  existence?: CompositionExistence;
   origin: "compile-time" | "runtime";
 }>;
 
@@ -103,6 +138,7 @@ export type UniqueIntrospection = Readonly<{
 
 type IntrospectContext = Readonly<{
   graphId: string;
+  registry: KindRegistry;
   schemaVersion: number | undefined;
   schemaHash: string | undefined;
 }>;
@@ -126,12 +162,18 @@ export function introspectSchema<G extends GraphDef>(
       annotations: reg.type.annotations,
       deprecated: deprecated.has(name),
       properties: serializeSchemaProperties(reg.type.schema),
-      unique: (reg.unique ?? []).map((constraint) => ({
-        name: constraint.name,
-        fields: [...constraint.fields],
-        scope: constraint.scope,
-        collation: constraint.collation,
-      })),
+      unique: (reg.unique ?? []).map((constraint) => {
+        const { scope, collation } = withUniqueConstraintDefaults(
+          constraint,
+          NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+        );
+        return {
+          name: constraint.name,
+          fields: [...constraint.fields],
+          scope,
+          collation,
+        };
+      }),
     });
   }
 
@@ -144,9 +186,11 @@ export function introspectSchema<G extends GraphDef>(
       origin: runtimeEdgeNames.has(name) ? "runtime" : "compile-time",
       description: edgeType.description,
       from: reg.from.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
-      to: reg.to.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
+      to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
+      targetCardinality: effectiveTargetCardinality(reg.targetCardinality),
       endpointExistence: reg.endpointExistence ?? "notDeleted",
+      acyclic: edgeKindIsInAcyclicRelation(graph, context.registry, name),
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,
       deprecated: deprecated.has(name),
@@ -158,6 +202,7 @@ export function introspectSchema<G extends GraphDef>(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
     origin:
       runtimeOntologyKeys.has(compileTimeOntologyKey(relation)) ? "runtime" : (
         "compile-time"
@@ -166,6 +211,7 @@ export function introspectSchema<G extends GraphDef>(
 
   return {
     graphId: context.graphId,
+    annotations: canonicalAnnotations(graph.annotations),
     schemaVersion: context.schemaVersion,
     schemaHash: context.schemaHash,
     kinds,

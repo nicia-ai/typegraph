@@ -14,6 +14,7 @@ import type {
   SelectiveField,
   Traversal,
 } from "../src/query/ast";
+import { compileQuery } from "../src/query/compiler";
 import { type PredicateCompilerContext } from "../src/query/compiler/predicates";
 import { DEFAULT_SQL_SCHEMA } from "../src/query/compiler/schema";
 import {
@@ -23,6 +24,7 @@ import {
 import { getDialect } from "../src/query/dialect";
 import type { DialectAdapter } from "../src/query/dialect/types";
 import { sql } from "../src/query/sql-fragment";
+import { toSqlString } from "./sql-test-utils";
 
 // ============================================================
 // Helpers
@@ -105,7 +107,7 @@ function makeSelectiveField(
 
 function makeMinimalAst(overrides: Partial<QueryAst> = {}): QueryAst {
   return {
-    start: { alias: "p", kinds: ["Person"], includeSubClasses: false },
+    start: { alias: "p", kinds: ["Person"], expansion: "exact" as const },
     traversals: [],
     predicates: [],
     projection: {
@@ -129,6 +131,7 @@ function makePipelineContext(
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
   };
 }
 
@@ -472,27 +475,28 @@ describe("traversal limit pushdown", () => {
 });
 
 // ============================================================
-// runStandardQueryPassPipeline — selective traversal rowset collapsing
+// runStandardQueryPassPipeline — linear traversal rowset collapsing
 // ============================================================
 
-describe("selective traversal rowset collapsing", () => {
+describe("linear traversal rowset collapsing", () => {
   it("does not collapse without traversals", () => {
     const ast = makeMinimalAst({
       selectiveFields: [makeSelectiveField("p", "name")],
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(false);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(false);
     expect(state.collapsedTraversalCteAlias).toBeUndefined();
   });
 
-  it("does not collapse without selectiveFields", () => {
+  it("collapses ordinary projections without selectiveFields", () => {
     const ast = makeMinimalAst({
       traversals: [makeTraversal()],
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(false);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(true);
+    expect(state.collapsedTraversalCteAlias).toBe("cte_c");
   });
 
   it("does not collapse when traversals have optional joins", () => {
@@ -502,7 +506,7 @@ describe("selective traversal rowset collapsing", () => {
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(false);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(false);
   });
 
   it("does not collapse when groupBy is present", () => {
@@ -513,7 +517,7 @@ describe("selective traversal rowset collapsing", () => {
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(false);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(false);
   });
 
   it("collapses when conditions are met", () => {
@@ -523,7 +527,7 @@ describe("selective traversal rowset collapsing", () => {
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(true);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(true);
     expect(state.collapsedTraversalCteAlias).toBe("cte_c");
   });
 
@@ -542,7 +546,39 @@ describe("selective traversal rowset collapsing", () => {
     });
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
-    expect(state.shouldCollapseSelectiveTraversalRowset).toBe(false);
+    expect(state.shouldCollapseLinearTraversalRowset).toBe(false);
+  });
+
+  it("projects all earlier node and edge aliases from the final CTE", () => {
+    const ast = makeMinimalAst({
+      traversals: [
+        makeTraversal({ nodeAlias: "friend", edgeAlias: "knows" }),
+        makeTraversal({
+          nodeAlias: "company",
+          edgeAlias: "employs",
+          joinFromAlias: "friend",
+        }),
+      ],
+      projection: {
+        fields: [
+          { outputName: "starter", source: makeFieldRef("p", ["props"]) },
+          { outputName: "relation", source: makeFieldRef("knows", ["props"]) },
+          { outputName: "friend", source: makeFieldRef("friend", ["props"]) },
+          { outputName: "company", source: makeFieldRef("company", ["props"]) },
+        ],
+      },
+    });
+    const compiled = toSqlString(
+      compileQuery(ast, "test_graph", { dialect: "sqlite" }),
+    );
+
+    expect(compiled).toContain("cte_friend.*");
+    expect(compiled).toContain("FROM cte_company");
+    expect(compiled).not.toContain("INNER JOIN cte_friend");
+    expect(compiled).toContain("cte_company.p_props");
+    expect(compiled).toContain("cte_company.knows_props");
+    expect(compiled).toContain("cte_company.friend_props");
+    expect(compiled).toContain("cte_company.company_props");
   });
 });
 

@@ -1,5 +1,7 @@
-import { projectBackendMembers } from "../backend/graph-backend-projection";
+import type { CLAIMS } from "../backend/capabilities/bundle-registry";
+import { projectBackend } from "../backend/derive-backend";
 import { type GraphBackend } from "../backend/types";
+import { type Assert, type ContainsAll } from "../utils/type-assert";
 
 /**
  * Members that are safe to expose through a history-enabled adapter Store.
@@ -15,41 +17,75 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "assertVectorSlotsInitialized",
   "bootstrapTables",
   "capabilities",
+  "catalog",
+  "lineage",
+  "recordedTime",
   "checkUnique",
   "checkUniqueBatch",
+  // The edge cardinality fence. Both members write only the claim relation —
+  // a reservation whose holder is a graph row, never a graph row itself — so
+  // neither can bypass a capture flush, and a history-enabled store that could
+  // not reach them would write constrained edges unfenced.
+  "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
+  "claimEdgeCardinalityBatch",
   "claimIndexMaterialization",
   "close",
   "commitSchemaVersion",
+  "commitSchemaVersionIfKindsEmpty",
+  "lockSchemaVersionForWrite",
+  "lockSchemaVersionAndGraphWrite",
   "compileSql",
   "countEdgesByKind",
-  "countEdgesFrom",
+  "countEdgesAtEndpoint",
   "countNodesByKind",
   "createVectorIndex",
   "deleteEdge",
   "deleteEdgesBatch",
   "deleteEmbedding",
+  "deleteEmbeddingBatch",
   "deleteFulltext",
   "deleteFulltextBatch",
   "deleteNode",
   "deleteUnique",
+  "hardDeleteUniquesByNodeIds",
   "deleteVectorSlotContribution",
   "dialect",
   "dropVectorIndex",
+  "fenceSql",
+  "adoptBaseSchema",
+  "assertBaseSchemaCurrent",
   "edgeExistsBetween",
   "ensureContributionMaterializationsTable",
+  // Installs a database-global extension — and `ensureTrigramExtension` is the
+  // same operation under its deprecated `pg_trgm`-only name, so the two are
+  // classified together or not at all. Like the `ensure*Table` members they sit
+  // beside, they create storage-level scaffolding and write no graph row, so
+  // neither can bypass a capture flush.
+  "ensureExtension",
+  "ensureEdgeMatchIdentityStorage",
   "ensureFulltextTable",
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
   "ensureReconciliationMarkersTable",
   "ensureRevisionOriginsTable",
+  "ensureRevisionChangesJournal",
+  "revisionChangesJournalReady",
   "ensureRuntimeContributions",
+  "ensureTrigramExtension",
   "ensureVectorSlotContribution",
   "ensureVectorSlotContributions",
   "execute",
   "executeTemporaryStatement",
   "findEdgesByKind",
+  "findActiveEdgesBySourceV1",
+  "findEdgesAcrossKinds",
+  "findEdgesByEndpointSet",
+  "findEdgesByHeterogeneousEndpointSet",
   "findEdgesConnectedTo",
+  "findEdgesConnectedToNodes",
   "findNodesByKind",
+  "findNodesAcrossKinds",
   "fulltextSearch",
   "fulltextStrategy",
   "getActiveSchema",
@@ -61,23 +97,46 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "getIndexMaterializations",
   "getNode",
   "getNodes",
+  // Locks the rows it reads and writes none, so it cannot bypass a capture
+  // flush; the store's endpoint and delete reads call it unconditionally, so a
+  // history store's projection must carry it.
+  "lockNodes",
   "getPendingKindRemovals",
   "getReconciliationMarker",
   "getSchemaVersion",
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
   "hardDeleteNode",
+  "hardDeleteNodesBatch",
+  // Reaps the claims a removed kind's nodes own. Like the sibling
+  // `hardDeleteUniquesByNodeIds` beside it, it clears sidecar rows whose
+  // entity rows are already gone, so it cannot bypass a capture flush.
+  "hardDeleteUniquesByConcreteKind",
+  "hardDeleteUniquesByNodeIds",
   "hybridSearch",
   "insertEdge",
+  "commands",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "insertEdgesDurableBatchReturning",
   "insertNode",
+  "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "insertUnique",
   "insertUniqueBatch",
+  "probeContributions",
+  // Housekeeping for the relation above: drops claim rows whose holders are
+  // already gone. Writes no graph row.
+  "purgeEdgeClaims",
+  // Read-only fence audit. Writes nothing at all, so it can bypass no capture
+  // flush, and a history-enabled store that could not reach it would have no
+  // way to report which declared constraint its data already violates.
+  "readConstraintFenceViolations",
   "recordContributionMaterialization",
   "recordIndexMaterialization",
   "recordKindRemoval",
@@ -88,21 +147,50 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "tableNames",
   "updateEdge",
   "updateNode",
+  "upsertHeterogeneousNodes",
+  "updateResolvedNodesBatch",
+  "compareAndSetNode",
+  "updateNodeSet",
   "upsertEmbedding",
   "upsertEmbeddingBatch",
   "upsertFulltext",
   "upsertFulltextBatch",
   "vectorSearch",
   "vectorStrategy",
+  "verifyContributions",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
 
+// I13: every `claims` core member is exposed through the history-store
+// projection, or a history-enabled Store could silently lose access to a
+// member `claimSupport` binds — unfencing exactly the constrained edge
+// writes the claim relation exists to fence.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _historyStoreContainsClaimsCore = Assert<
+  ContainsAll<
+    typeof HISTORY_STORE_BACKEND_KEYS,
+    (typeof CLAIMS)["core"][number]
+  >
+>;
+
 type UnsafeHistoryStoreBackendMember =
+  | "findEdgesByMatchIdentity"
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
+  | "commitSchemaVersionWithPreflight"
+  | "instantiateGraphTemplate"
   | "executeDdl"
   | "executeRaw"
   | "executeStatement"
+  | "ensureIdentityTables"
+  | "identityTableDdl"
+  | "rebuildContribution"
+  | "recordedTableDdl"
+  | "repairContributions"
+  | "registerGraphTemplate"
+  | "schemaWriteTransaction"
+  | "setActiveVersionWithPreflight"
   | "transaction"
   | "trustedImport";
 
@@ -120,7 +208,5 @@ export type HistoryStoreBackend =
 export function createHistoryStoreBackendProjection(
   backend: GraphBackend,
 ): HistoryStoreBackend {
-  return Object.freeze(
-    projectBackendMembers(backend, HISTORY_STORE_BACKEND_KEYS),
-  );
+  return Object.freeze(projectBackend(backend, HISTORY_STORE_BACKEND_KEYS));
 }

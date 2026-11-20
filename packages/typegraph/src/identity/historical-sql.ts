@@ -1,0 +1,374 @@
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../backend/capabilities/recursive-traversal";
+import {
+  optionalRecordedInstantParts,
+  type ReadCoordinate,
+  type RecordedInstantParts,
+} from "../core/temporal";
+import { type TemporalMode } from "../core/types";
+import { ConfigurationError } from "../errors";
+import { type SqlSchema } from "../query/compiler/schema";
+import { sql, type SqlFragment } from "../query/sql-fragment";
+import { type IdentityRelation } from "./types";
+
+/**
+ * THE refusal shared by every historical identity read entry point —
+ * {@link Store.identityAtCoordinate}'s facade and the query compiler's
+ * identity-traversal path alike — for a recorded coordinate under
+ * engine-native recorded time.
+ *
+ * `identityNodeSnapshotSource`/`identityAssertionSnapshotSource` below read a
+ * recorded relation's own columns (`schema.recordedNodesTable`/
+ * `recordedIdentityAssertionsTable`, `recorded_from`/`recorded_to`) directly
+ * rather than through the `RecordedReadSource` seam an engine-native binding
+ * satisfies — an engine-native backend has no such relation to read, so this
+ * refuses before either function ever runs, rather than emitting SQL against
+ * a relation that does not exist.
+ */
+export function refuseEngineNativeRecordedIdentityRead(surface: string): never {
+  throw new ConfigurationError(
+    `${surface} cannot reconstruct identity at a recorded coordinate under engine-native recorded time: identity history reads TypeGraph's own recorded relations directly, which an engine-native backend does not populate.`,
+    { code: "ENGINE_NATIVE_RECORDED_IDENTITY_UNSUPPORTED", surface },
+    {
+      suggestion:
+        "Read identity at the current coordinate, or use a store whose recorded time is TypeGraph-owned (history/revisionTracking without an engine-native recordedTime member) for historical identity reconstruction.",
+    },
+  );
+}
+
+/**
+ * Column list of the identity assertion relation, in storage order. Every
+ * assertion SELECT projection and the INSERT column clause share this fragment,
+ * so a column added to the relation cannot be picked up by one read path and
+ * silently missed by another.
+ */
+export const IDENTITY_ASSERTION_COLUMNS: SqlFragment = sql.raw(
+  [
+    "graph_id",
+    "id",
+    "rel",
+    "a_kind",
+    "a_id",
+    "b_kind",
+    "b_id",
+    "valid_from",
+    "valid_to",
+    "created_at",
+    "updated_at",
+    "deleted_at",
+    "ended_by_kind",
+    "ended_by_id",
+  ].join(", "),
+);
+
+export type HistoricalIdentitySqlCoordinate = Readonly<{
+  validMode: TemporalMode;
+  validAsOf?: string | undefined;
+  recorded?: RecordedInstantParts | undefined;
+  currentInstant: SqlFragment;
+}>;
+
+export function identitySqlCoordinate(
+  coordinate: ReadCoordinate | undefined,
+  currentInstant: string | SqlFragment,
+): HistoricalIdentitySqlCoordinate {
+  return {
+    validMode: coordinate?.valid.mode ?? "current",
+    validAsOf: coordinate?.valid.asOf,
+    recorded: optionalRecordedInstantParts(
+      coordinate?.recorded?.asOf,
+      "recorded.asOf",
+    ),
+    currentInstant:
+      typeof currentInstant === "string" ?
+        sql`${currentInstant}`
+      : currentInstant,
+  };
+}
+
+function validityInstant(
+  coordinate: HistoricalIdentitySqlCoordinate,
+): SqlFragment {
+  if (coordinate.validMode === "asOf" && coordinate.validAsOf !== undefined) {
+    return sql`${coordinate.validAsOf}`;
+  }
+  if (coordinate.recorded !== undefined) {
+    return sql`${coordinate.recorded.recordedAt}`;
+  }
+  return coordinate.currentInstant;
+}
+
+function qualifiedColumn(alias: string, column: string): SqlFragment {
+  return sql`${sql.identifier(alias)}.${sql.identifier(column)}`;
+}
+
+/** Point-in-time node visibility shared by identity reads and traversal SQL. */
+export function identityNodeVisibilitySql(
+  coordinate: HistoricalIdentitySqlCoordinate,
+  alias: string,
+): SqlFragment {
+  const deletedAt = qualifiedColumn(alias, "deleted_at");
+  if (coordinate.validMode === "includeTombstones") return sql`1 = 1`;
+  if (coordinate.validMode === "includeEnded") {
+    return sql`${deletedAt} IS NULL`;
+  }
+  const validFrom = qualifiedColumn(alias, "valid_from");
+  const validTo = qualifiedColumn(alias, "valid_to");
+  const instant = validityInstant(coordinate);
+  return sql`
+    ${deletedAt} IS NULL
+    AND (${validFrom} IS NULL OR ${validFrom} <= ${instant})
+    AND (${validTo} IS NULL OR ${validTo} > ${instant})
+  `;
+}
+
+/**
+ * Lifecycle predicate for implicit same-id folds.
+ *
+ * A valid-time read before a later soft deletion must still see the fold that
+ * existed then. Recorded reads already source a historical row image, while a
+ * valid-time-only read has the live row and therefore reconstructs existence
+ * from created_at/deleted_at.
+ */
+export function structuralFoldVisibilitySql(
+  coordinate: HistoricalIdentitySqlCoordinate,
+  alias: string,
+): SqlFragment {
+  const deletedAt = qualifiedColumn(alias, "deleted_at");
+  if (coordinate.recorded !== undefined) return sql`${deletedAt} IS NULL`;
+  if (coordinate.validMode !== "asOf") return sql`${deletedAt} IS NULL`;
+  const createdAt = qualifiedColumn(alias, "created_at");
+  const instant = validityInstant(coordinate);
+  return sql`${createdAt} <= ${instant} AND (${deletedAt} IS NULL OR ${deletedAt} > ${instant})`;
+}
+
+export function identityNodeSnapshotSource(
+  schema: SqlSchema,
+  graphId: string,
+  coordinate: HistoricalIdentitySqlCoordinate,
+): SqlFragment {
+  const table =
+    coordinate.recorded === undefined ?
+      schema.nodesTable
+    : schema.recordedNodesTable;
+  const recordedFilter =
+    coordinate.recorded === undefined ?
+      sql``
+    : sql`
+      AND recorded_from <= ${coordinate.recorded.revision}
+      AND recorded_to > ${coordinate.recorded.revision}
+    `;
+  return sql`
+    SELECT kind, id, valid_from, valid_to, created_at, deleted_at
+    FROM ${table}
+    WHERE graph_id = ${graphId}
+      ${recordedFilter}
+  `;
+}
+
+export function identityAssertionSnapshotSource(
+  schema: SqlSchema,
+  graphId: string,
+  coordinate: HistoricalIdentitySqlCoordinate,
+  relation: IdentityRelation | undefined,
+): SqlFragment {
+  const table =
+    coordinate.recorded === undefined ?
+      schema.identityAssertionsTable
+    : schema.recordedIdentityAssertionsTable;
+  const recordedFilter =
+    coordinate.recorded === undefined ?
+      sql``
+    : sql`
+      AND recorded_from <= ${coordinate.recorded.revision}
+      AND recorded_to > ${coordinate.recorded.revision}
+    `;
+  const relationFilter =
+    relation === undefined ? sql`` : sql`AND rel = ${relation}`;
+  const instant = validityInstant(coordinate);
+  return sql`
+    SELECT ${IDENTITY_ASSERTION_COLUMNS}
+    FROM ${table}
+    WHERE graph_id = ${graphId}
+      ${recordedFilter}
+      AND deleted_at IS NULL
+      ${relationFilter}
+      AND valid_from <= ${instant}
+      AND (valid_to IS NULL OR valid_to > ${instant})
+  `;
+}
+
+/**
+ * Builds the shared recursive CTE body used to reconstruct an identity class.
+ * `seedSource` must select `(seed_kind, seed_id)` columns.
+ *
+ * The assert below names this call site "historical identity class read"
+ * (site C). {@link historicalIdentityPeerClassQuery} (site D) asserts with its
+ * own label *before* calling this builder, so on the D path this assert is
+ * unreachable — the D-labeled refusal always fires first.
+ */
+export function historicalIdentityReconstructionCtes(
+  input: Readonly<{
+    schema: SqlSchema;
+    graphId: string;
+    coordinate: HistoricalIdentitySqlCoordinate;
+    seedSource: SqlFragment;
+    sameIdAcrossKinds: "fold" | "ignore";
+    allowedKinds?: readonly string[];
+    recursiveTraversal: RecursiveTraversalVerdict;
+  }>,
+): SqlFragment {
+  assertRecursiveTraversal(
+    input.recursiveTraversal,
+    "historical identity class read",
+  );
+  const nodes = identityNodeSnapshotSource(
+    input.schema,
+    input.graphId,
+    input.coordinate,
+  );
+  const assertions = identityAssertionSnapshotSource(
+    input.schema,
+    input.graphId,
+    input.coordinate,
+    "same",
+  );
+  const allowedKinds =
+    input.allowedKinds === undefined ? undefined
+    : input.allowedKinds.length === 0 ? sql`SELECT NULL WHERE 1 = 0`
+    : sql`VALUES ${sql.join(
+        input.allowedKinds.map((kind) => sql`(${kind})`),
+        sql`, `,
+      )}`;
+  const allowedKindPredicate =
+    input.allowedKinds === undefined ? sql`1 = 1`
+    : input.allowedKinds.length === 0 ? sql`1 = 0`
+    : sql`EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = n.kind)`;
+  const assertionKindsPredicate =
+    input.allowedKinds === undefined ? sql`1 = 1`
+    : input.allowedKinds.length === 0 ? sql`1 = 0`
+    : sql`
+      EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = a_kind)
+            AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = b_kind)
+    `;
+  const sameIdEdges =
+    input.sameIdAcrossKinds === "fold" && input.allowedKinds?.length !== 0 ?
+      sql`
+        UNION ALL
+        SELECT left_node.kind, left_node.id, right_node.kind, right_node.id
+        FROM node_snapshot left_node
+        JOIN node_snapshot right_node
+          ON right_node.id = left_node.id
+         AND right_node.kind <> left_node.kind
+        WHERE ${structuralFoldVisibilitySql(input.coordinate, "left_node")}
+          AND ${structuralFoldVisibilitySql(input.coordinate, "right_node")}
+          ${
+            input.allowedKinds === undefined ?
+              sql``
+            : sql`
+              AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = left_node.kind)
+              AND EXISTS (SELECT 1 FROM allowed_kinds WHERE allowed_kinds.kind = right_node.kind)
+            `
+          }
+      `
+    : sql``;
+  // `seeds` is declared after `identity_edges` so a seed source may itself read
+  // the edge relation (see {@link historicalIdentityPeerClassQuery}); every
+  // entry still references only entries declared before it.
+  return sql`
+    ${allowedKinds === undefined ? sql`` : sql`allowed_kinds(kind) AS (${allowedKinds}),`}
+    node_snapshot(kind, id, valid_from, valid_to, created_at, deleted_at) AS (
+      ${nodes}
+    ),
+    same_assertions(a_kind, a_id, b_kind, b_id) AS (
+      SELECT a_kind, a_id, b_kind, b_id
+      FROM (${assertions}) identity_assertions
+      WHERE ${assertionKindsPredicate}
+    ),
+    identity_edges(a_kind, a_id, b_kind, b_id) AS (
+      SELECT a_kind, a_id, b_kind, b_id FROM same_assertions
+      UNION ALL
+      SELECT b_kind, b_id, a_kind, a_id FROM same_assertions
+      ${sameIdEdges}
+    ),
+    seeds(seed_kind, seed_id) AS (
+      ${input.seedSource}
+    ),
+    identity_members(seed_kind, seed_id, kind, id) AS (
+      SELECT seeds.seed_kind, seeds.seed_id, seeds.seed_kind, seeds.seed_id
+      FROM seeds
+      JOIN node_snapshot n
+        ON n.kind = seeds.seed_kind AND n.id = seeds.seed_id
+      WHERE ${allowedKindPredicate}
+        AND ${identityNodeVisibilitySql(input.coordinate, "n")}
+      UNION
+      SELECT member.seed_kind, member.seed_id, edge.b_kind, edge.b_id
+      FROM identity_members member
+      JOIN identity_edges edge
+        ON edge.a_kind = member.kind
+       AND edge.a_id = member.id
+    )
+  `;
+}
+
+/**
+ * Column contract of the peer-class relation built by
+ * {@link historicalIdentityPeerClassQuery}, in projection order. A consumer names
+ * the relation itself, so it declares these columns on the name it chooses.
+ */
+export const IDENTITY_PEER_CLASS_COLUMNS: SqlFragment = sql.raw(
+  ["seed_kind", "seed_id", "kind", "id"].join(", "),
+);
+
+/**
+ * A self-contained query for the *visible* identity classes of every node that
+ * has at least one identity peer at `coordinate`, as
+ * `(seed_kind, seed_id, kind, id)` rows.
+ *
+ * Unlike {@link historicalIdentityReconstructionCtes}, nothing here depends on
+ * which nodes a caller is asking about: the seeds are the endpoints of the
+ * identity-edge relation itself. That is what makes the result hoistable to a
+ * query-level CTE evaluated once, rather than a correlated subquery a planner
+ * may re-evaluate per candidate row (typegraph#310). Nodes with no peer are
+ * absent by construction, leaving the "member is the seed itself" case to the
+ * consumer; that is what keeps this relation proportional to the identity ledger
+ * and the folded-id population rather than to the whole graph.
+ *
+ * Members are filtered to those visible at `coordinate`, matching the
+ * point-in-time node check a membership consumer would otherwise apply itself.
+ * The filter sits in the projection, not in the recursion, so a class may still
+ * be held together through a member that is not visible.
+ *
+ * The returned fragment is a complete `SELECT` carrying its own
+ * `WITH RECURSIVE`, so the inner relation names stay scoped to it and multiple
+ * consumers in one statement cannot collide.
+ */
+export function historicalIdentityPeerClassQuery(
+  input: Readonly<{
+    schema: SqlSchema;
+    graphId: string;
+    coordinate: HistoricalIdentitySqlCoordinate;
+    sameIdAcrossKinds: "fold" | "ignore";
+    allowedKinds?: readonly string[];
+    recursiveTraversal: RecursiveTraversalVerdict;
+  }>,
+): SqlFragment {
+  assertRecursiveTraversal(
+    input.recursiveTraversal,
+    "historical identity expansion",
+  );
+  const reconstruction = historicalIdentityReconstructionCtes({
+    ...input,
+    seedSource: sql`SELECT DISTINCT a_kind, a_id FROM identity_edges`,
+  });
+  return sql`
+    WITH RECURSIVE
+    ${reconstruction}
+    SELECT member.seed_kind, member.seed_id, member.kind, member.id
+    FROM identity_members member
+    JOIN node_snapshot n ON n.kind = member.kind AND n.id = member.id
+    WHERE ${identityNodeVisibilitySql(input.coordinate, "n")}
+  `;
+}

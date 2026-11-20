@@ -12,15 +12,15 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { defineGraph } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH_ID = "reclaim_vec_pg";
 
@@ -68,7 +68,7 @@ beforeEach(async () => {
   if (sharedPool === undefined) return;
   // Clear the durable contribution markers (#135) alongside dropping the
   // per-field tables below: this suite drops `tg_vec_*` tables directly
-  // (bypassing reclaim), so a marker left behind on this shared database
+  // (bypassing reclaim), so a marker left behind by an earlier test
   // would outlive its table and make a later evolve()/createStoreWithSchema
   // trust the marker and skip re-creating the table.
   await sharedPool.query(
@@ -173,5 +173,76 @@ describe("Postgres reclaimRemovedVectorFieldTables", () => {
 
     expect(result.reclaimedVectorFields).toEqual([]);
     expect(await tableExists(pool, table)).toBe(true);
+  });
+
+  it("rolls back the vector table and marker together when cleanup fails", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const baseBackend = createPostgresBackend(drizzle(pool));
+    const vectorStrategy = requireDefined(baseBackend.vectorStrategy);
+    const table = vectorStrategy.tableName(GRAPH_ID, "Document", "embedding");
+    const slot = {
+      graphId: GRAPH_ID,
+      nodeKind: "Document",
+      fieldPath: "embedding",
+      dimensions: 3,
+      metric: "cosine",
+      indexType: "hnsw",
+    } as const;
+    const contribution = requireDefined(
+      vectorStrategy.ownedTables(slot)[0],
+      "vector contribution",
+    );
+    const markerIdentity = {
+      graphId: GRAPH_ID,
+      logicalName: contribution.logicalName,
+      owner: contribution.owner,
+      tableName: contribution.tableName,
+    } as const;
+    const schemaWriteTransaction = requireDefined(
+      baseBackend.schemaWriteTransaction,
+    );
+    let failAfterCleanup = true;
+    const backend = deriveBackend(baseBackend, {
+      async schemaWriteTransaction(graphId, fn) {
+        return schemaWriteTransaction(graphId, async (target) => {
+          const result = await fn(target);
+          if (failAfterCleanup) {
+            failAfterCleanup = false;
+            throw new Error("fail after vector cleanup");
+          }
+          return result;
+        });
+      },
+    });
+
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const withField = await store.evolve(addDocumentWithEmbedding);
+    await withField
+      .getNodeCollectionOrThrow("Document")
+      .create({ title: "a", embedding: [1, 0, 0] });
+    const evolved = await withField.evolve(dropEmbeddingModifier);
+
+    const failed = await evolved.materializeRemovals();
+    expect(failed.reclaimedVectorFields).toMatchObject([
+      {
+        kind: "Document",
+        fieldPath: "embedding",
+        status: "failed",
+        error: { message: "fail after vector cleanup" },
+      },
+    ]);
+    expect(await tableExists(pool, table)).toBe(true);
+    await expect(
+      baseBackend.getContributionMaterialization?.(markerIdentity),
+    ).resolves.toBeDefined();
+
+    const retried = await evolved.materializeRemovals();
+    expect(retried.reclaimedVectorFields).toEqual([
+      { kind: "Document", fieldPath: "embedding", status: "reclaimed" },
+    ]);
+    expect(await tableExists(pool, table)).toBe(false);
+    await expect(
+      baseBackend.getContributionMaterialization?.(markerIdentity),
+    ).resolves.toBeUndefined();
   });
 });

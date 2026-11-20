@@ -190,6 +190,13 @@ describe.each(backendMatrix())("cross-kind identity merge [$name]", (entry) => {
       "Doctor",
       "SpecialistDoctor",
     ]);
+    expect(reconciliation.decisiveEdges).toMatchObject([
+      {
+        decision: "definitional",
+        sources: [{ kind: "retype", sourceId: "retype" }],
+      },
+    ]);
+    expect(result.data.resolutions).toEqual([]);
   });
 
   it('keeps a same-id Doctor / SpecialistDoctor pair distinct under reconcileTypes:"off"', async () => {

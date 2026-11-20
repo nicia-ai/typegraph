@@ -16,23 +16,42 @@
  */
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
+  asNodeId,
+  CardinalityError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { rowPropsToObject } from "../../src/backend/types";
+import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  rowPropsToObject,
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
-import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
-import { mergeIncremental } from "../../src/graph-merge/merge";
+import {
+  BaseVersionMismatchError,
+  CardinalityMergeConflictError,
+  InvalidMergeOptionsError,
+} from "../../src/graph-merge/errors";
+import {
+  mergeIncremental,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
-import type { GraphBranch, MergeOptions } from "../../src/graph-merge/types";
-import { asBranchId } from "../../src/graph-merge/types";
+import type {
+  GraphBranch,
+  MergeIncrementalArgs,
+  MergeOptions,
+} from "../../src/graph-merge/types";
+import { asBaseVersion, asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
 import { normalizeGraph } from "../property/graph-merge/normalize";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -60,6 +79,11 @@ const flaggedEncounter = defineEdge("flaggedEncounter", {
   to: [Encounter],
 });
 const primaryEncounter = defineEdge("primaryEncounter", {
+  schema: z.object({ on: z.string() }),
+  from: [Patient],
+  to: [Encounter],
+});
+const activeEncounter = defineEdge("activeEncounter", {
   schema: z.object({ on: z.string() }),
   from: [Patient],
   to: [Encounter],
@@ -94,6 +118,12 @@ const careGraph = defineGraph({
       to: [Encounter],
       cardinality: "one",
     },
+    activeEncounter: {
+      type: activeEncounter,
+      from: [Patient],
+      to: [Encounter],
+      cardinality: "oneActive",
+    },
   },
 });
 type CareGraph = typeof careGraph;
@@ -118,6 +148,11 @@ function options(
   };
 }
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())(
   "mergeIncremental new-vs-live-target [$name]",
   (entry) => {
@@ -131,7 +166,10 @@ describe.each(backendMatrix())(
     });
 
     async function makeBackend(): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        entry.name === "PGlite" ?
+          await pglitePool.makeFixture()
+        : await entry.make();
       cleanups.push(fixture.cleanup);
       return fixture.backend;
     }
@@ -179,6 +217,54 @@ describe.each(backendMatrix())(
       return requireDefined(edge);
     }
 
+    it("refuses an untyped options.target instead of ignoring it", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const target = await emptyStore();
+      const conflictingTarget = await emptyStore();
+      const unsafeArguments = {
+        forkPoint,
+        target,
+        branches: [],
+        options: { ...options(), target: conflictingTarget },
+      } as unknown as MergeIncrementalArgs<CareGraph>;
+
+      const result = await mergeIncremental<CareGraph>(unsafeArguments);
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.message).toContain(
+          "does not accept options.target",
+        );
+        expect(result.error.details).toMatchObject({ option: "target" });
+      }
+    });
+
+    it("returns the same typed user error for invalid option values", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const target = await emptyStore();
+      const unsafeArguments = {
+        forkPoint,
+        target,
+        branches: [],
+        options: { maxComparisonsPerKind: -1 },
+      } as unknown as MergeIncrementalArgs<CareGraph>;
+
+      const result = await mergeIncremental<CareGraph>(unsafeArguments);
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.cause).toBeDefined();
+      }
+    });
+
     it("commits an incremental merge into a history-backed target", async () => {
       cleanups = [];
       const forkPoint = await emptyStore();
@@ -203,6 +289,156 @@ describe.each(backendMatrix())(
         { id: "new-ana", name: "Ana Rivera", mrn: "MRN-1" },
       ]);
       expect(await target.recordedNow()).toBeDefined();
+    });
+
+    it("plans and merges from an attested recorded cut after the target advances", async () => {
+      cleanups = [];
+      const target = await historyStore();
+      await seedCarePath(target);
+      const recorded = await target.recordedNow();
+      if (recorded === undefined) throw new Error("Missing recorded fork cut");
+      const provider = await forkOf(target);
+      const forkPoint = { recorded, base: provider.base };
+
+      await provider.store.nodes.Patient.update(asNodeId("base-ana"), {
+        tag: "provider",
+      });
+      await provider.store.nodes.Encounter.create(
+        { reason: "provider visit" },
+        { id: "provider-visit" },
+      );
+      await target.nodes.Encounter.create(
+        { reason: "unrelated committed visit" },
+        { id: "committed-visit" },
+      );
+
+      const plan = await planMergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isOk(plan)).toBe(true);
+      const merged = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isOk(merged)).toBe(true);
+      expect(
+        (await target.nodes.Patient.getById(asNodeId("base-ana")))?.tag,
+      ).toBe("provider");
+      expect(
+        await target.nodes.Encounter.getById(asNodeId("provider-visit")),
+      ).toBeDefined();
+      expect(
+        await target.nodes.Encounter.getById(asNodeId("committed-visit")),
+      ).toBeDefined();
+
+      const wrongPoint = {
+        recorded,
+        base: asBaseVersion(`${forkPoint.base}-wrong`),
+      };
+      const refused = await planMergeIncremental<CareGraph>({
+        forkPoint: wrongPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+      expect(isErr(refused)).toBe(true);
+      if (isErr(refused)) {
+        expect(refused.error).toBeInstanceOf(BaseVersionMismatchError);
+      }
+    });
+
+    it("guards an inherited row unchanged since a recorded cut against a later edit", async () => {
+      cleanups = [];
+      const target = await historyStore();
+      await seedCarePath(target);
+      const recorded = await target.recordedNow();
+      if (recorded === undefined) throw new Error("Missing recorded fork cut");
+      const provider = await forkOf(target);
+      const forkPoint = { recorded, base: provider.base };
+      await provider.store.nodes.Patient.update(asNodeId("base-ana"), {
+        name: "Provider Edit",
+      });
+
+      const original = target.transaction.bind(target);
+      let injected = false;
+      (target as { transaction: unknown }).transaction = async (
+        fn: unknown,
+        opts: unknown,
+      ) => {
+        if (!injected) {
+          injected = true;
+          await target.nodes.Patient.update(asNodeId("base-ana"), {
+            name: "Concurrent Edit",
+          });
+        }
+        return (original as (f: unknown, o: unknown) => unknown)(fn, opts);
+      };
+
+      try {
+        const result = await mergeIncremental<CareGraph>({
+          forkPoint,
+          target,
+          branches: [provider],
+          options: options(),
+        });
+        expect(isErr(result)).toBe(true);
+        if (isErr(result)) {
+          expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+        }
+      } finally {
+        (target as { transaction: unknown }).transaction = original;
+      }
+      expect(
+        (await target.nodes.Patient.getById(asNodeId("base-ana")))?.name,
+      ).toBe("Concurrent Edit");
+    });
+
+    it("acquires the schema fence for a managed target without revision tracking", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const provider = await forkOf(forkPoint);
+      await provider.store.nodes.Encounter.create(
+        { reason: "new encounter" },
+        { id: "new-encounter" },
+      );
+
+      const baseBackend = await makeBackend();
+      let schemaFenceCount = 0;
+      const targetBackend = deriveBackend(baseBackend, {
+        transaction: async <T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          transactionOptions?: TransactionOptions,
+        ): Promise<T> =>
+          baseBackend.transaction(async (tx) => {
+            const lockSchemaVersionForWrite = requireDefined(
+              tx.lockSchemaVersionForWrite,
+            );
+            const observedTx = deriveBackend(tx, {
+              lockSchemaVersionForWrite: async (input) => {
+                schemaFenceCount += 1;
+                await lockSchemaVersionForWrite(input);
+              },
+            });
+            return fn(observedTx);
+          }, transactionOptions),
+      });
+      const [target] = await createStoreWithSchema(careGraph, targetBackend);
+      schemaFenceCount = 0;
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isOk(result)).toBe(true);
+      expect(schemaFenceCount).toBeGreaterThan(0);
     });
 
     it("HAPPY PATH: resolves a branch addition onto an advanced target's base entity", async () => {
@@ -703,6 +939,17 @@ describe.each(backendMatrix())(
       });
       expect(isErr(result)).toBe(true);
       if (isErr(result)) {
+        // A refused CALLER-SUPPLIED option is a user error with the invalid-options
+        // code, not the generic system-category merge failure: an option this entry
+        // point cannot honor is refused by name, never silently ignored.
+        expect(result.error).toBeInstanceOf(InvalidMergeOptionsError);
+        expect(result.error.code).toBe("GRAPH_MERGE_INVALID_OPTIONS");
+        expect(result.error.category).toBe("user");
+        expect(result.error.details).toMatchObject({
+          option: "onBasePropertyConflict",
+          accepted: "flag",
+          received: "lastWriteWins",
+        });
         expect(result.error.message).toMatch(/onBasePropertyConflict/);
       }
     });
@@ -1097,6 +1344,71 @@ describe.each(backendMatrix())(
       ).toEqual(["base-primary"]);
     });
 
+    it("refuses an authored oneActive reopening that collides with the target's active edge", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      await forkPoint.nodes.Patient.create(
+        { name: "Anna Rivera", mrn: "MRN-1" },
+        { id: "base-ana" },
+      );
+      await forkPoint.nodes.Encounter.bulkCreate([
+        { id: "enc-active", props: { reason: "active" } },
+        { id: "enc-ended", props: { reason: "ended" } },
+      ]);
+      const ended = await forkPoint.edges.activeEncounter.create(
+        { kind: "Patient", id: "base-ana" },
+        { kind: "Encounter", id: "enc-ended" },
+        { on: "2025-06-01" },
+        {
+          id: "ended",
+          validFrom: "2025-01-01T00:00:00.000Z",
+          validTo: "2026-01-01T00:00:00.000Z",
+        },
+      );
+      const provider = await forkOf(forkPoint);
+      const target = (await forkOf(forkPoint)).store;
+      await provider.store.edges.activeEncounter.update(
+        ended.id,
+        {},
+        { clearValidTo: true },
+      );
+      const active = await target.edges.activeEncounter.create(
+        { kind: "Patient", id: "base-ana" },
+        { kind: "Encounter", id: "enc-active" },
+        { on: "2026-06-01" },
+        { id: "active" },
+      );
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      // The reopened row and the target's own active edge would both hold the
+      // patient's one active slot: a certain apply refusal, refused at plan time.
+      expect(result.error).toBeInstanceOf(CardinalityMergeConflictError);
+      expect(result.error.cause).toBeInstanceOf(CardinalityError);
+      expect(result.error.details).toMatchObject({
+        constraintCode: "CARDINALITY_ERROR",
+        edgeKind: "activeEncounter",
+        cardinality: "oneActive",
+      });
+      expect(
+        (
+          await target
+            .asOf("2025-06-01T00:00:00.000Z")
+            .edges.activeEncounter.getById(ended.id)
+        )?.meta.validTo,
+      ).toBeDefined();
+      expect(
+        (await target.edges.activeEncounter.find()).map((edge) => edge.id),
+      ).toEqual([active.id]);
+    });
+
     it("GUARD (base update): refuses to strip heterogeneous committed props while gap-filling base fields", async () => {
       cleanups = [];
       const forkPoint = await emptyStore();
@@ -1206,7 +1518,10 @@ describe.each(backendMatrix())(
     });
 
     async function makeBackend(): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        entry.name === "PGlite" ?
+          await pglitePool.makeFixture()
+        : await entry.make();
       cleanups.push(fixture.cleanup);
       return fixture.backend;
     }

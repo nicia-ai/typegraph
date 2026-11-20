@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import type { GraphBackend } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
@@ -48,8 +49,7 @@ async function withCapturingStore<T>(
   const { backend: raw, db } = createLocalSqliteBackend();
   try {
     const captured: CapturedStatement[] = [];
-    const backend: GraphBackend = {
-      ...raw,
+    const backend: GraphBackend = deriveBackend(raw, {
       async execute(query) {
         const compiled = raw.compileSql?.(query);
         if (compiled) {
@@ -64,7 +64,7 @@ async function withCapturingStore<T>(
         captured.push({ sql: sqlText, params });
         return requireDefined(raw.executeRaw)<T>(sqlText, params);
       },
-    };
+    });
     const store = createStore(buildGraph(), backend);
     const client = (db as unknown as { $client: Database.Database }).$client;
     return await run(store, captured, client);

@@ -10,6 +10,10 @@ import {
   type NullCheckOp,
   type TemporalMode,
 } from "../core/types";
+import { type RowMembership } from "../registry/row-membership";
+import { type Assert, type Equal } from "../utils/type-assert";
+import { type AliasExpansionAxis } from "./builder/alias-expansion";
+import { type DatabaseExpression } from "./expressions";
 import { type JsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -19,13 +23,26 @@ import { type JsonPointer } from "./json-pointer";
 /**
  * A field reference in a predicate.
  */
-export type FieldRef = Readonly<{
+export type FieldRef<
+  Value = unknown,
+  Alias extends string = string,
+  Path extends readonly string[] = readonly string[],
+  PropertyPath extends readonly string[] = readonly string[],
+> = Readonly<{
   __type: "field_ref";
-  alias: string;
-  path: readonly string[]; // ["props", "name"] or ["id"]
+  alias: Alias;
+  path: Path; // ["props", "name"] or ["id"]
   jsonPointer?: JsonPointer | undefined; // JSON Pointer into props
   valueType?: ValueType | undefined;
   elementType?: ValueType | undefined;
+  /** Whether this field can be absent in the current query row. */
+  nullable?: boolean | undefined;
+  /** @internal Carries the public value type without affecting the AST. */
+  readonly __value?: {
+    bivarianceHack(value: Value): void;
+  }["bivarianceHack"];
+  /** @internal Carries the public property path without affecting the AST. */
+  readonly __propertyPath?: PropertyPath | undefined;
 }>;
 
 /**
@@ -81,7 +98,15 @@ export type ComparisonPredicate = Readonly<{
   __type: "comparison";
   op: ComparisonOp;
   left: FieldRef;
-  right: LiteralValue | LiteralValue[] | ParameterRef;
+  right: FieldRef | LiteralValue | LiteralValue[] | ParameterRef;
+}>;
+
+/** A lexicographic comparison between equally sized scalar field/value tuples. */
+export type TupleComparisonPredicate = Readonly<{
+  __type: "tuple_comparison";
+  op: "gt" | "lt";
+  fields: readonly [FieldRef, ...FieldRef[]];
+  values: readonly [LiteralValue, ...LiteralValue[]];
 }>;
 
 /**
@@ -193,6 +218,12 @@ type OrPredicate = Readonly<{
 type NotPredicate = Readonly<{
   __type: "not";
   predicate: PredicateExpression;
+}>;
+
+/** A typed Boolean database expression used as a SQL predicate. */
+type DatabaseExpressionPredicate = Readonly<{
+  __type: "database_expression_predicate";
+  expression: DatabaseExpression<boolean | undefined>;
 }>;
 
 /**
@@ -345,6 +376,7 @@ export const DEFAULT_RRF_WEIGHT = 1;
  */
 export type PredicateExpression =
   | ComparisonPredicate
+  | TupleComparisonPredicate
   | StringPredicate
   | NullPredicate
   | BetweenPredicate
@@ -357,7 +389,8 @@ export type PredicateExpression =
   | ExistsSubquery
   | InSubquery
   | VectorSimilarityPredicate
-  | FulltextMatchPredicate;
+  | FulltextMatchPredicate
+  | DatabaseExpressionPredicate;
 
 // ============================================================
 // Query Start
@@ -368,8 +401,15 @@ export type PredicateExpression =
  */
 type QueryStart = Readonly<{
   alias: string;
-  kinds: readonly string[]; // Expanded via ontology if includeSubClasses
-  includeSubClasses: boolean;
+  kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
+  /**
+   * Which expansion axis produced `kinds` — see
+   * `src/query/builder/alias-expansion.ts`. Diagnostic only: error details and
+   * suggestions report it, but no compilation or execution decision may read
+   * it. `kinds` is the resolved decision; a later recursive stage re-roots on a
+   * traversal alias and labels it `"exact"` whatever axis resolved that alias.
+   */
+  expansion: AliasExpansionAxis;
 }>;
 
 // ============================================================
@@ -405,6 +445,12 @@ export type VariableLengthSpec = Readonly<{
   /** Maximum number of hops (-1 = unlimited, default: -1) */
   maxDepth: number;
   /**
+   * Walk to the end of every path with no hop ceiling: termination rests on
+   * cycle prevention, so it requires `cyclePolicy: "prevent"`, and it is
+   * mutually exclusive with a stated `maxDepth` (leave it at -1).
+   */
+  exhaustive?: boolean;
+  /**
    * Cycle handling mode.
    *
    * - "prevent": Track visited nodes per path and reject revisits
@@ -413,8 +459,15 @@ export type VariableLengthSpec = Readonly<{
   cyclePolicy: RecursiveCyclePolicy;
   /** Optional column alias for projected traversal path array */
   pathAlias?: string;
+  /** Qualified paths include alternating node and edge references. */
+  pathFormat?: "qualified";
   /** Optional column alias for projected traversal depth */
   depthAlias?: string;
+  /** Stop expanding a matching node, optionally omitting that node from results. */
+  stopExpansion?: Readonly<{
+    expression: PredicateExpression;
+    emitStopNode: boolean;
+  }>;
 }>;
 
 /**
@@ -436,9 +489,32 @@ export type Traversal = Readonly<{
   joinEdgeField: "from_id" | "to_id";
   /** If true, use LEFT JOIN instead of INNER JOIN (optional match) */
   optional: boolean;
+  /** Expand this hop through coordinate-visible Operational Identity members. */
+  includeIdentityMembers?: boolean;
   /** Variable-length traversal configuration (for recursive CTEs) */
   variableLength?: VariableLengthSpec;
+  /**
+   * Present on a composition navigation (`parts()` / `wholes()`): each walked
+   * edge kind's composition membership rule. The traversal's edges are then
+   * read by ownership — a `"openRows"` kind's row binds only while open, an
+   * `"allRows"` kind's for its whole life — at the read's instant, rather
+   * than by the read's validity window.
+   */
+  compositionMembership?: readonly Readonly<{
+    edgeKind: string;
+    membership: "allRows" | "openRows";
+  }>[];
 }>;
+
+// Spelled inline above so the public `Traversal` type names no unexported
+// symbol; pinned here so it cannot drift from the rule's own type.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _compositionMembershipMatchesRowMembership = Assert<
+  Equal<
+    NonNullable<Traversal["compositionMembership"]>[number]["membership"],
+    RowMembership
+  >
+>;
 
 /**
  * Returns the full set of edge kind names for a traversal, merging
@@ -467,17 +543,20 @@ type AggregateFunction =
 /**
  * An aggregate expression.
  */
-export type AggregateExpr = Readonly<{
+export type AggregateExpr<
+  Function extends AggregateFunction = AggregateFunction,
+  Field extends FieldRef = FieldRef,
+> = Readonly<{
   __type: "aggregate";
-  function: AggregateFunction;
-  field: FieldRef;
+  function: Function;
+  field: Field;
 }>;
 
 /**
  * A GROUP BY specification.
  */
 export type GroupBySpec = Readonly<{
-  fields: readonly FieldRef[];
+  fields: readonly (DatabaseExpression | FieldRef)[];
 }>;
 
 // ============================================================
@@ -490,7 +569,7 @@ export type GroupBySpec = Readonly<{
  */
 export type ProjectedField = Readonly<{
   outputName: string;
-  source: FieldRef | AggregateExpr;
+  source: AggregateExpr | DatabaseExpression | FieldRef;
   /** Override the CTE alias for this field (used for edge fields in node CTEs) */
   cteAlias?: string;
 }>;
@@ -546,7 +625,7 @@ export type SortDirection = "asc" | "desc";
  * An ordering specification.
  */
 export type OrderSpec = Readonly<{
-  field: FieldRef;
+  field: DatabaseExpression | FieldRef;
   direction: SortDirection;
   nulls?: NullOrdering;
 }>;
@@ -603,11 +682,15 @@ type TemporalOptions = Readonly<{
  * The complete query AST.
  */
 export type QueryAst = Readonly<{
+  /** Runtime identity for validating expression and outer-reference scope. */
+  expressionScope?: symbol;
   /** The graph ID this query is for (used for subqueries) */
   graphId?: string;
   start: QueryStart;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
+  /** Filters completed match rows, after expansion/candidate generation and before grouping/ranges. */
+  resultPredicate?: PredicateExpression;
   projection: Projection;
   temporalMode: TemporalOptions;
   /** Recorded/system-time timestamp for recorded-pinned reads. */

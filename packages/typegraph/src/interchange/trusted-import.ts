@@ -1,14 +1,24 @@
+import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
+import { snapshotExportContention } from "../backend/transaction-resource";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
+  TrustedImportOptions,
   TrustedImportSession,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
+import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
-import { storeBackend } from "../store/runtime-port";
+import { acyclicEdgeKinds } from "../store/acyclicity";
+import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
+import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
+import { storeBackend, storeCaptureEnabled } from "../store/runtime-port";
 import type { Store } from "../store/store";
+import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
+import { serializedStreamRefusal, withImportStreamLease } from "./import";
+import { exportStreamBackend } from "./stream-source";
 import type {
   GraphData,
   GraphInterchangeChunk,
@@ -25,7 +35,60 @@ export type TrustedImportResult = Readonly<{
 function rejectUnsupportedStoreFeatures<G extends GraphDef>(
   store: Store<G>,
 ): void {
-  if (store.historyEnabled) {
+  const backend = storeBackend(store);
+  for (const [kind, registration] of Object.entries(store.graph.edges)) {
+    assertEdgeMatchIdentityBackendSupport(
+      registration.matchIdentity,
+      backend.capabilities,
+      kind,
+    );
+  }
+  // Composition first, ahead of the cardinality refusal below. Every
+  // composition edge kind must declare a part-side cardinality, so the
+  // cardinality check would otherwise always answer for it — with a reason a
+  // caller cannot branch on as composition, and advice (declare the kind
+  // unconstrained) the ontology refuses.
+  const compositionKinds = store.registry.compositionEdgeKinds();
+  if (compositionKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not enforce composition (`partOf`/`hasPart`): it writes no composition claim row and does not check the acyclicity relation, so a graph loaded this way can carry a part with two live wholes, or a part/whole cycle. store.verifyConstraintFences() reports either afterward.",
+      "composition_unsupported",
+      { graphId: store.graphId, edgeKinds: [...compositionKinds] },
+      {
+        suggestion:
+          'Use importGraphStream(), or importGraph() when a pair declares `existence: "required"`; both maintain the composition claim and its acyclicity check.',
+      },
+    );
+  }
+  // Trusted import maintains no edge claim: `trustedImportGraphStream` writes
+  // through `session.insertEdges` beneath the claim path entirely, so a
+  // declared axis — source OR target — would be accepted here and written
+  // unfenced. One reason for both directions: the restriction is "this path
+  // maintains no claims", which is direction-blind.
+  const constrainedEdgeKinds = Object.entries(store.graph.edges)
+    .filter(
+      ([, registration]) =>
+        edgeCardinalityAxisReferences(registration).length > 0,
+    )
+    .map(([kind]) => kind);
+  if (constrainedEdgeKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not maintain edge cardinality claims.",
+      "cardinality_unsupported",
+      { graphId: store.graphId, edgeKinds: constrainedEdgeKinds },
+      {
+        suggestion:
+          'Use importGraph(), or declare the edge kind(s) unconstrained ("many" on both axes) and enforce the limit in application code.',
+      },
+    );
+  }
+  if (storeCaptureEnabled(store)) {
+    // Trusted import writes rows directly, bypassing the node/edge-
+    // operations layer that TypeGraph's own capture uses to populate the
+    // recorded relations — a check against `storeCaptureEnabled`, not the
+    // public `historyEnabled` getter, so an engine-native `history: true`
+    // store (whose engine versions every write to the live table itself,
+    // regardless of which code path produced it) is unaffected.
     throw new TrustedImportError(
       "Trusted import does not support recorded-time history capture.",
       "history_unsupported",
@@ -39,6 +102,13 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       { graphId: store.graphId },
     );
   }
+  if (store.graph.identity !== undefined) {
+    throw new TrustedImportError(
+      "Trusted import does not maintain Operational Identity assertions or closure.",
+      "identity_unsupported",
+      { graphId: store.graphId },
+    );
+  }
 
   const uniqueKinds = Object.values(store.graph.nodes)
     .filter((registration) => (registration.unique?.length ?? 0) > 0)
@@ -48,6 +118,17 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       "Trusted import does not maintain node uniqueness sidecars.",
       "uniqueness_unsupported",
       { graphId: store.graphId, nodeKinds: uniqueKinds },
+    );
+  }
+
+  // No composition kind reaches here (refused above), so every acyclic edge
+  // kind left is one declared `acyclic: true`.
+  const acyclicKinds = acyclicEdgeKinds(store.graph, store.registry);
+  if (acyclicKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not enforce edge acyclicity: it holds one transaction for the whole stream, validates nothing by contract, and has no per-row point to probe the relation at.",
+      "acyclicity_unsupported",
+      { graphId: store.graphId, edgeKinds: acyclicKinds },
     );
   }
 
@@ -82,6 +163,102 @@ function invalidStream(message: string): TrustedImportError {
   return new TrustedImportError(message, "invalid_stream");
 }
 
+/** The stated validity window of a streamed node or edge. */
+type StatedValidityWindow = Readonly<{
+  validFrom?: string | null | undefined;
+  validTo?: string | undefined;
+}>;
+
+type ValidityWindowField = "validFrom" | "validTo";
+
+/** A stated window field that is not canonical, with the offending value. */
+type NonCanonicalWindow = Readonly<{
+  field: ValidityWindowField;
+  value: string;
+}>;
+
+/**
+ * The first window field of `entity` stating a timestamp that is not canonical
+ * fixed-width UTC ISO 8601 — with the offending value — or `undefined` when
+ * every stated one is canonical.
+ *
+ * A trusted stream is never re-parsed, so this is the only place its timestamps
+ * are held to the format the rest of the system assumes. It is deliberately
+ * format-ONLY — the same {@link isCanonicalIsoDate} decision the untrusted
+ * path's schema and the store's own write validation make, and nothing more —
+ * because a non-canonical instant is not merely ugly: every temporal filter
+ * compares these values AS TEXT against an `asOf` coordinate, so a variable-width
+ * one (`...:00.1Z`, an offset, date-only) mis-sorts and silently includes or
+ * excludes the wrong rows once stored, and it would mis-decide the negative-width
+ * check below on the way in. Two field tests per row costs about a microsecond
+ * against the ~4µs an in-memory SQLite row already costs — the price of the
+ * stream's ordering claims meaning anything.
+ *
+ * An absent field states nothing, and a `null` validFrom is a confirmed
+ * open-left window (see {@link nodeParams}) — neither is a timestamp to check.
+ */
+function nonCanonicalWindowOf(
+  entity: StatedValidityWindow,
+): NonCanonicalWindow | undefined {
+  const { validFrom, validTo } = entity;
+  if (typeof validFrom === "string" && !isCanonicalIsoDate(validFrom)) {
+    return { field: "validFrom", value: validFrom };
+  }
+  if (typeof validTo === "string" && !isCanonicalIsoDate(validTo)) {
+    return { field: "validTo", value: validTo };
+  }
+  return undefined;
+}
+
+/**
+ * The first entity in `entities` stating a non-canonical window timestamp, with
+ * the offending field and value. Allocates only on the failing path, so a clean
+ * chunk pays one predicate per stated timestamp and nothing else.
+ */
+function findNonCanonicalWindow<Entity extends StatedValidityWindow>(
+  entities: readonly Entity[],
+): (NonCanonicalWindow & Readonly<{ entity: Entity }>) | undefined {
+  for (const entity of entities) {
+    const nonCanonical = nonCanonicalWindowOf(entity);
+    if (nonCanonical !== undefined) return { entity, ...nonCanonical };
+  }
+  return undefined;
+}
+
+/** The refusal message for a non-canonical window timestamp on `subject`. */
+function nonCanonicalWindowMessage(
+  subject: string,
+  field: ValidityWindowField,
+  value: string,
+): string {
+  return (
+    `Non-canonical ${field} in trusted import: ${subject} states "${value}". ` +
+    `Expected canonical fixed-width UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), ` +
+    `which is what makes a stored timestamp sort chronologically against an asOf ` +
+    `coordinate. Convert with new Date(value).toISOString().`
+  );
+}
+
+/**
+ * An entity whose stated window has negative width. Trusted import writes
+ * straight to SQL and skips schema validation for throughput, but a row that
+ * stopped being true before it started is a stream SHAPE fault rather than a
+ * policy check: it is unobservable at every `asOf` coordinate, and no later
+ * write repairs it. `null` validFrom is a confirmed open-left window, so there
+ * is no lower bound to invert against; zero width is legal (see
+ * {@link isInvertedValidityWindow}).
+ *
+ * Only ever reached for a chunk whose timestamps {@link findNonCanonicalWindow}
+ * has already accepted, which is what makes the lexicographic compare inside a
+ * chronological one.
+ */
+function hasInvertedWindow(entity: StatedValidityWindow): boolean {
+  return isInvertedValidityWindow(
+    entity.validFrom ?? undefined,
+    entity.validTo,
+  );
+}
+
 function nodeParams(graphId: string, node: InterchangeNode): InsertNodeParams {
   return {
     graphId,
@@ -93,7 +270,22 @@ function nodeParams(graphId: string, node: InterchangeNode): InsertNodeParams {
   };
 }
 
-function edgeParams(graphId: string, edge: InterchangeEdge): InsertEdgeParams {
+function edgeParams(
+  graphId: string,
+  edge: InterchangeEdge,
+  registration: EdgeRegistration,
+): InsertEdgeParams {
+  const matchIdentity = resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props: edge.properties,
+    },
+    { graphId, edgeKind: edge.kind },
+  );
   return {
     graphId,
     id: edge.id,
@@ -103,6 +295,7 @@ function edgeParams(graphId: string, edge: InterchangeEdge): InsertEdgeParams {
     toKind: edge.to.kind,
     toId: edge.to.id,
     props: edge.properties,
+    ...(matchIdentity === undefined ? {} : { matchIdentity }),
     ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
     ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
   };
@@ -137,6 +330,12 @@ async function consumeTrustedChunks<G extends GraphDef>(
             "Trusted graph interchange stream emitted more than one header.",
           );
         }
+        if (chunk.header.identity !== undefined) {
+          throw invalidStream(
+            "Trusted graph interchange import does not support identity data. " +
+              "Use importGraphStream() for an identity export.",
+          );
+        }
         receivedHeader = true;
         break;
       }
@@ -157,6 +356,26 @@ async function consumeTrustedChunks<G extends GraphDef>(
         if (unknownKind !== undefined) {
           throw invalidStream(
             `Unknown node kind in trusted import: ${unknownKind}`,
+          );
+        }
+        const nonCanonicalNode = findNonCanonicalWindow(chunk.nodes);
+        if (nonCanonicalNode !== undefined) {
+          const { entity, field, value } = nonCanonicalNode;
+          throw invalidStream(
+            nonCanonicalWindowMessage(
+              `${entity.kind} "${entity.id}"`,
+              field,
+              value,
+            ),
+          );
+        }
+        const invertedNode = chunk.nodes.find((node) =>
+          hasInvertedWindow(node),
+        );
+        if (invertedNode !== undefined) {
+          throw invalidStream(
+            `Inverted validity window in trusted import: ${invertedNode.kind} "${invertedNode.id}" ends at ` +
+              `"${String(invertedNode.validTo)}", before its validFrom "${String(invertedNode.validFrom)}".`,
           );
         }
         await session.insertNodes(
@@ -183,11 +402,57 @@ async function consumeTrustedChunks<G extends GraphDef>(
             `Unknown edge or endpoint kind in trusted import: ${invalidEdge.kind}`,
           );
         }
+        const nonCanonicalEdge = findNonCanonicalWindow(chunk.edges);
+        if (nonCanonicalEdge !== undefined) {
+          const { entity, field, value } = nonCanonicalEdge;
+          throw invalidStream(
+            nonCanonicalWindowMessage(
+              `${entity.kind} edge "${entity.id}"`,
+              field,
+              value,
+            ),
+          );
+        }
+        const invertedEdge = chunk.edges.find((edge) =>
+          hasInvertedWindow(edge),
+        );
+        if (invertedEdge !== undefined) {
+          throw invalidStream(
+            `Inverted validity window in trusted import: ${invertedEdge.kind} edge "${invertedEdge.id}" ends at ` +
+              `"${String(invertedEdge.validTo)}", before its validFrom "${String(invertedEdge.validFrom)}".`,
+          );
+        }
         await session.insertEdges(
-          chunk.edges.map((edge) => edgeParams(store.graphId, edge)),
+          chunk.edges.map((edge) =>
+            edgeParams(
+              store.graphId,
+              edge,
+              store.graph.edges[edge.kind] as EdgeRegistration,
+            ),
+          ),
         );
         edgeCount += chunk.edges.length;
         break;
+      }
+      case "identity": {
+        // The trusted session writes only the node and edge relations, so it
+        // has no way to persist assertions or materialize the derived closure.
+        // Refuse rather than drop identity truth from an identity-enabled
+        // export: `importGraph` / `importGraphStream` carry it correctly.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity assertions. " +
+            "Use importGraphStream() for an export that carries identity truth.",
+        );
+      }
+      case "identity-transitions": {
+        // Same refusal as "identity" above, and unreachable in practice: the
+        // header check earlier in this loop already refuses a stream whose
+        // header declares `identity` at all, and archival export never emits
+        // this chunk type without one.
+        throw invalidStream(
+          "Trusted graph interchange import does not support identity transitions. " +
+            "Use importGraphStream() for an archival export that carries identity history.",
+        );
       }
     }
   }
@@ -204,9 +469,20 @@ async function consumeTrustedChunks<G extends GraphDef>(
  * Atomically imports a header-first stream into a fresh, dedicated database.
  *
  * This is an intentionally trusted path. It checks stream ordering and kind
- * names, but it does not validate properties, references, cardinality, or
- * conflicts. The caller must guarantee those invariants. Use
+ * names, but it does not validate properties, references, cardinality,
+ * composition, or conflicts. The caller must guarantee those invariants. Use
  * {@link importGraphStream} for untrusted data.
+ *
+ * Trusted of the DATA, not of the connection: this holds ONE write transaction
+ * open for the entire stream, which makes it a long-lived import holder exactly
+ * like {@link importGraphStream}, and it is guarded the same way — the source
+ * stream's own backend is checked against the target before the first chunk, and
+ * the target connection's exclusive stream lease is held for the whole import.
+ * `trustedImportGraphStream(target, exportGraphStream(source))` over one
+ * serialized connection is therefore refused with the shared typed
+ * {@link ConfigurationError} (codes and `details.heldBy` / `details.requested`
+ * as documented on `importGraphStream`) rather than reaching the driver as a
+ * nested BEGIN.
  */
 export async function trustedImportGraphStream<G extends GraphDef>(
   store: Store<G>,
@@ -223,16 +499,59 @@ export async function trustedImportGraphStream<G extends GraphDef>(
       { dialect: backend.dialect },
     );
   }
-  return trustedImport((session) =>
-    consumeTrustedChunks(store, session, chunks),
+  // The same pre-flight `importGraphStream` runs, through the same owner of
+  // "would this export hold the connection that write needs": a synchronous
+  // iterable was materialized by its producer and holds nothing, so only an
+  // async stream can name a source backend.
+  const sourceBackend =
+    Symbol.asyncIterator in chunks ? exportStreamBackend(chunks) : undefined;
+  const contention =
+    sourceBackend === undefined ? undefined : (
+      snapshotExportContention(sourceBackend, backend)
+    );
+  if (contention !== undefined) {
+    throw serializedStreamRefusal({
+      graphId: store.graphId,
+      requested: "import-stream",
+      heldBy: "export-snapshot",
+      detector: contention,
+    });
+  }
+  const schemaVersion = store.introspect().schemaVersion;
+  const options: TrustedImportOptions | undefined =
+    schemaVersion === undefined ? undefined : (
+      {
+        schemaWrite: {
+          graphId: store.graphId,
+          expectedVersion: schemaVersion,
+        },
+      }
+    );
+  return withImportStreamLease(store, () =>
+    trustedImport(
+      (session) => consumeTrustedChunks(store, session, chunks),
+      options,
+    ),
   );
 }
 
 function* graphDataChunks(data: GraphData): Iterable<GraphInterchangeChunk> {
-  const { nodes, edges, ...header } = data;
-  yield { type: "header", header };
+  const { nodes, edges, identity, ...header } = data;
+  yield {
+    type: "header",
+    header:
+      identity === undefined ? header : (
+        {
+          ...header,
+          identity: { profile: identity.profile, mode: identity.mode },
+        }
+      ),
+  };
   yield { type: "nodes", nodes };
   yield { type: "edges", edges };
+  if (identity !== undefined) {
+    yield { type: "identity", assertions: identity.assertions };
+  }
 }
 
 /** In-memory convenience wrapper around {@link trustedImportGraphStream}. */

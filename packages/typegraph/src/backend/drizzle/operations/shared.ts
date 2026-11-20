@@ -1,10 +1,89 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
-import type { SqlDialect } from "../../types";
+import { getDialect } from "../../../query/dialect";
+import type { SqlFragment } from "../../../query/sql-fragment";
+import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
+import type { NodeRowLock, SqlDialect } from "../../types";
+import { toDrizzleSql } from "../execution/types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
 export type Tables = SqliteTables | PostgresTables;
+
+/**
+ * A row-lock clause for the trailing locking position of a `SELECT`. `of`
+ * names the `FROM` aliases it locks; without it the clause locks every row
+ * the `SELECT` reads. A dialect whose engine already serializes writers
+ * renders an empty clause.
+ */
+export type RowLockClause = (of?: readonly string[]) => SQL;
+
+/** One {@link RowLockClause} per node-row lock purpose (see `NodeRowLock`). */
+export type NodeRowLockClauses = Readonly<Record<NodeRowLock, RowLockClause>>;
+
+/**
+ * The names a relation's PRIMARY KEY constraint can carry, given the relation
+ * name and its key columns.
+ *
+ * Two, because TypeGraph supports two provisioning paths for the same schema
+ * and they name the constraint differently:
+ *
+ *  - TypeGraph's own DDL (`generatePostgresCreateTableSQL`) emits an UNNAMED
+ *    `PRIMARY KEY (...)` clause, which PostgreSQL names `<relation>_pkey`;
+ *  - `drizzle-kit` renders the Drizzle `primaryKey({ columns })` builder with
+ *    its explicit name, `<relation>_<column>_..._pk`.
+ *
+ * Both are derived rather than hardcoded so a custom table name is covered
+ * too. Accepting only these two — never
+ * an arbitrary unique constraint on the relation — is what keeps a declared
+ * `unique: true` index violation out of the duplicate-identity classification.
+ *
+ * One declared bound: PostgreSQL clips every identifier to 63 bytes, and clips
+ * the RELATION part to make room for the `_pkey` it appends, so a custom
+ * relation name long enough to overflow that (58+ bytes) is named something
+ * neither of these matches. Classification then simply does not happen and the
+ * driver failure surfaces as it did before — no misattribution, just no
+ * translation.
+ */
+function primaryKeyConstraintNames(
+  relation: string,
+  keyColumns: readonly string[],
+): readonly string[] {
+  return [`${relation}_pkey`, `${relation}_${keyColumns.join("_")}_pk`];
+}
+
+/**
+ * The nodes relation's identity constraint: `(graph_id, kind, id)`, the tuple
+ * every node read also filters on.
+ */
+export function nodePrimaryKeyConstraint(
+  nodes: Tables["nodes"],
+): PrimaryKeyRelation {
+  const relation = getTableName(nodes);
+  const sqliteColumns = [nodes.graphId.name, nodes.kind.name, nodes.id.name];
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, sqliteColumns),
+    sqliteColumns,
+  };
+}
+
+/**
+ * The edges relation's identity constraint: `(graph_id, id)`. An edge id is
+ * unique per graph without its kind, so the key is one column shorter than a
+ * node's.
+ */
+export function edgePrimaryKeyConstraint(
+  edges: Tables["edges"],
+): PrimaryKeyRelation {
+  const relation = getTableName(edges);
+  const sqliteColumns = [edges.graphId.name, edges.id.name];
+  return {
+    table: relation,
+    constraintNames: primaryKeyConstraintNames(relation, sqliteColumns),
+    sqliteColumns,
+  };
+}
 
 /**
  * Converts undefined to SQL NULL for use in template literals.
@@ -15,29 +94,119 @@ export function sqlNull(value: string | undefined): SQL | string {
 }
 
 /**
- * Resolves a `validFrom` insert value against the row's creation timestamp.
- * Three states, matching {@link InsertNodeParams.validFrom} /
- * {@link InsertEdgeParams.validFrom}:
- *  - `undefined` (omitted): defaults to `timestamp` — every insert path
- *    (single, batch, returning/non-returning) agrees that "no validFrom"
- *    means "valid from creation", not open-left NULL (see issue #240).
- *  - `null`: preserves an explicit open-left window — returned as
- *    `undefined` here so the caller's {@link sqlNull} wrap emits SQL NULL,
- *    letting interchange import round-trip a row that predates the #240
- *    fix without narrowing its validity window on re-import (e.g. via a
- *    `branch()` clone).
- *  - a string: passed through unchanged.
+ * Gives a bound value the destination column's declared SQL type before it
+ * enters a CTE. PostgreSQL otherwise resolves JSON and timestamp parameters in
+ * a standalone `VALUES` relation as text, then refuses to assign them to their
+ * typed destination columns. SQLite's declared types make the same lowering a
+ * no-op in practice, so write programs keep one shared statement shape.
  */
-export function resolveValidFrom(
-  validFrom: string | null | undefined,
-  timestamp: string,
-): string | undefined {
-  if (validFrom === null) return undefined;
-  return validFrom ?? timestamp;
+export function castBoundValueForColumn(
+  column: Readonly<{ getSQLType: () => string }>,
+  value: unknown,
+): SQL {
+  return sql`CAST(${value} AS ${sql.raw(column.getSQLType())})`;
+}
+
+/**
+ * The `AND valid_from …` conjunction a write carries when its caller ASSERTED
+ * the lower bound the target row already holds (see
+ * {@link UpdateNodeParams.expectedValidFrom} /
+ * {@link UpdateEdgeParams.expectedValidFrom}).
+ *
+ * NULL-SAFE by construction, and that is the whole point of routing both
+ * entities through one builder: `valid_from` is nullable (an open-left window),
+ * and `col = NULL` is UNKNOWN in SQL, so the obvious `AND col = ?` spelling
+ * turns "I checked that this row has no lower bound" into a predicate that
+ * matches NOTHING — an assertion that always fails is as wrong as one that
+ * never runs. The three states are therefore distinct:
+ *
+ *  - `undefined` — the caller asserted nothing; no predicate is emitted.
+ *  - `null` — the caller read an OPEN-LEFT window; emits `IS NULL`.
+ *  - a string — the caller read that bound; emits `= <bound>`.
+ *
+ * One owner: nodes and edges share this function so the two statements cannot
+ * drift into disagreeing about what "the bound I read" means.
+ */
+export function expectedValidFromPredicate(
+  column: SQLWrapper,
+  expected: string | null | undefined,
+): SQL {
+  if (expected === undefined) return sql.empty();
+  if (expected === null) return sql` AND ${column} IS NULL`;
+  return sql` AND ${column} = ${expected}`;
+}
+
+/**
+ * The edges with one endpoint at a node, as `(graph AND from side) OR (graph
+ * AND to side)`. `graphId`, `kind` and `id` are bound values or columns of an
+ * outer row.
+ *
+ * The graph equality is repeated inside each arm, with no conjunct shared by
+ * both, on purpose. A shared `graph_id = ?` conjunct gives SQLite a
+ * single-index plan to weigh against the two endpoint seeks: with no
+ * `sqlite_stat1` it takes that plan and walks every edge in the graph. With
+ * the graph inside each arm, every plan SQLite can choose is the two endpoint
+ * index seeks. PostgreSQL plans both spellings as the same BitmapOr. An edge
+ * that is a self-loop matches both arms and is still one row.
+ *
+ * This holds because each occurrence is its own bound parameter, as every
+ * bundled driver executes it. SQLite lifts a term common to every arm of an OR
+ * out of it, so the same statement with the graph id inlined as a literal
+ * would plan the graph-wide range again.
+ *
+ * History capture's `queryConnectedEdgeIds`
+ * (`store/recorded-capture/flush.ts`) selects the same edges as a portable
+ * fragment and spells the predicate the same way; keep the two in step.
+ */
+export function edgeAtEitherEndpoint(
+  edges: Tables["edges"],
+  endpoint: Readonly<{
+    graphId: SQLWrapper | string;
+    kind: SQLWrapper | string;
+    id: SQLWrapper | string;
+  }>,
+): SQL {
+  return sql`
+    (
+            (${edges.graphId} = ${endpoint.graphId} AND ${edges.fromKind} = ${endpoint.kind} AND ${edges.fromId} = ${endpoint.id})
+            OR (${edges.graphId} = ${endpoint.graphId} AND ${edges.toKind} = ${endpoint.kind} AND ${edges.toId} = ${endpoint.id})
+          )
+  `;
 }
 
 export function quotedColumn(column: { name: string }): SQL {
   return sql.raw(`"${column.name.replaceAll('"', '""')}"`);
+}
+
+/**
+ * The predicate a CURRENT read applies to one temporal relation: not
+ * tombstoned, and `now` inside the row's validity window — the same window
+ * `compileTemporalFilter({ mode: "current" })` compiles for an ordinary read
+ * (`src/query/compiler/temporal.ts`), NOT `valid_to IS NULL`: a
+ * currently-valid row may carry a bounded FUTURE `valid_to`.
+ *
+ * The one owner of "what counts as a currently-valid row" for hand-rendered
+ * statements, so a change to the window's boundaries cannot reach some of them
+ * and miss others. `now` stays a bound parameter, so every statement a caller
+ * renders from one sample reads against the same instant.
+ */
+function currentWindowPredicate(
+  relation: string,
+  columns: Pick<Tables["nodes"], "deletedAt" | "validFrom" | "validTo">,
+  now: string,
+): SQL {
+  const deletedAt = qualifiedColumn(relation, columns.deletedAt);
+  const validFrom = qualifiedColumn(relation, columns.validFrom);
+  const validTo = qualifiedColumn(relation, columns.validTo);
+  return sql`${deletedAt} IS NULL AND (${validFrom} IS NULL OR ${validFrom} <= ${now}) AND (${validTo} IS NULL OR ${validTo} > ${now})`;
+}
+
+/** Qualifies a column with a relation name, the rendering both dialects read. */
+export function qualifiedColumn(
+  relation: string,
+  column: Readonly<{ name: string }>,
+): SQL {
+  return sql`${quotedTableName(relation)}.${quotedColumn(column)}`;
 }
 
 /**
@@ -49,13 +218,36 @@ export function quotedTableName(tableName: string): SQL {
   return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
 }
 
-const CODE_POINT_ORDER_BUILDERS = {
-  postgres: (value: SQL) => sql`${value} COLLATE "C"`,
-  sqlite: (value: SQL) => value,
-} satisfies Record<SqlDialect, (value: SQL) => SQL>;
+const EXISTING_COLUMN_QUALIFIERS = {
+  postgres: (tableName: string, columnName: string) =>
+    sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`,
+  sqlite: (_tableName: string, columnName: string) =>
+    quotedColumn({ name: columnName }),
+} satisfies Record<SqlDialect, (tableName: string, columnName: string) => SQL>;
 
 /**
- * `column` rendered so that ORDER BY sorts it by code point on both engines.
+ * The EXISTING row's column inside an `ON CONFLICT ... DO UPDATE`, as
+ * opposed to `excluded.<column>` (the row that was proposed for insertion).
+ * PostgreSQL requires this reference qualified with the table name to
+ * disambiguate it from `excluded`; SQLite takes the bare column. Every
+ * upsert builder that reads the conflicting row routes through this one
+ * owner instead of re-spelling the qualification: `buildInsertUnique`,
+ * `buildInsertUniqueBatch`, and `buildInsertUniqueFromSource` (all in
+ * `operations/uniques.ts`), plus the atomic node claim upsert in
+ * `operations/atomic-node-claims.ts` — four call sites.
+ */
+export function existingColumn(
+  dialect: SqlDialect,
+  tableName: string,
+  columnName: string,
+): SQL {
+  return EXISTING_COLUMN_QUALIFIERS[dialect](tableName, columnName);
+}
+
+/**
+ * `column` (an identifier or raw fragment, e.g. `sql.identifier("node_id")`
+ * or `sql.raw("node_id")`) rendered so that ORDER BY sorts it by code point
+ * on both engines.
  *
  * Relevance-ranking SQL breaks score ties on `node_id`. Left bare, Postgres
  * sorts it under the column's collation — a linguistic collation such as
@@ -65,11 +257,18 @@ const CODE_POINT_ORDER_BUILDERS = {
  * as is the store's `compareCodePoints`, which ranks the same rows whenever a
  * search falls back to fusing in JavaScript.
  *
+ * `DialectAdapter.binaryText` is the repo's one owner of this decision
+ * (`COLLATE "C"` on Postgres, identity on SQLite — the same seam
+ * `src/store/algorithms/**` and `identity/interchange-read.ts` already
+ * consume), so this reaches it instead of re-spelling the collation choice.
  * Forcing the `C` collation on Postgres makes all three agree. The ranking is
  * sorted anyway (no index supplies the order), so this costs nothing.
  */
-export function codePointOrderKey(column: SQL, dialect: SqlDialect): SQL {
-  return CODE_POINT_ORDER_BUILDERS[dialect](column);
+export function codePointOrderKey(
+  column: SqlFragment,
+  dialect: SqlDialect,
+): SQL {
+  return toDrizzleSql(getDialect(dialect).binaryText(column), dialect);
 }
 
 /**
@@ -80,7 +279,7 @@ export function codePointOrderKey(column: SQL, dialect: SqlDialect): SQL {
  * tombstoned/expired nodes after (which silently shrinks results below
  * `limit` under index drift).
  *
- * Currency matches a `current` read: non-tombstoned AND inside the
+ * Currency is {@link currentWindowPredicate}: non-tombstoned AND inside the
  * validity window. The instant is BOUND as a parameter (the backend's
  * clock, same source as its write timestamps) rather than compiled as a
  * per-row SQL now() call — on SQLite a per-row strftime() across two
@@ -92,7 +291,7 @@ export function liveNodeIdsSubquery(
   nodeKind: string,
   nowIso: string,
 ): SQL {
-  return sql`SELECT ${nodes.id} AS node_id FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${nodes.deletedAt} IS NULL AND (${nodes.validFrom} IS NULL OR ${nodes.validFrom} <= ${nowIso}) AND (${nodes.validTo} IS NULL OR ${nodes.validTo} > ${nowIso})`;
+  return sql`SELECT ${nodes.id} AS node_id FROM ${nodes} WHERE ${nodes.graphId} = ${graphId} AND ${nodes.kind} = ${nodeKind} AND ${currentWindowPredicate(getTableName(nodes), nodes, nowIso)}`;
 }
 
 export function nodeColumnList(nodes: Tables["nodes"]): SQL {
@@ -103,6 +302,6 @@ export function nodeColumnList(nodes: Tables["nodes"]): SQL {
 
 export function edgeColumnList(edges: Tables["edges"]): SQL {
   return sql.raw(
-    `"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`,
+    `"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.matchIdentityName.name}", "${edges.matchIdentityKey.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`,
   );
 }

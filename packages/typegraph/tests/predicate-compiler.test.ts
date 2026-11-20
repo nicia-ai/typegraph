@@ -69,7 +69,7 @@ function subqueryAst(alias: string, kind: string, graphId?: string): QueryAst {
     start: {
       alias,
       kinds: [kind],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],
@@ -108,6 +108,7 @@ function createContext(cteColumnPrefix?: string): PredicateCompilerContext {
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    orderedAggregates: true,
   };
   if (cteColumnPrefix !== undefined) {
     return { ...base, cteColumnPrefix };
@@ -345,6 +346,20 @@ describe("comparison predicates", () => {
       expect(toSqlString(result)).toContain("!=");
     });
 
+    it("compiles an equality predicate between compatible field references", () => {
+      const expr: ComparisonPredicate = {
+        __type: "comparison",
+        op: "eq",
+        left: field("p", ["props", "ownerId"], { valueType: "string" }),
+        right: field("owner", ["id"], { valueType: "string" }),
+      };
+      const result = compilePredicateExpression(expr, ctx);
+      const compiled = toSqlString(result);
+
+      expect(compiled).toContain("p_props");
+      expect(compiled).toContain("owner_id");
+    });
+
     it("compiles gt operator", () => {
       const expr: ComparisonPredicate = {
         __type: "comparison",
@@ -552,7 +567,10 @@ describe("string predicates", () => {
       pattern: "test%value",
     };
     const result = compilePredicateExpression(expr, ctx);
-    expect(toSqlString(result)).toContain("LIKE");
+    // SQLite's LIKE ignores ASCII case, so a case-sensitive like compiles to
+    // GLOB over the translated pattern.
+    expect(toSqlString(result)).toContain("GLOB");
+    expect(toSqlString(result)).not.toContain(" LIKE ");
   });
 
   it("compiles ilike operator with case insensitivity", () => {
@@ -1152,7 +1170,7 @@ describe("aggregate predicates", () => {
       aggregate: {
         __type: "aggregate",
         function: "countDistinct",
-        field: field("p", ["props", "category"]),
+        field: field("p", ["props", "category"], { valueType: "string" }),
       },
       value: literal(10, "number"),
     };
@@ -1264,6 +1282,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM users WHERE active = 1`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1281,6 +1300,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1 FROM deleted_users`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1298,6 +1318,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id FROM admins`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1316,6 +1337,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT score FROM scores`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1347,6 +1369,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT blocked_id FROM blocklist`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1365,6 +1388,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT user_id, role FROM admins`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1399,6 +1423,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT name FROM people`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1429,6 +1454,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT profile FROM people`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {
@@ -1461,6 +1487,7 @@ describe("subquery predicates", () => {
       schema: DEFAULT_SQL_SCHEMA,
       compileQuery: () => sql`SELECT 1`,
       windowFunctions: true,
+      orderedAggregates: true,
     };
 
     const expr: PredicateExpression = {

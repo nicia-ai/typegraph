@@ -4,7 +4,9 @@
  *
  * Both dialect schema factories (`createSqliteTables` /
  * `createPostgresTables`) derive their Drizzle index builders from this
- * list, so the two dialects cannot drift, and
+ * list, so the two dialects cannot drift (a declaration's `dialects` scope
+ * is the one sanctioned asymmetry, read through
+ * `systemIndexDeclarationsFor`), and
  * `materializeSystemIndexes()` derives the same indexes as runtime DDL so
  * an index added in a new library version reaches already-initialized
  * databases (bootstrap DDL only runs on first boot — see
@@ -26,7 +28,19 @@
  * strands the old physical index (the runner only adds). When the first
  * rename actually happens, add a retired-suffixes list + drop path here.
  */
-import { quoteIdentifier, shortHash } from "../query/dialect/vector-strategy";
+import {
+  GRAPH_ID_COLUMN,
+  GRAPH_PRESENCE_ANCHOR_KEYS,
+  type GraphRelationKey,
+  type GraphRelationNameSource,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
+import { ConfigurationError } from "../errors";
+import { getDialect, type SqlDialect } from "../query/dialect";
+import { quoteIdentifier } from "../query/dialect/vector-strategy";
+import { renderSqlInline, sql } from "../query/sql-fragment";
+import { shortHash } from "../utils/hash";
+import { requireDefined } from "../utils/presence";
 
 /** The TypeGraph relations that carry system indexes. */
 export type SystemIndexTable =
@@ -45,6 +59,7 @@ type LiveEdgeColumn =
   LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
 type RecordedColumn =
+  | "history_id"
   | "graph_id"
   | "kind"
   | "id"
@@ -62,11 +77,26 @@ type SystemIndexColumnsFor<T extends SystemIndexTable> =
   : T extends "recordedNodes" ? RecordedColumn
   : RecordedEdgeColumn;
 
+/**
+ * The rows a partial system index covers: those whose `isNull` column is
+ * NULL. Structured rather than SQL text so the runtime DDL, the Drizzle
+ * builders and the drift signature all derive the same predicate.
+ */
+export type SystemIndexPredicate<C extends string = string> = Readonly<{
+  isNull: C;
+}>;
+
 type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
   table: T;
   /** Physical index name is `${physicalTableName}_${suffix}`. */
   suffix: string;
+  /** Text keys whose ordering must be independent of database locale. */
+  binaryOrderColumns?: readonly string[];
   columns: readonly [SystemIndexColumnsFor<T>, ...SystemIndexColumnsFor<T>[]];
+  /** Makes the index partial; absent means it covers every row. */
+  predicate?: SystemIndexPredicate<SystemIndexColumnsFor<T>>;
+  /** The dialects that carry the index; absent means every dialect. */
+  dialects?: readonly [SqlDialect, ...SqlDialect[]];
 }>;
 
 export type SystemIndexDeclaration =
@@ -77,7 +107,6 @@ export type SystemIndexDeclaration =
 
 export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   // ---------------------------------------------------------- nodes
-  { table: "nodes", suffix: "kind_idx", columns: ["graph_id", "kind"] },
   // Listing shape: kind partition ordered by creation with the
   // soft-delete column ahead of it so `deleted_at IS NULL` list queries
   // stay index-served.
@@ -85,6 +114,22 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     table: "nodes",
     suffix: "kind_created_idx",
     columns: ["graph_id", "kind", "deleted_at", "created_at"],
+  },
+  // Live listing order on PostgreSQL (typegraph#859). PostgreSQL does not
+  // treat `deleted_at IS NULL` as an ordering equality, so kind_created_idx
+  // cannot serve `ORDER BY created_at DESC, id DESC` and every listing page
+  // sorted the whole live kind. Leaving deleted rows out of the index and
+  // ending the key in `id` lets the listing read in index order. SQLite
+  // treats IS NULL as an equality and already serves the order from
+  // kind_created_idx; a second ordering index there turns
+  // `edges.findFrom` into a walk of the whole kind under sampled
+  // statistics, so the index is PostgreSQL's alone.
+  {
+    table: "nodes",
+    suffix: "live_created_idx",
+    columns: ["graph_id", "kind", "created_at", "id"],
+    predicate: { isNull: "deleted_at" },
+    dialects: ["postgres"],
   },
   {
     table: "nodes",
@@ -106,7 +151,6 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   { table: "nodes", suffix: "id_idx", columns: ["graph_id", "id"] },
 
   // ---------------------------------------------------------- edges
-  { table: "edges", suffix: "kind_idx", columns: ["graph_id", "kind"] },
   // Directional traversal index (outgoing): supports endpoint lookups
   // and extra filtering by edge kind / target kind. Includes every
   // system column the compiled query's soft-delete/temporal-validity
@@ -153,6 +197,14 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     suffix: "kind_created_idx",
     columns: ["graph_id", "kind", "deleted_at", "created_at"],
   },
+  // Same rationale as nodes' live_created_idx.
+  {
+    table: "edges",
+    suffix: "live_created_idx",
+    columns: ["graph_id", "kind", "created_at", "id"],
+    predicate: { isNull: "deleted_at" },
+    dialects: ["postgres"],
+  },
   {
     table: "edges",
     suffix: "deleted_idx",
@@ -193,6 +245,16 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   // `degree()` at a recorded coordinate) would otherwise scan every
   // historical version in the graph. See typegraph#280.
   { table: "recordedNodes", suffix: "id_idx", columns: ["graph_id", "id"] },
+  // `recorded_from`-led lookup: `entity_idx` leads with `kind, id`, so it
+  // cannot serve the lineage capability's changed-since scan
+  // (`store/recorded-capture/lineage.ts`), which filters by `graph_id` and
+  // `recorded_from` alone across every kind. Without this the scan is a
+  // full per-graph table scan of every historical row.
+  {
+    table: "recordedNodes",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
+  },
 
   // ---------------------------------------------------------- recordedEdges
   {
@@ -236,7 +298,61 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     suffix: "valid_idx",
     columns: ["graph_id", "valid_from", "valid_to"],
   },
+  // Candidate-bounded adjacency walks seek through historical rows before
+  // applying visibility filters. The history id makes the key total even
+  // across multiple versions of one edge.
+  {
+    table: "recordedEdges",
+    suffix: "adjacency_from_idx",
+    binaryOrderColumns: ["kind", "id", "history_id"],
+    columns: [
+      "graph_id",
+      "from_kind",
+      "from_id",
+      "kind",
+      "recorded_from",
+      "id",
+      "history_id",
+    ],
+  },
+  {
+    table: "recordedEdges",
+    suffix: "adjacency_to_idx",
+    binaryOrderColumns: ["kind", "id", "history_id"],
+    columns: [
+      "graph_id",
+      "to_kind",
+      "to_id",
+      "kind",
+      "recorded_from",
+      "id",
+      "history_id",
+    ],
+  },
+  // `recorded_from`-led lookup, same rationale as recordedNodes' since_idx:
+  // the directional indexes above lead with an endpoint, not `recorded_from`
+  // alone, so they cannot serve the lineage capability's changed-since scan.
+  {
+    table: "recordedEdges",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
+  },
 ];
+
+/**
+ * The system indexes `dialect` carries: the single owner of a declaration's
+ * dialect scope, consulted by both schema factories and by
+ * `materializeSystemIndexes`.
+ */
+export function systemIndexDeclarationsFor(
+  dialect: SqlDialect,
+): readonly SystemIndexDeclaration[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) =>
+      declaration.dialects === undefined ||
+      declaration.dialects.includes(dialect),
+  );
+}
 
 /** Default physical table names for the system-index relations. */
 const DEFAULT_SYSTEM_INDEX_TABLE_NAMES: Readonly<
@@ -258,6 +374,64 @@ export function resolveSystemIndexTableName(
     Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
 ): string {
   return overrides?.[table] ?? DEFAULT_SYSTEM_INDEX_TABLE_NAMES[table];
+}
+
+/**
+ * The suffix of the byte-ordered `graph_id` index the graph id listing seeks.
+ *
+ * PostgreSQL's alone: a SQLite text index is already kept in byte order, so
+ * the `graph_id`-leading primary keys serve the listing's seeks there and a
+ * second index would only add write cost. PostgreSQL orders text indexes by the
+ * database collation, so a byte-order bound on `graph_id` is only an index
+ * range when the index itself is `COLLATE "C"`.
+ *
+ * Not a {@link SYSTEM_INDEX_DECLARATIONS} entry: it covers every graph presence
+ * anchor, including the schema-versions relation, which is not a
+ * {@link SystemIndexTable}, and base-schema adoption creates it rather than
+ * `materializeSystemIndexes`.
+ */
+const GRAPH_ID_ORDER_INDEX_SUFFIX = "graph_id_bytes_idx";
+
+/** Physical name of the byte-ordered `graph_id` index on `physicalTableName`. */
+export function graphIdOrderIndexName(physicalTableName: string): string {
+  return systemIndexName(physicalTableName, GRAPH_ID_ORDER_INDEX_SUFFIX);
+}
+
+/**
+ * The physical tables that carry the byte-ordered `graph_id` index for a
+ * deployment's (possibly overridden) table names: the listing's presence
+ * anchors, so a relation that becomes an anchor gets its index name reserved
+ * and adopted with no further change here.
+ */
+export function graphIdOrderIndexTables(
+  overrides: GraphRelationNameSource | undefined,
+): readonly Readonly<{ relation: GraphRelationKey; table: string }>[] {
+  const tableNames = resolveGraphRelationNames(overrides);
+  return GRAPH_PRESENCE_ANCHOR_KEYS.map((relation) => ({
+    relation,
+    table: tableNames[relation],
+  }));
+}
+
+function graphIdOrderIndexNames(
+  overrides: GraphRelationNameSource | undefined,
+): readonly string[] {
+  return graphIdOrderIndexTables(overrides).map(({ table }) =>
+    graphIdOrderIndexName(table),
+  );
+}
+
+/**
+ * Runtime DDL for one byte-ordered `graph_id` index — byte-compatible with the
+ * index the PostgreSQL schema factory declares, so a fresh bootstrap and the
+ * base-schema adoption step agree. Non-concurrent, like every base-schema
+ * adoption index: adoption may be raced by several booting processes, and
+ * `CREATE INDEX CONCURRENTLY` of one index by two of them can deadlock.
+ */
+export function generateGraphIdOrderIndexDDL(
+  physicalTableName: string,
+): string {
+  return `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(graphIdOrderIndexName(physicalTableName))} ON ${quoteIdentifier(physicalTableName)} (${quoteIdentifier(GRAPH_ID_COLUMN)} COLLATE "C");`;
 }
 
 /**
@@ -296,17 +470,17 @@ export function systemIndexName(
  * guards in the schema factories and `materializeIndexes`.
  */
 export function resolveSystemIndexNames(
-  overrides:
-    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+  overrides: GraphRelationNameSource | undefined,
 ): ReadonlySet<string> {
-  return new Set(
-    SYSTEM_INDEX_DECLARATIONS.map((declaration) =>
+  return new Set([
+    ...SYSTEM_INDEX_DECLARATIONS.map((declaration) =>
       systemIndexName(
         resolveSystemIndexTableName(declaration.table, overrides),
         declaration.suffix,
       ),
     ),
-  );
+    ...graphIdOrderIndexNames(overrides),
+  ]);
 }
 
 /**
@@ -319,8 +493,7 @@ export function resolveSystemIndexNames(
  */
 export function assertNoSystemIndexNameCollision(
   indexes: readonly Readonly<{ name: string }>[],
-  overrides:
-    Readonly<Partial<Record<SystemIndexTable, string | undefined>>> | undefined,
+  overrides: GraphRelationNameSource | undefined,
 ): void {
   if (indexes.length === 0) return;
   const reserved = resolveSystemIndexNames(overrides);
@@ -340,21 +513,127 @@ export function assertNoSystemIndexNameCollision(
 /**
  * Runtime DDL for one system index — byte-compatible with the index the
  * bootstrap path creates from the Drizzle schema (same name, same
- * columns), plus `CONCURRENTLY` where the dialect supports building
- * without blocking writes.
+ * columns, same predicate), plus `CONCURRENTLY` where the dialect supports
+ * building without blocking writes.
  */
 export function generateSystemIndexDDL(
   declaration: SystemIndexDeclaration,
   physicalTableName: string,
-  options: Readonly<{ concurrent: boolean }>,
+  options: Readonly<{ concurrent: boolean; dialect?: SqlDialect }>,
 ): string {
+  if (declaration.binaryOrderColumns?.length && options.dialect === undefined)
+    throw new ConfigurationError(
+      "An explicit dialect is required for byte-ordered system indexes.",
+      {
+        code: "SYSTEM_INDEX_DIALECT_REQUIRED",
+      },
+    );
   const name = quoteIdentifier(
     systemIndexName(physicalTableName, declaration.suffix),
   );
   const table = quoteIdentifier(physicalTableName);
   const columns = declaration.columns
-    .map((column) => quoteIdentifier(column))
+    .map((column) =>
+      declaration.binaryOrderColumns?.includes(column) === true ?
+        renderSqlInline(
+          getDialect(options.dialect ?? "sqlite").binaryText(
+            sql.identifier(column),
+          ),
+          options.dialect ?? "sqlite",
+        )
+      : quoteIdentifier(column),
+    )
     .join(", ");
   const concurrently = options.concurrent ? "CONCURRENTLY " : "";
-  return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns});`;
+  const where =
+    declaration.predicate === undefined ?
+      ""
+    : ` WHERE ${quoteIdentifier(declaration.predicate.isNull)} IS NULL`;
+  return `CREATE INDEX ${concurrently}IF NOT EXISTS ${name} ON ${table} (${columns})${where};`;
+}
+
+/**
+ * Runtime DDL for the base-schema release's three `since_idx (graph_id,
+ * recorded_from)` indexes — the lineage capability's changed-since scan
+ * (`store/recorded-capture/lineage.ts`): the two recorded relations
+ * (`recordedNodes`, `recordedEdges`, declared in
+ * {@link SYSTEM_INDEX_DECLARATIONS} and managed by `materializeIndexes`),
+ * plus the recorded identity-assertions relation's own `since_idx`, which
+ * `changesSince`'s per-revision completeness scan folds into the same
+ * three-relation scan but which is NOT a {@link SystemIndexTable} — like that
+ * relation's other three indexes (`entity_idx`/`a_idx`/`b_idx`), it is
+ * structural, hand-declared with the table rather than run through
+ * `materializeIndexes`' lazy backfill, and this function follows the same
+ * pattern for it. Both dialect factories thread this into the base-schema
+ * version-3 adoption step (`engine/members/base-schema-members.ts`) the
+ * same way `fencesTableDdl` feeds version 2: a fresh bootstrap already
+ * carries all three indexes through the schema factories' own index
+ * builders, but a database that reaches adoption without re-running
+ * bootstrap DDL (a reopen of an already-provisioned installation) needs
+ * this explicit `CREATE INDEX IF NOT EXISTS` triple. The adoption step must
+ * first ensure recorded identity-assertions storage: older provisioned
+ * installations can predate that table, which originally shipped only in
+ * bootstrap DDL. One owner for the
+ * declaration lookup and the identity-assertions index's own name (both
+ * routed through {@link systemIndexName}, the single naming choke point)
+ * keeps the two dialect factories from re-spelling either and risking
+ * drift between them; the identity-assertions name this renders MUST match
+ * the schema factories' own hand-written `index(...)` call byte-for-byte —
+ * the shape-ratchet test (`tests/base-schema-shape-ratchet.test.ts`) is
+ * what would catch a drift.
+ */
+export function sinceIndexAdoptionDdl(
+  recordedTableNames: Readonly<{
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedIdentityAssertions: string;
+  }>,
+): readonly [string, string, string] {
+  function sinceIndexDdlFor(table: "recordedNodes" | "recordedEdges"): string {
+    const declaration = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (candidate) =>
+          candidate.table === table && candidate.suffix === "since_idx",
+      ),
+      `No "since_idx" system index is declared for "${table}".`,
+    );
+    return generateSystemIndexDDL(declaration, recordedTableNames[table], {
+      concurrent: false,
+    });
+  }
+  function identityAssertionsSinceIndexDdl(): string {
+    const name = quoteIdentifier(
+      systemIndexName(
+        recordedTableNames.recordedIdentityAssertions,
+        "since_idx",
+      ),
+    );
+    const table = quoteIdentifier(
+      recordedTableNames.recordedIdentityAssertions,
+    );
+    return `CREATE INDEX IF NOT EXISTS ${name} ON ${table} (${quoteIdentifier("graph_id")}, ${quoteIdentifier("recorded_from")});`;
+  }
+  return [
+    sinceIndexDdlFor("recordedNodes"),
+    sinceIndexDdlFor("recordedEdges"),
+    identityAssertionsSinceIndexDdl(),
+  ];
+}
+
+/** Idempotent version-6 adoption DDL, sharing bootstrap's declarations. */
+export function adjacencyIndexAdoptionDdl(
+  recordedEdges: string,
+  dialect: SqlDialect,
+): readonly string[] {
+  return SYSTEM_INDEX_DECLARATIONS.filter(
+    (declaration) =>
+      declaration.table === "recordedEdges" &&
+      (declaration.suffix === "adjacency_from_idx" ||
+        declaration.suffix === "adjacency_to_idx"),
+  ).map((declaration) =>
+    generateSystemIndexDDL(declaration, recordedEdges, {
+      concurrent: false,
+      dialect,
+    }),
+  );
 }

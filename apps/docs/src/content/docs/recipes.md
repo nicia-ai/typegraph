@@ -167,17 +167,19 @@ const recommendations = await store
 
 ## Content Versioning with History
 
-TypeGraph has built-in support for temporal data. Every node and edge tracks
-`validFrom` and `validTo` timestamps, allowing you to travel through time
-without complex schema changes.
+TypeGraph has built-in support for temporal data. Every node and edge carries a
+valid-time window (`validFrom` and `validTo`) that you can query with `asOf`.
+An `update()` rewrites the row in place and does not keep the previous
+properties; to keep them, enable recorded history (see below).
 For audit cases that need TypeGraph's captured state before a correction, enable
 recorded/system-time capture with `history: true` and use
 [`store.asOfRecorded(T)`](/queries/temporal#recorded-time-bitemporal).
 
-### Enabling Temporal Mode
+### Default Read Mode
 
-Ensure your graph definition allows for history. By default, TypeGraph uses
-`temporalMode: "current"`, which only returns currently valid data.
+By default, TypeGraph uses `temporalMode: "current"`, which only returns
+currently valid, non-deleted data. Set it in the graph defaults, or override it
+per query with `.temporal(...)`.
 
 ```typescript
 const cmsGraph = defineGraph({
@@ -189,7 +191,6 @@ const cmsGraph = defineGraph({
     /* ... */
   },
   defaults: {
-    // This allows us to query past states
     temporalMode: "current", // Default, but can be overridden per query
   },
 });
@@ -197,10 +198,9 @@ const cmsGraph = defineGraph({
 
 ### Updating Content
 
-When you update a node, TypeGraph automatically:
-
-1. Marks the old row as valid until `now()`.
-2. Inserts a new row valid from `now()`.
+`update()` modifies the node in place: it replaces the properties, increments
+`meta.version` and sets `meta.updatedAt`. The previous properties are not
+retained unless the store records history.
 
 ```typescript
 // 1. Create initial version
@@ -209,19 +209,21 @@ const article = await store.nodes.Article.create({
   content: "Work in progress...",
 });
 
-// 2. Update it (automatically versions)
+// 2. Update it (in place; meta.version increments)
 await store.nodes.Article.update(article.id, {
   title: "Final Version",
   content: "Ready to publish!",
 });
 ```
 
-### Querying Past States
+### Querying Valid Time
 
-You can query the state of the graph as it existed at any point in time using `asOf`.
+`asOf` selects rows whose validity window (`validFrom` to `validTo`) covers an
+instant. Set the window when you create or update a node to model when a fact
+is true in the domain:
 
 ```typescript
-// Get the current version (Final Version)
+// The current version (rows valid now)
 const current = await store
   .query()
   .from("Article", "a")
@@ -229,9 +231,8 @@ const current = await store
   .select((ctx) => ctx.a)
   .execute();
 
-// Get the version from 5 minutes ago (Draft 1)
+// Rows whose validity window covered this instant
 const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
 const past = await store
   .query()
   .from("Article", "a")
@@ -241,23 +242,41 @@ const past = await store
   .execute();
 ```
 
-### Audit Logs
+### Ended Rows
 
-To see the full history of changes for a specific node, you can use `includeEnded`.
+To include rows whose validity window has already ended, use `includeEnded`. It still returns one row
+per id, as last written: the update above left no "Draft 1" row behind.
 
 ```typescript
-const history = await store
+const withEnded = await store
   .query()
   .from("Article", "a")
-  .temporal("includeEnded") // Include historical rows
+  .temporal("includeEnded") // Also rows whose validity window has ended
   .whereNode("a", (a) => a.id.eq(article.id))
-  .orderBy("a", "validFrom", "desc")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.validFrom,
-    validTo: ctx.a.validTo,
+    validFrom: ctx.a.meta.validFrom,
+    validTo: ctx.a.meta.validTo,
   }))
   .execute();
+```
+
+### Audit Logs
+
+To read the "Draft 1" version back, the store has to record it: open the store with `history: true`,
+keep a checkpoint after the write you may need to read again, and read at that recorded instant (see
+[Recorded Time](/queries/temporal#recorded-time-bitemporal)):
+
+```typescript
+// With createStoreWithSchema(graph, backend, { history: true }):
+const draft = await store.nodes.Article.create({ title: "Draft 1", content: "..." });
+const afterDraft = await store.recordedNow();
+await store.nodes.Article.update(draft.id, { title: "Final Version" });
+
+if (afterDraft !== undefined) {
+  const asDrafted = await store.asOfRecorded(afterDraft).nodes.Article.getById(draft.id);
+  // asDrafted?.title === "Draft 1"
+}
 ```
 
 ### Replaying a Recorded Belief
@@ -428,14 +447,26 @@ const allChildren = await store
     name: ctx.child.name,
     level: ctx.level,
   }))
-  .orderBy((ctx) => ctx.level, "asc")
   .execute();
+
+// The recursive depth is selectable but not an `orderBy` field: sort in memory
+const byLevel = allChildren.toSorted((a, b) => a.level - b.level);
 ```
 
 ### Build a Tree Structure
 
 ```typescript
-async function buildTree(rootSlug: string): Promise<TreeNode> {
+type TreeNode = { id: string; name: string; children: TreeNode[] };
+
+async function buildTree(rootSlug: string): Promise<TreeNode | undefined> {
+  const root = await store
+    .query()
+    .from("Category", "root")
+    .whereNode("root", (c) => c.slug.eq(rootSlug))
+    .select((ctx) => ({ id: ctx.root.id, name: ctx.root.name }))
+    .first();
+  if (root === undefined) return undefined;
+
   const descendants = await store
     .query()
     .from("Category", "root")
@@ -451,16 +482,16 @@ async function buildTree(rootSlug: string): Promise<TreeNode> {
     .execute();
 
   // Build tree in memory
-  const nodeMap = new Map<string, TreeNode>();
-  for (const d of descendants) {
-    nodeMap.set(d.id, { ...d, children: [] });
+  const nodeMap = new Map<string, TreeNode>([
+    [root.id, { ...root, children: [] }],
+  ]);
+  for (const { id, name } of descendants) {
+    nodeMap.set(id, { id, name, children: [] });
   }
-  for (const d of descendants) {
-    if (d.parentId && nodeMap.has(d.parentId)) {
-      nodeMap.get(d.parentId)!.children.push(nodeMap.get(d.id)!);
-    }
+  for (const { id, parentId } of descendants) {
+    nodeMap.get(parentId)?.children.push(nodeMap.get(id)!);
   }
-  return nodeMap.get(rootSlug)!;
+  return nodeMap.get(root.id);
 }
 ```
 
@@ -504,7 +535,7 @@ const related = await store
     score: ctx.e.score,
     type: ctx.e.type,
   }))
-  .orderBy((ctx) => ctx.score, "desc")
+  .orderBy("e", "score", "desc")
   .execute();
 ```
 
@@ -555,16 +586,16 @@ await store.nodes.Document.upsertById(documentId, {
 ### Find Deleted Nodes
 
 ```typescript
-// Use temporal queries to see deleted nodes
+// Soft-deleted nodes are tombstones: include them, then keep only those
 const deletedDocs = await store
   .query()
   .from("Document", "d")
-  .temporal("includeEnded")
-  .whereNode("d", (d) => d.deletedAt.isNotNull())
+  .temporal("includeTombstones")
+  .whereNode("d", (d) => d.$meta.deletedAt.isNotNull())
   .select((ctx) => ({
     id: ctx.d.id,
     title: ctx.d.title,
-    deletedAt: ctx.d.deletedAt,
+    deletedAt: ctx.d.meta.deletedAt,
   }))
   .execute();
 ```
@@ -572,7 +603,9 @@ const deletedDocs = await store
 ### Cascade Delete Pattern
 
 ```typescript
-async function cascadeDelete(documentId: string): Promise<void> {
+import { asEdgeId, type NodeId } from "@nicia-ai/typegraph";
+
+async function cascadeDelete(documentId: NodeId<typeof Document>): Promise<void> {
   await store.transaction(async (tx) => {
     // Find all related edges
     const edges = await tx
@@ -586,7 +619,7 @@ async function cascadeDelete(documentId: string): Promise<void> {
 
     // Delete edges first
     for (const { edgeId } of edges) {
-      await tx.edges.relatedTo.delete(edgeId);
+      await tx.edges.relatedTo.delete(asEdgeId(edgeId));
     }
 
     // Then delete the node
@@ -603,6 +636,17 @@ Drizzle connection (relational rows) and a TypeGraph `Store`, use
 The caller owns the transaction boundary; TypeGraph adopts that exact
 connection, so a failure rolls back both layers — no stray relational row, no
 graph node with a dangling foreign reference.
+
+:::caution[Do not use the root store inside a caller-owned transaction]
+Inside `db.transaction(async (sqlTx) => ...)`, do not call a managed write on
+the root `store` (for example, `store.nodes.Document.create(...)`). On a
+single-connection PostgreSQL handle, Drizzle starts that root-store write with
+`BEGIN` and finishes it with `COMMIT`; PostgreSQL treats the nested `BEGIN` as
+a warning and the `COMMIT` ends the caller's transaction. Use
+`store.withTransaction(sqlTx)` and make every graph write through the returned
+transaction context instead. For a history-enabled store, use
+`store.withRecordedTransaction(sqlTx, async (tx) => ...)`.
+:::
 
 This is the explicit adapter surface: create the store with
 `createAdapterStore` or `createAdapterStoreWithSchema`. The portable
@@ -677,7 +721,7 @@ interleave other async work that writes to the same connection inside the
 
 **Cloudflare Durable Objects (`do-sqlite`).** A store backed by
 `drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`
-and advertises `capabilities.transactions: true`. Drizzle's own
+and advertises `capabilities.execution.interactiveTransactions: true`. Drizzle's own
 `db.transaction()` here is `ctx.storage.transactionSync` and cannot span an
 `await`; TypeGraph instead delegates to the async storage runner
 `ctx.storage.transaction(async …)` (surfaced by Drizzle as
@@ -711,8 +755,15 @@ once at startup with `createAdapterStoreWithSchema(graph, backend)` so
 fulltext-backed writes find their durable materialization marker; an uninitialized store
 throws `StoreNotInitializedError` instead of migrating mid-transaction.
 
+On SQLite, open caller-owned transactions that may perform constrained writes
+with `BEGIN IMMEDIATE`. TypeGraph probes the writer slot before any
+decision-driving constraint read; if a `DEFERRED` snapshot was invalidated by a
+concurrent commit, the operation refuses with
+`CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED` and the caller must roll back and
+retry the whole transaction.
+
 `withTransaction` throws `ConfigurationError` on backends that cannot provide
-real rollback (`backend.capabilities.transactions === false`:
+real rollback (`backend.capabilities.execution.interactiveTransactions === false`:
 `drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`) —
 it never silently degrades to a non-atomic fallback, because the relational
 write would still commit.
@@ -741,8 +792,8 @@ await store.transaction(async (tx) => {
 Custom `AdapterBackend<TNativeTransaction>` implementations determine the
 inferred native handle through their generic parameter. Managed
 `/sqlite/local` and `/postgres/pglite` entrypoints return `Store`, whose
-transaction context exposes only TypeGraph collections and backend ports—no
-adapter-native `tx.sql` handle. Use an adapter entrypoint when application
+transaction context exposes TypeGraph collections, graph reads, and backend
+ports—but no adapter-native `tx.sql` handle. Use an adapter entrypoint when application
 tables must share the transaction.
 On **Postgres / libsql** this is mandatory for correctness — using the outer
 `db` would write on a *different* connection and silently escape the
@@ -761,7 +812,7 @@ await store.transaction(async (tx) => {
       break;
     }
     case "unavailable":
-      // Non-transactional fallback: no tx.sql property and no atomicity.
+      // Raw Store only: no tx.sql, atomicity, or schema-version fence.
       await writeWithoutAtomicity();
       break;
     case "history":
@@ -803,7 +854,7 @@ const graph = defineGraph({
       type: User,
       unique: [
         { name: "user_email", fields: ["email"], scope: "kind", collation: "caseInsensitive" },
-        { name: "user_username", fields: ["username"], scope: "kind", collation: "caseSensitive" },
+        { name: "user_username", fields: ["username"], scope: "kind", collation: "binary" },
       ],
     },
   },
@@ -832,7 +883,12 @@ async function createOrUpdateUserByEmail(
 ### Use `getOrCreateByEndpoints` for Edge Deduplication
 
 ```typescript
-async function followUser(followerId: string, followeeId: string): Promise<void> {
+import { type NodeId } from "@nicia-ai/typegraph";
+
+async function followUser(
+  followerId: NodeId<typeof User>,
+  followeeId: NodeId<typeof User>,
+): Promise<void> {
   const follower = await store.nodes.User.getById(followerId);
   const followee = await store.nodes.User.getById(followeeId);
   if (!follower || !followee) {

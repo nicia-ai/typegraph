@@ -4,12 +4,10 @@ export { defineNode, type DefineNodeOptions } from "./node";
 // Edge factory
 export { defineEdge, type DefineEdgeOptions } from "./edge";
 
-// Meta-edge factory
-export { metaEdge, type MetaEdgeOptions } from "./meta-edge";
-
 // Embedding type for vector search
 export {
   embedding,
+  type EmbeddingBrand,
   type EmbeddingSchema,
   type EmbeddingValue,
   getEmbeddingDimensions,
@@ -39,7 +37,16 @@ export {
 } from "./external-ref";
 
 // Recorded-time instant brand (the typed anchor for store.asOfRecorded)
-export { asRecordedInstant, type RecordedInstant } from "./temporal";
+export {
+  asRecordedInstant,
+  compareRecordedInstants,
+  type RecordedInstant,
+  recordedInstant,
+  recordedInstantOwner,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+  type RestoredRecordedInstant,
+} from "./temporal";
 
 // Graph definition
 export {
@@ -52,12 +59,27 @@ export {
   getNodeKinds,
   type GetNodeType,
   type GraphDef,
+  type GraphIdentityConfig,
   isGraphDef,
   type NodeKinds,
 } from "./define-graph";
 
-// Core types
+// Edge endpoint utilities
 export {
+  type EndpointPair,
+  formatEndpointPairs,
+  getEdgeEndpointPairs,
+  isEdgeTargetMap,
+  normalizeTargetMap,
+  projectTargetKinds,
+  projectTargetNodes,
+  validateTargetMapEntries,
+} from "./edge-endpoints";
+
+// Core types
+export type { GraphAllocationOwner } from "./allocation-owner";
+export {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   asEdgeId,
   asNodeId,
@@ -65,16 +87,21 @@ export {
   type Collation,
   type DeleteBehavior,
   type EdgeId,
+  type EdgeMatchIdentity,
   type EdgeProps,
   type EdgeRegistration,
+  type EdgeTargetMap,
+  type EdgeTargets,
   type EdgeType,
   type EdgeTypeWithEndpoints,
   type EndpointExistence,
+  type GraphAnnotations,
   type GraphDefaults,
   type IndexEntity,
   isEdgeType,
   isEdgeTypeWithEndpoints,
   isNodeType,
+  type JsonScalar,
   type JsonValue,
   type KindAnnotations,
   type KindEntity,
@@ -83,7 +110,33 @@ export {
   type NodeRegistration,
   type NodeType,
   type NullCheckOp,
+  type TargetCardinality,
   type TemporalMode,
   type UniqueConstraint,
   type UniquenessScope,
 } from "./types";
+
+// Ontology declaration and custom meta-edge vocabulary
+export {
+  type CompositionExistence,
+  type CompositionOptions,
+  type CompositionPartSide,
+  type CompositionViaRef,
+  core,
+  type EquivalentToCheck,
+  isMetaEdge,
+  type MetaEdge,
+  type MetaEdgeName,
+  type MetaEdgeProperties,
+  type OntologyRelation,
+  type PolymorphicNodeType,
+  type StructuralSubtypeMismatch,
+  type SubClassOfCheck,
+  type TypedOntologyRelation,
+} from "../ontology";
+// Type-only: `MetaEdgeName` is spelled `(typeof ALL_META_EDGE_NAMES)[number]`,
+// so naming it needs the constant's type, not a runtime export.
+export type { ALL_META_EDGE_NAMES } from "../ontology/constants";
+
+// ID generation
+export { generateId } from "../utils/id";

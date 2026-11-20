@@ -1,0 +1,443 @@
+/**
+ * Claim axis vocabulary.
+ *
+ * A declared constraint is a CLAIM on an AXIS: the value bound to a claim row's
+ * `node_kind` column, which is what the relation's primary key fences on. The
+ * axis is not always a kind — it is whatever set of kinds the constraint spans —
+ * and deciding it is this module's only job, so no write path spells its own.
+ *
+ * The other half of a claim row is its OWNER, `(concrete_kind, node_id)`. Ids
+ * are unique only per kind, so an id alone cannot answer "is this row mine?":
+ * `Employee "X"` and `Contractor "X"` are two rows under the nodes primary key
+ * and would read as one owner. The predicate lives here once, in the two
+ * renderings the code needs (TypeScript and SQL), so a claim's accept/refuse
+ * verdict cannot differ between the layer that probes it and the layer that
+ * writes it.
+ *
+ * The SQL rendering below is generic over the caller's SQL representation and
+ * keyed on physical column NAMES rather than a Drizzle `Column` object, so a
+ * backend with no column objects at all can call this one owner without an
+ * adapter-specific intermediate representation or a re-spelled predicate.
+ */
+import { subClassComponent } from "../../constraints";
+import { type UniquenessScope } from "../../core/types";
+import { uniquenessScopeSpansSubclasses } from "../../core/unique-constraint-options";
+import { ConfigurationError } from "../../errors";
+import { type KindRegistry } from "../../registry/kind-registry";
+import { compareCodePoints, compareStrings } from "../../utils/compare";
+import { encodeTupleKey } from "../../utils/tuple-key";
+// Type-only: `edge-claims.ts` value-imports `edgeCardinalityAxis` from this
+// file, but a type-only import is erased at runtime, so this back-edge
+// creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "./edge-claims";
+
+/**
+ * The one code point an axis component may not contain, written as an escape
+ * so it can never be mistaken for whitespace in a diff.
+ *
+ * Axes that are not kinds are built by joining with it — the disjointness pair
+ * axis below is the first — so a kind or constraint name containing it could
+ * spell a reserved axis and take a claim row the fence assigns to something
+ * else. {@link assertClaimAxisSafe} is what makes that unspellable, at
+ * graph-definition time.
+ */
+const AXIS_SEPARATOR = "\u001E";
+
+/** The prefix marking an axis as a disjoint PAIR rather than as a kind. */
+const DISJOINT_AXIS_PREFIX = `${AXIS_SEPARATOR}disjoint${AXIS_SEPARATOR}`;
+
+/**
+ * The `constraint_name` every disjointness claim is written under.
+ *
+ * Reserved rather than derived: it is what tells the claim seam that a refusal
+ * on this row is a `DisjointError` and not a `UniquenessError`, and what tells
+ * a reader of the relation that this row's `node_kind` is a pair label rather
+ * than a kind. {@link assertClaimAxisSafe} is what guarantees no declared
+ * constraint can carry the same name.
+ */
+export const DISJOINT_CONSTRAINT_NAME = `${AXIS_SEPARATOR}disjointWith`;
+
+/**
+ * THE axis every composition claim is written at, and THE name of the
+ * composition acyclic relation ({@link file://../acyclicity.ts
+ * compositionAcyclicRelation}).
+ *
+ * ONE string for the whole graph, not one per edge kind and not one per
+ * population: the single-whole invariant is relation-wide, so two composition edges out
+ * of one part must collide on one row regardless of which `partOf`/`hasPart`
+ * pair or which realizing edge kind wrote it. Prefixed with the reserved
+ * separator so no kind name can spell it (enforced the same way
+ * {@link DISJOINT_CONSTRAINT_NAME} is, through {@link assertClaimAxisSafe}).
+ */
+export const COMPOSITION_RELATION_NAME = `${AXIS_SEPARATOR}composition`;
+
+/**
+ * THE printable form of an acyclic relation's name, for the one place such a
+ * name crosses into a public field — `EdgeAcyclicityErrorDetails.relation`,
+ * `EdgeAcyclicityIndeterminateErrorDetails.relation`, and
+ * `EdgeAcyclicityViolation.relation` (which `ConstraintFenceViolation`
+ * carries verbatim). A standalone `acyclic: true` relation is named after its
+ * own edge kind (`src/store/acyclicity.ts`'s `standaloneAcyclicRelation`) and
+ * is already printable — `assertClaimAxisSafe` refuses any kind name
+ * containing {@link AXIS_SEPARATOR} — so this only ever has work to do for
+ * {@link COMPOSITION_RELATION_NAME} itself.
+ *
+ * The reserved prefix stays on the relation's INTERNAL name
+ * (`AcyclicEdgeRelation.name`, used for grouping and as this graph's one
+ * composition relation's identity) precisely because no real kind name can
+ * spell it — swapping in a printable internal name would reopen the
+ * collision {@link assertClaimAxisSafe} exists to close, this time against a
+ * user's own `acyclic: true` edge kind. Stripping it here, at display time
+ * only, is what keeps the raw U+001E out of a thrown message or a
+ * `details`/`ConstraintFenceViolation` field a caller might log, serialize,
+ * or compare — the same treatment {@link DISJOINT_CONSTRAINT_NAME} gets by
+ * never being surfaced at all (`DisjointError` names the two kinds instead).
+ */
+export function displayAcyclicRelationName(name: string): string {
+  return name.startsWith(AXIS_SEPARATOR) ?
+      name.slice(AXIS_SEPARATOR.length)
+    : name;
+}
+
+/**
+ * THE axis a disjointness claim is written at: the registry's own canonical
+ * pair label, prefixed so it cannot collide with a kind.
+ *
+ * A fold of `KindRegistry.disjointPairLabel` rather than a second
+ * normalization of the same pair — the two kinds of one disjoint pair must
+ * compute ONE string, or their claims sit on two rows that can never collide
+ * and the fence refuses nothing.
+ *
+ * Pairwise, and deliberately not per component: the registry's disjoint pairs
+ * are literal unordered pairs and disjointness is not transitive here, so an
+ * axis keyed on a connected component would refuse an `A`/`C` pair under
+ * `A⊥B, B⊥C` that the graph never declared disjoint.
+ */
+export function disjointnessClaimAxis(
+  kind: string,
+  otherKind: string,
+  registry: KindRegistry,
+): string {
+  return `${DISJOINT_AXIS_PREFIX}${registry.disjointPairLabel(kind, otherKind)}`;
+}
+
+/**
+ * Refuses a kind name or constraint name that could spell a reserved claim
+ * axis or the reserved disjointness constraint name.
+ *
+ * Runs at graph-definition time, the one gate every kind and every declared
+ * constraint passes before a claim can be written for it — so the reserved
+ * vocabulary is unspellable by construction rather than re-checked at each
+ * write, and the claim seam can read "this refusal is a disjointness refusal"
+ * off the reserved constraint name without a caller being able to forge it. A
+ * new refusal, on an input no real schema carries.
+ *
+ * `subject` names the ROLE (`Node kind`, `Unique constraint`); the name itself
+ * is quoted through `JSON.stringify` so the offending code point reads as an
+ * escape instead of as an invisible character.
+ */
+export function assertClaimAxisSafe(name: string, subject: string): void {
+  if (!name.includes(AXIS_SEPARATOR)) return;
+  throw new ConfigurationError(
+    `${subject} name ${JSON.stringify(name)} contains U+001E, which TypeGraph reserves for claim axes.`,
+    { name },
+    {
+      suggestion: `Rename it without the U+001E (record separator) character.`,
+    },
+  );
+}
+
+/**
+ * WHERE a uniqueness claim for this kind and scope is written, and whether that
+ * target spans kinds beyond the writer's own.
+ *
+ * Both facts come out of one computation on purpose. The axis is the code-point
+ * minimum of the set the scope covers, and "does this site also need the
+ * per-graph write lock?" is that same set having more than one member — so a
+ * caller cannot pick up one without the other, and the lock trigger cannot
+ * drift away from the claim target. Asking the covered SET rather than the
+ * scope token is what keeps a `kindWithSubClasses` constraint on a kind with no
+ * hierarchy classified like the `kind` scope it is equivalent to.
+ */
+export type UniquenessClaimTarget = Readonly<{
+  axis: string;
+  crossKind: boolean;
+}>;
+
+/** The kinds one uniqueness claim axis spans, in canonical order. */
+function uniquenessClaimKinds(
+  kind: string,
+  scope: UniquenessScope,
+  registry: KindRegistry,
+): readonly string[] {
+  return uniquenessScopeSpansSubclasses(scope) ?
+      subClassComponent(kind, registry)
+    : [kind];
+}
+
+/**
+ * THE code-point minimum of a set of kinds — what a uniqueness axis folds
+ * a covered set onto. One spelling, so the live-graph claim target
+ * ({@link uniquenessClaimTarget}) and the ontology-tightening probe (which
+ * folds a proposed schema's merged subclass component onto the same axis)
+ * cannot compute two different minima for the same covered set.
+ *
+ * `undefined` only for an empty input, which no real caller produces: both
+ * `uniquenessClaimKinds` and a merged subclass component always carry at
+ * least the kind that anchors them.
+ */
+export function uniquenessAxisOfKinds(
+  kinds: readonly string[],
+): string | undefined {
+  return kinds.toSorted((left, right) =>
+    compareUniquenessAxisKinds(left, right),
+  )[0];
+}
+
+/**
+ * THE order a uniqueness axis is the minimum of: code-point order. The schema
+ * gate's "does a lost member sort before the kind?" asks this same order, so
+ * where claims were written and which lost members could hold them cannot
+ * disagree for kind names with astral characters.
+ */
+export function compareUniquenessAxisKinds(
+  left: string,
+  right: string,
+): number {
+  return compareCodePoints(left, right);
+}
+
+/** THE decision above — the one owner of both readings. */
+export function uniquenessClaimTarget(
+  kind: string,
+  scope: UniquenessScope,
+  registry: KindRegistry,
+): UniquenessClaimTarget {
+  const kinds = uniquenessClaimKinds(kind, scope, registry);
+  return {
+    axis: uniquenessAxisOfKinds(kinds) ?? kind,
+    crossKind: kinds.length > 1,
+  };
+}
+
+/**
+ * THE axis a uniqueness claim is written at: the kind itself for
+ * `scope: "kind"`, and the code-point minimum of the subclass component for
+ * `scope: "kindWithSubClasses"`.
+ *
+ * The minimum is a fold of a kind-independent set, so every kind in one
+ * hierarchy folds to the same axis and their claims collide on the uniques
+ * primary key — which is the whole fence. Reserving under each writer's own
+ * kind (what this replaces) put sibling kinds in rows that can never collide.
+ */
+export function uniquenessClaimAxis(
+  kind: string,
+  scope: UniquenessScope,
+  registry: KindRegistry,
+): string {
+  return uniquenessClaimTarget(kind, scope, registry).axis;
+}
+
+/**
+ * THE order a uniqueness probe reads claim rows in: the axis first, then every
+ * remaining kind the scope covers, in code-point order.
+ *
+ * Two things make this list wider than the axis alone and narrower than
+ * arbitrary:
+ *
+ * - The axis is where this version writes, so it is read first.
+ * - Rows written before the axis move sit under their own concrete kind, so the
+ *   probe visits the full undirected component, including every root of a
+ *   multi-root hierarchy. That is what makes the axis move need no data
+ *   migration.
+ *
+ * The remainder is sorted rather than left in registry-iteration order so two
+ * processes reading the same scope read it in the same order.
+ */
+export function uniquenessProbeKinds(
+  kind: string,
+  scope: UniquenessScope,
+  registry: KindRegistry,
+): readonly string[] {
+  const axis = uniquenessClaimAxis(kind, scope, registry);
+  const coveredKinds = uniquenessClaimKinds(kind, scope, registry);
+  const rest = coveredKinds
+    .filter((candidate) => candidate !== axis)
+    .toSorted((left, right) => compareUniquenessAxisKinds(left, right));
+  return [axis, ...rest];
+}
+
+/**
+ * The prefix marking an axis as a TARGET-side population.
+ *
+ * The reserved U+001E device the disjointness axis already uses (`:41-42`):
+ * a source axis is `"<cardinality>:<edgeKind>"` and can never begin with the
+ * separator, so the two namespaces cannot collide however an edge kind is
+ * named. Source axis strings are unchanged byte for byte — existing
+ * `typegraph_edge_claims` rows keep fencing what they fence today, with no
+ * migration.
+ */
+const TARGET_AXIS_PREFIX = `${AXIS_SEPARATOR}to${AXIS_SEPARATOR}`;
+
+/**
+ * THE axis an edge cardinality claim is written at: the direction, the
+ * declared cardinality and the edge kind, which together name the population
+ * the constraint counts.
+ *
+ * `one` and `oneActive` on one kind (in either direction) are DIFFERENT axes
+ * on purpose — they count different populations (every live edge vs every
+ * active one) — so a kind whose declaration changed cannot inherit rows the
+ * old declaration wrote. The cardinality tokens contain no `:`, so the pair is
+ * injective over arbitrary edge kind names. The signature takes the direction
+ * explicitly (rather than a bare cardinality) so every caller must say which
+ * endpoint's population it means; a caller that cannot say is a caller that
+ * was guessing.
+ */
+export function edgeCardinalityAxis(
+  ref: EdgeCardinalityAxisRef,
+  edgeKind: string,
+): string {
+  const base = `${ref.cardinality}:${edgeKind}`;
+  return ref.direction === "source" ? base : `${TARGET_AXIS_PREFIX}${base}`;
+}
+
+/** The relation a claim row lives in. */
+type ClaimRelation = "uniques" | "edgeClaims";
+
+/** A claim row named in full — the row a statement is about to lock. */
+export type ClaimTarget = Readonly<{
+  relation: ClaimRelation;
+  graphId: string;
+  axis: string;
+  /**
+   * `uniques.constraint_name`. The edge claim relation keys on
+   * `(graph_id, axis, key)` and has no such column, so its targets omit it and
+   * sort as the empty string. Absent means "this relation does not key on a
+   * constraint name", never "not known yet".
+   */
+  constraintName?: string;
+  key: string;
+}>;
+
+/**
+ * THE canonical order claims are acquired in: code-point compare on
+ * `(relation, graphId, axis, constraintName, key)`.
+ *
+ * Two writers that take the same two claim rows in opposite orders deadlock,
+ * and PostgreSQL resolves that by aborting one with `40P01` — which would turn
+ * an import's per-row recovery into a whole-batch abort. Sorting every claim
+ * statement's entries by one comparator removes the commonest cycle, exactly as
+ * multi-graph lock acquisition already does (see `recorded-capture.ts`, whose
+ * comment states the same rule: every process must acquire in the same order).
+ *
+ * The order it establishes is per claim SET and per statement, not per
+ * transaction: rows and batches inside one import claim in input order, so two
+ * concurrent lock-free imports into one graph can still deadlock. That residual
+ * is declared out of contract rather than fenced here.
+ */
+export function compareClaimTargets(
+  left: ClaimTarget,
+  right: ClaimTarget,
+): number {
+  return (
+    compareStrings(left.relation, right.relation) ||
+    compareStrings(left.graphId, right.graphId) ||
+    compareStrings(left.axis, right.axis) ||
+    compareStrings(left.constraintName ?? "", right.constraintName ?? "") ||
+    compareStrings(left.key, right.key)
+  );
+}
+
+/**
+ * A claim target keyed as ONE map entry — the identity a grouping or a
+ * duplicate refusal keys on, so every consumer groups the same rows together.
+ * {@link encodeTupleKey} rather than a delimiter join, for the reason that
+ * module states: a delimiter is also a legal value character.
+ *
+ * `graphId` is deliberately absent: every caller groups within one graph, and
+ * including it would make the key say nothing the caller does not already
+ * know.
+ */
+export function targetIdentity(target: ClaimTarget): string {
+  return encodeTupleKey([
+    target.relation,
+    target.axis,
+    target.constraintName ?? "",
+    target.key,
+  ]);
+}
+
+/**
+ * WHO holds a claim. A node, not an id: ids are unique only per kind, so
+ * `(concrete_kind, node_id)` is the smallest thing that identifies a claimant.
+ */
+export type ClaimOwner = Readonly<{ concreteKind: string; nodeId: string }>;
+
+/**
+ * THE ownership predicate. Every reader of "is this claim row mine?" calls it —
+ * the probe, the single-row upsert's verdict, the batch upsert's verdict, and
+ * the batch-validation cache's pending answer.
+ *
+ * Comparing ids alone accepts a claim held by a namesake under another kind,
+ * which is precisely the collision `disjointWith` forbids and precisely the one
+ * a shared uniqueness scope exists to catch.
+ */
+export function isSameClaimOwner(left: ClaimOwner, right: ClaimOwner): boolean {
+  return (
+    left.nodeId === right.nodeId && left.concreteKind === right.concreteKind
+  );
+}
+
+/**
+ * THE Set/Map key rendering of {@link isSameClaimOwner}, for a path that decides
+ * ownership against MANY owners at once rather than pairwise.
+ *
+ * `encodeTupleKey`, not a delimiter join: kind names are constrained but node
+ * ids are arbitrary caller data, and a delimiter a value may contain would make
+ * two different owners collapse onto one key — which, where this is used, would
+ * silently whitelist a foreign owner. Third rendering of one predicate, in the
+ * module that owns it and beside {@link claimOwnerMatchesSql}: keys are equal
+ * exactly when `isSameClaimOwner` holds and exactly when the SQL matches.
+ */
+export function claimOwnerKey(owner: ClaimOwner): string {
+  return encodeTupleKey([owner.concreteKind, owner.nodeId]);
+}
+
+/**
+ * The owner columns of the uniques relation, by PHYSICAL COLUMN NAME.
+ *
+ * Names, not column objects: every renderer only ever reads `column.name`
+ * (the batch builder's is already typed `(column: Readonly<{name: string}>)`),
+ * and taking the name is what lets a backend that has no column objects at all
+ * call the one owner of this predicate instead of re-spelling it.
+ */
+export type ClaimOwnerColumnNames = Readonly<{
+  nodeId: string;
+  concreteKind: string;
+}>;
+
+/**
+ * THE SQL rendering of {@link isSameClaimOwner}, for the three upsert builders.
+ *
+ * `existing` qualifies a column of the conflicting row the way the dialect
+ * requires (PostgreSQL needs the table name, SQLite takes the bare quoted
+ * column); `proposed` renders the value being claimed — a bound parameter for
+ * the single-row builders, an `excluded.` reference for the batch one. Two
+ * renderings, one definition: the arms every builder decides ownership with
+ * are this fragment, so a builder cannot quietly compare fewer columns than
+ * the TypeScript predicate does. The dialect switch between the qualified and
+ * bare forms is the batch builder's own; this function only composes whatever
+ * renderer it is handed. The generic tag keeps that composition portable while
+ * allowing an adapter to build its native SQL value directly.
+ */
+export function claimOwnerMatchesSql<TExpression>(
+  tag: (
+    strings: TemplateStringsArray,
+    ...expressions: readonly TExpression[]
+  ) => TExpression,
+  existing: (columnName: string) => TExpression,
+  proposed: (columnName: string) => TExpression,
+  columns: ClaimOwnerColumnNames,
+): TExpression {
+  return tag`${existing(columns.nodeId)} = ${proposed(columns.nodeId)} AND ${existing(columns.concreteKind)} = ${proposed(columns.concreteKind)}`;
+}

@@ -17,7 +17,8 @@ SQLite is ideal for development, testing, single-server deployments, and embedde
 
 ### Quick Setup
 
-For development and testing, use the convenience function that handles everything:
+For development and testing, use the convenience function that owns the
+connection and provisions TypeGraph's base tables:
 
 ```typescript
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
@@ -81,13 +82,24 @@ const [store] = await createStoreWithSchema(graph, backend);
 process.on("exit", () => sqlite.close());
 ```
 
-If you need to run DDL yourself (e.g. via a migration tool), use
+For a fresh database whose DDL is managed externally, use
 `generateSqliteMigrationSQL()` with `createStore()` instead:
 
 ```typescript
 sqlite.exec(generateSqliteMigrationSQL());
 const store = createStore(graph, backend);
 ```
+
+The generated script is complete installation DDL and stamps the current
+deployment-wide base-schema marker last; it is not an incremental upgrade
+planner. Existing databases attached only through the zero-DDL runtime
+factories must apply release-specific additive migrations through their
+migration tool. See
+[Upgrading deployment-wide base storage](#upgrading-deployment-wide-base-storage)
+for the exact SQLite and PostgreSQL statements. A privileged
+`createStoreWithSchema()` open adopts missing release storage once, then stamps
+a deployment-wide base-schema marker. Warm opens read that marker and issue no
+base-adoption DDL.
 
 ### SQLite with Vector Search
 
@@ -99,7 +111,7 @@ extension and pass the strategy explicitly:
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { createSqliteBackend, generateSqliteMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
-import { sqliteVecStrategy } from "@nicia-ai/typegraph";
+import { sqliteVecStrategy } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 const sqlite = new Database("app.db");
 
@@ -148,18 +160,24 @@ const store = createStore(graph, backend);
 execution profile automatically. It returns both the `backend` and the underlying
 Drizzle `db` instance for direct SQL access. The caller retains ownership of the
 client and is responsible for closing it when done — this allows sharing a single
-client across TypeGraph and other libraries.
+client across TypeGraph and other libraries. Its installation is complete: the
+factory publishes the deployment-wide base-schema marker, and when it encounters
+a pre-0.52 edge table it applies the focused match-identity storage adoption
+before retrying the idempotent installation script. The local SQLite factory has
+the same behavior.
 
 The libsql backend has native vector and hybrid search, wired automatically via `libsqlVectorStrategy` — no
 extension to load. It uses libSQL's built-in engine (`F32_BLOB(N)` storage, `vector_distance_cos` /
 `vector_distance_l2`, and DiskANN approximate nearest neighbor via `libsql_vector_idx` + `vector_top_k`) and
 supports the `cosine` and `l2` metrics. See [Semantic Search](/semantic-search) for query examples.
 
-:::caution[In-memory databases and transactions]
-libsql's `file::memory:` creates a separate database per connection. Since transactions
-open a new connection, the original database is destroyed after a transaction completes
-([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)).
-Use a file-based database (`file:path.db`) or remote URL when transactions are needed.
+:::note[In-memory databases and transactions]
+`file::memory:` databases work for all operations, including transactions. On
+a local client whose `client.transaction()` would hand the client's connection to the
+transaction and lazily open a fresh, empty in-memory database afterwards
+([tursodatabase/libsql-client-ts#229](https://github.com/tursodatabase/libsql-client-ts/issues/229)),
+`createLibsqlBackend` frames transactions with raw `BEGIN`/`COMMIT` on the single stable
+connection instead. See [libsql Single-Connection Transactions](/limitations#libsql-single-connection-transactions).
 :::
 
 ### API Reference
@@ -172,6 +190,15 @@ Creates a SQLite backend with automatic database and schema setup.
 function createLocalSqliteBackend(options?: {
   path?: string; // Database path, defaults to ":memory:"
   tables?: SqliteTables;
+  /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
 }): { backend: GraphBackend; db: BetterSQLite3Database };
 ```
 
@@ -185,19 +212,46 @@ function createSqliteBackend(
   db: BetterSQLite3Database,
   options?: {
     tables?: SqliteTables;
+    /**
+     * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+     * built-in FTS5 virtual table). Pass `false` to disable fulltext
+     * support entirely — the backend then advertises no
+     * `capabilities.fulltext` and omits the fulltext CRUD/search methods,
+     * mirroring `vector` left unset. Required for a SQLite build without
+     * FTS5 compiled in.
+     */
+    fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy;
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
   },
 ): GraphBackend;
 ```
 
-#### `generateSqliteMigrationSQL()`
-
-Returns SQL for creating TypeGraph tables in SQLite.
+Pass `{ fulltext: false }` on a SQLite build without FTS5 compiled in, or
+whenever the graph has no `searchable()` fields and you would rather skip
+the virtual table than carry it unused:
 
 ```typescript
-function generateSqliteMigrationSQL(): string;
+const backend = createSqliteBackend(db, { fulltext: false });
 ```
+
+#### `generateSqliteMigrationSQL()`
+
+Returns complete fresh-installation SQL for creating TypeGraph tables and
+stamping the current deployment-wide base-schema marker in SQLite.
+
+```typescript
+function generateSqliteMigrationSQL(
+  tables?: SqliteTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
+```
+
+`generateSqliteDDL()` is the lower-level table/index statement array used by
+backend bootstrap. It deliberately omits the deployment-wide marker row and is
+therefore not a complete installation script. Use `generateSqliteMigrationSQL()`
+when the resulting database will be opened through `createVerifiedStore()` or
+the DML-only graph-template APIs.
 
 #### `createLibsqlBackend(client, options?)`
 
@@ -233,14 +287,19 @@ Both Neon drivers work with TypeGraph. They have different tradeoffs:
 
 - **`drizzle-orm/neon-http`** uses HTTP per statement. Lowest cold-start cost; survives Workers'
   per-request isolation. **Cannot hold a session across statements**, so multi-statement transactions
-  are unavailable — TypeGraph auto-detects this driver and sets `capabilities.transactions = false`,
-  so `store.transaction(...)` falls through to non-transactional sequential execution.
+  are unavailable — TypeGraph auto-detects this driver and sets `capabilities.execution.interactiveTransactions = false`,
+  so `store.transaction(...)` refuses rather than pretending to provide rollback. Eligible
+  atomic-batch operations remain available when the transport is certified for them.
+  A schema-managed Store's write fuses its schema fence into the write's own statement when the
+  write fuses, and fails closed otherwise — see
+  [The guard every fused write shares](/limitations#the-guard-every-fused-write-shares) for which
+  writes fuse and the reasons a write that cannot refuses with.
 - **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
   semantics, but the WebSocket connection lifecycle needs care in serverless / per-request contexts
   (you typically want a fresh Pool per request).
 
-Pick HTTP for stateless reads, single upserts, and migrations. Pick WebSockets if you need atomic
-multi-statement writes.
+Pick HTTP for stateless reads and for the fused schema-managed writes. Pick WebSockets for schema
+migrations, and for any write outside that fused envelope.
 :::
 
 ### node-postgres (pg)
@@ -264,7 +323,7 @@ const backend = createPostgresBackend(db);
 const [store] = await createStoreWithSchema(graph, backend);
 ```
 
-If you manage DDL externally, use `generatePostgresMigrationSQL()` with `createStore()`:
+For a fresh database managed externally, use `generatePostgresMigrationSQL()` with `createStore()`:
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
@@ -272,6 +331,12 @@ import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizz
 await pool.query(generatePostgresMigrationSQL());
 const store = createStore(graph, backend);
 ```
+
+As with SQLite, this is complete installation DDL rather than an incremental
+upgrade plan. Apply the
+[base-schema upgrade](#upgrading-deployment-wide-base-storage)
+to an existing database, or let a privileged `createStoreWithSchema()`
+preparation adopt the storage before runtime workers use `createStore()`.
 
 ### postgres-js
 
@@ -289,7 +354,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
 
-const sql = postgres(process.env.DATABASE_URL, {
+const sql = postgres(process.env.DATABASE_URL!, {
   max: 10,
   idle_timeout: 30,
 });
@@ -341,17 +406,45 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
-to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
-to `false`, so `store.transaction(...)` falls through to sequential execution
-rather than throwing.
+to manage. TypeGraph auto-detects this driver and sets
+`capabilities.execution.interactiveTransactions` to `false` and
+`capabilities.execution.unitOfWork` to `"batch"`. On a raw Store,
+`store.transaction(...)` refuses rather than silently falling through to
+sequential execution.
 
-Schema commits are the one exception: `commitSchemaVersion` and
-`setActiveVersion` require atomicity to eliminate the orphan-row crash window
-they exist to fix, so they refuse with a typed `ConfigurationError` on
+A schema-managed or verified Store's first write does not universally fail
+closed here — it depends on whether the write fuses. A singleton node
+create, update, `upsertById`, or delete fuses on a kind with no declared
+unique constraint (a create takes a generated or a caller-supplied id) —
+except a node delete, which fuses even when the kind DOES carry a declared
+unique constraint, because the atomic delete program releases that claim in
+the same statement. A singleton edge create fuses when the kind's
+cardinality AND targetCardinality are both `"many"`, and edge update and
+delete fuse the same way (`EdgeCollection` has no `upsertById`). So do
+`bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
+and a constrained write inside an atomic program's claim envelope. Each of
+these asserts the active schema version inside the statements neon-http
+submits together, and `transaction(queries)` commits or rejects that
+submission as a whole. A write that cannot fuse either fails closed with
+`BATCH_WRITE_UNSUPPORTED` naming a proven reason (an interactive callback, a
+probe-then-write constraint check, Operational Identity, history, or a
+schema commit), or — for a write that simply doesn't fit the fused shape,
+such as a singleton create, update, or `upsertById` on a uniquely-constrained
+kind, or a supplied-id tombstone resurrection — fails closed with the plain
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation and no named reason. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for the shared guard and the full reason table.
+
+Schema commits stay refused regardless: `commitSchemaVersion` and
+`setActiveVersion` require holding one transaction across their
+compare-and-swap read and activating write to eliminate the orphan-row crash
+window they exist to fix, so they refuse with a typed `ConfigurationError` on
 non-transactional backends. Run schema migrations from a process with a
 transactional driver (`drizzle-orm/neon-serverless`, regular `pg`, etc.); the
-edge worker can keep using neon-http for reads and writes once the schema is
-established.
+edge worker can keep using neon-http for reads and for the fused writes
+above. A raw `createStore()` remains available for writes outside that
+envelope when the application explicitly accepts they are not fenced against
+schema changes.
 
 ```bash
 npm install @neondatabase/serverless drizzle-orm
@@ -367,11 +460,12 @@ const sql = neon(env.NEON_DATABASE_URL);
 const db = drizzle({ client: sql });
 const backend = createPostgresBackend(db);
 const store = createStore(graph, backend);
-// backend.capabilities.transactions === false (auto-detected)
+// backend.capabilities.execution.interactiveTransactions === false (auto-detected)
 ```
 
-Use `neon-http` for reads, single upserts, and migrations. Use `neon-serverless`
-when you need atomic multi-statement writes.
+Use `neon-http` for reads and for the fused schema-managed writes listed
+above. Run schema migrations, and any write outside that envelope, through
+`neon-serverless`, regular `pg`, or another transactional driver.
 
 ### PGlite (Postgres-in-WASM)
 
@@ -466,10 +560,12 @@ See [Semantic Search](/semantic-search) for query examples.
 
 `importGraph()` refreshes planner statistics automatically after an import
 that created or updated rows, and `store.materializeIndexes()` does the
-same on SQLite after creating indexes (pass `refreshStatistics: false` to
-opt out). On PostgreSQL, `materializeIndexes()` builds with
-`CREATE INDEX CONCURRENTLY` and skips the automatic refresh — call
-`store.refreshStatistics()` after materializing.
+same after creating indexes on both bundled backends (pass
+`refreshStatistics: false` to opt out). PostgreSQL builds with
+`CREATE INDEX CONCURRENTLY`; a custom concurrent backend that does not
+implement the index-build claim members (`claimIndexMaterialization` and
+`releaseIndexMaterializationClaim`) skips the automatic refresh, so call
+`store.refreshStatistics()` after materializing there.
 
 `bulkCreate` and `bulkInsert` on nodes and edges also refresh
 automatically when a single autocommit call writes 1,000 rows or more. Tune or disable this
@@ -534,10 +630,183 @@ const backend = createPostgresBackend(db, {
 });
 ```
 
-The cache that maps SQL text → statement name is LRU-bounded (default 256
-entries, override via `preparedStatementCacheMax`). Worst-case server-side
-footprint is roughly `cap × pool size` prepared statements across all pooled
-connections.
+The in-process cache that maps SQL text → statement name is LRU-bounded
+(default 256 entries, override via `preparedStatementCacheMax`). Eviction
+never recycles a name, because a live connection may still retain that name for
+its original SQL. Therefore this setting does not bound server-side prepared
+statement memory. For a high-cardinality stream of SQL text, use
+`prepareStatements: false` instead.
+
+### Adopted schema transactions
+
+`store.withEvolvedTransaction(nativeTx, plan, callback, { waitBudgetMs })`
+requires an initialized adapter Store and a live caller-owned transaction.
+Plan the extension outside that transaction with `store.planEvolution()`.
+For change plans, the default exclusive schema-fence wait budget is 5,000 ms; a `SchemaFenceTimeoutError`
+requires rollback and retry of the complete application transaction. Omit
+`waitBudgetMs` for no-op plans, which use ordinary adoption without the exclusive
+fence and refuse that option.
+
+Interactive PostgreSQL adapters validate the active session, retain the existing
+schema advisory lock → schema row → recorded-write lock order, and use
+transaction-scoped advisory locks. This lock lifetime is suitable for transaction
+poolers such as Hyperdrive. The adapter restores temporary timeout settings before
+the callback. A PostgreSQL schema write needs a `READ COMMITTED` session: the caller's
+transaction is refused with `SCHEMA_WRITE_REQUIRES_READ_COMMITTED` when it runs at
+`REPEATABLE READ` or `SERIALIZABLE`, before the adapter acquires anything.
+Noninteractive HTTP drivers cannot adopt schema transactions.
+
+SQLite schema adoption requires an active transaction on the backend's exact
+native connection with an observable `inTransaction` state, as provided by
+better-sqlite3. Drivers without that evidence refuse schema adoption; ordinary
+transaction support alone does not imply support for this operation. A deferred
+SQLite transaction acquires the writer slot before validating the schema plan.
+
+Adapters default to a DML-only schema provisioning policy. Plans requiring new
+vector slots or identity work refuse before taking a mutating fence, running
+DDL, or changing schema rows. A privileged adapter configured with
+`schemaProvisioning: "transactional"` can apply those plans: it revalidates
+storage on the pinned caller session and provisions identity relations, vector
+tables, and durable contribution markers inside that same transaction. The
+caller must roll back the entire native transaction if any step fails.
+
+```typescript
+const backend = createPostgresBackend(db, {
+  schemaProvisioning: "transactional",
+});
+```
+
+Use a connection with permission to run the required DDL for this adapter;
+keep the default policy for a runtime role limited to DML.
+Bootstrap base storage before this request path; missing bootstrap tables
+refuse rather than being created lazily. Database permissions still determine
+whether transactional DDL succeeds. Generic eager index materialization,
+including concurrent PostgreSQL indexes, remains an explicit post-commit
+operation on the refreshed Store.
+Custom adapters must implement `adoptSchemaWriteTransaction` with the same
+session-bound fencing, finite-wait, and CAS guarantees to support change plans.
+See [Graph Extensions](/graph-extensions) for callback and receipt usage.
+
+### Authoritative command sessions
+
+Store create paths use the backend's `commands` port for writes whose
+decision and mutation must share one command boundary. First-party paths pass
+an explicit command context: a root port owns any internal transaction it
+needs and cannot inherit caller coordination, while a transaction-scoped
+backend uses the active caller or Store transaction. A
+transaction command may additionally carry a coordination token only after it
+has acquired the graph's advisory lock; the token is bound to that graph and
+transaction session and cannot authorize work on another connection.
+On PostgreSQL, the lock statement also observes the effective transaction
+isolation and binds it to the same token. A writer that goes on to make a
+decision the fence alone protects — match-key convergence, edge acyclicity, a
+composition whole's parts closure — additionally advances the graph's row in
+`typegraph_fences`, in that statement when the write names such a constraint
+up front and in a second statement behind the held lock otherwise, and the
+token records that too. Each such decision reads both facts from the token,
+not from the caller-requested option or the server's assumed default: read
+committed always passes, and repeatable read or serializable pass only when
+the fence row was advanced, because that write is what fails a session whose
+snapshot predates another decider's commit. A custom backend that takes the
+advisory lock but names no fences relation (`tableNames.fences`) is refused at
+those two levels. Every other holder of the fence — a history-capturing or
+revision-tracking write, a claim-backed constraint, a read — takes the lock
+alone and writes no row. See [Write Fence Row](/limitations#write-fence-row)
+for the privileges the row needs and how a long-lived snapshot affects it.
+
+`GraphBackend.commands` is a required member as of the authoritative command
+port release. Custom backends must expose `{ session, execute }` and implement
+the `node.create`, `edge.create`, and `edge.converge-create` commands, or return
+a typed `unsupported` result for dimensions they do not provide. The former
+optional managed-create and specialized edge-insert hooks are no longer a
+complete backend implementation; migrate those branches into the command
+port before upgrading.
+
+For a custom backend, the migration shape is:
+
+```typescript
+const commands: GraphCommandPort = {
+  session: "transaction", // use "root" for a single-statement backend
+  async execute(command, context) {
+    // Apply every requested dimension, or explicitly refuse the command.
+    switch (command.kind) {
+      case "node.create": {
+        return { outcome: "unsupported", entity: "node", dimensions: ["claims"] };
+      }
+      case "edge.create": {
+        return {
+          outcome: "unsupported",
+          entity: "edge",
+          dimensions: ["endpointPredicate"],
+        };
+      }
+      case "edge.converge-create": {
+        return { outcome: "unsupported", entity: "edge", dimensions: ["convergence"] };
+      }
+    }
+  },
+};
+const backend: GraphBackend = { ...members, commands };
+```
+
+Every command port caller must provide the explicit context. TypeGraph-owned
+write paths use the command helper, which verifies that any coordination token
+belongs to the active graph and transaction session and carries a supported
+effective isolation before executing convergence. The portable PostgreSQL
+graph-lock path records that isolation automatically. A custom implementation
+of `lockSchemaVersionAndGraphWrite` must advance the graph's fence row exactly
+when `params.fenceRow` is `"advance"`, and return the
+`GraphWriteFenceAcquisition` its combined statement observed and did: the
+normalized isolation, and `fenceRow: "advanced"` only if it wrote the row. When
+decorating a first-party backend with `decorateBackend`, a same-session
+`commands` override retains the session identity. A wrapper that changes
+session or forwards to a different connection is a new command boundary and
+cannot reuse a token from the original port.
+
+These are four different execution guarantees; do not use “atomic” as a
+catch-all:
+
+- **Interactive transaction** (`store.transaction(...)`) pins one session and
+  can make several Store operations commit or roll back together. The
+  `runOptionallyInTransaction` callback receives
+  `{ mode: "interactive-transaction" }` when this boundary was opened, or
+  `{ mode: "sequential" }` on a backend without transaction support.
+- **Static internal adapter batch** is an adapter implementation detail (for
+  example, a D1 batch or a bind-budgeted multi-row insert). It may make one
+  precompiled set of statements atomic, but it is not a public Store
+  transaction and does not make an arbitrary sequence of Store calls atomic.
+- **Certified atomic SQL program** is the backend-authoring transport seam for
+  a closed, ordered sequence of statements. A backend earns this capability by
+  passing the framework-agnostic conformance runner: result slots and bound
+  parameters must be preserved, a failure in a later statement must leave no
+  primary or sidecar writes, and an empty program must be a no-op. Certification
+  is separate from semantic mutation eligibility; a transport alone does not
+  authorize a mutation family. Bundled recognized PostgreSQL drivers provide
+  this boundary either through Neon HTTP's transaction batch or a pinned
+  interactive transaction; an unrecognized driver leaves it unavailable.
+- **Authoritative one-statement command** is the `commands.execute` port. A
+  command returns a created/found/rejected/unsupported result after the
+  database statement itself owns the decision and mutation. It is the
+  transactionless path for eligible durable edge `matchIdentity` convergence;
+  it is not a promise that every command or side effect can be fused.
+
+Operational Identity, single-edge claim/cardinality checks, and undeclared
+dynamic `matchOn` convergence remain interactive-transaction contracts. A
+custom or non-transactional backend must refuse those dimensions rather than
+silently falling through to a sequence of independent statements. Eligible
+direct edge batches on bundled roots are a narrower static-program contract:
+the insert and cardinality sidecars execute in one native atomic exchange. A
+declared durable edge `matchIdentity` is different for endpoint convergence:
+its canonical key has a database arbiter, so the eligible root create/found
+command can be authoritative in one statement.
+
+Backend implementations may also expose the optional
+`findEdgesByMatchIdentity` read capability for bounded merge planning. It must
+match the complete `(graphId, kind, name, key)` tuple and return tombstoned
+owners as well as active rows; omitting it keeps the portable full-clone path.
+Custom Drizzle operation strategies can opt in by supplying the corresponding
+owner-query builder. A strategy without that builder does not expose the
+capability, so callers can detect and retain the portable path.
 
 ### Connection Pooling
 
@@ -573,7 +842,7 @@ Creates a PostgreSQL backend adapter. Accepts any Drizzle PostgreSQL database
 instance, regardless of the underlying driver. Tested with `drizzle-orm/node-postgres`,
 `drizzle-orm/postgres-js`, `drizzle-orm/neon-serverless`,
 `drizzle-orm/neon-http`, and `drizzle-orm/pglite`. The neon-http driver is auto-detected and
-`capabilities.transactions` is set to `false` (HTTP can't hold a session); use
+`capabilities.execution.interactiveTransactions` is set to `false` (HTTP can't hold a session); use
 `drizzle-orm/neon-serverless` if you need transactional writes.
 
 ```typescript
@@ -581,7 +850,14 @@ function createPostgresBackend(
   db: AnyPgDatabase,
   options?: {
     tables?: PostgresTables;
-    fulltext?: FulltextStrategy;
+    /**
+     * Override the fulltext strategy. Defaults to `tsvectorStrategy`.
+     * Pass a custom `FulltextStrategy` to swap the fulltext stack, or
+     * `false` to disable fulltext support entirely — the backend then
+     * advertises no `capabilities.fulltext` and omits the fulltext
+     * CRUD/search methods, mirroring `vector: false`.
+     */
+    fulltext?: FulltextStrategy | false;
     /**
      * Override the vector search strategy. Defaults to
      * `pgvectorStrategy`. Pass a custom `VectorStrategy` to change the
@@ -590,11 +866,12 @@ function createPostgresBackend(
     vector?: VectorStrategy | false;
     /**
      * Override specific backend capabilities. Useful for HTTP-style
-     * drivers or test scenarios. neon-http already has `transactions:
-     * false` auto-applied — pass this to override that or to disable
-     * other capabilities for custom drivers.
+     * drivers or test scenarios. neon-http already has
+     * `execution.interactiveTransactions: false` auto-applied — pass
+     * this to override that or to disable other capabilities for custom
+     * drivers.
      */
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
     /**
      * Use server-side prepared statements on the node-postgres /
      * neon-serverless fast path. Default `true`. Set to `false` when
@@ -612,6 +889,47 @@ function createPostgresBackend(
   },
 ): GraphBackend;
 ```
+
+Pass `{ fulltext: false }` when the graph has no `searchable()` fields and
+you would rather skip the fulltext table (`typegraph_node_fulltext`) and its
+GIN index than carry them unused:
+
+```typescript
+const backend = createPostgresBackend(db, { fulltext: false });
+```
+
+#### `createPostgresTransactionBackend(tx, options?)`
+
+Creates a full backend on a Drizzle PostgreSQL transaction opened by the
+application. Use it when TypeGraph's tables share a transaction with other
+application tables, especially when TypeGraph uses prefixed table names. Pass
+the same `PostgresBackendOptions` as `createPostgresBackend`:
+
+```typescript
+import {
+  createPostgresTransactionBackend,
+  createPostgresTables,
+} from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+
+const graphTables = createPostgresTables({ nodes: "app_graph_nodes" });
+
+await db.transaction(async (tx) => {
+  const backend = createPostgresTransactionBackend(tx, {
+    tables: graphTables,
+  });
+  // Use the backend or a Store built from it within this callback.
+});
+```
+
+The factory requires a transaction handle and serializes TypeGraph statements
+on its single pinned connection, including concurrent reads started by the
+same Store operation. Backends created for the same transaction handle share
+one queue. The application owns commit and rollback and must await all work
+using these backends before its transaction callback returns.
+`createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
+transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
+when you want the transaction-scoped intent to be explicit; a regular database
+handle passed to `createPostgresBackend(db)` still creates the pooled backend.
 
 #### `createLocalPgliteBackend(options?)`
 
@@ -632,6 +950,13 @@ async function createLocalPgliteBackend(options?: {
    * support, or pass a PGlite Extension object to control the extension import.
    */
   vector?: false | Extension;
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table.
+   */
+  fulltext?: FulltextStrategy | false;
 }): Promise<{
   backend: GraphBackend;
   db: PgliteDatabase;
@@ -641,21 +966,401 @@ async function createLocalPgliteBackend(options?: {
 
 #### `generatePostgresMigrationSQL()`
 
-Returns SQL for creating TypeGraph tables in PostgreSQL, including the pgvector extension.
+Returns complete fresh-installation SQL for creating TypeGraph tables and
+stamping the current deployment-wide base-schema marker in PostgreSQL. It
+includes the pgvector extension. The vector-disabled local PGlite factory uses
+the same installation builder internally while omitting only that extension.
 
 ```typescript
-function generatePostgresMigrationSQL(): string;
+function generatePostgresMigrationSQL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
 ```
 
 #### `generatePostgresDDL(tables?)`
 
 Returns individual DDL statements (CREATE TABLE, CREATE INDEX) as an array. Useful when you
 need per-statement control, for example to execute them in separate transactions or log them
-individually.
+individually. This low-level array deliberately omits the deployment-wide
+marker row, so joining it does not produce a complete installation. Use
+`generatePostgresMigrationSQL()` for a database that will be opened through
+`createVerifiedStore()` or the DML-only graph-template APIs.
 
 ```typescript
-function generatePostgresDDL(tables?: PostgresTables): string[];
+function generatePostgresDDL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string[];
 ```
+
+#### `generatePostgresDropSQL(tables?, fulltextStrategy?)`
+
+Returns one `DROP TABLE IF EXISTS` statement for the base and fulltext tables
+that `generatePostgresDDL()` would create. Use it to clean up an isolated,
+prefixed PostgreSQL table set after closing every backend connected to it.
+Pass the same tables and fulltext strategy used at installation. The statement
+does not use `CASCADE`: PostgreSQL refuses the drop if an application-owned
+object depends on one of these tables. It does not drop graph-scoped vector
+tables materialized later at runtime, so a working copy using those tables
+needs additional graph-scoped cleanup.
+
+```typescript
+function generatePostgresDropSQL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
+```
+
+### Upgrading deployment-wide base storage
+
+Skip this section when `createStoreWithSchema()` or
+`createAdapterStoreWithSchema()` owns schema preparation: the bundled SQLite
+and PostgreSQL adapters adopt each numbered base-schema release automatically
+on the first privileged open. No separate bootstrap command is needed. The
+deployment invariant is ordering: that privileged open must finish before any
+DML-only runtime worker starts. Base-schema version 1 includes the durable graph
+template relation and edge match-identity storage. It is required even for
+graphs without a `matchIdentity` declaration because every edge write names the
+two nullable columns.
+
+When database DDL is managed externally, apply the matching migration before a
+runtime worker opens the new graph schema. Apply the marker write last: it is
+the durable proof that every preceding step succeeded. The examples use the
+default TypeGraph table names. Replace every occurrence consistently when the
+adapter uses custom table names.
+
+For SQLite, run this migration exactly once. SQLite has no portable `ADD COLUMN
+IF NOT EXISTS`, so a migration tool must record whether it has already applied
+the two `ALTER TABLE` statements. Fresh and published schemas include the
+nullable-pair `CHECK` below. Privileged adoption accepts an externally managed
+table that already has both columns without that defensive constraint: SQLite
+does not expose structural CHECK metadata or support adding one without a full
+table rebuild, while TypeGraph writes always bind both values or neither.
+
+```sql
+CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT PRIMARY KEY NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" TEXT NOT NULL,
+  "created_at" TEXT NOT NULL
+);
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN "match_identity_name" TEXT;
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN "match_identity_key" TEXT
+  CHECK (("match_identity_name" IS NULL) = ("match_identity_key" IS NULL));
+
+CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
+  ON "typegraph_edges" (
+    "graph_id", "kind", "match_identity_name", "match_identity_key"
+  );
+
+CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER PRIMARY KEY NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check"
+    CHECK ("installation" = 1)
+);
+
+INSERT INTO "typegraph_base_schema_versions"
+  ("installation", "version", "updated_at")
+VALUES (1, 1, CURRENT_TIMESTAMP)
+ON CONFLICT ("installation") DO UPDATE SET
+  "version" = excluded."version",
+  "updated_at" = excluded."updated_at"
+WHERE "typegraph_base_schema_versions"."version" <= excluded."version";
+```
+
+For PostgreSQL, the adoption statements are idempotent:
+
+```sql
+CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT PRIMARY KEY NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" JSONB NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL
+);
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN IF NOT EXISTS "match_identity_name" TEXT;
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN IF NOT EXISTS "match_identity_key" TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = to_regclass('"typegraph_edges"')
+      AND conname = 'typegraph_edges_match_identity_pair_check'
+  ) THEN
+    ALTER TABLE "typegraph_edges"
+      ADD CONSTRAINT "typegraph_edges_match_identity_pair_check"
+      CHECK (
+        ("match_identity_name" IS NULL) = ("match_identity_key" IS NULL)
+      );
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
+  ON "typegraph_edges" (
+    "graph_id", "kind", "match_identity_name", "match_identity_key"
+  );
+
+CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER PRIMARY KEY NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check"
+    CHECK ("installation" = 1)
+);
+
+INSERT INTO "typegraph_base_schema_versions"
+  ("installation", "version", "updated_at")
+VALUES (1, 1, NOW())
+ON CONFLICT ("installation") DO UPDATE SET
+  "version" = excluded."version",
+  "updated_at" = excluded."updated_at"
+WHERE "typegraph_base_schema_versions"."version" <= excluded."version";
+```
+
+The conditional update makes marker publication monotonic: replaying an older
+migration can never claim that storage prepared by a newer TypeGraph release is
+older. The fresh-installation generators use `DO NOTHING` instead because they
+are not upgrade planners; an existing stale marker remains stale until the
+numbered privileged adoption lifecycle runs.
+
+`createVerifiedStore`, `assertSchemaCurrent`, and the DML-only graph-template
+APIs read this marker and throw `BaseSchemaMigrationError` when it is missing,
+stale, or newer than the running library. They never attempt repair. Every
+schema commit reads it too, so `store.evolve()`, `store.removeKinds()` and
+`withEvolvedTransaction()` on a store a plain `createStore` attached refuse
+the same way before writing, rather than committing a schema document onto a
+database an earlier release still opens. A plain
+`createStore` remains a synchronous zero-I/O attach; if it reaches an edge
+write on legacy storage, the write fails with `ConfigurationError` and
+`details.code === "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE"` rather than a raw
+missing-column error.
+
+Provisioning the columns does not authorize re-keying existing data. Adding,
+removing, renaming, or changing the fields of a declared `matchIdentity` remains
+a breaking graph-schema change while that edge kind has any physical rows,
+including tombstones. Export the affected edges, hard-delete them, publish the
+new schema, and import them again so every row receives a key under the new
+declaration.
+
+### Base-schema version 9: allocation retention and the identity transition log
+
+Version 9 is one release with two parts: a nullable retention column on the recorded clock, and
+the two identity transition-log relations. Privileged adoption applies both before it advances the
+marker, so a database stamped 9 has the column and both relations.
+
+#### Allocation retention watermark
+
+Among recorded-time APIs, only `pruneRecordedInstants` requires version 9.
+As with every base-schema bump, verified-schema loading, graph-template entry points,
+and working-copy cloning require adoption to the current version. `resolveRecordedInstant` continues to
+read existing pre-v9 allocation logs in one statement without a marker probe.
+Version 9 adds nullable TEXT column `anchor_retention` to the recorded clock
+(`typegraph_recorded_clock`, or its configured name). Existing rows retain their
+clock coordinates and start with no retention watermark. Privileged adoption adds
+the column before publishing version 9; externally managed deployments must apply
+that additive migration before pruning. Synchronous local SQLite opening preserves
+an existing versioned clock and marker until asynchronous privileged adoption. Marker-less local SQLite and managed libSQL
+bootstrap upgrade an existing clock before stamping the current marker, including
+when legacy edge-identity columns also need adoption. Before pruning an existing
+versioned local SQLite file, run `await backend.adoptBaseSchema()` or
+`createStoreWithSchema()` with DDL privileges. The managed libSQL factory is
+asynchronous and adopts on open.
+Custom schema providers must include the column and supply the version 9 adoption
+step: the three `baseSchemaRuntime` members listed under
+[Base-schema adoption DDL](/backend-authoring/#base-schema-adoption-ddl-baseschemaruntime).
+Pruning requires both `recordedAnchorLookup` and `recordedAnchorPruning` capabilities, plus the backend-owned
+`assertBaseSchemaCurrent` lifecycle assertion, which reports the actual installed
+version in `BaseSchemaMigrationError`. `recordedAnchorLookup` advertises lookup only;
+a backend claiming pruning without the required member raises `ConfigurationError`.
+Upgrade every reader before enabling a retention job so lookups honor retired coverage.
+
+PostgreSQL checks the column catalog and skips unnecessary DDL. A required ALTER
+queues for its exclusive table lock with a one-second maximum `lock_timeout`,
+honoring a stricter caller timeout. Queuing lets adoption proceed ahead of later
+writers even when captured transactions overlap. The timeout bounds lock acquisition,
+not how long the acquired lock is held. A required ALTER holds its exclusive table
+lock until the enclosing transaction commits or rolls back. On a root backend this
+is the adoption statement's transaction. Inside a caller-owned transaction, releasing
+the savepoint keeps the lock until the outer COMMIT or ROLLBACK: writes and lookups
+on every graph sharing that clock table can block throughout that period. Run
+privileged adoption separately from long migrations, or commit the caller transaction
+promptly. The previous timeout setting is restored on success; a failed savepoint
+also restores the caller's session. Persistent contention raises
+`BaseSchemaAdoptionTimeoutError` with `details.tableName` and the effective session
+lock timeout in `details.waitBudgetMs` (including a stricter caller timeout);
+the deployment marker stays at its old version. Retry privileged adoption after
+transactions using the table have completed.
+
+`pruneRecordedInstants(before, { limit })` persists the coverage boundary and deletes
+one bounded revision range per transaction. Each call asserts schema compatibility;
+resumed batches do not rewrite a watermark whose boundary has not advanced.
+Its result reports `deletedCount`,
+`retainedBoundary`, and `hasMore`; resume until cleanup finishes. See
+[allocation metadata retention](/queries/temporal#retain-and-prune-allocation-metadata).
+
+#### The identity transition log
+
+Version 9 adds two deployment-wide relations: `typegraph_identity_transitions`, the append-only log
+`store.identity.transitionsOf()` and `store.identity.replay()` read, and
+`typegraph_identity_transition_retention`, one row per graph holding the watermark
+`pruneIdentityTransitions()` advances and the cut an archival restore carried in, each with the
+recorded time of the instant it was made at. Every database gets both, whether or not any graph in
+it enables identity, the same way version 2 added `fences`. `createSqlSchema` names them `identityTransitions` and
+`identityTransitionRetention`; replace the default names below consistently when the adapter
+overrides them. The step only creates relations, so it never rewrites existing rows and finishes in
+the time two `CREATE TABLE` statements and three `CREATE INDEX` statements on empty tables take.
+
+The privileged open adopts it in place: `createStoreWithSchema()`, `createAdapterStoreWithSchema()`
+or an explicit `backend.adoptBaseSchema()`. Until one of them has run, a DML-only or zero-DDL
+runtime (`createVerifiedStore()`, graph-template attach) refuses with `BaseSchemaMigrationError`,
+so finish privileged adoption before those workers start. A plain `createStore()` attaches without
+reading the marker; on an identity graph opened with `history: true`, its first write that records
+an identity transition, and any `transitionsOf()`, `replay()` or `pruneIdentityTransitions()` call,
+then fails with `ConfigurationError` and `details.code === "IDENTITY_TRANSITION_RELATIONS_MISSING"`,
+naming both relations.
+
+Externally managed DDL applies these statements and the retention column above, then advances the
+marker to 9 with the monotonic `INSERT ... ON CONFLICT` shown above. For PostgreSQL:
+
+```sql
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transitions" (
+  "graph_id" TEXT NOT NULL,
+  "transition_id" TEXT NOT NULL,
+  "recorded_revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  "valid_at" TIMESTAMPTZ NOT NULL,
+  "cause" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  "prior_class_kind" TEXT,
+  "prior_class_id" TEXT,
+  "assertion_ids" JSONB NOT NULL,
+  "decision" JSONB,
+  "tx_id" TEXT,
+  "restored_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "transition_id")
+);
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "class_kind", "class_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_revision_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "recorded_revision");
+CREATE INDEX IF NOT EXISTS "typegraph_identity_transitions_prior_class_idx"
+  ON "typegraph_identity_transitions" ("graph_id", "prior_class_kind", "prior_class_id", "recorded_revision");
+CREATE TABLE IF NOT EXISTS "typegraph_identity_transition_retention" (
+  "graph_id" TEXT NOT NULL,
+  "pruned_before_revision" BIGINT NOT NULL,
+  "pruned_before_recorded_at" TIMESTAMPTZ,
+  "restored_pruned_before_revision" BIGINT,
+  "restored_pruned_before_recorded_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id")
+);
+```
+
+SQLite uses the same statements with `INTEGER` for the three revision columns and `TEXT` for the
+timestamp and JSON columns (`recorded_at`, `valid_at`, `restored_at`, `pruned_before_recorded_at`,
+`restored_pruned_before_recorded_at`, `assertion_ids`, `decision`).
+
+Advancing the marker to 9 is one-way: a library release that knows only version 8 or lower refuses a
+database stamped 9 as newer, so roll forward rather than back once any process has adopted it. A
+PostgreSQL durable working copy carries its own marker; reopening one provisioned under an earlier
+version adopts the current base schema into the allocation in place (see
+[PostgreSQL table-backed working copies](/graph-merge/#postgresql-table-backed-working-copies)).
+
+### Base-schema version 8: durable Store outcomes
+
+Upgrade storage before enabling durable ordinary mutation outcomes. Version 8
+adds `typegraph_store_operations` (or the configured `storeOperations` name),
+with a primary key over graph, origin, namespace scope, and caller key. These
+structural objects are installed even when optional system indexes are skipped.
+The evidence relation is part of the graph's transactional storage, not a
+separately committed sidecar. Keep request targets with persisted retry requests;
+`clear()` retires both their origin and the evidence. See [durable ordinary
+mutation outcomes](/graph-merge#durable-ordinary-mutation-outcomes).
+
+### Base-schema version 7: retained recorded anchors
+
+Upgrade the base schema before starting the new library against an existing
+installation. Version 7 adds `typegraph_recorded_anchors` (or the configured
+`recordedAnchors` name), its primary key, and a `(graph_id, origin, recorded_at,
+revision)` index. These structural objects are installed even when optional
+system-index materialization is skipped. Captured transactions append their
+allocation anchor atomically; existing historical allocations are not backfilled.
+The resolver refuses unlogged coverage with `RECORDED_LOOKUP_HISTORY_NOT_LOGGED`;
+it returns `undefined` before the first allocation only when complete coverage is known. Stop older writers
+during cutover, because they cannot append the new log. See [anchor ownership and
+checkpoint upgrades](/queries/temporal#anchor-ownership-and-checkpoint-upgrades).
+
+### Base-schema version 6: recorded adjacency indexes
+
+Version 6 adds two seven-column indexes to the recorded edges relation, ordered by graph, endpoint kind/id, edge
+kind, recorded revision, edge id, and history id. Privileged open adopts them with plain `CREATE INDEX IF NOT
+EXISTS`, which blocks history-recording edge writes while each build runs. This runs inline even with
+`systemIndexes: "skip"`; base-schema adoption is independent of lazy system-index materialization.
+
+For a large PostgreSQL history, prebuild both indexes before upgrading. Run each statement outside a transaction,
+substituting your adapter's table and index names if customized:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_from_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_recorded_edges_adjacency_to_idx"
+  ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind" COLLATE "C", "recorded_from", "id" COLLATE "C", "history_id" COLLATE "C");
+```
+
+Verify that both indexes are valid and have exactly these definitions before opening the upgraded store. An
+interrupted concurrent build can leave an invalid index; drop that index and rerun its build. `IF NOT EXISTS`
+trusts an existing name and does not repair a wrong definition. SQLite adopts the same column order with its
+default binary text ordering.
+
+### Base-schema version 5: byte-ordered `graph_id` indexes (PostgreSQL)
+
+Version 5 adds one index to each relation `listGraphIds` seeks (`nodes`, `edges` and
+`schema_versions`), ordering `graph_id` by bytes instead of by the database collation so that a page's
+cursor, prefix and limit bound the walk. SQLite already keeps text indexes in byte order, so its step
+only advances the marker. The index is a single-column `graph_id` index: PostgreSQL deduplicates the
+repeated values, so it stays small (about 7 MB beside a 97 MB `nodes` heap of one million rows) and
+adds 1 to 2% to writes on the relation it lands on (single creates and 1,000-row bulk writes alike).
+
+The privileged open builds the three indexes with a plain `CREATE INDEX`, which blocks writes to the
+table while it runs (about 0.1 second per million `nodes` rows on the measurement hardware). This
+happens inline at boot even when `systemIndexes: "skip"` is set: that option only defers system index
+materialization, not base-schema adoption. For a large deployment, build the indexes first with
+`CONCURRENTLY`; the adoption step is `IF NOT EXISTS` and then finds them in place. Run each statement
+outside a transaction, and never run the same concurrent build from two sessions at once. Use the
+adapter's table names throughout:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_nodes_graph_id_bytes_idx"
+  ON "typegraph_nodes" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_edges_graph_id_bytes_idx"
+  ON "typegraph_edges" ("graph_id" COLLATE "C");
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "typegraph_schema_versions_graph_id_bytes_idx"
+  ON "typegraph_schema_versions" ("graph_id" COLLATE "C");
+```
+
+`CREATE INDEX CONCURRENTLY` can leave an invalid index behind if it is interrupted; drop it and rerun.
+`listGraphIds` checks only that each index exists and is valid, not its definition, so an index you
+create by hand under one of these names with a different definition is trusted and makes the walk slow
+rather than wrong. Create them exactly as shown.
+
+Advancing the marker to 5 is a one-way step: a library release that predates version 5 refuses a
+database stamped 5, so roll forward rather than back once any process has adopted it.
+
+Externally managed DDL applies the same statements, then advances the marker to 5 with the
+monotonic `INSERT ... ON CONFLICT` shown above. Until the indexes exist `listGraphIds` still returns
+correct pages, by reading and de-duplicating the anchor relations instead of walking them.
 
 ## Drizzle-Free Entrypoints
 
@@ -665,14 +1370,38 @@ TypeGraph keeps its public core and backend contracts independent of Drizzle:
   schema-derived types for packages that only define or share schemas.
 - `@nicia-ai/typegraph/backend` exports the complete backend, dialect,
   SQL-fragment, fulltext, and vector strategy contracts for adapter authors.
+  This authoring surface is not covered by semver and may change in any
+  release; see [Stability](/backend-authoring#stability).
 - `@nicia-ai/typegraph/sqlite/local` and
   `@nicia-ai/typegraph/postgres/pglite` create managed Stores without exposing
   adapter-native handles.
 
-Application code can continue importing the complete portable Store API from
-`@nicia-ai/typegraph`. Use the `/adapters/drizzle/...` entrypoints only when the
-application deliberately owns a Drizzle connection or needs native transaction
-interop.
+Application code imports the Store factories and everyday types from
+`@nicia-ai/typegraph`, and the Store's option and result types from
+`@nicia-ai/typegraph/store`. Use the `/adapters/drizzle/...` entrypoints only
+when the application deliberately owns a Drizzle connection or needs native
+transaction interop.
+
+Custom insert builders must apply the same born-ended validity rule as the
+built-in adapters. Import its public owner instead of duplicating the bound
+comparison. This is the backend authoring surface, which is not covered by
+semver; see [Stability](/backend-authoring#stability).
+
+```typescript
+import { resolveStampedValidityLowerBound } from "@nicia-ai/typegraph/backend";
+
+const validFrom = resolveStampedValidityLowerBound(
+  params.validFrom,
+  params.validTo,
+  writeInstant,
+);
+```
+
+Use the same `writeInstant` for the decision and the row's creation/update
+stamp. This keeps custom node and edge inserts, plus node resurrection paths
+that reset the validity window, aligned with Store and interchange semantics at
+the zero-width boundary. Edge resurrection retains its stored lower bound and
+does not use this stamping helper.
 
 ## Managed Store Entrypoints
 
@@ -703,13 +1432,16 @@ unused database drivers.
 PGlite vector support is enabled by default and loads the optional
 `@electric-sql/pglite-pgvector` package. Install that package when using vector
 fields, or pass `{ vector: false }` as above for a smaller non-vector setup.
+Both managed entrypoints also accept `fulltext: false`, which skips the
+fulltext table at bootstrap and returns a backend with no
+`capabilities.fulltext`.
 
 Both factories accept `store` and `schemaManagement` groups, so the managed
 path supports the same hooks, history/revision tracking, custom SQL schema,
 query defaults, and migration policy as `createStoreWithSchema`:
 
 ```typescript
-import { createSqlSchema } from "@nicia-ai/typegraph";
+import { createSqlSchema } from "@nicia-ai/typegraph/query";
 
 const store = await createLocalSqliteStore(graph, {
   path: "./graph.db",
@@ -730,6 +1462,17 @@ const store = await createLocalSqliteStore(graph, {
 When a custom SQL schema is supplied, the managed factory provisions those
 same physical table names; no separate Drizzle table configuration is needed.
 
+`drizzle-orm` is an optional peer dependency for these two managed
+entrypoints: they load it only when their factory is called and, when it is
+absent, reject with a typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`)
+naming the package and the install command (`npm install drizzle-orm`) rather
+than a bare module-resolution stack. The explicit `/adapters/drizzle/...`
+entrypoints below expose Drizzle-native backends, connections, or schema
+builders — or, for `/adapters/drizzle/engine`, the factory that assembles a
+backend from a caller-supplied engine profile — and load `drizzle-orm` when
+the module is evaluated. Importing one without the peer installed therefore
+surfaces the raw module-resolution error, which names the same package.
+
 ## Drizzle Adapter Entrypoints
 
 TypeGraph exposes Drizzle adapters through public entrypoints:
@@ -739,55 +1482,216 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/local` — Batteries-included better-sqlite3 wrapper (Node.js only)
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
+- `@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy` — PostgreSQL table-backed working-copy manager
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
+- `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend`, `deriveEngineProfile`, the bundled builders, `SqlEngineProfile`
+  (backend authoring surface, not covered by semver; see [Stability](/backend-authoring#stability))
 
 Import from the entrypoint matching your database:
 
 ```typescript
-import { createSqliteBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
+import { createSqliteBackend, tables as sqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql";
-import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { createPostgresBackend, tables as postgresTables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 ```
+
+### Engine profiles
+
+`createPostgresBackend` and `createSqliteBackend` are each `createSqlBackend`
+applied to a profile built by `buildPostgresEngineProfile` /
+`buildSqliteEngineProfile`, both exported alongside `createSqlBackend` and
+`deriveEngineProfile` from the engine entrypoint:
+
+```typescript
+import {
+  buildPostgresEngineProfile,
+  createSqlBackend,
+} from "@nicia-ai/typegraph/adapters/drizzle/engine";
+
+const backend = createSqlBackend(buildPostgresEngineProfile(db, options));
+```
+
+Most callers adapting a bundled backend want `deriveEngineProfile`, which
+builds a variant of a bundled profile — a different lock spelling, a looser
+declared capability, a replaced resource-audit verdict — without hand-copying
+every other field. A profile written from scratch is not constructible today:
+the assembly constructor is unexported, and `createSqlBackend` refuses a
+hand-built assembly. See [Authoring an engine profile](/backend-authoring) for
+the derivable-field table, the refusals a custom profile can hit, a worked
+example, and [what is not derivable yet](/backend-authoring#what-is-not-derivable-yet).
+
+A profile owns everything that genuinely differs between engines: dialect
+tokens, the execution adapter, transaction framing, its `fenceSql` lock
+spelling (see [Write fence declaration](#write-fence-declaration-writefence)),
+provisioning DDL, strategies, and limits. `createSqlBackend` owns everything that is the
+same for every SQL engine: deriving the final capabilities, resolving the
+write-fence decision once, assembling the mirrored member groups, auditing
+the backend's resource shape, and applying the trust marks. A backend minted
+this way earns the marks its own declarations back: the schema-fenced-insert
+mark only when the resolved fence plan actually fences writers, the
+root-autocommit mark only when the profile declares single-statement
+durability, and the atomic-program registrations only when its capabilities
+support root atomic batching — whether the profile is for a PostgreSQL-wire
+engine with a different locking story or an embedded engine with a different
+transaction model.
+
+`createSqlBackend` refuses a profile whose resolved capabilities omit
+`writeFence` — every mark and registration it applies assumes a
+resolvable write-fence decision, and a profile that does not declare one
+cannot back that decision soundly. `buildPostgresEngineProfile` and
+`buildSqliteEngineProfile` are the reference profiles to read when modeling a
+new one.
+
+A profile's `provisioning.catalog` supplies the backend's optional `catalog`
+member: physical-schema introspection — table and index existence, each
+column's normalized type family and raw declared type (a `CatalogColumn` is
+`{ name, kind, declaredType }`; `declaredType` is required, and every custom
+`columnTypes` implementation must populate it), and this engine's
+index-build facts — for the handful of store paths that need to read the
+engine catalog directly instead of compiling a portable query: index
+materialization (`store.materializeIndexes()` refuses only once its
+empty-candidate short circuit and the status-table ensure step have already
+run; `store.materializeSystemIndexes()`, which has no candidate short
+circuit, refuses only once that same status-table ensure step has run), the
+recorded-time schema check, and the recorded-time migration's column read. A
+profile that leaves `catalog` unset builds a backend with no `catalog`
+member at all; those paths then refuse with a `ConfigurationError` naming
+`catalog` rather than guessing at engine-specific SQL.
+
+A dialect also declares `subgraphMembershipStrategy`, naming a decision the
+dialect adapter makes, not one a profile supplies directly — the dialect
+adapters are a fixed record keyed by `SqlDialect`, and each adapter's
+capabilities (`DialectCapabilities`) declares `subgraphMembershipStrategy`, so a
+profile inherits whichever of the two dialects its own `dialect` field names. It
+is the plan-shape choice behind `store.subgraph()`'s reachable-node filter:
+`"materialized-ids"` fetches the traversal closure once and filters both the
+node and edge queries against that fixed list of (kind, id) pairs (the shape PostgreSQL uses,
+trading one extra round trip for a parameter-driven plan), while `"inline-cte"`
+embeds the recursive closure in each fetch instead (the shape SQLite uses, where
+an in-process traversal is cheap and a growing parameter list would pressure the
+bind budget). This is a control-flow and prepared-plan decision, not SQL text a
+shared token could express identically on both shapes, so it lives on
+`DialectCapabilities` rather than in the query compiler.
+
+`instantiateStatement` — a member of the profile's `graphTemplateRuntime` bag, and so one of the
+fields `deriveEngineProfile` can override — is a required builder cloning a durable schema template
+into a fresh graph. Given the template and target graph's ids and schema hashes
+(`InstantiateGraphTemplateSqlParams`: `templateId`, `templateSchemaHash`, `graphId`, `schemaHash`,
+and the three physical table names it reads), it must return the statement that inserts the target
+graph's `schema_versions` row from the template's stored document and copies the template's
+contribution-marker rows into the target graph — taking the target graph's write lock, the same key
+the schema-commit fence takes, co-atomically with the insert on an engine that fences with locks. An
+engine whose dialect can compose a data-modifying CTE beside the schema INSERT (PostgreSQL) folds
+the marker copy and the lock into that one statement; an engine that cannot (SQLite) instead
+supplies the optional `copyContributionMarkers` dep, which runs the marker copy as a second
+statement once the schema row is confirmed. The bundled
+`postgresInstantiateGraphTemplateStatement` and `sqliteInstantiateGraphTemplateStatement` builders
+(`graph-template-sql.ts`) are what `createPostgresBackend` and `createSqliteBackend` supply to
+their own profiles; neither is exported, so a from-scratch profile reaches the same shape only by
+copying a bundled profile and adapting its statement, while a derived profile can replace the whole
+`graphTemplateRuntime` bag through `deriveEngineProfile`.
+
+`FenceSql` (see [Write fence declaration](#write-fence-declaration-writefence))
+declares `advisoryLockExpression` and `isolationFactExpression` as the two
+composable, no-`SELECT` forms an `advisory`-mechanism backend author
+supplies; TypeGraph derives the standalone-statement counterparts
+(`acquireKeyed`, `acquireKeyedWithIsolation`, `isolationFact`) from them. A
+statement that
+must compose a lock or an isolation read INSIDE a larger query it builds
+itself — a CTE, a data-modifying statement — embeds the bare expression
+directly, rather than running the derived standalone form as its own
+preceding statement. The schema write fence's fused schema + graph-write
+statement (`postgres-schema-write-fence.ts`) is the one site that needs
+this: it puts the expression in its own CTE's `SELECT ... AS "lock_token"`,
+resolving the fence target's OWN `FenceSql` — the bundled `postgresFenceSql`
+for a bundled backend, a derived profile's own override otherwise — so a
+custom spelling backs this fused statement exactly as it backs every
+ordinary lock site.
+
+The graph-template instantiation statement's `locked AS (SELECT ...)` CTE is
+a DIFFERENT case, not a `FenceSql` consumer at all: it composes the baked
+single-argument `advisoryLockSingleExpression` directly.
+
+The ONE lock form with no override point is `advisoryLockSingleExpression`,
+the ONE-argument form on a bare key: PostgreSQL stores it in a lock space
+distinct from every namespaced two-argument lock, and the schema-commit fence
+and graph-template instantiation both take it on the same key so the two
+mutually exclude. It is not a `FenceSql` member — both bundled builders bake it
+in directly, and a custom profile has no way to replace it.
 
 ## Cloudflare D1
 
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 
-Use `createStoreWithSchema()` to automatically create tables on a fresh D1
-database and manage schema versions across deployments:
+Cloudflare D1 has no interactive transaction primitive, so it cannot commit
+TypeGraph schema versions: `commitSchemaVersion` / `setActiveVersion` need to
+hold one transaction across their compare-and-swap read and activating
+write, and D1 has no session to hold it on. Apply the base DDL with Wrangler
+/ drizzle-kit. `capabilities.execution.unitOfWork` reports `"batch"`. A
+singleton node create, update, `upsertById`, or delete fuses on a kind with
+no declared unique constraint (a create takes a generated or a
+caller-supplied id) — except a node delete, which fuses even when the kind
+DOES carry a declared unique constraint, because the atomic delete program
+releases that claim in the same statement. A singleton edge create fuses
+when the kind's cardinality AND targetCardinality are both `"many"`, and edge
+update and delete fuse the same way (`EdgeCollection` has no `upsertById`). So do
+`bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
+and a constrained write inside an atomic program's claim envelope. Each of
+these asserts the active schema version inside the statements
+`D1Database.batch()` runs together, so these succeed on a schema-managed
+Store. A write that cannot fuse either fails closed with
+`BATCH_WRITE_UNSUPPORTED` naming a proven reason (a probe-then-write
+constraint check, an interactive callback, Operational Identity, history, or
+a schema commit), or — for a write that simply doesn't fit the fused shape,
+such as a singleton create, update, or `upsertById` on a uniquely-constrained
+kind, or a supplied-id tombstone resurrection — fails closed with the plain
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation and no named reason; see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for the full reason table. Use a raw `createStore()` only when the
+application accepts unfenced writes for the remaining paths:
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
-import { createStoreWithSchema } from "@nicia-ai/typegraph";
+import { createStore } from "@nicia-ai/typegraph";
 import { createSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 
 export default {
   async fetch(request: Request, env: Env) {
     const db = drizzle(env.DB);
     const backend = createSqliteBackend(db);
-    const [store] = await createStoreWithSchema(graph, backend);
+    const store = createStore(graph, backend);
 
     // Use store...
   },
 };
 ```
 
-If you prefer to manage DDL yourself, use `createStore()` with manual migrations
-instead.
+This raw Store does not validate or fence a committed TypeGraph schema version.
+For schema commits and multi-statement schema-managed writes on Cloudflare, use
+**Durable Objects** (below), whose SQLite storage exposes an interactive
+transaction runner.
 
 **Important:** D1 has no interactive transaction primitive
 (`D1Database.batch(...)` is transactional, but batch-only — not an
-interactive runner), so `store.transaction()` is non-atomic on D1. See
+interactive runner), so `store.transaction()` refuses on D1 before invoking
+its callback. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
+
+For the same reason, a write guarded by a **declared constraint** — source or
+target edge cardinality other than `many`, a `disjointWith` axiom, a
+shared-scope unique, or dynamic `getOrCreateByEndpoints` convergence — is
+refused on D1 with
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
+[Declared constraints require an interactive transaction](#declared-constraints-require-an-interactive-transaction).
 
 ## Cloudflare Durable Objects (SQLite)
 
 A store backed by `drizzle(ctx.storage)` inside a Durable Object is
 **auto-detected** as `transactionMode: "do-sqlite"` and reports
-`capabilities.transactions: true` — no `executionProfile` hint needed.
+`capabilities.execution.interactiveTransactions: true` — no `executionProfile` hint needed.
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so adapter stores can provide fully atomic `store.transaction()` and
 `store.withTransaction()` operations.
@@ -849,7 +1753,7 @@ Check what features a backend supports:
 const backend = createSqliteBackend(db);
 const store = createStore(graph, backend);
 
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => {
     /* ... */
   });
@@ -867,16 +1771,1035 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 | Field                                                                      | Meaning                                                                                             |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `transactions`                                                             | Atomic transactions available (see note below)                                                      |
+| `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, and derived `unitOfWork` |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
-| `graphAnalytics?.{supported,mathFunctions}`                                | Whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
+| `orderedAggregates?` | Ordered scalar and record collection aggregation; absent means unsupported |
+| `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
+| `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
+| `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
+| `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
+| `writeFence?.{mechanism,drain}`                                            | How this engine excludes concurrent writers, and how far a caller can drain a table lock — see [Write fence declaration](#write-fence-declaration-writefence) |
+
+`expr.collect()` requires `orderedAggregates: true`. Bundled PostgreSQL supports it. Supported preparable synchronous
+SQLite clients and the dedicated async `createLibsqlBackend()` factory are probed when the backend
+is created; the query itself adds no discovery statement. Other unprobed SQLite
+connections default to unsupported. If you have
+verified that your engine supports aggregate-local ordering, declare
+`capabilities: { orderedAggregates: true }` in the bundled backend options. Older or unsupported
+engines must retain `false`; collection queries are refused before execution.
+
+SQLite introduced `NULLS FIRST` / `NULLS LAST` ordering in version 3.30 and aggregate-local ordering
+in [version 3.44](https://www.sqlite.org/releaselog/3_44_0.html).
+Collection compilation avoids depending on JSON object subtype preservation during sorting.
+Existing reads continue to work when ordered aggregates are unavailable.
+
+Custom dialect adapters implement `orderedScalarJsonArray` with one required object argument:
+`{ value, valueType, orderBy, filter }`. Migrate positional implementations by destructuring that
+object, applying `filter` as an aggregate `FILTER (WHERE ...)` before wrapping the aggregate in the
+empty-input `COALESCE`, and leaving it off when `filter` is `undefined`. The aggregate must preserve
+included NULL operands and return `[]` for empty input. The `filter` key itself is required in the
+adapter contract, even though its value may be `undefined`, which requires old positional
+implementations to migrate explicitly.
+
+The dialect adapter contract also requires `orderedRecordJsonArray` for
+`expr.collect({ field: scalarExpression }, options)`. Custom adapters must add this method when
+upgrading. It builds an ordered JSON array of flat records with the named projected scalar fields,
+honors the required ordering tuple and optional aggregate-local filter, preserves admitted SQL NULL
+fields within each record, and returns `[]` for empty input. The same `orderedAggregates` capability
+governs scalar and record collections; a custom adapter must supply both SQL emitters before
+declaring that capability.
+
+The dialect adapter contract also requires `like(column, pattern)`, the case-sensitive
+counterpart of `ilike`, with backslash as the escape character. A custom adapter must
+implement it when upgrading; the bundled SQLite adapter emits `GLOB` because SQLite's own
+`LIKE` ignores ASCII case.
+
+The former top-level `capabilities.transactions` override is not interpreted
+as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
+including for JavaScript and already-compiled callers, because transaction
+availability and atomic batching are now independent facts. Move the value to
+`capabilities.execution.interactiveTransactions`; root `atomicBatch` support
+is discovered from the bundled transport and cannot be claimed through factory
+overrides. Bundled PostgreSQL transaction factories may expose
+`atomicBatch: "session"` on the exact already-open transaction object. That
+declaration is paired with fresh transport and semantic registrations and is
+never inherited by an ordinary derived backend.
+
+`execution.unitOfWork` is derived, never declared by a factory or override:
+`"optimistic-retry"` when `interactiveTransactions` is `true` AND the resolved
+write fence is `{ mechanism: "row", conflict: "commit-time" }` (see
+[Write fence declaration](#write-fence-declaration-writefence) below);
+`"interactive"` when `interactiveTransactions` is `true` otherwise; else
+`"batch"` when `atomicBatch` is not `"none"` (an HTTP-only driver such as
+`drizzle-orm/neon-http`, which cannot hold an open session but does support a
+native atomic program); else `"none"`. Only the root capability derivation
+ever resolves the write-fence plan needed for the `"optimistic-retry"` arm —
+a derived or session-scoped capabilities object (a `store.transaction`
+session, a projected backend) has no way to re-resolve that plan for
+itself, but it carries the root's answer forward instead of losing it: it
+reads whether its own source object was already `"optimistic-retry"` and
+keeps the tier for as long as `interactiveTransactions` stays `true`,
+falling back to `"interactive"` only for a capabilities object whose source
+never carried the tier to begin with.
+
+Two further internal readers key off the `"batch"` value: the batch-tier
+write verdict (`resolveBatchWriteVerdict`) that produces
+`BATCH_WRITE_UNSUPPORTED` refusals, and the autocommit single-statement
+eligibility gate that decides whether a supplied-id singleton create can
+fuse its schema fence into one statement. Even absent `"optimistic-retry"`,
+`unitOfWork` exists so any caller can tell the execution shapes apart without
+re-deriving the same distinction from `interactiveTransactions` and
+`atomicBatch` separately.
+
+Under `"optimistic-retry"`, every TypeGraph-owned transaction that acquires a
+fence row replays a real commit-time conflict as a whole unit, up to
+`OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts, and only exhausting that budget (or
+a non-retryable failure) surfaces `TransactionConflictError` to the caller —
+see [Retrying on conflict](/schemas-stores#retrying-on-conflict). That covers
+every store-owned write (collection create/update/delete, bulk paths,
+`importGraph`, identity maintenance, contribution rebuild, index
+materialization) as well as the two backend-owned transactions that acquire
+the schema-commit fence row directly, outside the store's own write path:
+graph-template instantiation and a schema commit (`commitSchemaVersion` and
+its three siblings, via `runSchemaWriteTransaction`). A nested write running
+inside an existing transaction (`store.transaction`, an adopted transaction)
+never retries on its own: it cannot restart a transaction it does not own, so
+its conflict propagates unchanged to the outermost store-owned write, or to
+`store.transaction` itself. This tier therefore changes behavior only for a
+transaction that opens its own top-level connection.
+
+An `"interactive"` backend whose write fence is a keyed acquisition (the
+bundled PostgreSQL backends) replays the same way where the per-graph write
+fence can refuse a stale snapshot, which is where a lock-only decision
+advances the graph's fence row: a store-owned write that names a constraint, a
+`bulkUpsertById` or `bulkGetOrCreateByConstraint` (the collection opens their
+transaction), and a merge commit are each replayed whole, up to the same three
+attempts. A write that names no constraint decides nothing under the fence and
+takes one attempt, as before. SQLite takes no keyed acquisition and replays
+nothing.
+
+An `"optimistic-retry"` backend requires `node:async_hooks`' `AsyncLocalStorage`
+to detect a retried unit nested inside another one; on a runtime where it is
+unavailable, the first retried unit `runRetriedUnit` opens is refused with
+`OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` rather than degrading to independent,
+unsafe per-unit retries, while interactive backends are unaffected and keep
+retrying (`store.transaction`'s own `retry` option) with no async-context
+support at all.
+
+`graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
+session state. A hot standby or a role without the database `TEMP` privilege can
+still reject the working-table transaction that the iterative graph algorithms
+open: a standby refuses the read-write transaction itself, and a role without
+`TEMP` refuses the `CREATE TEMP TABLE` inside it. Both refusals reach the caller
+as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
+its `cause`.
+
+### Durable edge match identity capability
+
+`capabilities.durableEdgeMatchIdentity: true` is a correctness promise. A
+custom backend making it must provide all of these guarantees:
+
+- Every edge write carrying `InsertEdgeParams.matchIdentity` stores both the
+  name and key with the row. They are either both absent or both present.
+- A database constraint atomically owns uniqueness over `(graph_id, kind,
+  match_identity_name, match_identity_key)`. Soft deletion keeps the key;
+  physical hard deletion releases it.
+- `commands.execute()` handles a durable `edge.converge-create` as one database
+  decision and returns the authoritative `created` or `found` row. Returning
+  `unsupported` fails closed with
+  `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED`; TypeGraph does not fall
+  back to a read-then-write race.
+- Storage exists before runtime writes. Implement
+  `ensureEdgeMatchIdentityStorage` for privileged schema adoption, or provision
+  the columns, pair constraint, and unique arbiter independently before setting
+  the capability.
+
+`insertEdgesDurableBatchReturning` is an optional throughput member. When
+implemented, every input must carry a durable identity, conflicts are omitted
+from the returned rows, and returned rows identify exactly which inputs were
+created. Omitting it preserves correctness through per-row authoritative
+commands, but loses the set-oriented bulk/import fast path.
+
+`findEdgesByHeterogeneousEndpointSet` is likewise an optional set-read
+optimization. An input carrying `opposite` requests an exact directed endpoint
+pair, not every edge incident to the first endpoint. One call may contain only
+incident inputs or only exact-pair inputs; mixing the two modes is refused. A
+backend that omits the member retains the exact per-pair fallback.
+
+### Node-row locks (`lockNodes`)
+
+Every `GraphBackend` implements the required
+`lockNodes(graphId, kind, ids, lock)` member. The store's portable edge writes
+check endpoint liveness through it, and its portable node deletes take their
+preflight through it (see
+[Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes)).
+Single-statement commands and closed atomic programs take the same locks inside
+their own SQL. The contract:
+
+- Return the rows `getNodes(graphId, kind, ids)` returns, live and tombstoned
+  alike.
+- Acquire them in code-point order of `id` (PostgreSQL: `ORDER BY id COLLATE "C"`).
+- Hold them locked until the surrounding transaction ends: `"edgeEndpoint"`
+  takes a lock that admits other endpoint locks and ordinary row updates but
+  waits on a delete's lock (PostgreSQL `FOR KEY SHARE`); `"delete"` takes a lock
+  that waits on every endpoint lock (PostgreSQL `FOR UPDATE`).
+- On an engine whose writers serialize — the backend declares
+  `writeFence: { mechanism: "engine-serialized" }`, or `"caller-serialized"` —
+  the plain ordered read is a complete implementation, because no other writer
+  can hold either lock.
+- On an engine with no row locks — the backend declares
+  `writeFence: { mechanism: "row" }` — take an exclusive per-node lock before
+  the plain ordered read, in the caller's transaction. The bundled operation
+  layer takes one keyed fence row per id, in the same code-point order, for
+  both purposes.
+
+The bundled backends implement it on every driver. There is no fallback: the
+store calls it unconditionally.
+
+A custom command port carries the same obligation: when it reports `created`
+for `edge.create` or `edge.converge-create`, the statement that inserts must
+check both endpoints live and take the `"edgeEndpoint"` lock on both rows
+(`FOR KEY SHARE`, a fence row under a `row` write fence, or equivalent), in
+(kind, id) code-point order, until the transaction ends. A port that cannot returns `unsupported` with the
+`endpointPredicate` dimension, and the store's portable path takes the lock.
+
+### Validity-end clearing capability
+
+Custom backends must advertise `capabilities.clearValidTo: true` only when both
+`updateNode` and `updateEdge` apply `clearValidTo: true` by storing SQL `NULL` in
+`valid_to`. The built-in SQLite and PostgreSQL adapters do. An explicit clear on
+a backend without that promise is refused with `ConfigurationError` code
+`CLEAR_VALID_TO_UNSUPPORTED` before coalescing or writes, so the result
+does not depend on whether the target row is already open. Omission still means
+preserve; custom backends that do not support clearing remain compatible with
+all writes that omit the option.
+
+### Recorded-table migration DDL (`recordedTableDdl`)
+
+`GraphBackend.recordedTableDdl` is an optional, synchronous callback used only by the offline
+timestamp-only recorded-time preview migration. The migration calls it twice, once with temporary
+table names and once with the final names, and expects DDL for `recordedClock`, `recordedNodes`, and
+`recordedEdges`. The backend owns this callback because table creation, indexes, and named
+constraints are dialect-specific and must not pull Drizzle into portable entrypoints.
+
+A custom backend can omit the callback unless it created data in the old preview schema. If
+`migrateLegacyRecordedTime` discovers that schema and the callback is absent, it throws
+`UnsupportedBackendCapabilityError` with `details.capability: "recordedTableDdl"`. When the engine
+names primary-key constraints, the temporary and final callback results must either both name the
+constraint or both omit it; a one-sided result throws `ConfigurationError` code
+`RECORDED_DDL_CONSTRAINT_NAME_MISMATCH`.
+
+The callback only describes DDL. It must not execute statements or inspect the catalog, because the
+migration invokes it inside its transaction. See
+[Migrating Preview Recorded Time](/schema-management#migrating-preview-recorded-time) for the
+operator workflow.
+
+### Recursive traversal capability
+
+Both bundled backends declare `capabilities.recursiveTraversal: { supported: true }`. **Absent
+means supported** — mirroring `returning`, not `constraintClaims`: every existing custom backend
+already runs the six recursive-CTE emission sites unconditionally, so absence meaning unsupported
+would refuse traversals that work today.
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  recursiveTraversal: { supported: false, reason: "engine has no WITH RECURSIVE / equivalent" },
+};
+```
+
+A backend that genuinely lacks the primitive declares `{ supported: false, reason }`. A factory
+refuses a contradictory declaration — `supported: false` with no `reason`, or `supported: true`
+with a dangling `reason` — with `ConfigurationError` details code `CAPABILITY_DECLARATION_CONTRADICTION`.
+
+Five operations refuse when unsupported: variable-length (`traverse`) queries, `store.subgraph()`,
+historical identity class reads, identity-expanded historical queries, and the identity
+window-ledger read — each throwing `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`
+with `details.operation` naming the site and `details.reason` echoing the declaration.
+
+`weightedShortestPath` is the one exception: on a backend with temporary statements but no
+recursion, it **falls back** to a per-hop predecessor walk instead of refusing, issuing
+`pathLength + 1` extraction statements for the path a recursive CTE would have returned in one
+round trip. The unweighted `shortestPath` (along with `reachable`, `canReach`, and `neighbors`)
+emits no recursive CTE at all — it routes through the iterative working-table or inline path
+instead — so it neither refuses nor falls back regardless of this declaration.
+
+<a id="write-fence-declaration-pessimisticlocks"></a>
+
+### Write fence declaration (writeFence)
+
+TypeGraph serializes a family of writes — Operational Identity's mutations, and the
+TypeGraph-owned recorded-clock allocation behind `history` / `revisionTracking` — behind a
+per-graph fence rather than trusting the engine's default isolation. `capabilities.writeFence`
+declares what this backend can provide, as two independent facts, and `resolveWriteFencePlan` is
+the one place that declaration turns into a plan every lock site consumes instead of re-deriving:
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  writeFence: { mechanism: "advisory", drain: "table-lock" },
+};
+```
+
+`mechanism` is how the backend excludes concurrent writers. `writeFence` is a discriminated union on
+`mechanism`, and `drain` is a field of the `"advisory"` and `"row"` shapes only — `"engine-serialized"`
+and `"caller-serialized"` declarations carry no `drain` key at all:
+
+| `mechanism` | Meaning |
+| --- | --- |
+| `"advisory"` | A keyed `pg_advisory_xact_lock`-style lock a caller takes explicitly. Needs `fenceSql` (below) and a `drain`. |
+| `"row"` | A keyed exclusion spelled by TypeGraph itself against the never-dropped fences relation, for an engine with no advisory-lock primitive. Needs a `drain` and a `conflict` (below); a `fenceSql.isolationFactExpression` is optional (absent means recorded capture and match-key convergence fail closed on an unknown isolation fact, exactly as they do for a target that supplies neither). |
+| `"engine-serialized"` | The engine serializes writers by construction — SQLite's single writer slot. No lock statement, no `fenceSql`, no `drain`. |
+| `"caller-serialized"` | A deployment-level promise, not an engine fact — see below. No lock statement, no `drain`; a `fenceSql` the backend still carries is used only for its isolation-fact read (recorded capture's isolation guard). |
+
+`drain` (on `mechanism: "advisory"` or `"row"` only) is a separate fact: whether a caller that
+already excluded other writers can additionally take a relation-wide lock on the table a drain site
+protects:
+
+| `drain` | Meaning |
+| --- | --- |
+| `"table-lock"` | Yes — a `LOCK TABLE`-style statement is available and the drain site takes it. |
+| `"quiescent"` | The resource is already exclusive for some other reason (an advisory or row lock layered under a deployment's own `caller-serialized` promise, for instance), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
+| `"none"` | Neither — a drain site refuses, naming the drain. |
+
+`conflict` (on `mechanism: "row"` only) is the engine fact for what happens when two writers
+acquire the SAME fence row:
+
+| `conflict` | Meaning |
+| --- | --- |
+| `"wait"` | A lock-based engine — the second acquirer's statement blocks until the first commits, exactly like an advisory lock. |
+| `"commit-time"` | An optimistic-concurrency engine — both acquirers proceed and the loser's COMMIT fails. Correctness comes from the retry owner replaying the whole unit, never from waiting, so `conflict: "commit-time"` derives the `"optimistic-retry"` execution tier (see [Backend Capabilities](#backend-capabilities) above) and requires it: declaring it on a non-interactive backend is refused the same way an out-of-place `drain` is. |
+
+TypeGraph cannot check either value. A `row` fence is sound only on an engine that blocks the second
+acquirer of a fence row until the first ends, or fails one of two concurrent acquirers at COMMIT
+whatever value each wrote. An engine that accepts the fence UPSERT but lets both acquirers commit
+satisfies neither and must not declare `row`. Under `"wait"` the engine must also detect a deadlock
+between waiting acquirers and abort one of them. TypeGraph retries that abort only when it recognizes
+it as a serialization failure: PostgreSQL's `40001` and `40P01` are recognized, and an engine that
+reports a deadlock or commit conflict another way declares an `execution.serializationFailure`
+classifier (see [Backend authoring](/backend-authoring#declaring-a-serializationfailure-classifier)).
+
+`"engine-serialized"` and `"caller-serialized"` satisfy every drain site unconditionally — a writer
+slot and an in-process serialization promise are each already a stronger exclusion than any `drain`
+value could add, so attaching one to either mechanism is refused (see **Runtime validation** below)
+rather than silently ignored; attaching `conflict` to anything but `"row"` is refused the same way.
+
+`resolveWriteFencePlan` resolves one of five plans:
+
+- `{ kind: "lock", drain, sql }` — take the declared advisory lock (`sql`, the target's own
+  spelling), and, when `drain === "table-lock"`, the table lock a drain site needs.
+- `{ kind: "row", drain, conflict, sql }` — take the SAME `sql.acquireKeyed` /
+  `sql.acquireKeyedWithIsolation` a `"lock"` plan's site calls, spelled instead against the fences
+  relation; `conflict` is the one fact a `"row"` site (and the execution tier) reads that a
+  `"lock"` site never needs.
+- `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by construction.
+- `{ kind: "caller-serialized" }` — no lock needed; the deployment's own promise excludes concurrent
+  writers (see below).
+- `{ kind: "unfenced" }` — no declaration at all. Every fence that guards a read-then-write across
+  statements refuses rather than running unfenced. Only a predicate carried *inside* the statement
+  it guards degrades, since one statement cannot race itself.
+
+Resolution order: (1) the declared `writeFence` value, if present; (2) absent, AND the backend was
+built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`, which is exactly
+what every lock site used to compute inline (this derivation never resolves `"row"`: it is the two
+bundled dialects' own `"advisory"`/`"engine-serialized"` split); (3) absent on anything else —
+`unfenced`, because an undeclared custom backend is by definition uncertified and inferring lock
+support from `dialect` alone is the unsound inference this capability replaces.
+
+The two bundled backends resolve exactly these declarations — copy the one matching your engine:
+
+- PostgreSQL: `writeFence: { mechanism: "advisory", drain: "table-lock" }`
+- SQLite: `writeFence: { mechanism: "engine-serialized" }` (no `drain`: the writer slot already
+  excludes every drain site's writer, so a drain site under it always takes no statement — the same
+  behavior `drain: "quiescent"` describes for `"advisory"`/`"row"`, without a `drain` field to spell it)
+
+A backend that declares `mechanism: "advisory"` also supplies `fenceSql`: `lockTables` (only needed
+when `drain: "table-lock"`) plus the two composable, no-`SELECT` forms `advisoryLockExpression` /
+`isolationFactExpression` a statement embeds inside a larger query it builds itself (see the
+schema-write-fence discussion above) — the complete `FenceSql` bag. `resolveWriteFencePlan`'s `lock`
+arm derives the standalone-statement forms every ordinary lock site actually calls — `acquireKeyed`;
+`acquireKeyedWithIsolation` (the lock plus the session's isolation-level fact, read in the same
+statement it locks in); `acquireKeyedSnapshotFence` (the per-graph write fence of a writer that makes a lock-only decision:
+the lock, the isolation fact, and an advance of the key's row in the fences relation, in one
+statement); and `isolationFact` — from those two expressions, so a backend author never spells both
+forms separately. The fence-row advance is what lets a `REPEATABLE READ` or `SERIALIZABLE` session
+make a decision the fence alone protects: a lock cannot refresh a snapshot taken before the wait,
+but a session whose snapshot predates another decider's commit cannot update a row that decider
+advanced, and fails on it with a serialization failure. Only deciders issue it; every other holder
+of the fence issues `acquireKeyedWithIsolation` and writes no row. An `"advisory"` backend that
+names no fences relation (`tableNames.fences`) has no `acquireKeyedSnapshotFence` at all, its
+deciders take the lock-only statement, and TypeGraph refuses those two
+isolation levels on it wherever such a decision is made. `mechanism: "row"` needs no `advisoryLockExpression` at all: TypeGraph
+spells its own `acquireKeyed` / `acquireKeyedWithIsolation` against the fences relation (see below),
+and a `fenceSql.isolationFactExpression` — when supplied — rides the SAME acquisition statement, so a
+`"row"` target's isolation fact is read on the exact connection that took the row. The bundled
+PostgreSQL spelling is exported as `postgresFenceSql` from `@nicia-ai/typegraph/adapters/drizzle/postgres`
+— pass it straight through as `fenceSql` when wrapping that backend (under either `"advisory"` or
+`"row"`), or supply a custom `FenceSql` matching a different engine's lock syntax. A backend that
+declares `mechanism: "advisory"` with a `fenceSql` missing a member the resolved `mechanism`/`drain`
+combination needs is refused at construction with details code `WRITE_FENCE_SQL_UNAVAILABLE`, naming
+the missing member; `"row"` is refused the same way only for `drain: "table-lock"` without
+`lockTables` — its acquisition statement needs no author-supplied spelling at all, so a missing
+`tableNames.fences` instead refuses the first time a keyed site actually acquires the row, not at
+construction; `"engine-serialized"` and `"caller-serialized"` need no `fenceSql` to take a lock at
+all.
+
+#### The fences relation
+
+A `"row"`-mechanism backend needs one relation, `typegraph_fences(key TEXT PRIMARY KEY, generation
+BIGINT NOT NULL)` (`INTEGER NOT NULL` on SQLite) — part of TypeGraph's base schema on both bundled
+dialects, so a fresh install already has it and `generateSqliteMigrationSQL` /
+`generatePostgresMigrationSQL` add it to an existing database. It is **never dropped, never cleared
+by `clear()`, and never row-deleted** — the same durability contract `schema_versions` and
+`recorded_clock` carry. Every acquisition is one portable statement TypeGraph spells itself, never
+the profile: `INSERT INTO typegraph_fences (key, generation) VALUES (key, 1) ON CONFLICT (key) DO
+UPDATE SET generation = generation + 1 RETURNING generation`, keyed on `${namespace}:${key}` —
+the SAME advisory namespaces and per-position keys an `"advisory"`-mechanism backend locks on,
+verbatim, so the lock-order contract carries over unchanged to an engine using the fences relation
+instead of `pg_advisory_xact_lock`. A custom backend supplies the relation's physical name through
+`tableNames.fences` (defaulted to `typegraph_fences` by both bundled factories) exactly as it names
+every other TypeGraph-owned table.
+
+#### Runtime validation
+
+TypeScript's discriminated union only holds a caller who goes through the type checker — a plain
+JavaScript backend author, or a value round-tripped through JSON or a config file, can still supply
+an unrecognized `mechanism` string, an unrecognized `drain` or `conflict` string, a `drain` attached
+to `"engine-serialized"` / `"caller-serialized"`, or a `conflict` attached to anything but `"row"`.
+`resolveWriteFencePlan` validates every declaration — whether it came from `capabilities.writeFence`
+directly or from the first-party dialect fallback — before shaping a plan from it, and refuses with
+`ConfigurationError` details code `WRITE_FENCE_DECLARATION_INVALID`, naming the invalid `field`
+(`"mechanism"`, `"drain"`, or `"conflict"`) and, for an unrecognized value, the `accepted` list. An
+unrecognized `drain` never falls through to behaving like `"quiescent"` — it is refused outright,
+the same as an unrecognized `mechanism`. The same validator refuses `conflict: "commit-time"`
+outright when the target's own `capabilities.execution.interactiveTransactions` is `false`: that
+value is honored only by the `"optimistic-retry"` execution tier, which never derives without an
+interactive transaction to replay inside, so accepting the declaration there would silently drop it
+rather than apply it.
+
+#### `caller-serialized`: the promise split into two halves
+
+`caller-serialized` is for a deployment that knows its database has no other concurrent writer, but
+whose engine is neither an advisory-lock engine nor a single-writer one — a PostgreSQL-wire engine
+with no working `pg_advisory_xact_lock` / `LOCK TABLE`, for example. The promise has two halves,
+and TypeGraph only enforces the first:
+
+- **In process**, TypeGraph enforces it: every root member the backend classifies as mutating —
+  collection writes, `store.transaction` / `transactionWithNative`, schema commits, identity and
+  contribution maintenance, index materialization, table/DDL provisioning, `clearGraph`, import,
+  and the raw-SQL members (`execute`, `executeRaw`, `executeStatement`,
+  `executeTemporaryStatement`) that can carry an arbitrary write — runs through one per-backend
+  serialized queue, so two concurrent calls through one pool cannot race each other. A root write
+  awaited from inside a `store.transaction` callback is refused rather than left to deadlock behind
+  the transaction's own queue slot.
+- **Outside the process**, the deployment enforces it: no other client writes to this database
+  while this backend is open. TypeGraph cannot see or verify that half; declaring
+  `caller-serialized` is asserting it.
+
+Adopting an externally owned transaction (`store.withTransaction(externalTx)`, backed by
+`adoptTransaction`) is refused outright on a `caller-serialized` backend, with `ConfigurationError`
+details code `CALLER_SERIALIZED_REFUSES_ADOPTION`: an adopted transaction's lifetime belongs to the
+caller, not to this backend's write-unit queue, so there is no honest way to hold a queue slot open
+for it — queuing it would block every other queued write until the caller's own transaction ends,
+and leaving it unqueued would let its writes interleave with the queue's own, silently breaking the
+promise `caller-serialized` makes. Open the transaction through this backend's own `transaction()` /
+`transactionWithNative()` instead, or do not declare `caller-serialized` on a backend that needs
+cross-store adoption.
+
+`createPostgresBackend` accepts `capabilities: { writeFence: { mechanism: "caller-serialized" } }` — a claim about the
+deployment — while still refusing `mechanism: "engine-serialized"` outright, because that value is
+a claim about the *engine*, which this factory's own engine does not back.
+
+Constructing Operational Identity, or `history: true` / `revisionTracking: true`, against an
+`unfenced` backend is refused immediately at `createStore` — never mid-flush — with
+`ConfigurationError` details code `IDENTITY_REQUIRES_WRITE_FENCE` (identity) or
+`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` (recorded-clock allocation), and the refusal message names
+the exact declaration line to add.
+
+A `lock` plan whose `drain` cannot back a site's `requires: "drain"` — `drain: "none"` — is
+refused with details code `WRITE_FENCE_UNAVAILABLE`, naming `details.operation` and the drain that
+could not be satisfied. `"engine-serialized"` and `"caller-serialized"` satisfy either `requires`
+value (`"keyed"` or `"drain"`) without consulting `drain`.
+
+The PostgreSQL schema fence refuses too, and it is worth knowing why it is not on the
+degradable side. The per-graph advisory lock plus `SELECT ... FOR UPDATE` a schema commit takes,
+and the `FOR SHARE` a managed write takes on that same row, each fence a read-then-write sequence
+that spans **statements**: `commitSchemaVersion` reads the active version and then writes the
+flip, and a managed write holds its `FOR SHARE` for the remainder of the transaction so the
+version it asserted stays true through the writes that follow. Skipping those locks would not
+give a slower-but-correct path; it would assert a version and then let the very change the
+assertion was checking for land before the write. So a PostgreSQL-dialect backend that resolves
+`unfenced` is refused at the schema commit with `WRITE_FENCE_UNAVAILABLE`, naming the operation.
+
+The one part that *does* degrade is the fence folded into a managed insert's own statement. That
+predicate is evaluated inside the INSERT that depends on it, and one statement cannot race
+itself: with no locking clause the fence subquery still yields no row when the expected version
+is no longer active, so the INSERT still writes nothing. This is how SQLite has always run the
+path, on the strength of its writer slot.
+
+This matters for a PostgreSQL-wire engine that implements neither `pg_advisory_xact_lock` nor the
+`FOR UPDATE` / `FOR SHARE` clauses, and whose engine merges concurrent transactions rather than
+serializing them.
+
+`writeFence` has no arm for "no exclusion mechanism at all" — every `mechanism` value claims
+something real. An engine with neither locks nor a writer slot nor a caller promise to make has
+nothing honest to declare, and `unfenced` is how that shows up downstream — but neither bundled
+factory will hand you that backend. `createPostgresBackend` and `createSqliteBackend` both build on
+`createSqlBackend`, which refuses at construction, with `ConfigurationError` details code
+`ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION`, when the resolved capabilities carry no
+`writeFence` at all — including `capabilities: { writeFence: undefined }` passed to either factory,
+which no longer builds a backend the way it once did:
+
+```typescript
+createPostgresBackend(db, {
+  capabilities: { writeFence: undefined },
+});
+// throws ConfigurationError: ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION
+```
+
+`unfenced` is reachable only outside that gate: a hand-assembled `GraphBackend` that never goes
+through `createSqlBackend`, or a custom `SqlEngineProfile` whose `declaredCapabilities.writeFence`
+some other override clears before it reaches a call site — never through either bundled factory.
+Getting there is a way of admitting the engine truly has nothing to declare; TypeGraph then refuses
+a schema-managed store built on it at `createStore`, naming the missing capability, rather than
+running a fence the engine cannot enforce.
+
+If the deployment instead knows it is the only writer of this database — a pool clamped to one
+connection, or a single-writer topology otherwise enforced outside TypeGraph — declare
+`writeFence: { mechanism: "caller-serialized" }` instead (see above): that is
+the honest way to spell a deployment convention. Do not reach for `mechanism: "engine-serialized"`
+for the same purpose — that declaration means the *engine* serializes writers by construction, and
+a deployment convention is not a construction. `createPostgresBackend` refuses that particular
+claim outright for this reason.
+
+### Capability bundles
+
+A **capability bundle** groups a set of `GraphBackend` members that one operation family needs
+together, with one verdict resolver and one member accessor, so a caller never re-derives "does
+this backend support X" from a scattered `undefined` check. Seven pilot bundles ship in this
+release:
+
+| Bundle                    | Kind       | Disposition                                                                                                                                                                 |
+| ------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claims`                  | gated      | Bidirectional cross-check between the `constraintClaims` declaration and the core members; disagreement in either direction refuses with `CONSTRAINT_CLAIM_SURFACE_MISMATCH` |
+| `statementExecution`      | gated      | Core `executeStatement` absent refuses with `IDENTITY_REQUIRES_STATEMENT_EXECUTION`                                                                                          |
+| `recordedRevisionOrigins` | gated      | Core `ensureRevisionOriginsTable` absent refuses with the operation's own typed error                                                                                        |
+| `batchPointRead`          | graduated  | `getNodes` absent falls back to per-id `getNode`; `getEdges` absent falls back to per-id `getEdge`                                                                           |
+| `uniqueSidecarBatch`      | graduated  | `insertUniqueBatch` absent falls back to `issueClaimsIndividually`; `checkUniqueBatch` absent falls back to a per-key loop; `hardDeleteUniquesByNodeIds` absent refuses with the operation's own typed error |
+| `contributionHealth`      | graduated  | `verifyContributions` / `repairContributions` / `rebuildContribution` absent each refuse with the operation's own typed error; `probeContributions` absent falls back to `{ entries: [] }` |
+| `endpointSetRead`         | graduated  | `findEdgesByEndpointSet` absent refuses set-oriented `bulkFindFrom` / `bulkFindTo` with `ENDPOINT_SET_READ_UNSUPPORTED`; singleton reads remain available |
+
+The port-mismatch rule that governs every bundle's member accessor is keyed to the disposition,
+not blanket: a `refuse`-disposition row whose backend object cannot actually reach the member
+throws that bundle's own `portSurfaceCode` (`CONSTRAINT_CLAIM_SURFACE_MISMATCH` for `claims`,
+`BUNDLE_PORT_SURFACE_MISMATCH` for the other six); a `fallback`-disposition row whose port cannot
+reach the member takes its declared fallback instead of throwing — the verdict said the member
+was there, the object it binds against says otherwise, and a fallback row is defined to degrade
+rather than assert.
+
+This bundle model ships for **seven of the twenty-one** member-bearing operation families measured
+in this workstream; the remaining fourteen are a named follow-up workstream, not a silent gap —
+their members keep working exactly as before, unbundled, with an access-count ceiling that
+prevents new scattered checks from accumulating ahead of that follow-up.
+
+A backend author does not need to do anything for these seven bundles today: both bundled backends
+already carry every core member each bundle's `dialects` scope requires. The atomic transport
+conformance runner is the foundation for certifying a **third-party** backend: the author supplies
+engine-specific statements, state observers, and exact-root provenance checks, while the runner
+asserts the shared transport contract. Bundle verdicts remain a separate check against the declared
+capabilities and the object the calls actually execute on. A backend must therefore make every
+declared capability (`constraintClaims`, `contributions`, and execution support) truthful about
+what the active backend object implements, not just which fields it sets.
+
+Run the conformance fixture in the custom backend's own test suite, then pair
+the earned declaration with the exact root transport in its factory:
+
+```typescript
+import {
+  decorateBackend,
+  registerAtomicMutationPrograms,
+  registerAtomicSqlProgram,
+  runAtomicMutationProgramConformance,
+  runAtomicTransportConformance,
+} from "@nicia-ai/typegraph/backend";
+
+const backend = createCustomBackend({
+  execution: {
+    interactiveTransactions: false,
+    atomicBatch: "root",
+  },
+});
+registerAtomicSqlProgram(backend, { executeAtomicBatch });
+const authorCreatedWrapper = decorateBackend(backend, {});
+
+await runAtomicTransportConformance({
+  ...transportCases,
+  backend,
+  derivedBackends: [authorCreatedWrapper],
+  executeAtomicBatch,
+});
+
+registerAtomicMutationPrograms(backend, mutationPrograms);
+const semanticCases = buildSemanticCases({ backend });
+
+await runAtomicMutationProgramConformance({
+  backend,
+  derivedBackends: [authorCreatedWrapper],
+  equal: deepEqual,
+  cases: semanticCases,
+});
+```
+
+Transport registration is exact-resource evidence only: a derived backend does
+not inherit it, and a second registration on the same object is refused rather
+than replacing the function production uses. A bundled PostgreSQL transaction
+session earns a separate registration bound to its pinned client; it does not
+inherit the root's registration.
+Create wrappers with the exported `decorateBackend()` seam so the runner can
+verify their lineage back to the registered root instead of accepting an
+unrelated object as derivation evidence. The conformance fixture's mandatory
+provenance checks prove registration, lineage, derived isolation, and—when
+applicable—transaction isolation against the real objects supplied by the
+backend author. A non-interactive root reports the
+transaction-isolation check as skipped rather than claiming evidence it could
+not obtain. Transport registration certifies mechanics, not graph semantics, and
+therefore does not by itself opt a custom backend into any Store mutation
+program.
+
+The separate `registerAtomicMutationPrograms()` call is the semantic boundary:
+each member declares one complete TypeGraph mutation family implemented by that
+exact backend resource. Omitted families retain the portable path, and an empty profile or
+a profile registered before its atomic transport is refused with
+`ConfigurationError`.
+
+The semantic executors must preserve the same schema fence, validation,
+side-effect, refusal classification, rollback, postimage correlation, result
+ordering, and bind-ceiling contracts as the bundled implementation. Registering
+one family is not evidence for another. Derived and projected backends inherit
+neither registration. An exact transaction session must be registered
+independently before Store code can dispatch through it.
+
+`runAtomicMutationProgramConformance()` is the executable semantic boundary.
+For every reachable positive-limit variant in `mutationPrograms`, the fixture supplies
+three real Store-level cases:
+
+1. an ordered success whose return value and independently read committed state
+   both match their oracles;
+2. a stale-schema-fence refusal that leaves the database unchanged; and
+3. a family-specific typed refusal that either rolls back every sibling write
+   after native dispatch or explicitly refuses before dispatch without writing.
+
+The runner resolves the profile from `backend`; it does not accept a detached
+profile description, caller-supplied provenance verdict, or fixture-owned
+dispatch counter. Before any fixture preparation can write, it validates the
+complete case inventory and probes the author's actual derived backend objects.
+It observes dispatch inside the exact registered executors and therefore refuses
+a success that silently used the portable fallback,
+a case bound to a different family claim, a missing or duplicate family case,
+and a case that claims an unregistered family. A zero entry limit is an honest
+opt-out and does not require an unreachable case. `mutateEdges` has separate
+`resolvedSet` and `durableConvergence` variants because proving one does not
+prove the other.
+
+Every semantic case identifies the exact `backend` its callbacks use. The
+runner checks that binding and the registered profile identity before any
+preparation, again between preparation and execution, and after execution, so
+a pre-dispatch refusal or a mid-run registry replacement cannot borrow another
+root's certificate. The fixture callbacks should invoke public Store methods and inspect committed
+rows through an independent database read. Supply at least one real wrapper or
+derived backend created with `decorateBackend()`; the runner does not manufacture
+a projection and mistake that tautology for author evidence. Do not instrument
+or replace the registered executors—the runner owns dispatch evidence. Run
+conformance with exclusive use of that exact root: unrelated same-variant writes
+during the observation window cannot be distinguished from fixture traffic.
+Mark each semantic refusal's `dispatch` as `"required"` or `"pre-dispatch"`
+according to the Store contract, and do not use executor return rows as the
+state oracle. Stale-fence cases always require native dispatch regardless of a
+fixture value supplied by untyped JavaScript. Match
+Store-level typed errors rather than raw driver sentinels. The runner is
+framework-agnostic, so the same fixture runs in the custom backend's own test
+suite. Pair it with the shared cross-backend Store integration suite; transport
+conformance alone cannot prove graph semantics.
+
+The profile is family-scoped:
+
+| Member                        | Store operations authorized                                                               |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| `createNodes` / `createEdges` | Eligible direct `bulkInsert()` and `bulkCreate()` programs                                |
+| `replaceNodes`                | Eligible complete-document `nodes.bulkReplaceById()` programs                            |
+| `deleteNodes` / `deleteEdges` | Eligible direct `bulkDelete()` programs                                                   |
+| `updateNodes` / `updateEdges` | Eligible resolved update-only sets                                                        |
+| `mutateNodes` / `mutateEdges` | Eligible mixed create/update sets; the edge family also owns durable endpoint convergence |
+
+Executor limits such as `maxEntries`, `replaceNodes.maxEntries.plain`,
+`replaceNodes.maxEntries.claimed`,
+`createNodes.claimSupport.maxInputCostPerEntry`, and the two edge mutation
+ceilings are part of the registration contract and must be nonnegative
+integers; zero honestly declares that the backend's bind budget cannot admit
+one member of that shape. TypeGraph validates those declarations before
+publishing the exact-root profile. `claimSupport.families` explicitly
+advertises `uniqueness` and/or `disjointness`; an empty list with a zero bound
+honestly opts out of all claim work. The Store calls the exported
+`atomicNodeClaimInputCost()` owner for each member and refuses the native path
+when its complete normalized claim set exceeds the executor's declared bound.
+Custom executors must use that same helper instead of reproducing its
+dialect-reviewed bind formula. `deleteNodes.releasedClaimFamilies` similarly
+declares which owner-side claim cleanup the delete program proves.
+Bundled replacement executors also expose an `accepts(entries)` pre-dispatch
+proof. It packs prepared members with the same bind-weighted planner used by
+execution, so claimed batches are admitted by their actual work instead of an
+unrelated fixed 32-entry ceiling; `false` is an explicit no-SQL fallback
+verdict. Custom executors may provide the same exact admission seam when one
+claimed-member ceiling would be needlessly pessimistic.
+`replaceNodes.releasedClaimFamilies` declares which previous owner claims the
+replacement releases before acquiring its complete postimage claims; the Store
+does not infer that proof from `claimSupport`. Node
+create/update/mutation executors advertise derived-storage support separately
+through `projectionSupport.families`; omission or an empty list honestly opts
+out, and the Store never infers projection safety from transport registration
+alone. The supported families are `fulltext` and `embedding`.
+
+On a transactionless root, dedicated
+update-only and mixed mutation executors are independently reachable Store
+families even when their entry ceilings are equal, so each requires its own
+conformance evidence. On an interactive root, the collection-level
+read/partition/write unit moves into a transaction and exact-root registration
+does not follow; the root conformance inventory therefore excludes the mixed
+variants while continuing to require direct create, delete, update, and durable
+convergence evidence. Bundled PostgreSQL binds the same reviewed lowering to the
+exact transaction session and exercises the mixed node and edge variants against
+a real engine, including typed refusal rollback. The same session profile
+registers `replaceNodes`, so a caller-owned PostgreSQL transaction keeps blind
+replacement inside its savepoint-backed atomic program.
+An exact `atomicBatch: "session"` conformance fixture includes those mixed
+variants even though `interactiveTransactions` is true; nested-transaction
+isolation is reported as inapplicable because the fixture resource is already
+the open transaction. The transport runner accepts the same exact-session
+resource and certifies its ordered slots, parameter preservation, rollback,
+and empty-program behavior. Generic derived session objects still lose both
+the declaration and the identity-bound registrations.
+Backend authors implementing edge
+refusal paths use the exported
+`AtomicEdgeBatchEndpointRefusalError`,
+`AtomicEdgeBatchCardinalityRefusalError`,
+`AtomicEdgeConvergenceTombstoneRefusalError`, and
+`AtomicEdgeDeleteIdentityRefusalError` signals; restricted node deletion uses
+`AtomicNodeDeleteRestrictedRefusalError`. This preserves the Store's existing
+typed diagnostic classification rather than exposing driver-specific sentinel
+errors.
+
+Execution support is intentionally not collapsed into one ordered “tier.” An
+interactive transaction and an exact-root atomic batch are independent facts:
+a backend may provide either, both, or neither. Each Store operation selects
+the boundary its own semantics require instead of treating one mechanism as a
+universal substitute for the other.
+
+Endpoint-set reads have a small, independent conformance fixture for custom
+backends. Import `runEndpointSetReadConformance` from the `backend` entrypoint
+and provide the exact backend, one or more successful `FindEdgesByEndpointSetParams`
+cases, and at least one refusal case. The runner checks that the backend exposes
+`findEdgesByEndpointSet`, preserves the expected edge rows, and refuses invalid
+requests using the adapter's typed error. It does not create a schema or assume
+a driver, so the same fixture can run against any engine. A backend that omits
+the member remains valid for singleton reads; Store bulk endpoint reads refuse
+with `ENDPOINT_SET_READ_UNSUPPORTED`.
+
+### Declared constraints require an interactive transaction
+
+A **constrained write** — one whose correctness rests on a check-then-write that
+no database key repeats at write time — runs its probe and its write under one
+per-graph mutual exclusion. That fence is a transaction-scoped construct on both
+dialects: SQLite's `BEGIN IMMEDIATE` writer slot, PostgreSQL's
+`pg_advisory_xact_lock` (which outside a transaction is taken and dropped inside
+its own implicit single-statement one, excluding nothing). A backend reporting
+`capabilities.execution.interactiveTransactions: false` can supply neither, so such a write is
+**refused** rather than run unfenced — a constraint enforced only when nothing
+races is the defect the fence exists to close.
+
+The refusal is a `ConfigurationError` with `details.code`
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, and `details.constraint` naming which
+class needed the fence, because the way forward differs per class:
+
+| `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
+| --- | --- | --- |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true` | Drop `acyclic: true` from the edge and detect cycles in application code |
+| `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`, or whose `targetCardinality` is `one` or `oneActive` | Declare `cardinality: "many"` and `targetCardinality: "many"` (or omit both) and enforce the limit in application code |
+| `edgeComposition` | Creating or resurrecting an edge that realizes a declared `partOf`/`hasPart` pair | Drop the `partOf`/`hasPart` declaration realized by this edge kind and enforce the single-whole rule in application code |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key | Declare the edge registration's durable `matchIdentity`, or use `create` with a caller-chosen id |
+| `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
+| `nodeUniquenessClaim` | **Updating or resurrecting** a node whose kind declares any unique constraint, of any scope — a transition reserves the new key *before* the row write it gates, and only a transaction can undo the pair together | Drop the constraint, or run updates on a transactional backend. Plain **creates** under a `scope: "kind"` unique are unaffected: their claim follows the row |
+| `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind | Scope the constraint to `"kind"`, which the uniques primary key enforces on its own |
+
+`importGraph` / `importGraphStream` is refused on the same backends whenever any
+node kind of the graph owes a claim ahead of its row — that is, declares **any**
+unique constraint or has a disjoint partner — or any edge kind's `cardinality`
+or `targetCardinality` is non-`many`.
+The import writes both creates and updates, so the widest of those placements is
+what decides it. A graph declaring an `acyclic: true` edge kind — or any
+`partOf`/`hasPart` pair, whose composition relation is checked with the same
+exhaustive reachability probe — refuses the same way even when no other
+constraint applies: acyclicity has no claim row to substitute for the
+per-graph lock import otherwise takes none of, so the whole import is refused
+with `details.constraint: "edgeAcyclicity"` before the first chunk. (A
+composition edge kind is separately refused with `edgeComposition` first, by
+the ordinary claim-backed path above — the composition claim itself needs
+only an interactive transaction, not the lock-only fence; it is the
+*acyclicity* check over the composition relation that is lock-only.) On a
+transactional backend, import instead takes the per-graph lock for the
+duration of each chunk it processes — a real change to import's concurrency
+posture for such a graph, so every other writer of that graph blocks for the
+chunk's duration.
+
+This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
+backend built with `transactionMode: "none"`. Durable Objects are unaffected —
+`do-sqlite` reports `capabilities.execution.interactiveTransactions: true` and fences normally.
+
+Unconstrained writes on those backends are untouched and keep working exactly as
+before: an edge with `cardinality: "many"` and `targetCardinality: "many"`
+created, updated and deleted; any node
+delete, including one whose kind participates in a disjointness axiom (a delete
+re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
+and an undeclared `getOrCreateByEndpoints` that *finds* an existing edge in the default
+`ifExists: "return"` mode, or resurrects a `many` one — that resurrection is an
+id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
+enabled, confirming that a single `ifExists: "update"` endpoint replay is
+unchanged requires the endpoint match-key convergence fence and therefore
+refuses on these backends. Outside the native durable-convergence envelope,
+the bulk `getOrCreateByEndpoints` form returns an all-live default-`"return"`
+batch from one set-oriented root read because that outcome writes nothing.
+Inside the native envelope, the authoritative upsert runs first; it preserves
+the logical `"found"` outcome in one exchange but may take incumbent-row locks
+and produce write amplification. If any member may write, the whole batch
+retains that refusal on transactionless roots unless it matches the narrow native
+durable-convergence envelope: schema-declared
+`matchIdentity`, `cardinality: "many"` and `targetCardinality: "many"`,
+declared match fields, default `ifExists: "return"`, and no temporal mutation. That eligible form is one
+closed atomic exchange; dynamic match fields, update mode, constrained
+cardinality, temporal options, and all transaction-scoped or derived roots
+retain the refusal or fallback path required by their contracts.
+An otherwise eligible tombstoned winner cannot use the native path: the native
+attempt rolls back and transactionless convergence refuses with the typed
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
+transaction-capable backend when schema-aware resurrection is required.
+
+### Claim relations, and what they do not promise
+
+Underneath the lock, a declared constraint is also reserved in a **claim
+relation** whose primary key admits one live claimant per axis: `uniques` (for
+uniqueness scopes and `disjointWith` pairs) and `typegraph_edge_claims` (for
+source-side `cardinality: "one" | "unique" | "oneActive"` and, independently,
+[target-side `targetCardinality: "one" | "oneActive"`](/core-concepts#target-cardinality)
+— an edge kind declaring both axes reserves one row per axis, keyed apart by
+the axis name so the two never collide). Both bundled backends carry them
+and report `capabilities.constraintClaims: true`. The claim is what makes those
+constraints hold for TypeGraph writers that hold no per-graph lock at all —
+`importGraph` is the one in the box. The protocol is application-maintained:
+raw SQL that writes only `nodes` or `edges` bypasses the corresponding claim
+write and can violate the declaration. An out-of-band writer is fenced only if
+it participates in the same claim protocol in the same transaction.
+
+Three properties of that mechanism are worth knowing before you rely on it:
+
+- **A claim row's lock is held to the end of the transaction, including on
+  refusal.** A caller that catches a typed constraint error and keeps going —
+  import's per-row recovery, or your own `try`/`catch` inside
+  `store.transaction` — still holds the lock on the row it was refused at, and
+  any other writer of that axis waits until the transaction ends. This is
+  inherent to every row-lock fence, not specific to this one.
+- **Above READ COMMITTED, PostgreSQL reports a serialization failure instead of
+  the typed error.** At `REPEATABLE READ` or `SERIALIZABLE`, `INSERT … ON
+  CONFLICT DO UPDATE` raises `40001` rather than resolving the conflict, so the
+  losing writer sees a serialization failure to retry rather than
+  `UniquenessError`. SQLite has no such mode. This is unchanged from earlier
+  versions, which already reserved single-kind uniqueness through the same
+  statement.
+- **Pre-existing violations are neither repaired nor refused at boot.** A
+  database that already held two live claimants of one axis before the claim
+  relations existed keeps holding them; the next write that touches that axis is
+  refused with the ordinary typed error naming the incumbent.
+  `store.verifyConstraintFences()` is the read-only diagnostic that makes that
+  state legible ahead of time:
+
+```typescript
+for (const violation of await store.verifyConstraintFences()) {
+  switch (violation.family) {
+    case "nodeUniqueness":
+    case "nodeDisjointness":
+    case "edgeCardinality":
+    case "composition": {
+      // violation.target names the claim row two claimants contend for
+      // (axis and key are storage encodings). `edgeCardinality` also carries
+      // plain `edgeKind`, `direction` and `keyedOn`; `composition` carries `part`.
+      console.warn(violation.family, violation.target.axis, violation.target.key);
+      break;
+    }
+    default: {
+      // These families have no claim row, so no `target` to read.
+      console.warn(violation.family);
+    }
+  }
+}
+```
+
+`target` exists only on the families that are a contended claim row. Narrow on
+`violation.family` before reading it: five of the nine members carry none.
+The audit reports these families:
+
+| `family` | Reports | Carries |
+| --- | --- | --- |
+| `nodeUniqueness` | a uniqueness axis held by more than one live node | `target`, `owners` (each a `concreteKind` / `nodeId` pair, because ids are unique only per kind) |
+| `nodeDisjointness` | a `disjointWith` axis held by more than one live node | `target`, `owners` |
+| `edgeCardinality` | a source- or target-side cardinality axis held by more than one live edge | `target`, `edgeIds` |
+| `composition` | a part holding more than one live whole across every declared composition relation | `target`, `edgeIds` |
+| `compositionExistence` | live nodes of an `existence: "required"` part kind with no live whole | `partKind`, `parts` (no `target`) |
+| `compositionFutureWindow` | non-deleted rows of a composition realizing edge kind whose `validFrom` or `validTo` is later than now | `edgeKind`, `edgeIds` (no `target`) |
+| `compositionWindowOverlap` | a part whose composition edges' valid-time windows overlap | `partKind`, `partId`, `edgeIds` (no `target`) |
+| `edgeEndpointAssignability` | edge kinds whose live rows sit outside every endpoint pair the current ontology admits | `edgeKind`, `allowedPairs`, `edges` (no `target`) |
+| `edgeAcyclicity` | live edges of an `acyclic: true` relation whose `to` reaches their `from` | `relation`, `edgeIds` (no `target`) |
+
+The audit reads the nodes, edges and `uniques` relations, so it finds
+violations that predate the claim tables; it writes nothing, and it repairs
+nothing — choosing which claimant keeps the axis is a data-loss decision that
+stays with you. `edgeEndpointAssignability` is the same shrink an
+[ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+checks against, but reported for a whole graph rather than just the delta one
+schema commit proposes.
+
+`compositionExistence` reports every LIVE node of an `existence: "required"`
+composition part kind with no live whole. No live whole means either of two
+states: the part has no current composition edge at all, or the whole its edge
+names is not a live row. The second is why a part left hanging from a
+TOMBSTONED whole is reported — a state the delete cascade cannot produce, but a
+direct backend write, a custom port, or a bypassed import can. The write path's
+own incumbent decision is deliberately narrower: a tombstoned whole still holds
+its part's attachment there, so a second whole cannot quietly take it. Unlike
+the families a backend answers, this one is a portable scan (`findNodesByKind` paged,
+each page's attachments resolved through the same owner the write-path detach
+refusal reads, and each page's wholes read once per kind through the batch
+point read) rather than a `readConstraintFenceViolations` backend member — this runs only at an
+explicit diagnostic call and at schema-tightening-commit time, never on a
+write's hot path, so there is no per-dialect SQL for a custom backend to
+implement for this family.
+
+`compositionFutureWindow` reports every non-deleted row of a realizing edge
+kind whose window starts or ends later than the audit's clock. No composition
+edge write may state such a window, and every composition membership decision
+relies on that: an open-ended row is a member and an ended one is history.
+A row reported here was written before its edge kind realized a pair, or
+beneath the store. It is the same kind of portable scan as
+`compositionExistence` (`findEdgesByKind` paged, each row judged by the
+comparison the write path uses), so a custom backend has nothing to implement
+for it either.
+
+A custom backend implementing `readConstraintFenceViolations` may receive an
+`edgeEndpointAllowances` declaration (one entry per edge kind, each the
+concrete `(fromKind, toKind)` pairs the ontology still admits) and must answer
+with a `misassignedEdgeEndpointRows` array — present (even if empty) whenever
+`edgeEndpointAllowances` was non-empty. Leaving the key `undefined` when the
+family was requested is refused with `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED`
+rather than tolerated as a clean result: an empty report there would be
+indistinguishable from a database with no violations, which is the one answer
+this diagnostic must never fabricate.
+
+### Edge endpoints and concurrent node deletes
+
+A live edge never names a deleted endpoint. Every edge write that creates or
+resurrects a live edge checks that both endpoint nodes are live, and every node
+delete reads the node's connected edges and removes or refuses them by its
+`onDelete` behavior. On SQLite the two writes cannot interleave: each takes the
+single writer slot before its first read. On PostgreSQL they can, so the two
+checks are paired with row locks — the same pairing a foreign key's referential
+check makes with a delete of the referenced row:
+
+- An edge write locks both endpoint rows `FOR KEY SHARE` when it checks their
+  liveness, and holds the locks to the end of its transaction. A
+  single-statement write (a fused create, convergence, batch or claimed
+  create) takes them in that statement; the portable path reads the endpoints
+  with `lockNodes` before its insert, in the same transaction. Endpoint locks
+  do not conflict with each other or with node property updates, which lock
+  rows `FOR NO KEY UPDATE`, so concurrent edge writes and updates on a heavily
+  connected node are not serialized.
+- A node delete — single, bulk, hard, and the closed restrict-delete program —
+  locks its row(s) `FOR UPDATE` before it reads connected edges.
+- `store.clear()` deletes the graph's nodes before its edges, so it waits for
+  an uncommitted edge write and then removes the edge it committed. Edge
+  cardinality claims clear earlier in the sequence, so a claim row the waited-for
+  edge wrote can survive. It names an edge that no longer exists, so the next
+  write on that axis takes it over; until then `inspectGraphStorage` counts
+  one `edgeClaims` row for the cleared graph.
+- Both sides take their locks in (kind, id) code-point order: a single-edge
+  write names its two endpoints in that order, and a delete locks a kind's
+  rows in `id` code-point order.
+
+The outcome depends on which write runs first and on the delete's isolation
+level (edge writes at the default READ COMMITTED):
+
+| Order | Delete at READ COMMITTED (default) | Delete at REPEATABLE READ / SERIALIZABLE |
+| --- | --- | --- |
+| Delete first | The edge write waits for the delete, re-reads the endpoint, and is refused with `EndpointNotFoundError` | Same. An edge write itself running above READ COMMITTED fails with `TransactionConflictError` instead |
+| Edge write first | The delete waits for the edge write; its connected-edge read then sees the committed edge, which `cascade` / `disconnect` remove and `restrict` refuses with `RestrictedDeleteError` | **Not closed.** The delete waits, but its transaction snapshot predates the edge's commit, so it does not see the edge and commits a tombstone under it — unless both writers run at SERIALIZABLE, where PostgreSQL aborts the delete with a serialization failure (`TransactionConflictError`) |
+
+The open cell is a PostgreSQL property, not a missing lock: an edge write only
+locks the endpoint row and never updates it, and PostgreSQL raises a
+serialization failure at REPEATABLE READ only for a row that was updated after
+the snapshot. The safe choices are: delete nodes at READ COMMITTED (the
+default), or run both the delete and the edge writers at SERIALIZABLE. See
+[Limitations](/limitations#concurrent-endpoint-deletes-above-read-committed-postgresql).
+
+Because both sides lock in one order, a single-edge write and a bulk delete
+of one kind that covers both its endpoints wait on each other instead of
+deadlocking. A deadlock is still possible when a transaction deletes both
+endpoints of an edge being created concurrently through several statements
+in another order (one endpoint, then the other), when a composition whole's
+delete locks the whole and then its parts while an edge write locks the same
+nodes in `(kind, id)` order, when `store.clear()` deletes
+a graph's nodes while an edge write holds one endpoint and waits on the other,
+or when the edge write locks many endpoints at once: a transaction that creates
+several edges, or one closed batch edge program, whose rows lock endpoints row
+by row. PostgreSQL then aborts one of the two. Inside `store.transaction()`
+the abort surfaces as `TransactionConflictError`, retryable with
+`store.transaction(fn, { retry })`; a direct store call surfaces the driver's
+deadlock error (SQLSTATE `40P01`) unchanged, as it does any other conflict.
+See [Limitations](/limitations#deadlocks-between-deletes-and-edge-writes-postgresql)
+for the full list and how to retry.
+
+Two writes skip the check by design: `importGraph` with
+`validateReferences: false` inserts edges without reading their endpoints,
+and provenance retraction closes a node's currency without touching its edges.
+
+On a backend that declares `writeFence: { mechanism: "row" }` — an engine
+with neither advisory locks nor row locks — the pairing uses fence rows instead
+of row locks. Each edge write and each node delete takes one keyed fence row
+per node it locks, as its own statement before the liveness or connected-edge
+read and in the same transaction, in (kind, id) code-point order. No row-lock
+clause is emitted. Two differences from the row-lock pairing follow:
+
+- A fence row has no shared mode, so concurrent edge writes to one node wait
+  for each other, as an edge write and a delete do.
+- For the same reason, two transactions that each create several edges can
+  deadlock by fencing shared endpoints in opposite orders, where the row-lock
+  pairing's shared locks would not. The engine aborts one; inside
+  `store.transaction()` that surfaces as `TransactionConflictError`, retryable
+  with `store.transaction(fn, { retry })`. A schema-managed store does not
+  reach this order, because under a `row` fence its writers already serialize
+  on the graph's schema fence row.
+- The fence row is a write, so the open cell above closes: a delete above READ
+  COMMITTED whose snapshot predates the edge write's commit fails with
+  `TransactionConflictError` instead of missing the edge. Under
+  `conflict: "commit-time"` the losing transaction's COMMIT fails instead of
+  waiting, and the unit owner retries it.
+
+Which locks a backend takes follows its declared write fence, never its SQL
+dialect; a backend whose writers serialize takes neither.
+
+The pairing rests on [`lockNodes`](#node-row-locks-locknodes), which every
+backend implements.
 
 ### SQLite ↔ PostgreSQL parity
 
 The **query language is fully portable** between SQLite and PostgreSQL. Predicates (comparison, string/`ILIKE`,
-null, `between`, array, object, JSON-path), fixed and variable-length (recursive) traversals, aggregates
+null, `between`, array, object, JSON-path), fixed and variable-length (recursive) traversals, bounded
+neighbor reads, per-edge-kind subgraph windows, one-statement query batches, aggregates
 (`count`/`sum`/`avg`/`min`/`max` with `groupBy`/`having`), set operations (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`,
 including traversal, subquery, `GROUP BY`/`HAVING`, and per-leaf `ORDER BY`/`LIMIT`/`OFFSET` leaves), ordering with
 `NULLS FIRST`/`LAST`, cursor pagination, temporal queries, and the fulltext query modes (`websearch`, `phrase`,
@@ -889,13 +2812,44 @@ TypeGraph choosing separate query semantics per backend:
 
 | Capability                                             | SQLite                                            | PostgreSQL                                 | Behavior on the unsupported side                                                                                          |
 | ------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Case folding beyond ASCII in `ilike`, `contains`, `startsWith`, `endsWith` | ASCII only (Unicode if the ICU extension is loaded) | Per the database's `LC_CTYPE`: Unicode under a UTF-8 locale, ASCII only under `C` | A non-ASCII letter matches only its own case. `like` is case-sensitive on both. |
 | Whole-graph temporary-table analytics                  | ✓ standard connections / ✗ D1 and Durable Objects | ✓ connection-based drivers / ✗ `neon-http` | Throws `UnsupportedBackendCapabilityError`; traversal algorithms with an inline engine fall back automatically            |
 | Vector metric `inner_product`                          | ✗                                                 | ✓                                          | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
 | Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
-| HNSW `efSearch` query tuning                           | ✗                                                 | ✓                                          | Silent no-op on SQLite; Postgres applies `hnsw.ef_search`. Performance only — same results                                |
+| HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
+| TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path. Replay (`store.identity.replay` / `transitionsOf`) additionally requires `history: true` — refuses with `IDENTITY_REPLAY_REQUIRES_HISTORY` otherwise, on both dialects |
+| Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence; under that lock every constrained write is probed before it lands, including "one whole per part" across every realizing edge kind |
+| Composition claim (`partOf`/`hasPart`)                 | ✓                                                  | ✓                                           | One reserved axis in `typegraph_edge_claims`, identical on both dialects — no new relation or statement shape. Needs an interactive transaction the same way any other declared-cardinality write does (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeComposition`), and needs `typegraph_edge_claims` to already exist: a deployment initialized before it did raises `EDGE_CLAIM_RELATION_MISSING` on the first `partOf`/`hasPart` write and must be migrated under owner credentials first |
+| Durable edge match identity (`capabilities.durableEdgeMatchIdentity`) | ✓ bundled adapters | ✓ bundled adapters | Both dialects persist the same canonical key and use a unique database arbiter. A custom backend must satisfy the full capability contract above or leave the capability absent |
+| Managed node projection fusion                        | ✓ registered atomic bulk programs; singleton fallback | ✓ registered atomic bulk programs; singleton create fusion | Eligible node bulk creates and resolved updates group fulltext/vector transitions into the same atomic program as their row mutations on both dialects. PostgreSQL additionally fuses an eligible singleton generated-ID create into one SQL statement when every active strategy supplies an inserted-node builder |
+| Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
+| Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, exactly one cardinality claim (source *or* target), and the insert in one statement after any required graph lock. An edge kind constraining **both** axes always takes the portable guarded-claim path on every engine — the fused command carries at most one claim per write in this version |
+| Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on bundled recognized PostgreSQL drivers, including neon-http | `root` means the exact backend owns the atomic boundary; `session` means the exact object is already bound to an open transaction and the outer transaction owns commit/rollback. Both require identity-keyed executor registration. Neon HTTP uses its native transaction batch; session-capable `pg`, postgres-js, neon-serverless, and PGlite drivers can execute programs on one pinned Drizzle transaction. Unrecognized drivers remain `none`. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
+| Eligible registered managed writes                    | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative create statement. Eligible node updates may carry fulltext/vector replacements; unconstrained non-durable-identity edge updates, direct edge deletes, and plain restricted node deletes use one authoritative read/gate plus one registered atomic mutation. Generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches compose supported multi-claim/cross-scope claim sets with projections in one schema-fenced native program; direct edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same mutation profile. Eligible mixed `bulkUpsertById` sets, including node projections, use the profile on serverless roots and on exact bundled PostgreSQL transaction sessions; a generic derived backend still loses the evidence. A custom backend may opt in per family only after registering its exact transport and semantic executor. Unregistered or otherwise ineligible families, projected/identity-enabled node deletes, over-budget claimed members, cascade/disconnect deletes, and other managed writes retain the existing path |
+| Edge write racing a delete of its endpoint            | ✓ writers serialize on the writer slot            | ✓ for READ COMMITTED deletes; ✗ for a REPEATABLE READ / SERIALIZABLE delete whose snapshot predates the edge's commit, unless both writers run at SERIALIZABLE | The open case commits a tombstone under the edge — see [Edge endpoints and concurrent node deletes](#edge-endpoints-and-concurrent-node-deletes) |
+| Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
+| Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
+| Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
+| Edge acyclicity probe (`acyclic: true`)                 | ✓ index-only scan of `typegraph_edges_from_idx`   | ✓ index-only scan of `typegraph_edges_from_idx` | Both engines enforce the check identically — the same recursive-reachability builder, `UNION` set semantics, and no depth bound. Both refuse without transactions (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `edgeAcyclicity`) and both raise `RECURSIVE_TRAVERSAL_UNSUPPORTED` if `recursiveTraversal` is declared unsupported. No new system index is required |
+| Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares no `writeFence` resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
+| Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
+| Engine-native lineage (`backend.lineage`)               | ✗ (recorded-relations lineage via `history`)      | ✗ (recorded-relations lineage via `history`) | Neither bundled profile declares its own `lineage`. `resolveLineage` derives it from the store's recorded relations whenever `history: true` is on, identically on both dialects, so a graph-merge diff against such a store is pruned the same way regardless of backend. Without `history`, no lineage source resolves and the diff is full; the anchor is the durable revision anchor when `revisionTracking: true`, otherwise the compatibility content fingerprint |
+| Engine-native recorded time (`backend.recordedTime`)    | ✗ (TypeGraph-owned recorded relations via `history`) | ✗ (TypeGraph-owned recorded relations via `history`) | Neither bundled profile declares `recordedTime`, so `resolveRecordedTimeOwnership` derives `"typegraph-relations"` for both — `history: true` captures into TypeGraph's own recorded relations and clock, identically on both dialects, and every recorded-time integration suite and the parity snapshot run unchanged. A backend that supplies `recordedTime` (and the co-required `lineage`) reads and writes recorded time through its own engine instead: no TypeGraph capture, clock, or recorded relations, `RecordedInstant` anchors in the `e1:` form, and several TypeGraph-relation-specific surfaces refused — see [Engine-native recorded time](/queries/temporal#engine-native-recorded-time) and [Supplying `recordedTime`](/backend-authoring#supplying-recordedtime). No bundled backend implements this today; the capability is proven by a PostgreSQL-family simulation (shared by the always-running `tests/backends/postgres/pglite-engine-native-recorded-time.test.ts` and the `POSTGRES_URL`-gated `tests/backends/postgres/engine-native-recorded-time.test.ts`, both built on `engine-native-recorded-time-simulation.ts`) that dresses TypeGraph's own recorded relations as a temporal-table expression, labeled as a simulation rather than a real third engine |
+| Durable ordinary mutation outcomes | ✓ (`revisionTracking` or `history`) | ✓ (`revisionTracking` or `history`) | Atomic caller-key outcomes through `operateStore`; requires `durableStoreOperations`, interactive transactions, and protected revision origins. |
+| Wall-clock recorded-anchor lookup | ✓ (`history: true`) | ✓ (`history: true`) | Indexed retained allocation-time lookup via `resolveRecordedInstant`; bounded metadata retention with progress via `pruneRecordedInstants` (base schema 9). Lookup requires `recordedAnchorLookup`; pruning additionally requires `recordedAnchorPruning`. Engine-native histories refuse. |
+| Recorded adjacency paging | ✓ (`history: true`) | ✓ (`history: true`) | Candidate-bounded incident edge/neighbor pages. Engine-native and external recorded sources refuse with `RECORDED_ADJACENCY_UNSUPPORTED_SOURCE`. See [temporal queries](/queries/temporal). |
+
+Identity support also has a **driver** dimension inside each dialect:
+
+| Driver                                                       | Atomic identity support | Behavior                                                                                                            |
+| ------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Managed SQLite, libSQL, Durable Objects                      | ✓                       | Full profile                                                                                                        |
+| PostgreSQL `node-postgres`, `postgres-js`, neon-serverless, PGlite | ✓                  | Full profile; identity-affecting writes serialize per graph, limiting each graph to one identity writer at a time   |
+| Cloudflare D1                                                | ✗                       | Enabled graphs fail at store construction with `ConfigurationError` details code `IDENTITY_REQUIRES_ATOMIC_BACKEND` |
+| `drizzle-orm/neon-http`                                      | ✗                       | Same fail-fast error; identity-disabled graphs retain the ordinary single-statement path                            |
 
 ### Filtered approximate search
 
@@ -926,10 +2880,19 @@ filter to every row; or declare the field's index as `"none"` so it is always br
 
 Vector and fulltext capabilities are populated from the configured strategy, so the matrix above reflects the
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
-different `metrics`/`indexTypes`/`filteredApproximateSearch` shifts these rows accordingly — always check
-`backend.capabilities` at runtime rather than hard-coding the dialect.
+different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
+always check `backend.capabilities` at runtime rather than hard-coding the dialect.
 
-Both bundled backends advertise `windowFunctions: true`. Vector, fulltext, and hybrid relevance-ranking
+`searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
+per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,
+indexType, requiresTransactionScope }` names the engine parameter `efSearch` maps to (`pgvector`: `hnsw.ef_search`, on
+an `hnsw` slot, needing a transaction to scope it), while `{ tunable: false, reason }` names why the engine has no such
+knob and is what makes `efSearch` a typed refusal there. A hand-written strategy that omits the field no longer
+compiles.
+
+Both bundled backends advertise `windowFunctions: true`. Relation `topPerPartition()` refuses execution
+with `UnsupportedBackendCapabilityError` when a custom backend sets `windowFunctions: false`.
+Vector, fulltext, and hybrid relevance-ranking
 queries use `ROW_NUMBER()` internally and throw `ConfigurationError` before SQL generation if a custom backend profile
 sets `windowFunctions: false` — there the window output *is* the result (the relevance k-cutoff / rank ordinal), so
 there is no correct fallback.
@@ -950,10 +2913,17 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 :::
 
 :::note[Transactions are driver-dependent, not backend-dependent]
-Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
+Both backends report `execution.interactiveTransactions: true` by default. The exception is symmetric and lives in
+specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
-`transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`) throw on those
-drivers regardless of backend.
+`execution.interactiveTransactions: false`. Operations that require atomicity (`commitSchemaVersion`,
+`setActiveVersion`, Operational Identity) throw on those drivers regardless of backend. A
+schema-managed Store's write that cannot fuse its schema fence into its own statement fails closed
+the same way, because it has no other way to hold the transaction-scoped fence; `store.transaction()`
+refuses on those roots regardless. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares) for which
+writes fuse. Eligible operations
+with a certified atomic SQL program remain available independently of this interactive transaction capability.
 :::
 
 :::note[Aggregate set operations are a builder limitation, not a parity gap]
@@ -998,6 +2968,83 @@ process.on("exit", () => {
 Here `store.close()` leaves `sqlite` open because the application supplied the
 connection. Close the driver or pool through its own API.
 
+### Serialized connections
+
+Some drivers run every statement through **one** connection. Two long-lived
+interchange streams cannot share such a connection — an export snapshot holds a
+read transaction for the whole stream while an import writes one per chunk — so
+TypeGraph refuses the second one with a typed error instead of letting it hang
+(see
+[Interchange serialized-connection guard codes](/errors#interchange-serialized-connection-guard-codes)).
+
+Recognizing a serialized connection means recognizing the *driver*, from the
+shape of the client object. That is deliberately conservative: a driver
+TypeGraph cannot positively identify is left unmarked, because refusing a pooled
+connection would refuse work that succeeds.
+
+| Driver / configuration                                                                        | Detected           | Notes                                                                                                          |
+| --------------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| better-sqlite3, bun:sqlite, sql.js, local libSQL (`file:` / `:memory:`), Durable Object storage | ✓ automatic        | One handle, one connection                                                                                       |
+| PGlite                                                                                        | ✓ automatic        | One in-process WASM connection                                                                                   |
+| Bare `pg` / neon-serverless `Client`, a checked-out `PoolClient`                               | ✓ automatic        | One owned socket                                                                                                 |
+| `pg` `Pool` capped at one (`{ max: 1 }`, `{ max: "1" }`, `{ poolSize: "1" }`)                  | ✓ automatic        | pg-pool does not coerce the cap, so the string forms are the same one-connection pool                            |
+| postgres-js capped at one (`{ max: 1 }`, `?max=1`, `PGMAX=1`)                                  | ✓ automatic        | Same reasoning on the postgres-js side                                                                           |
+| Default-size pools, `neon-http`, D1, RDS Data API, remote libSQL (`http` / `ws`)               | — deliberately not | Each statement gets an independent connection; refusing would refuse work that succeeds                          |
+| `expo-sqlite`, `op-sqlite`, `sqlite-proxy`, `pg-proxy`, a bespoke adapter                      | ✗ **declare it**   | Serialized in fact, but the client exposes no shape TypeGraph can attribute to a known driver                    |
+| Bun `SQL` (Postgres) at `{ max: 1 }`                                                           | ✗ **declare it**   | The cap is readable, but nothing identifies the driver, and a cap on an unknown client is not evidence           |
+| postgres-js with a non-numeric string cap other than one, e.g. `?max=5`                        | ✗ **declare it**   | Opens exactly one connection today only because postgres-js does not coerce the value — marking it would encode an upstream bug that will one day be fixed |
+
+For the rows marked **declare it**, tell TypeGraph what it cannot see. The
+option is on `createSqliteBackend` and `createPostgresBackend` — the two
+factories that resolve it. The batteries-included wrappers
+(`createLibsqlBackend`, `createLocalSqliteBackend`, `createLocalPgliteBackend`)
+do not take it, because each already detects its own connection.
+
+`{ mode: "shared", resource: pool }` is incorrect for a `pg.Pool` that can open
+multiple connections, even if several backends use that pool. Each transaction
+checks out its own connection; marking the pool as one resource makes independent
+snapshot exports and imports contend for a single lease and refuses concurrent
+operations that the pool can run. Leave the declaration absent for such a pool.
+
+```typescript
+const sql = postgres(process.env.DATABASE_URL + "?max=5");
+
+const backend = createPostgresBackend(drizzle(sql), {
+  // This client really does run every statement on one connection.
+  serializedResource: { mode: "shared", resource: sql },
+});
+```
+
+Two backends that name the **same** object are one serialized resource, exactly
+as two wrappers over a detected client are. Naming a *different* object than the
+one TypeGraph detected is refused with a `ConfigurationError`
+(`details.reason: "serialized-resource-conflict"`) rather than silently
+preferred: two wrappers over one connection given two different sentinels would
+stop being seen as a pair, which is the failure the guard exists to prevent.
+The refusal names each side by constructor (`details.declaredKind` /
+`details.detectedKind`) instead of carrying the two handles, because `details`
+is what `toLogString()` serializes and a driver handle there would log whatever
+that driver stores — a `pg.Pool` keeps its `connectionString`.
+
+The reverse declaration escapes a detection that is wrong for your topology:
+
+```typescript
+const backend = createSqliteBackend(db, {
+  serializedResource: { mode: "independent" },
+});
+```
+
+**Scope.** `{ mode: "independent" }` lifts the *shared-resource* refusal between
+two distinct backend objects. It does not lift the object-identity refusal, under
+which one SQLite backend exporting into **itself** is refused with
+`INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT`. That one is a fact about a single
+handle holding a single open snapshot transaction, not a claim about connection
+topology, so no declaration can make it false — pass a second backend instead.
+That surviving refusal is SQLite-only, so on PostgreSQL the declaration lifts
+the refusal for one backend exporting into itself as well: a client that hands
+out independent connections — which is exactly what the declaration claims —
+runs the snapshot and the writes it contends with on different ones.
+
 ## Database roles & least privilege
 
 `createStoreWithSchema()` and `createStore()` divide cleanly along DDL
@@ -1006,6 +3053,11 @@ least-privilege, DML-only database role.
 
 - **`createStoreWithSchema(graph, backend)` runs DDL.** It bootstraps the
   base tables on a fresh database, applies safe auto-migrations, and
+  adopts release-added deployment-wide base storage on pre-provisioned
+  databases, even when the persisted graph schema is unchanged. The first
+  adoption creates or repairs the graph-template and edge match-identity
+  storage, then stamps a version marker; a warm base-schema check is one
+  `SELECT` with no base-adoption DDL. It also
   durably materializes strategy-owned runtime storage — both fulltext and
   each `embedding()` field's per-`(kind, field)` vector table, plus a
   durable marker for each. It also brings TypeGraph's own base-relation
@@ -1013,18 +3065,18 @@ least-privilege, DML-only database role.
   runs on the very first boot, so an index shipped in a newer version
   reaches an already-initialized database through this step (built with
   `CREATE INDEX CONCURRENTLY` on PostgreSQL; a database whose indexes all
-  exist settles from the catalog with no DDL). It re-issues idempotent DDL
-  on every cold boot — at minimum a `CREATE TABLE IF NOT EXISTS` for the
-  contribution-marker table — so the role it runs under **must hold
-  `CREATE` / DDL privileges**. Run it once at startup, outside request
+  exist settles from the catalog with no DDL). Contribution and system-index
+  preparation have their own catalog checks and may still issue DDL, so the
+  role it runs under **must hold `CREATE` / DDL privileges**. Run it once at startup, outside request
   handlers and transactions. (`store.evolve()` likewise provisions any
   embedding field it introduces, so it too needs DDL privileges.)
   Deployments that never run `createStoreWithSchema` (manual-DDL boot with
   a plain `createStore` attach) adopt new system indexes by calling
   `store.materializeSystemIndexes()` once under a DDL-capable role after
-  upgrading; deployments that must not run index builds inline at boot
-  (large tables behind a readiness probe) pass `systemIndexes: "skip"` to
-  `createStoreWithSchema` and materialize out-of-band the same way.
+  upgrading. To defer lazy materialization, pass `systemIndexes: "skip"` to
+  `createStoreWithSchema` and materialize out of band the same way. This does
+  not defer base-schema adoption: prebuild required version 5 and version 6
+  indexes concurrently before upgrading a large PostgreSQL installation.
 
 - **`createStore(graph, backend)` is a synchronous, zero-I/O attach.**
   It does not create tables, repair DDL, or record that runtime storage
@@ -1043,17 +3095,139 @@ least-privilege, DML-only database role.
   This is what lets a least-privilege role run vector ops: the table
   already exists. Graphs with no `searchable()` or `embedding()` fields
   are unaffected.
+  The Store is also raw and unversioned: its writes do not participate in
+  the schema-version fence. Direct backend writes have the same semantics.
+  Quiesce those writers yourself before changing schemas.
 
 - **`createVerifiedStore(graph, backend)` is the same zero-DDL attach
   with a verification gate.** It reads the active schema row, folds the
   persisted graph extension, and refuses to construct the Store unless
   the database is at the same schema version as the code graph. Throws
-  `MigrationError` on drift (safe or breaking), `ConfigurationError`
-  when no schema has been initialized, and `StoreNotInitializedError`
+  `BaseSchemaMigrationError` when deployment-wide base storage is missing,
+  stale, or newer than the library, `MigrationError` on graph-schema drift
+  (safe or breaking), `ConfigurationError` when no graph schema has been
+  initialized, and `StoreNotInitializedError`
   when the schema is current but runtime-contribution markers are
   missing. The runtime-side counterpart of `createStoreWithSchema` for
   least-privilege deployments. If you only need the gate without
-  building a Store (e.g. a readiness probe), call `assertSchemaCurrent`.
+  building a Store (e.g. a readiness probe), call `assertSchemaCurrent`. Both
+  are exported from `@nicia-ai/typegraph/schema`.
+  Its managed writes require a transactional backend with the schema-write
+  fence; non-transactional and unsupported custom backends can attach for
+  reads but fail closed on the first write.
+
+The adapter equivalents (`createAdapterStoreWithSchema` and
+`createVerifiedAdapterStore`) carry the same managed metadata. So does
+`createAdapterStore(..., { reconciled })` with a cached reconciliation snapshot,
+and Stores returned by `evolve()` or rebound from an already-managed Store.
+Check `store.introspect().schemaVersion !== undefined` at runtime. Calling
+`store.clear()` deletes the schema rows and resets that Store to raw semantics;
+reopen it through a managed factory before resuming version-fenced writes.
+
+- **`store.verifyContributions()` diagnoses contribution storage;
+  `store.repairContributions()` repairs safe findings under a privileged
+  role.**
+  Every gate above trusts the marker row without probing the catalog, so
+  a database whose strategy-owned tables were dropped out of band opens
+  clean and fails at the first dependent read or write. This method compares each contribution
+  currently expected by the active graph and backend strategies with its
+  marker and the catalog. It does not audit retired marker rows, and a
+  never-attempted contribution with neither marker nor table is omitted, so
+  an empty result is not initialization proof. It is read-only (`SELECT`
+  only, no DDL) so the least-privilege role can run it, and it is deliberately
+  not part of any open path. For a readiness check, construct the Store with
+  `createVerifiedStore()` first and then run this diagnostic; otherwise use
+  it as an operator check. The repair method re-audits current declarations,
+  preserves data while repairing `missing-marker` and
+  `failed-materialization`, and reports `stale` or `orphaned-marker` as
+  `requires-rebuild`. Run repair through the DDL-capable migration role, not
+  the least-privilege runtime role. Follow the per-state table in
+  [The store opens clean but a fulltext or vector read fails](/troubleshooting#the-store-opens-clean-but-a-fulltext-or-vector-read-fails)
+  rather than applying one repair to every entry.
+
+- **`store.probeContributions()` is the read-only readiness check;
+  `store.rebuildContribution()` is the destructive last resort.**
+  The two bracket `repairContributions()` into one escalation ladder:
+  probe (writes nothing) → repair (non-destructive) → rebuild
+  (destructive, but scoped to the calling graph). The probe reports one
+  `ready` / `degraded` entry per
+  search projection and is safe on a read path, on a replica, and under
+  the least-privilege role — it shares the detection logic of the other
+  two rather than reimplementing it, so it cannot disagree with the gate
+  the hot path actually consults. The rebuild is the only repair for a
+  `stale` contribution, whose table exists at a shape the current
+  `createDdl` no longer produces; it deletes and refills only the calling
+  graph's rows in the shared fulltext table, escalating to drop → recreate
+  when that table holds no other graph's rows (under a database-scoped DDL
+  advisory lock, since that DDL is database-global), and runs the whole
+  sequence inside one transaction under the schema-write fence. It refuses
+  with `ContributionRebuildUnsupportedError` for vector storage, whose
+  embeddings exist only in the table it would drop
+  (`reason: "vector-source-unavailable"`), and for a `stale` shape whose
+  storage still holds other graphs' rows
+  (`reason: "shared-storage-in-use"`, naming them in
+  `details.otherGraphIds`). Run rebuilds through
+  the DDL-capable migration role, in a maintenance window: the
+  transaction is held for the whole refill, and on PostgreSQL a drop's
+  `ACCESS EXCLUSIVE` lock blocks both searches and writes to any kind with
+  `searchable()` fields until it commits. Reach it from a `createStore()`
+  Store — the managed factory's boot step refuses to open while a
+  contribution is `stale`. See
+  [Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
+
+  Strategy contributions declare an ownership `scope`: `"graph"` (the
+  default for older custom strategies) provisions one physical contribution
+  per graph, while `"deployment"` provisions shared physical storage once
+  under TypeGraph's reserved deployment marker and records a separate
+  graph-local activation marker. The built-in full-text strategies use
+  deployment scope; vector slots remain graph-scoped. A subsequent graph open
+  reads both attestations and performs no DDL, so it can run under a
+  DML-only role without disabling full-text search. The reserved marker key is
+  exported as `DEPLOYMENT_CONTRIBUTION_GRAPH_ID`; graph definitions must not
+  use that id.
+
+### Contribution capability parity
+
+`backend.capabilities.contributions` declares how far up the ladder a
+backend goes. Each rung is separate because a backend can genuinely stop
+at any of them, and a rung a backend cannot serve refuses with a typed
+error rather than returning something that looks like success.
+
+| Backend | `supported` | `probe` | `rebuild` |
+| --- | --- | --- | --- |
+| SQLite (better-sqlite3, bun:sqlite, libSQL, Durable Objects) | ✅ | ✅ | ✅ |
+| SQLite with `transactionMode: "none"` | ✅ | ✅ | ❌ no schema fence |
+| PostgreSQL (`pg`, `postgres-js`, PGlite, `neon-serverless`) | ✅ | ✅ | ✅ |
+| PostgreSQL over `neon-http` | ✅ | ✅ | ❌ no schema fence |
+| Custom fulltext strategy without `dropDdl` | ✅ | ✅ | ❌ no teardown DDL |
+| Fulltext disabled (`fulltext: false`) | ✅ | ✅ | ✅ with a schema fence |
+
+`rebuild` requires two things at once: a fulltext strategy that declares
+`dropDdl` on its contribution, and a transactional schema fence
+(`schemaWriteTransaction`) to run the sequence under. The HTTP-only
+PostgreSQL drivers cannot hold a session across statements, so they have
+no fence — the same reason they already report
+`capabilities.execution.interactiveTransactions === false`. A third-party strategy predating
+`dropDdl` keeps working for every other operation and is reported as not
+rebuildable rather than being dropped through a synthesized statement
+TypeGraph guessed at. Vector contributions are never rebuildable on any
+backend; that is a property of what TypeGraph stores, not of the engine. A
+backend built with `fulltext: false` has no fulltext contribution at all, so
+the first condition is vacuously satisfied and `rebuild` reduces to whether
+the backend has the transactional schema fence — the same value it would
+report if fulltext were still active on a driver with that fence.
+
+**`fulltext: false` stops creating and maintaining the fulltext table; it
+never drops one.** On a database that already carries fulltext rows,
+disabling fulltext leaves them in place and unmaintained: a hard delete
+performed while fulltext is off leaves an orphaned row behind in the
+fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+build a delete statement from. Re-enabling fulltext later therefore requires
+the destructive contribution rebuild — `store.rebuildContribution("fulltext")`,
+which drops and recreates the fulltext table — **not**
+`store.search.rebuildFulltext()`: that method pages live nodes to recompute
+their content, and a hard-deleted node has no row left in the node table for
+it to page, so it never revisits, and therefore never clears, the orphan.
 
 ### Recommended deployment shape
 
@@ -1084,6 +3258,8 @@ const [/* store */] = await createStoreWithSchema(graph, adminBackend);
 ```typescript
 // 2. Runtime — least-privilege, DML-only role. Zero DDL.
 // createVerifiedStore fails fast if the privileged migrator is behind.
+import { createVerifiedStore } from "@nicia-ai/typegraph/schema";
+
 const runtimePool = new Pool({ connectionString: process.env.APP_DATABASE_URL });
 const backend = createPostgresBackend(drizzle(runtimePool));
 const [store] = await createVerifiedStore(graph, backend);

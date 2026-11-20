@@ -45,8 +45,40 @@ export const DEFAULT_STREAM_BATCH_SIZE = 1000;
 /** SQLite stores array paths as pipe-delimited strings: |id1|id2|id3| */
 export const SQLITE_PATH_DELIMITER = "|";
 
+/**
+ * Percent-escapes SQLite applies to every path token, so a token can never
+ * contain {@link SQLITE_PATH_DELIMITER} and a delimited `INSTR` match is exact.
+ * Encoding applies them in order, decoding in reverse. The escape character
+ * itself comes first, so every `%` in an encoded token starts one of these
+ * escapes and decoding cannot misread a literal `%7C` in an id.
+ */
+export const SQLITE_PATH_TOKEN_ESCAPES = [
+  { raw: "%", encoded: "%25" },
+  { raw: SQLITE_PATH_DELIMITER, encoded: "%7C" },
+] as const;
+
 /** PostgreSQL text arrays use comma-separated elements: {id1,id2,id3} */
 export const PG_PATH_ELEMENT_SEPARATOR = ",";
+
+/** Quote around a PostgreSQL text array element that needs one. */
+export const PG_ARRAY_ELEMENT_QUOTE = '"';
+
+/** Escape character inside a quoted PostgreSQL text array element. */
+export const PG_ARRAY_ELEMENT_ESCAPE = "\\";
+
+/**
+ * The characters PostgreSQL's array parser and output treat as whitespace
+ * (`array_isspace`): ASCII only. Any other character, U+00A0 included, is part
+ * of an unquoted element.
+ */
+export const PG_ARRAY_WHITESPACE: ReadonlySet<string> = new Set([
+  " ",
+  "\t",
+  "\n",
+  "\r",
+  "\v",
+  "\f",
+]);
 
 /** PostgreSQL text array start delimiter. */
 export const PG_ARRAY_START = "{";

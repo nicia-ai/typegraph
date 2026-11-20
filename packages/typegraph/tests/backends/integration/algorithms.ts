@@ -8,13 +8,26 @@
  * generation all get exercised on each backend.
  */
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { createStore, GraphAlgorithmConvergenceError } from "../../../src";
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  KindNotFoundError,
+  type Store,
+} from "../../../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import type {
   GraphBackend,
   TransactionBackend,
   TransactionOptions,
 } from "../../../src/backend/types";
+import { GraphAlgorithmConvergenceError } from "../../../src/errors-entry";
 import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
@@ -32,6 +45,40 @@ type AlgorithmFixture = Readonly<{
   dianaId: string;
   eveId: string;
 }>;
+
+const NODE_KIND_INITIALIZATION_KIND_COUNT = 30;
+const nodeKindInitializationNodes = Object.fromEntries(
+  Array.from({ length: NODE_KIND_INITIALIZATION_KIND_COUNT }, (_, index) => {
+    const kind = `BindKind${String(index).padStart(2, "0")}`;
+    return [
+      kind,
+      {
+        type: defineNode(kind, {
+          schema: z.object({ name: z.string() }),
+        }),
+      },
+    ];
+  }),
+);
+const nodeKindInitializationGraph = defineGraph({
+  id: "algorithm_node_kind_bind_budget",
+  nodes: nodeKindInitializationNodes,
+  edges: { connects: defineEdge("connects") },
+});
+const nodeKindInitializationKinds = Object.keys(
+  nodeKindInitializationNodes,
+).toSorted();
+const nodeKindInitializationKindSet = new Set(nodeKindInitializationKinds);
+type NodeKindInitializationStore = Store<typeof nodeKindInitializationGraph>;
+
+/**
+ * The seed statement binds three identifiers plus its two temporal bounds, so
+ * a 28-parameter ceiling leaves room for exactly 23 node kinds per statement.
+ */
+const NODE_KIND_INITIALIZATION_BIND_LIMIT = 28;
+const NODE_KIND_INITIALIZATION_CHUNK_SIZE = 23;
+const NODE_KIND_SEED_STATEMENT =
+  /^\s*INSERT INTO "typegraph_iterative_[^"]+"\s+\(graph_id, run_id, node_id, node_kind/u;
 
 async function resolveAlgorithmFixture(
   store: IntegrationStore,
@@ -106,9 +153,17 @@ async function seedWeightedTriangle(store: IntegrationStore) {
   return { anna, bruno, clara };
 }
 
-function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
-  return {
-    ...backend,
+type CompiledStatement = Readonly<{
+  sql: string;
+  params: readonly unknown[];
+}>;
+
+function withBindLimit(
+  backend: GraphBackend,
+  maxBindParameters: number,
+  onTemporaryStatement?: (statement: CompiledStatement) => void,
+) {
+  return deriveBackend(backend, {
     capabilities: { ...backend.capabilities, maxBindParameters },
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
@@ -125,39 +180,171 @@ function withBindLimit(backend: GraphBackend, maxBindParameters: number) {
           async executeTemporaryStatement(
             query: CompiledTemporaryStatementSql,
           ): Promise<void> {
-            assertWithinBindLimit(backend, query, maxBindParameters);
+            const compiled = assertWithinBindLimit(
+              backend,
+              query,
+              maxBindParameters,
+            );
+            onTemporaryStatement?.(compiled);
             await requireDefined(tx.executeTemporaryStatement)(query);
           },
         };
         return fn(constrainedTransaction);
       }, options);
     },
-  } satisfies GraphBackend;
+  });
 }
 
 function assertWithinBindLimit(
   backend: GraphBackend,
   query: CompiledRowsSql | CompiledTemporaryStatementSql,
   maxBindParameters: number,
-): void {
-  const parameterCount = requireDefined(backend.compileSql)(query).params
-    .length;
-  if (parameterCount <= maxBindParameters) return;
-  throw new Error(
-    `Statement used ${parameterCount} bind parameters; limit is ${maxBindParameters}.`,
+): CompiledStatement {
+  const compiled = requireDefined(backend.compileSql)(query);
+  if (compiled.params.length > maxBindParameters) {
+    throw new Error(
+      `Statement used ${compiled.params.length} bind parameters; limit is ${maxBindParameters}.`,
+    );
+  }
+  return compiled;
+}
+
+/**
+ * Runs one iterative algorithm under a bind ceiling that forces the node-kind
+ * initializer to split, and asserts both that it split and that the caller's
+ * duplicated kind still lands on the first chunk's boundary — the only
+ * arrangement in which the duplicate can prove that kinds are deduplicated
+ * before they are chunked.
+ */
+async function expectChunkedNodeKindInitialization(
+  backend: GraphBackend,
+  boundaryKind: string,
+  run: (store: NodeKindInitializationStore) => Promise<unknown>,
+): Promise<void> {
+  const initializationChunks: (readonly string[])[] = [];
+  const constrainedStore = createStore(
+    nodeKindInitializationGraph,
+    withBindLimit(backend, NODE_KIND_INITIALIZATION_BIND_LIMIT, (statement) => {
+      if (!NODE_KIND_SEED_STATEMENT.test(statement.sql)) return;
+      initializationChunks.push(
+        statement.params.filter(
+          (parameter): parameter is string =>
+            typeof parameter === "string" &&
+            nodeKindInitializationKindSet.has(parameter),
+        ),
+      );
+    }),
   );
+
+  await run(constrainedStore);
+
+  expect(initializationChunks.length).toBeGreaterThan(1);
+  expect(requireDefined(initializationChunks[0])).toHaveLength(
+    NODE_KIND_INITIALIZATION_CHUNK_SIZE,
+  );
+  expect(requireDefined(initializationChunks[0]).at(-1)).toBe(boundaryKind);
 }
 
 function withoutTemporaryStatements(backend: GraphBackend): GraphBackend {
-  const { executeTemporaryStatement, ...inlineBackend } = backend;
-  void executeTemporaryStatement;
-  return inlineBackend;
+  return projectBackendWithout(backend, ["executeTemporaryStatement"]);
 }
 
 export function registerAlgorithmIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Graph Algorithms", () => {
+    it("chunks every iterative node-kind initializer within the bind budget", async () => {
+      const store = await context.createStore(nodeKindInitializationGraph);
+      const firstKind = requireDefined(nodeKindInitializationKinds[0]);
+      const lastKind = requireDefined(nodeKindInitializationKinds.at(-1));
+      const boundaryDuplicateKind = requireDefined(
+        nodeKindInitializationKinds[NODE_KIND_INITIALIZATION_CHUNK_SIZE - 1],
+      );
+      // The duplicated kind needs a node of its own: the straddling chunks
+      // only collide on the working table's primary key if the repeated kind
+      // actually selects a row.
+      const [firstNode] = await Promise.all([
+        requireDefined(store.nodes[firstKind]).create({ name: "First" }),
+        requireDefined(store.nodes[lastKind]).create({ name: "Last" }),
+        requireDefined(store.nodes[boundaryDuplicateKind]).create({
+          name: "Boundary",
+        }),
+      ]);
+
+      // The last kind of the first chunk is repeated, so without deduplication
+      // ahead of chunking it lands in two chunks and its node is seeded twice,
+      // violating the working table's primary key.
+      const selectedKinds = [
+        ...nodeKindInitializationKinds,
+        boundaryDuplicateKind,
+      ];
+      const expectedKinds = [
+        firstKind,
+        lastKind,
+        boundaryDuplicateKind,
+      ].toSorted();
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        boundaryDuplicateKind,
+        async (scoped) => {
+          const memberships = await scoped.algorithms.weaklyConnectedComponents(
+            {
+              edges: ["connects"],
+              nodeKinds: selectedKinds,
+            },
+          );
+          expect(memberships.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        boundaryDuplicateKind,
+        async (scoped) => {
+          const memberships = await scoped.algorithms.labelPropagation({
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+          });
+          expect(memberships.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        boundaryDuplicateKind,
+        async (scoped) => {
+          const scores = await scoped.algorithms.pageRank({
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+          });
+          expect(scores.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+
+      await expectChunkedNodeKindInitialization(
+        store.backend,
+        boundaryDuplicateKind,
+        async (scoped) => {
+          const scores = await scoped.algorithms.personalizedPageRank({
+            dampingFactor: 0,
+            edges: ["connects"],
+            nodeKinds: selectedKinds,
+            seeds: [{ id: firstNode.id, kind: firstKind }],
+          });
+          expect(scores.map((row) => row.kind).toSorted()).toEqual(
+            expectedKinds,
+          );
+        },
+      );
+    });
+
     describe("core behaviors (seedKnowsChain: Alice→Bob→Charlie→Diana→Eve + Alice→Charlie)", () => {
       let ids: AlgorithmFixture;
 
@@ -707,6 +894,81 @@ export function registerAlgorithmIntegrationTests(
         ]);
       });
 
+      it("filters whole components at inclusive size boundaries", async () => {
+        const store = context.getStore();
+        const [largeA, largeB, largeC, pairA, pairB, singleton] =
+          await Promise.all([
+            store.nodes.Person.create(
+              { name: "Large component A" },
+              { id: "wcc-size-a" },
+            ),
+            store.nodes.Person.create(
+              { name: "Large component B" },
+              { id: "wcc-size-b" },
+            ),
+            store.nodes.Person.create(
+              { name: "Large component C" },
+              { id: "wcc-size-c" },
+            ),
+            store.nodes.Person.create(
+              { name: "Pair component A" },
+              { id: "wcc-size-d" },
+            ),
+            store.nodes.Person.create(
+              { name: "Pair component B" },
+              { id: "wcc-size-e" },
+            ),
+            store.nodes.Person.create(
+              { name: "Singleton component" },
+              { id: "wcc-size-f" },
+            ),
+          ]);
+        await Promise.all([
+          store.edges.knows.create(largeA, largeB, {}),
+          store.edges.knows.create(largeB, largeC, {}),
+          store.edges.knows.create(pairA, pairB, {}),
+        ]);
+
+        const filtered = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          minComponentSize: 2,
+        });
+        expect(filtered.map((row) => [row.id, row.size])).toEqual([
+          ["wcc-size-a", 3],
+          ["wcc-size-b", 3],
+          ["wcc-size-c", 3],
+          ["wcc-size-d", 2],
+          ["wcc-size-e", 2],
+        ]);
+
+        const unbounded = await store.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+        });
+        expect(unbounded.at(-1)).toEqual({
+          id: singleton.id,
+          kind: "Person",
+          componentId: singleton.id,
+          componentKind: "Person",
+          size: 1,
+        });
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            minComponentSize: 1,
+          }),
+        ).resolves.toEqual(unbounded);
+        await expect(
+          store.algorithms.weaklyConnectedComponents({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            minComponentSize: Number.MAX_SAFE_INTEGER,
+          }),
+        ).resolves.toEqual([]);
+      });
+
       it("preserves synchronous convergence across edge-kind chunks", async () => {
         const store = context.getStore();
         const [alpha, beta, gamma] = await Promise.all([
@@ -1126,6 +1388,105 @@ export function registerAlgorithmIntegrationTests(
         expect(byId.get(gamma.id)).toBeCloseTo(0.85 ** 2 / normalization, 10);
       });
 
+      it("applies topK after deterministic tie ordering", async () => {
+        const store = context.getStore();
+        const [alpha, beta] = await Promise.all([
+          store.nodes.Person.create(
+            { name: "Rank tie alpha" },
+            { id: "rank-tie-a" },
+          ),
+          store.nodes.Person.create(
+            { name: "Rank tie beta" },
+            { id: "rank-tie-b" },
+          ),
+          store.nodes.Person.create(
+            { name: "Rank tie gamma" },
+            { id: "rank-tie-c" },
+          ),
+        ]);
+
+        const unbounded = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+        });
+        await expect(
+          store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            dampingFactor: 0,
+            topK: Number.MAX_SAFE_INTEGER,
+          }),
+        ).resolves.toEqual(unbounded);
+        const topTwo = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+          topK: 2,
+        });
+        expect(topTwo).toEqual(unbounded.slice(0, 2));
+        expect(topTwo.map((row) => row.id)).toEqual([
+          "rank-tie-a",
+          "rank-tie-b",
+        ]);
+
+        const personalized = await store.algorithms.personalizedPageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          dampingFactor: 0,
+          seeds: [
+            { id: alpha.id, kind: "Person" },
+            { id: beta.id, kind: "Person" },
+          ],
+          topK: 1,
+        });
+        expect(personalized).toEqual([
+          { id: alpha.id, kind: "Person", score: 0.5 },
+        ]);
+      });
+
+      it("rejects invalid bounded-result options with typed errors", async () => {
+        const store = context.getStore();
+        const invalidBounds = [
+          0,
+          -1,
+          1.5,
+          Number.NaN,
+          Number.POSITIVE_INFINITY,
+          Number.MAX_SAFE_INTEGER + 1,
+        ];
+
+        for (const topK of invalidBounds) {
+          await expect(
+            store.algorithms.pageRank({ edges: ["knows"], topK }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { topK },
+          });
+          await expect(
+            store.algorithms.personalizedPageRank({
+              edges: ["knows"],
+              seeds: [{ id: "unused", kind: "Person" }],
+              topK,
+            }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { topK },
+          });
+        }
+        for (const minComponentSize of invalidBounds) {
+          await expect(
+            store.algorithms.weaklyConnectedComponents({
+              edges: ["knows"],
+              minComponentSize,
+            }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            details: { minComponentSize },
+          });
+        }
+      });
+
       it("preserves physical-edge and self-loop weights across chunking", async () => {
         const store = context.getStore();
         const [alpha, beta, company] = await Promise.all([
@@ -1537,6 +1898,63 @@ export function registerAlgorithmIntegrationTests(
             temporalMode: "asOf",
           }),
         ).rejects.toThrow(/asOf/);
+      });
+    });
+
+    describe("unregistered kinds", () => {
+      it("refuses an unregistered edge kind or node-kind scope instead of answering over nothing", async () => {
+        const store = context.getStore();
+        const alice = await store.nodes.Person.create({ name: "Alice" });
+        const bob = await store.nodes.Person.create({ name: "Bob" });
+        await store.edges.knows.create(alice, bob);
+        const unknownEdges = { edges: ["knowz"] } as never;
+        const unknownScope = {
+          edges: ["knows"],
+          nodeKinds: ["Persn"],
+        } as never;
+        const reads: Record<string, () => Promise<unknown>> = {
+          shortestPath: () =>
+            store.algorithms.shortestPath(alice, bob, unknownEdges),
+          weightedShortestPath: () =>
+            store.algorithms.weightedShortestPath(alice, bob, {
+              edges: ["knowz"],
+              weight: "since",
+            } as never),
+          reachable: () => store.algorithms.reachable(alice, unknownEdges),
+          canReach: () => store.algorithms.canReach(alice, bob, unknownEdges),
+          neighbors: () => store.algorithms.neighbors(alice, unknownEdges),
+          degree: () => store.algorithms.degree(alice, unknownEdges),
+          labelPropagation: () =>
+            store.algorithms.labelPropagation(unknownEdges),
+          weaklyConnectedComponents: () =>
+            store.algorithms.weaklyConnectedComponents(unknownEdges),
+          pageRank: () => store.algorithms.pageRank(unknownEdges),
+          "labelPropagation nodeKinds": () =>
+            store.algorithms.labelPropagation(unknownScope),
+          "weaklyConnectedComponents nodeKinds": () =>
+            store.algorithms.weaklyConnectedComponents(unknownScope),
+          "pageRank nodeKinds": () => store.algorithms.pageRank(unknownScope),
+        };
+
+        const refusals: Record<string, unknown> = {};
+        for (const [name, read] of Object.entries(reads)) {
+          refusals[name] = await Promise.resolve()
+            .then(() => read())
+            .then(
+              () => "answered",
+              (error: unknown) =>
+                error instanceof KindNotFoundError ? error.kindName : error,
+            );
+        }
+
+        expect(refusals).toEqual(
+          Object.fromEntries(
+            Object.keys(reads).map((name) => [
+              name,
+              name.endsWith("nodeKinds") ? "Persn" : "knowz",
+            ]),
+          ),
+        );
       });
     });
   });

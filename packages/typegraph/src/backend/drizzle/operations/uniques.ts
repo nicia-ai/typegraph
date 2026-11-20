@@ -1,28 +1,85 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import {
+  type ClaimOwnerColumnNames,
+  claimOwnerMatchesSql,
+} from "../../../store/claims/axis";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   DeleteUniqueParams,
+  HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
   SqlDialect,
 } from "../../types";
-import { quotedColumn, type Tables } from "./shared";
+import {
+  existingColumn as existingColumnFor,
+  quotedColumn,
+  type Tables,
+} from "./shared";
 
 type InsertUniqueDialectBuilder = (
   tables: Tables,
   params: InsertUniqueParams,
 ) => SQL;
 
+/** Adapts Drizzle's generic SQL tag to the representation-neutral claim owner. */
+function drizzleSqlTag(
+  strings: TemplateStringsArray,
+  ...expressions: readonly SQL[]
+): SQL {
+  return sql(strings, ...expressions);
+}
+
 /**
- * Builds an INSERT query for a uniqueness entry (SQLite).
+ * The owner columns of the uniques relation, by physical column name — the
+ * one owner {@link claimOwnerMatchesSql} is handed instead of a re-spelled
+ * qualification decision.
+ */
+function ownerColumnNames(uniques: Tables["uniques"]): ClaimOwnerColumnNames {
+  return {
+    nodeId: uniques.nodeId.name,
+    concreteKind: uniques.concreteKind.name,
+  };
+}
+
+/**
+ * The proposed row's owner columns, as bound values — the single-row builders'
+ * rendering of the `proposed` side of {@link claimOwnerMatchesSql}.
+ */
+function boundOwnerColumn(
+  uniques: Tables["uniques"],
+  params: InsertUniqueParams,
+): (columnName: string) => SQL {
+  return (columnName) =>
+    columnName === uniques.nodeId.name ?
+      sql`${params.nodeId}`
+    : sql`${params.concreteKind}`;
+}
+
+/**
+ * The batch builder's rendering of the `proposed` side of
+ * {@link claimOwnerMatchesSql}: the row `ON CONFLICT DO UPDATE` is about to
+ * write, read back off `excluded`.
+ */
+function excludedColumnByName(columnName: string): SQL {
+  return sql`excluded.${quotedColumn({ name: columnName })}`;
+}
+
+function excludedColumn(column: Readonly<{ name: string }>): SQL {
+  return excludedColumnByName(column.name);
+}
+
+/**
+ * Builds an INSERT query for a uniqueness claim (SQLite).
  *
  * Uses ON CONFLICT with a conditional update that only succeeds if:
- * 1. The existing entry belongs to the same node (safe update), OR
- * 2. The existing entry is soft-deleted (can be reused)
+ * 1. The existing claim belongs to the same node — the OWNER PAIR
+ *    `(concrete_kind, node_id)`, because ids are unique only per kind — OR
+ * 2. The existing claim is soft-deleted (can be reused)
  *
  * If a different live node holds this key, the conflict handler leaves the
- * row unchanged, and RETURNING will show the conflicting node_id.
+ * row unchanged, and RETURNING shows the conflicting owner.
  */
 function buildInsertUniqueSqlite(
   tables: Tables,
@@ -37,6 +94,19 @@ function buildInsertUniqueSqlite(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
+  const tableName = getTableName(uniques);
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor("sqlite", tableName, columnName);
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
+
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    boundOwnerColumn(uniques, params),
+    ownerColumnNames(uniques),
+  );
+
   return sql`
     INSERT INTO ${uniques} (${columns})
     VALUES (
@@ -46,33 +116,36 @@ function buildInsertUniqueSqlite(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.nodeId}
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
-        ELSE ${quotedColumn(uniques.nodeId)}
+        WHEN ${ownerMatches} THEN ${params.nodeId}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
+        ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.concreteKind}
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
-        ELSE ${quotedColumn(uniques.concreteKind)}
+        WHEN ${ownerMatches} THEN ${params.concreteKind}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
+        ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${quotedColumn(uniques.nodeId)} = ${params.nodeId} THEN NULL
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
-        ELSE ${quotedColumn(uniques.deletedAt)}
+        WHEN ${ownerMatches} THEN NULL
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
+        ELSE ${existingColumn(uniques.deletedAt)}
       END
-    RETURNING ${quotedColumn(uniques.nodeId)} as node_id
+    RETURNING
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 
 /**
- * Builds an INSERT query for a uniqueness entry (PostgreSQL).
+ * Builds an INSERT query for a uniqueness claim (PostgreSQL).
  *
  * Uses ON CONFLICT with a conditional update that only succeeds if:
- * 1. The existing entry belongs to the same node (safe update), OR
- * 2. The existing entry is soft-deleted (can be reused)
+ * 1. The existing claim belongs to the same node — the OWNER PAIR
+ *    `(concrete_kind, node_id)`, because ids are unique only per kind — OR
+ * 2. The existing claim is soft-deleted (can be reused)
  *
  * If a different live node holds this key, the conflict handler leaves the
- * row unchanged, and RETURNING will show the conflicting node_id.
+ * row unchanged, and RETURNING shows the conflicting owner.
  */
 function buildInsertUniquePostgres(
   tables: Tables,
@@ -88,8 +161,17 @@ function buildInsertUniquePostgres(
   );
 
   const tableName = getTableName(uniques);
-  const existingColumn = (column: { name: string }) =>
-    sql.raw(`"${tableName}"."${column.name}"`);
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor("postgres", tableName, columnName);
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
+
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    boundOwnerColumn(uniques, params),
+    ownerColumnNames(uniques),
+  );
 
   return sql`
     INSERT INTO ${uniques} (${columns})
@@ -100,21 +182,23 @@ function buildInsertUniquePostgres(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.nodeId}
+        WHEN ${ownerMatches} THEN ${params.nodeId}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
         ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN ${params.concreteKind}
+        WHEN ${ownerMatches} THEN ${params.concreteKind}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
         ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${params.nodeId} THEN NULL
+        WHEN ${ownerMatches} THEN NULL
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
         ELSE ${existingColumn(uniques.deletedAt)}
       END
-    RETURNING ${quotedColumn(uniques.nodeId)} as node_id
+    RETURNING
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 
@@ -137,13 +221,15 @@ export function buildInsertUnique(
 }
 
 /**
- * Builds a multi-row INSERT for uniqueness entries with the same conflict
+ * Builds a multi-row INSERT for uniqueness claims with the same conflict
  * semantics as {@link buildInsertUnique}, expressed against `excluded`
  * (the proposed row) instead of per-statement bound values. RETURNING
- * exposes `(node_kind, constraint_name, key, node_id)` for every row —
- * ON CONFLICT DO UPDATE returns updated rows too — so the caller can
- * attribute each entry's final owner and raise a uniqueness error for the
- * ones a different live node holds.
+ * exposes `(node_kind, constraint_name, key, node_id, concrete_kind)` for
+ * every row — ON CONFLICT DO UPDATE returns updated rows too — so the caller
+ * can attribute each entry's final OWNER PAIR and raise a uniqueness error for
+ * the ones a different live node holds. `concrete_kind` is load-bearing in that
+ * list: without it two batch rows sharing an id under different kinds would
+ * both read their own `node_id` back and both be accepted.
  *
  * Callers must not pass two entries with the same conflict target
  * (`node_kind`, `constraint_name`, `key`): a multi-row upsert cannot
@@ -163,25 +249,19 @@ export function buildInsertUniqueBatch(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
-  // Mirror the single-row builders' dialect split for references to the
-  // EXISTING row inside DO UPDATE: Postgres qualifies with the table name,
-  // SQLite uses the bare quoted column.
   const tableName = getTableName(uniques);
-  const existingColumn = (column: Readonly<{ name: string }>) => {
-    switch (dialect) {
-      case "postgres": {
-        return sql.raw(`"${tableName}"."${column.name}"`);
-      }
-      case "sqlite": {
-        return sql.raw(`"${column.name}"`);
-      }
-      default: {
-        return dialect satisfies never;
-      }
-    }
-  };
-  const excludedColumn = (column: Readonly<{ name: string }>) =>
-    sql.raw(`excluded."${column.name}"`);
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor(dialect, tableName, columnName);
+
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
+
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    excludedColumnByName,
+    ownerColumnNames(uniques),
+  );
 
   const valueRows = sql.join(
     entries.map(
@@ -197,17 +277,17 @@ export function buildInsertUniqueBatch(
     ON CONFLICT (${conflictColumns})
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.nodeId)}
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.nodeId)}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.nodeId)}
         ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN ${excludedColumn(uniques.concreteKind)}
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.concreteKind)}
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.concreteKind)}
         ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
-        WHEN ${existingColumn(uniques.nodeId)} = ${excludedColumn(uniques.nodeId)} THEN NULL
+        WHEN ${ownerMatches} THEN NULL
         WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
         ELSE ${existingColumn(uniques.deletedAt)}
       END
@@ -215,13 +295,142 @@ export function buildInsertUniqueBatch(
       ${quotedColumn(uniques.nodeKind)} as node_kind,
       ${quotedColumn(uniques.constraintName)} as constraint_name,
       ${quotedColumn(uniques.key)} as key,
-      ${quotedColumn(uniques.nodeId)} as node_id
+      ${quotedColumn(uniques.nodeId)} as node_id,
+      ${quotedColumn(uniques.concreteKind)} as concrete_kind
   `;
 }
 
 /**
- * Builds a soft DELETE query for a uniqueness entry.
+ * Builds the claim upsert used by the PostgreSQL node-write fusion CTE.
+ *
+ * The source relation is a backend-owned CTE with the fixed columns
+ * `(graph_id, axis, constraint_name, key, node_id, concrete_kind)`. Keeping
+ * this rendering beside the ordinary claim builders is important: the fused
+ * path must make exactly the same owner/tombstone decision as
+ * `buildInsertUnique` and `buildInsertUniqueBatch`.
+ */
+export function buildInsertUniqueFromSource(
+  tables: Tables,
+  dialect: SqlDialect,
+  sourceAlias: string,
+): SQL {
+  const { uniques } = tables;
+  const source = sql.identifier(sourceAlias);
+  const sourceColumn = (name: string): SQL =>
+    sql`${source}.${quotedColumn({ name })}`;
+  const columns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}", "${uniques.nodeId.name}", "${uniques.concreteKind.name}", "${uniques.deletedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
+  );
+  const tableName = getTableName(uniques);
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor(dialect, tableName, columnName);
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    (columnName) => excludedColumnByName(columnName),
+    ownerColumnNames(uniques),
+  );
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
+
+  return sql`
+    INSERT INTO ${uniques} (${columns})
+    SELECT
+      ${sourceColumn("graph_id")}, ${sourceColumn("axis")},
+      ${sourceColumn("constraint_name")}, ${sourceColumn("key")},
+      ${sourceColumn("node_id")}, ${sourceColumn("concrete_kind")},
+      ${sql.raw("NULL")}
+    FROM ${source}
+    ON CONFLICT (${conflictColumns})
+    DO UPDATE SET
+      ${quotedColumn(uniques.nodeId)} = CASE
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.nodeId)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.nodeId)}
+        ELSE ${existingColumn(uniques.nodeId)}
+      END,
+      ${quotedColumn(uniques.concreteKind)} = CASE
+        WHEN ${ownerMatches} THEN ${excludedColumn(uniques.concreteKind)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${excludedColumn(uniques.concreteKind)}
+        ELSE ${existingColumn(uniques.concreteKind)}
+      END,
+      ${quotedColumn(uniques.deletedAt)} = CASE
+        WHEN ${ownerMatches} THEN NULL
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
+        ELSE ${existingColumn(uniques.deletedAt)}
+      END
+    RETURNING
+      ${quotedColumn(uniques.nodeKind)} AS axis,
+      ${quotedColumn(uniques.constraintName)} AS constraint_name,
+      ${quotedColumn(uniques.key)} AS key,
+      ${quotedColumn(uniques.nodeId)} AS node_id,
+      ${quotedColumn(uniques.concreteKind)} AS concrete_kind
+  `;
+}
+
+/**
+ * Reads, without writing, the claims of a source relation that
+ * {@link buildInsertUniqueFromSource} would refuse: one row per source claim
+ * whose key a LIVE row holds for a different owner, naming that holder.
+ *
+ * The fused node write gates its writes on this read being empty. Its
+ * data-modifying CTEs all run to completion, so an upsert's own verdict can
+ * only withhold the writes that follow it — never one the same statement
+ * already made. Reading the refusal first is what lets a refused claim leave
+ * nothing behind. The source relation has the same fixed columns as the
+ * upsert's, and the refusal is the complement of the upsert's take arms.
+ */
+export function buildForeignClaimHoldersFromSource(
+  tables: Tables,
+  sourceAlias: string,
+): SQL {
+  const { uniques } = tables;
+  const source = sql.identifier(sourceAlias);
+  const sourceColumn = (name: string): SQL =>
+    sql`${source}.${quotedColumn({ name })}`;
+  const held = sql.identifier("held_claim");
+  const heldColumn = (column: Readonly<{ name: string }>): SQL =>
+    sql`${held}.${quotedColumn(column)}`;
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => sql`${held}.${quotedColumn({ name: columnName })}`,
+    (columnName) =>
+      columnName === uniques.nodeId.name ?
+        sourceColumn("node_id")
+      : sourceColumn("concrete_kind"),
+    ownerColumnNames(uniques),
+  );
+
+  return sql`
+    SELECT
+      ${sourceColumn("ordinal")} AS ordinal,
+      ${sourceColumn("axis")} AS axis,
+      ${sourceColumn("constraint_name")} AS constraint_name,
+      ${sourceColumn("key")} AS key,
+      ${heldColumn(uniques.nodeId)} AS holder_id,
+      ${heldColumn(uniques.concreteKind)} AS holder_kind
+    FROM ${source}
+    JOIN ${uniques} AS ${held}
+      ON ${heldColumn(uniques.graphId)} = ${sourceColumn("graph_id")}
+     AND ${heldColumn(uniques.nodeKind)} = ${sourceColumn("axis")}
+     AND ${heldColumn(uniques.constraintName)} = ${sourceColumn("constraint_name")}
+     AND ${heldColumn(uniques.key)} = ${sourceColumn("key")}
+    WHERE ${heldColumn(uniques.deletedAt)} IS NULL
+      AND NOT (${ownerMatches})
+  `;
+}
+
+/**
+ * Builds the owner-scoped soft DELETE that releases a uniqueness claim.
  * Uses raw column name in SET clause.
+ *
+ * The owner pair `(concrete_kind, node_id)` is always part of the predicate:
+ * a release gives up the claims THIS node holds, never a namesake's under
+ * another kind and never one that predates this node's write. `nodeKind`
+ * additionally restricts the release to one claim axis — see
+ * {@link DeleteUniqueParams} for the two shapes and who issues each.
  */
 export function buildDeleteUnique(
   tables: Tables,
@@ -230,13 +439,19 @@ export function buildDeleteUnique(
 ): SQL {
   const { uniques } = tables;
 
+  const axisTerm =
+    params.nodeKind === undefined ?
+      sql``
+    : sql` AND ${uniques.nodeKind} = ${params.nodeKind}`;
+
   return sql`
     UPDATE ${uniques}
     SET ${quotedColumn(uniques.deletedAt)} = ${timestamp}
     WHERE ${uniques.graphId} = ${params.graphId}
-      AND ${uniques.nodeKind} = ${params.nodeKind}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
       AND ${uniques.constraintName} = ${params.constraintName}
-      AND ${uniques.key} = ${params.key}
+      AND ${uniques.key} = ${params.key}${axisTerm}
       AND ${uniques.deletedAt} IS NULL
   `;
 }
@@ -247,16 +462,39 @@ export function buildDeleteUnique(
 export function buildHardDeleteUniquesByNode(
   tables: Tables,
   graphId: string,
+  concreteKind: string,
   nodeId: string,
+): SQL {
+  return buildHardDeleteUniquesByNodeIds(tables, {
+    graphId,
+    concreteKind,
+    nodeIds: [nodeId],
+  });
+}
+
+/**
+ * Builds a hard DELETE for every uniqueness entry owned by concrete nodes.
+ */
+export function buildHardDeleteUniquesByNodeIds(
+  tables: Tables,
+  params: HardDeleteUniquesByNodeIdsParams,
 ): SQL {
   const { uniques } = tables;
 
   return sql`
     DELETE FROM ${uniques}
-    WHERE ${uniques.graphId} = ${graphId}
-      AND ${uniques.nodeId} = ${nodeId}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})
   `;
 }
+
+// Re-exported from its new owner so `operations/strategy.ts:117,256,597-600`
+// sees no change.
+export { buildHardDeleteUniquesByConcreteKind } from "../../../store/claims/removal-sql";
 
 /**
  * Builds a SELECT query to check for uniqueness violations.

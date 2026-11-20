@@ -22,24 +22,27 @@ const sorted = await store
 ### Parameters
 
 ```typescript
-.orderBy(fieldSelector, direction?)
+.orderBy(expression, direction?)
 .orderBy(alias, field, direction?)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `fieldSelector` | `(ctx) => field` | Function that selects the field to sort by |
-| `alias` | `string` | Node/edge alias (alternative syntax) |
-| `field` | `string` | Field name (alternative syntax) |
+| `expression` | `(ctx) => expression` | Builds the value to sort by from the query's aliases |
+| `alias` | `string` | Node or edge alias (alias form) |
+| `field` | typed field name | A declared property or a system field of `alias` (alias form) |
 | `direction` | `"asc" \| "desc"` | Sort direction (default: `"asc"`) |
+
+The alias form is the one [cursor pagination](/queries/execute#cursor-pagination)
+and streaming accept; they refuse expression ordering.
 
 ### Single Field
 
 ```typescript
-// Function syntax
+// Expression form
 .orderBy((ctx) => ctx.p.name, "asc")
 
-// Alias syntax
+// Alias form
 .orderBy("p", "name", "asc")
 ```
 
@@ -52,31 +55,55 @@ const sorted = await store
   .query()
   .from("Task", "t")
   .select((ctx) => ctx.t)
-  .orderBy("t", "priority", "desc")    // Primary sort
-  .orderBy("t", "createdAt", "asc")    // Secondary sort
+  .orderBy("t", "priority", "desc")        // Primary sort
+  .orderBy("t", "meta.createdAt", "asc")   // Secondary sort
   .execute();
 ```
 
-Or use the array syntax:
+### Field Names
+
+In the alias form, `field` is typed from the alias's kind. It accepts:
+
+- a property the kind declares, by name (`"name"`, `"priority"`);
+- `"id"` and `"kind"`;
+- a metadata field by its path in a selected row: `"meta.validFrom"`,
+  `"meta.validTo"`, `"meta.createdAt"`, `"meta.updatedAt"`,
+  `"meta.deletedAt"`, and on a node alias `"meta.version"`;
+- on an edge alias, `"fromId"` and `"toId"`.
+
+The name is the path the value has in a selected row, so
+`orderBy("t", "meta.createdAt")` sorts by the same value a full select returns
+as `row.meta.createdAt`:
 
 ```typescript
-.orderBy((ctx) => [
-  { field: ctx.t.priority, direction: "desc" },
-  { field: ctx.t.createdAt, direction: "asc" },
-])
+const oldestFirst = await store
+  .query()
+  .from("Task", "t")
+  .orderBy("t", "meta.validFrom", "asc")
+  .select((ctx) => ctx.t)
+  .execute();
 ```
+
+Because metadata lives under `meta.`, it never collides with a property: a
+kind that declares its own `createdAt` property is ordered by it with
+`orderBy("t", "createdAt")`, and by TypeGraph's creation timestamp with
+`orderBy("t", "meta.createdAt")`.
+
+On a kind with a closed schema (`z.object`, `z.strictObject`, and objects
+wrapped by `.refine()` or built with `.extend()`), any other name is a compile
+error, and a `ConfigurationError` at runtime for callers the type checker does
+not reach. A kind whose schema admits unknown keys (`z.looseObject`,
+`.passthrough()`, `.catchall()`) may store keys it does not declare, so it orders
+by any name as a property. A key stored outside a closed schema, for example by
+an import with `onUnknownProperty: "allow"`, cannot be ordered by until the
+schema declares it (`z.string().optional()` is enough). The names are the same
+whether `orderBy()` appears before or after `select()`.
 
 ### Null Handling
 
-Control where null values appear:
-
-```typescript
-.orderBy((ctx) => ({
-  field: ctx.p.email,
-  direction: "asc",
-  nulls: "last",  // or "first"
-}))
-```
+Nulls sort last in ascending order and first in descending order, on both
+backends. Nullable system fields (`meta.validFrom`, `meta.validTo`,
+`meta.deletedAt`) and optional properties follow the same rule.
 
 ### Ordering by Edge Properties
 
@@ -208,13 +235,25 @@ const stream = store
   .query()
   .from("Event", "e")
   .select((ctx) => ctx.e)
-  .orderBy("e", "createdAt", "desc")  // Required
+  .orderBy("e", "meta.createdAt", "desc")  // Required
   .stream();
 ```
 
+`paginate()`, `page()`, and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()`, or `wholes()`) by throwing `ConfigurationError` with `details.code`
+`RECURSIVE_PAGINATION_UNSUPPORTED`, because a cursor cannot position itself inside the rows one
+start node fans out into. Read such a walk with `execute()` and an explicit `limit()` or
+`recursive({ maxHops })`.
+
 ### Stable Ordering
 
-For deterministic pagination, include a unique field (like `id`) in your ordering:
+Cursor pagination and streaming automatically append missing start-node identity keys: `id ASC`
+for a single kind, or `kind ASC` and `id ASC` for a multi-kind source. Existing caller-specified
+identity ordering is preserved. A traversal query also gets the matched edge `id` of each traversal,
+so parallel edges between one pair of nodes page as separate rows. Offset pagination needs an
+explicit total ordering.
+
+For deterministic offset pagination of one kind, include `id` in your ordering:
 
 ```typescript
 .orderBy("p", "name", "asc")
@@ -246,7 +285,7 @@ const feed = await store
   .from("Activity", "a")
   .whereNode("a", (a) => a.userId.eq(currentUserId))
   .select((ctx) => ctx.a)
-  .orderBy("a", "createdAt", "desc")
+  .orderBy("a", "meta.createdAt", "desc")
   .limit(50)
   .execute();
 ```
@@ -279,3 +318,35 @@ async function searchProducts(query: string, page: number) {
 - [Execute](/queries/execute) - Cursor pagination and streaming
 - [Shape](/queries/shape) - Output transformation
 - [Filter](/queries/filter) - Reducing results with predicates
+
+## Newest target through an edge
+
+When the source node is already available, `store.neighbors()` is the direct one-statement read:
+
+```typescript
+const [latest] = await store.neighbors(document, {
+  edges: ["hasVersion"],
+  orderBy: { by: "node", field: "sequence", direction: "desc" },
+  limit: 1,
+});
+```
+
+Use `by: "edge"` (or omit `by`) for edge metadata and `by: "node"` for an adjacent-node property.
+Both forms sort nulls last and use the edge ID as the deterministic final tie-breaker.
+
+The equivalent fluent traversal is useful when additional target predicates or projections are
+needed:
+
+```typescript
+const [newest] = await store.query()
+  .from("Document", "document")
+  .whereNode("document", (node) => node.id.eq(documentId))
+  .traverse("hasVersion", "edge").to("Version", "version")
+  .orderBy("version", "sequence", "desc")
+  .orderBy("version", "id", "desc")
+  .select((ctx) => ctx.version)
+  .limit(1)
+  .execute();
+```
+
+The ID order resolves ties deterministically. With no matching target, `newest` is `undefined`.

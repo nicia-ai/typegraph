@@ -27,3 +27,56 @@
   max-width: 100%;
   height: auto;
 }
+
+/* Blog cover art (starlight-blog's Cover component, used on both the post
+   list and individual posts) — round the corners to match the rest of the
+   site's rounded-lg convention (see the landing page's buttons/cards). */
+.sl-blog-cover-image {
+  border-radius: 0.5rem;
+}
+
+/* Blog sidebar: src/starlight-route-data.ts flattens the "Recent posts"
+   group into top-level links, which makes Starlight bold every post title
+   (its default top-level-link styling) instead of just the active one. */
+a.blog-recent-link:not([aria-current="page"]) {
+  font-weight: 400;
+}
+
+/* Blog titles: starlight-blog's index route hides the first `.content-panel`
+   (Starlight's title panel) with a `:global()` rule. Vite shares that rule
+   with every blog route under `astro dev`, so posts, tag pages and author
+   pages lose their heading; the production build splits CSS per route and is
+   unaffected. Only the index and its pagination render a post list without a
+   post count (tag and author pages add `.sl-blog-post-count`), so everywhere
+   else the title panel is shown again. This selector outranks the leaked rule. */
+main:is(:not(:has(.sl-blog-posts)), :has(.sl-blog-post-count))
+  .content-panel:first-of-type {
+  display: block;
+}
+
+/* Blog: the way back to the post list. The sidebar's "All posts" link is set
+   apart from the posts below it and gains an arrow wherever it is not the
+   current page; the same link sits above the title of every other blog page
+   (src/components/starlight/PageTitle.astro). */
+a.blog-index-link {
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+a.blog-index-link:not([aria-current="page"])::before {
+  content: "← ";
+}
+
+.blog-back-link {
+  display: inline-block;
+  margin-top: 0.25rem;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+}
+
+.blog-back-link:hover {
+  color: var(--sl-color-white);
+  text-decoration: underline;
+}

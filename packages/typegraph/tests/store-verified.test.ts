@@ -2,11 +2,11 @@
  * `createVerifiedStore` / `assertSchemaCurrent` — the runtime
  * counterpart of `createStoreWithSchema` for the "Database roles &
  * least privilege" deployment model. SELECT-only attach with a
- * verification gate: throws `ConfigurationError` when no schema has
- * been initialized, `MigrationError` when the persisted schema is
- * behind the code graph by **any** change (safe or breaking), and
- * `StoreNotInitializedError` when the schema is current but the
- * runtime-contribution markers are missing.
+ * verification gate: throws `BaseSchemaMigrationError` when deployment-wide
+ * storage has not been adopted, `ConfigurationError` when no graph schema has
+ * been initialized, `MigrationError` when the persisted schema is behind the
+ * code graph by **any** change (safe or breaking), and
+ * `StoreNotInitializedError` when runtime-contribution markers are missing.
  */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -17,16 +17,20 @@ import {
   ConfigurationError,
   createStore,
   createStoreWithSchema,
-  createVerifiedStore,
   defineGraph,
   defineNode,
+  type GraphBackend,
   MigrationError,
   searchable,
   StoreNotInitializedError,
 } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { tables as defaultTables } from "../src/backend/sqlite";
+import { BaseSchemaMigrationError } from "../src/errors-entry";
+import { createVerifiedStore } from "../src/schema";
 import { assertSchemaCurrent } from "../src/schema";
+import { disableTransactions } from "./test-utils";
 
 const PersonV1 = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -103,13 +107,59 @@ describe("createVerifiedStore", () => {
     expect(store.graphId).toBe(GRAPH_ID);
   });
 
-  it("throws ConfigurationError on a fresh database without bootstrapping tables", async () => {
+  it("fails managed writes closed when a custom transaction omits the schema fence", async () => {
+    const bootBackend = freshBackend(sqlite);
+    await createStoreWithSchema(graphV1(), bootBackend);
+    const baseRuntimeBackend = freshBackend(sqlite);
+    const runtimeBackend: GraphBackend = deriveBackend(baseRuntimeBackend, {
+      async transaction(fn, options) {
+        return baseRuntimeBackend.transaction((tx) => {
+          const {
+            lockSchemaVersionForWrite: unsupportedFence,
+            ...withoutFence
+          } = tx;
+          void unsupportedFence;
+          return fn(withoutFence);
+        }, options);
+      },
+    });
+    const [store] = await createVerifiedStore(graphV1(), runtimeBackend);
+
+    const error = await store.nodes.Person.create({ name: "Alice" }).catch(
+      (error_: unknown) => error_,
+    );
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+      graphId: GRAPH_ID,
+    });
+  });
+
+  it("fails managed writes closed on a verified non-transactional backend", async () => {
+    const bootBackend = freshBackend(sqlite);
+    await createStoreWithSchema(graphV1(), bootBackend);
+    const runtimeBackend = disableTransactions(freshBackend(sqlite));
+    const [store] = await createVerifiedStore(graphV1(), runtimeBackend);
+
+    const error = await store.nodes.Person.create({ name: "Alice" }).catch(
+      (error_: unknown) => error_,
+    );
+
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect((error as ConfigurationError).details).toMatchObject({
+      code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+      graphId: GRAPH_ID,
+    });
+  });
+
+  it("throws BaseSchemaMigrationError on a fresh database without bootstrapping tables", async () => {
     const backend = freshBackend(sqlite);
     const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
     const ensureRuntimeSpy = vi.spyOn(backend, "ensureRuntimeContributions");
 
     await expect(createVerifiedStore(graphV1(), backend)).rejects.toThrow(
-      ConfigurationError,
+      BaseSchemaMigrationError,
     );
 
     // Zero-DDL: the runtime path must not bootstrap or materialize.

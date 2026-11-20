@@ -10,7 +10,6 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
-import { compileKindFilter } from "../../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../query/compiler/recursive";
 import {
   type RecordedReadBinding,
@@ -23,9 +22,11 @@ import {
   type TemporalFilterOptions,
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { compareCodePoints } from "../../utils/compare";
+import {
+  assertRegisteredEdgeKinds,
+  assertRegisteredNodeKinds,
+} from "../registered-kinds";
 import type { AlgorithmCyclePolicy, TraversalDirection } from "./types";
 
 export const DEFAULT_ALGORITHM_MAX_HOPS = 10;
@@ -84,9 +85,12 @@ export function pickTemporalOptions(
 
 /**
  * Resolves per-call temporal overrides against the graph's default mode into
- * a plain `{ temporalMode, asOf? }` object. Shared by callers that forward
- * the pair to `buildReachableCte`. An `asOf` is rejected unless the mode is
- * `"asOf"` (via {@link resolveReadCoordinate}), matching every other read path.
+ * a plain `{ temporalMode, asOf? }` object. Consumed by the working-table
+ * iteration (`iterative-graph-operation.ts:848`), not `buildReachableCte` —
+ * `reachable`/`canReach`/`neighbors`/`shortestPath` route through the
+ * iterative working-table path and emit no recursive CTE. An `asOf` is
+ * rejected unless the mode is `"asOf"` (via {@link resolveReadCoordinate}),
+ * matching every other read path.
  */
 export function resolveTemporalOptions(
   ctx: AlgorithmContext,
@@ -103,7 +107,7 @@ export function resolveTemporalOptions(
   // `recordedAsOf` normally arrives pre-validated through StoreView's
   // withRecordedCoordinate, but it is absent from the public algorithm option
   // types, so validate here too: a type-unsafe caller that smuggles a
-  // non-canonical timestamp would otherwise be string-compared raw against
+  // non-canonical anchor would otherwise be string-compared raw against
   // recorded_from/recorded_to and return wrong rows on SQLite.
   if (options.recordedAsOf !== undefined) {
     assertValidRecordedInstant(options.recordedAsOf, "recordedAsOf");
@@ -147,6 +151,7 @@ export function resolveTemporalFilter(
     recordedAsOf: resolved.recordedAsOf,
     tableAlias,
     currentTimestamp: currentReadInstant(),
+    recordedReadBinding: ctx.recordedReadBinding,
   };
   return compileTemporalFilter(filterOptions);
 }
@@ -194,46 +199,53 @@ export function resolveMaxIterations(
   algorithm: string,
 ): number {
   const maxIterations = value ?? fallback;
-  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
-    throw new ConfigurationError(
-      `${algorithm} maxIterations must be a positive safe integer, got ${String(maxIterations)}.`,
-      { maxIterations },
-    );
-  }
+  assertPositiveSafeIntegerOption(maxIterations, algorithm, "maxIterations");
   return maxIterations;
 }
 
-export function assertEdgeKinds(edges: readonly string[]): void {
+/** Validates an optional positive safe-integer algorithm option. */
+export function assertPositiveSafeIntegerOption(
+  value: number | undefined,
+  algorithm: string,
+  optionName: string,
+): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ConfigurationError(
+      `${algorithm} ${optionName} must be a positive safe integer, got ${String(value)}.`,
+      { [optionName]: value },
+    );
+  }
+}
+
+/**
+ * @throws ConfigurationError when `edges` is empty.
+ * @throws KindNotFoundError when it names an edge kind the graph does not
+ *   register, which would otherwise traverse nothing and answer as if the
+ *   graph were simply disconnected.
+ */
+export function assertEdgeKinds(
+  ctx: Pick<AlgorithmContext, "graph">,
+  edges: readonly string[],
+): void {
   if (edges.length === 0) {
     throw new ConfigurationError(
       `Graph algorithms require at least one edge kind in 'edges'.`,
       { edges },
     );
   }
+  assertRegisteredEdgeKinds(ctx.graph, edges);
 }
 
 /**
- * Compiles the induced-subgraph node filter for a working-table seeding
- * statement over the nodes-table alias `n`; `undefined` selects every kind.
+ * @throws KindNotFoundError when a stated `nodeKinds` scope names a node kind
+ *   the graph does not register, which would otherwise seed nothing.
  */
-export function compileNodeKindSeedFilter(
+export function assertNodeKindScope(
+  ctx: Pick<AlgorithmContext, "graph">,
   nodeKinds: readonly string[] | undefined,
-): SqlFragment {
-  if (nodeKinds === undefined) return sql`TRUE`;
-  return compileKindFilter(sql.raw("n.kind"), nodeKinds);
-}
-
-/**
- * Deduplicates and code-point-sorts an induced-subgraph kind selection so
- * compiled kind filters are deterministic across call sites and backends.
- */
-export function normalizeNodeKinds(
-  nodeKinds: readonly string[] | undefined,
-): readonly string[] | undefined {
-  if (nodeKinds === undefined) return undefined;
-  return [...new Set(nodeKinds)].toSorted((left, right) =>
-    compareCodePoints(left, right),
-  );
+): void {
+  assertRegisteredNodeKinds(ctx.graph, nodeKinds ?? []);
 }
 
 export function assertGraphAnalyticsSupported(

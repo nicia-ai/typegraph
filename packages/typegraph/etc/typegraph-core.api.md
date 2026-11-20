@@ -13,7 +13,7 @@ const __edgeId: unique symbol;
 const __nodeId: unique symbol;
 
 // @public (undocumented)
-const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
+export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
 export type AllEdgeTypes<G extends GraphDef> = {
@@ -26,7 +26,10 @@ export type AllNodeTypes<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
-export type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, readonly NodeType[] | undefined>;
+export type AnyEdgeRegistration = EdgeRegistration<AnyEdgeType, NodeType, NodeType, EdgeTargets>;
+
+// @public
+export type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
 export function asEdgeId<E extends AnyEdgeType = AnyEdgeType>(value: string): EdgeId<E>;
@@ -38,10 +41,123 @@ export function asNodeId<N extends NodeType = NodeType>(value: string): NodeId<N
 export function asRecordedInstant(value: string): RecordedInstant;
 
 // @public
+function broader<N extends NodeType, B extends NodeType>(narrowerConcept: N, broaderConcept: B): TypedOntologyRelation<typeof META_EDGE_BROADER, N, B>;
+
+// @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
 
 // @public
 export type Collation = "binary" | "caseInsensitive";
+
+// @public
+export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
+
+// @public
+export type CompositionExistence = "optional" | "required";
+
+// @public
+export type CompositionOptions = Readonly<{
+    via: AnyEdgeType;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
+export type CompositionPartSide = "from" | "to";
+
+// @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
+export type CompositionViaRef = AnyEdgeType | string;
+
+// @public
+export const core: {
+    readonly subClassOfMetaEdge: Readonly<{
+        name: "subClassOf";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly broaderMetaEdge: Readonly<{
+        name: "broader";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly narrowerMetaEdge: Readonly<{
+        name: "narrower";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly relatedToMetaEdge: Readonly<{
+        name: "relatedTo";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly equivalentToMetaEdge: Readonly<{
+        name: "equivalentTo";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly disjointWithMetaEdge: Readonly<{
+        name: "disjointWith";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly partOfMetaEdge: Readonly<{
+        name: "partOf";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly hasPartMetaEdge: Readonly<{
+        name: "hasPart";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly inverseOfMetaEdge: Readonly<{
+        name: "inverseOf";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly impliesMetaEdge: Readonly<{
+        name: "implies";
+        properties: Readonly<{
+            description: string | undefined;
+        }>;
+        __metaEdge: true;
+    }>;
+    readonly subClassOf: typeof subClassOf;
+    readonly broader: typeof broader;
+    readonly narrower: typeof narrower;
+    readonly relatedTo: typeof relatedTo;
+    readonly equivalentTo: typeof equivalentTo;
+    readonly disjointWith: typeof disjointWith;
+    readonly partOf: typeof partOf;
+    readonly hasPart: typeof hasPart;
+    readonly inverseOf: typeof inverseOf;
+    readonly implies: typeof implies;
+};
 
 // @public
 export function createExternalRef<T extends string>(table: T): (id: string) => ExternalRefValue<T>;
@@ -59,10 +175,16 @@ export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape
 }): EdgeType<K, S, From, To>;
 
 // @public (undocumented)
-export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineEdgeOptions<S>): EdgeType<K, S>;
+export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[], To extends Record<From[number]["kind"], readonly [NodeType, ...NodeType[]]>>(name: K, options: DefineEdgeOptions<S, From, To> & {
+    from: From;
+    to: To;
+}): EdgeType<K, S, From, To>;
+
+// @public (undocumented)
+export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineEdgeOptions<S, undefined, undefined>): EdgeType<K, S>;
 
 // @public
-export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     schema?: S;
     description?: string;
     annotations?: KindAnnotations;
@@ -71,7 +193,7 @@ export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends
 }>;
 
 // @public
-export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[]>(config: GraphDefConfig<TNodes, TEdges, TOntology>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
+export function defineGraph<const TNodes extends Record<string, NodeRegistration<NodeType>>, const TEdges extends Record<string, EdgeEntry>, const TOntology extends readonly OntologyRelation[] = readonly [], const TIdentity extends GraphIdentityConfig | undefined = undefined>(config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
 
 // @public
 export function defineNode<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineNodeOptions<S>): NodeType<K, S>;
@@ -85,6 +207,9 @@ export type DefineNodeOptions<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
 
 // @public
 export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
+
+// @public
+function disjointWith<A extends NodeType, B extends NodeType>(kindA: A, kindB: B): TypedOntologyRelation<typeof META_EDGE_DISJOINT_WITH, A, B>;
 
 // @public
 const EDGE_TYPE_BRAND: "__edgeType";
@@ -111,19 +236,34 @@ type EdgeIndexDirection = "out" | "in" | "none";
 export type EdgeKinds<G extends GraphDef> = keyof G["edges"] & string;
 
 // @public
-export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
-
-// @public
-export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType> = Readonly<{
-    type: E;
-    from: readonly FromTypes[];
-    to: readonly ToTypes[];
-    cardinality?: Cardinality;
-    endpointExistence?: EndpointExistence;
+export type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
+    name: string;
+    fields: readonly (keyof z.infer<E["schema"]> & string)[];
 }>;
 
 // @public
-export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
+
+// @public
+export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType, ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets : readonly ToTypes[]> = Readonly<{
+    type: E;
+    from: readonly FromTypes[];
+    to: ToDef;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
+    endpointExistence?: EndpointExistence;
+    matchIdentity?: EdgeMatchIdentity<E>;
+    acyclic?: boolean;
+}>;
+
+// @public
+export type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+export type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     [EDGE_TYPE_BRAND]: true;
     kind: K;
     schema: S;
@@ -134,7 +274,7 @@ export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 }>;
 
 // @public
-export type EdgeTypeWithEndpoints = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[], readonly NodeType[]>;
+export type EdgeTypeWithEndpoints = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[], EdgeTargets>;
 
 // @public
 export function embedding<D extends number>(dimensions: D, options?: EmbeddingIndexOptions): EmbeddingSchema<D>;
@@ -147,6 +287,11 @@ const EMBEDDING_DIMENSIONS_KEY: "_embeddingDimensions";
 
 // @public
 const EMBEDDING_INDEX_KEY: "_embeddingIndex";
+
+// @public
+export type EmbeddingBrand = Readonly<{
+    [EMBEDDING_BRAND]: true;
+}>;
 
 // @public
 type EmbeddingIndexOptions = Readonly<{
@@ -170,9 +315,7 @@ export type EmbeddingSchema<D extends number = number> = z.ZodType<EmbeddingValu
 }>;
 
 // @public
-export type EmbeddingValue = readonly number[] & {
-    readonly [EMBEDDING_BRAND]: true;
-};
+export type EmbeddingValue = readonly number[] & EmbeddingBrand;
 
 // @public (undocumented)
 const EMPTY_SCHEMA: z.ZodObject<{}, z.core.$strip>;
@@ -182,6 +325,28 @@ type EmptySchema = typeof EMPTY_SCHEMA;
 
 // @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
+
+// @public
+export type EndpointPair = Readonly<{
+    from: string;
+    to: string;
+}>;
+
+// @public
+function equivalentTo<A extends NodeType, B extends NodeType>(kindA: A, kindB: B & EquivalentToCheck<A, B>): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
+
+// @public (undocumented)
+function equivalentTo<A extends NodeType | AnyEdgeType>(kindA: A, kindBOrIri: string): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, string>;
+
+// @public (undocumented)
+function equivalentTo<A extends AnyEdgeType, B extends NodeType>(kindA: A, kindB: B): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
+
+// @public
+export type EquivalentToCheck<A extends NodeType, B extends NodeType> = [
+IncompatibleKeys<NodeProps<A>, NodeProps<B>>
+] extends [never] ? [
+IncompatibleKeys<NodeProps<B>, NodeProps<A>>
+] extends [never] ? unknown : StructuralSubtypeMismatch<"equivalentTo", B["kind"], A["kind"], IncompatibleKeys<NodeProps<B>, NodeProps<A>>> : StructuralSubtypeMismatch<"equivalentTo", A["kind"], B["kind"], IncompatibleKeys<NodeProps<A>, NodeProps<B>>>;
 
 // @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -202,8 +367,11 @@ type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -281,7 +449,7 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-}>;
+}> & CompositionRealization;
 
 // @public
 type ExtensionPropertyModifiers = Readonly<{
@@ -341,6 +509,15 @@ export type ExternalRefValue<T extends string = string> = Readonly<{
 }>;
 
 // @public
+export function formatEndpointPairs(pairs: readonly EndpointPair[]): string;
+
+// @public
+export function generateId(): string;
+
+// @public
+export function getEdgeEndpointPairs(from: readonly NodeType[], to: EdgeTargets): readonly EndpointPair[];
+
+// @public
 export function getEdgeKinds<G extends GraphDef>(graph: G): readonly (keyof G["edges"] & string)[];
 
 // @public
@@ -365,12 +542,23 @@ export function getSearchableMetadata(schema: z.ZodType): SearchableMetadata | u
 const GRAPH_DEF_BRAND: "__graphDef";
 
 // @public
-export type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[]> = Readonly<{
+export type GraphAllocationOwner = Readonly<{
+    origin: string;
+    namespace: string;
+}>;
+
+// @public
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+// @public
+export type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined = GraphIdentityConfig | undefined> = Readonly<{
     [GRAPH_DEF_BRAND]: true;
     id: string;
+    annotations: GraphAnnotations | undefined;
     nodes: TNodes;
     edges: TEdges;
     ontology: TOntology;
+    identity: TIdentity;
     defaults: Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
@@ -387,18 +575,21 @@ export type GraphDefaults = Readonly<{
 }>;
 
 // @public
-type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>, TOntology extends readonly OntologyRelation[]> = Readonly<{
+type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>, TOntology extends readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined> = Readonly<{
     id: string;
+    annotations?: GraphAnnotations;
     nodes: TNodes;
     edges: TEdges;
     ontology?: TOntology;
     defaults?: GraphDefaults;
+    identity?: TIdentity;
     indexes?: readonly IndexDeclaration[];
 }>;
 
 // @public
 type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
@@ -407,6 +598,24 @@ type GraphExtension = Readonly<{
 
 // @public
 type GraphExtensionVersion = number;
+
+// @public
+export type GraphIdentityConfig = Readonly<{
+    sameIdAcrossKinds: "fold" | "ignore";
+}>;
+
+// @public
+function hasPart<Whole extends NodeType, Part extends NodeType>(whole: Whole, part: Part, options: CompositionOptions): TypedOntologyRelation<typeof META_EDGE_HAS_PART, Whole, Part>;
+
+// @public
+function implies<A extends AnyEdgeType, B extends AnyEdgeType>(edgeA: A, edgeB: B): TypedOntologyRelation<typeof META_EDGE_IMPLIES, A, B>;
+
+// @public
+type IncompatibleKeys<Child, Parent> = {
+    [K in LiteralKeysOf<Parent>]-?: K extends keyof Child ? [
+    TypeLevelChild<Child[K], Parent[K]>
+    ] extends [Parent[K]] ? never : K : undefined extends Parent[K] ? never : K;
+}[LiteralKeysOf<Parent>] & string;
 
 // @public
 type IndexDeclaration = RelationalIndexDeclaration | VectorIndexDeclaration;
@@ -492,7 +701,10 @@ type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
+function inverseOf<A extends AnyEdgeType, B extends AnyEdgeType>(edgeA: A, edgeB: B): TypedOntologyRelation<typeof META_EDGE_INVERSE_OF, A, B>;
+
+// @public
+export function isEdgeTargetMap(value: unknown): value is EdgeTargetMap;
 
 // @public
 export function isEdgeType(value: unknown): value is AnyEdgeType;
@@ -510,6 +722,9 @@ export function isExternalRefSchema(value: unknown): value is ExternalRefSchema;
 export function isGraphDef(value: unknown): value is GraphDef;
 
 // @public
+export function isMetaEdge(value: unknown): value is MetaEdge;
+
+// @public
 export function isNodeType(value: unknown): value is NodeType;
 
 // @public (undocumented)
@@ -521,7 +736,10 @@ type JsonPointer = string & {
 };
 
 // @public
-export type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+export type JsonScalar = null | string | number | boolean;
+
+// @public
+export type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -532,40 +750,60 @@ export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 export type KindEntity = "node" | "edge";
 
 // @public
+type LiteralKeysOf<T> = {
+    [K in keyof T]-?: string extends K ? never : K;
+}[keyof T] & string;
+
+// @public
 const META_EDGE_BRAND: "__metaEdge";
 
 // @public
-type MetaEdge<K extends string = string> = Readonly<{
+const META_EDGE_BROADER: "broader";
+
+// @public
+const META_EDGE_DISJOINT_WITH: "disjointWith";
+
+// @public
+const META_EDGE_EQUIVALENT_TO: "equivalentTo";
+
+// @public
+const META_EDGE_HAS_PART: "hasPart";
+
+// @public
+const META_EDGE_IMPLIES: "implies";
+
+// @public
+const META_EDGE_INVERSE_OF: "inverseOf";
+
+// @public
+const META_EDGE_NARROWER: "narrower";
+
+// @public
+const META_EDGE_PART_OF: "partOf";
+
+// @public
+const META_EDGE_RELATED_TO: "relatedTo";
+
+// @public
+const META_EDGE_SUB_CLASS_OF: "subClassOf";
+
+// @public
+export type MetaEdge<K extends string = string> = Readonly<{
     [META_EDGE_BRAND]: true;
     name: K;
     properties: MetaEdgeProperties;
 }>;
 
-// @public
-export function metaEdge<K extends string>(name: K, options?: MetaEdgeOptions): MetaEdge<K>;
-
 // @public (undocumented)
-type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
+export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
-export type MetaEdgeOptions = Readonly<{
-    transitive?: boolean;
-    symmetric?: boolean;
-    reflexive?: boolean;
-    inverse?: string;
-    inference?: InferenceType;
-    description?: string;
-}>;
-
-// @public
-type MetaEdgeProperties = Readonly<{
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
+export type MetaEdgeProperties = Readonly<{
     description: string | undefined;
 }>;
+
+// @public
+function narrower<B extends NodeType, N extends NodeType>(broaderConcept: B, narrowerConcept: N): TypedOntologyRelation<typeof META_EDGE_NARROWER, B, N>;
 
 // @public
 const NODE_TYPE_BRAND: "__nodeType";
@@ -580,6 +818,16 @@ type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
 }>;
 
 // @public
@@ -598,6 +846,7 @@ export type NodeRegistration<N extends NodeType = NodeType> = Readonly<{
 // @public
 export type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
     [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
     kind: K;
     schema: S;
     description: string | undefined;
@@ -606,18 +855,39 @@ export type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 
 // @public
 type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
-    [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"]> : never;
+    [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TEdges[K]["to"] extends (Record<string, readonly (infer N extends NodeType)[]>) ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"] : readonly TNodes[keyof TNodes]["type"][]> : never;
 };
+
+// @public
+export function normalizeTargetMap(to: EdgeTargetMap): EdgeTargetMap;
 
 // @public
 export type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
-type OntologyRelation = Readonly<{
+export type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
-    from: NodeType | EdgeType | string;
-    to: NodeType | EdgeType | string;
+    from: NodeType | AnyEdgeType | string;
+    to: NodeType | AnyEdgeType | string;
+}> & CompositionRealization;
+
+// @public
+type OpaqueTypeLevelValue = string | number | bigint | boolean | symbol | Date | RegExp | Error | Promise<unknown> | ReadonlyMap<unknown, unknown> | ReadonlySet<unknown> | ((...args: never[]) => unknown);
+
+// @public
+function partOf<Part extends NodeType, Whole extends NodeType>(part: Part, whole: Whole, options: CompositionOptions): TypedOntologyRelation<typeof META_EDGE_PART_OF, Part, Whole>;
+
+// @public
+export type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind" | "__nodeKind"> & Readonly<{
+    kind: string;
+    __nodeKind?: N["kind"];
 }>;
+
+// @public
+export function projectTargetKinds(to: EdgeTargets): readonly string[];
+
+// @public
+export function projectTargetNodes(to: EdgeTargets): readonly NodeType[];
 
 // @public (undocumented)
 const RECORDED_INSTANT_BRAND: unique symbol;
@@ -626,6 +896,25 @@ const RECORDED_INSTANT_BRAND: unique symbol;
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
+
+// @public
+export function recordedInstant(coordinate: Readonly<{
+    revision: number;
+    wallTime: string;
+    owner: GraphAllocationOwner;
+}>): RecordedInstant;
+
+// @public
+export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
+
+// @public
+export function recordedInstantRevision(instant: RecordedInstant): number;
+
+// @public
+export function recordedInstantWallTime(instant: RecordedInstant): string;
+
+// @public
+function relatedTo<A extends NodeType, B extends NodeType>(conceptA: A, conceptB: B): TypedOntologyRelation<typeof META_EDGE_RELATED_TO, A, B>;
 
 // @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
@@ -644,6 +933,14 @@ type ResolvedEmbeddingIndex = Readonly<{
 
 // @public
 export function resolveGraphVectorSlots(graph: GraphDef): readonly VectorSlot[];
+
+// @public
+export type RestoredRecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
+};
+
+// @public
+type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (Readonly<Record<typeof z.core.$brand, infer Tag>>) ? Readonly<Record<typeof z.core.$brand, Tag>> : unknown) & (NonNullable<Parent> extends EmbeddingBrand ? EmbeddingBrand : unknown);
 
 // @public
 export function searchable(options?: SearchableOptions): SearchableSchema;
@@ -666,11 +963,58 @@ export type SearchableSchema = z.ZodString & Readonly<{
     [SEARCHABLE_FIELD_KEY]: SearchableMetadata;
 }>;
 
+// @public
+export type StructuralSubtypeMismatch<Relation extends keyof StructuralSubtypeMismatchWording, ChildKind extends string, ParentKind extends string, Fields extends string> = Readonly<{
+    __typegraphStructuralSubtypeError: `${Relation}(${ChildKind}, ${ParentKind}): ${StructuralSubtypeMismatchWording[Relation]["requirement"]}`;
+    missingOrIncompatibleProperties: Fields;
+    fix: StructuralSubtypeMismatchWording[Relation]["fix"];
+}>;
+
+// @public
+type StructuralSubtypeMismatchWording = Readonly<{
+    subClassOf: Readonly<{
+        requirement: "the child's schema must extend the parent's";
+        fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
+    }>;
+    equivalentTo: Readonly<{
+        requirement: "each kind's schema must extend the other's, and the first named here does not extend the second";
+        fix: "Give the first kind these properties with compatible types, or declare subClassOf() in the one direction that holds.";
+    }>;
+}>;
+
+// @public
+function subClassOf<C extends NodeType, P extends NodeType>(child: C, parent: P & SubClassOfCheck<C, P>): TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P>;
+
+// @public
+export type SubClassOfCheck<C extends NodeType, P extends NodeType> = [
+IncompatibleKeys<NodeProps<C>, NodeProps<P>>
+] extends [never] ? unknown : StructuralSubtypeMismatch<"subClassOf", C["kind"], P["kind"], IncompatibleKeys<NodeProps<C>, NodeProps<P>>>;
+
 // @public (undocumented)
 type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
 
 // @public
+export type TargetCardinality = Exclude<Cardinality, "unique">;
+
+// @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
+
+// @public
+export type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
+    metaEdge: MetaEdge<M>;
+    from: From;
+    to: To;
+}> & CompositionRealization;
+
+// @public
+type TypeLevelChild<Child, Parent> = Child extends null | undefined ? Child : (Child extends OpaqueTypeLevelValue ? Child : Child extends readonly (infer Element)[] ? number extends Child["length"] ? TypeLevelChild<Element, TypeLevelElement<Parent>>[] : {
+    -readonly [Index in keyof Child]: TypeLevelChild<Child[Index], TypeLevelElement<Parent>>;
+} : Child extends object ? {
+    [Key in keyof Child]: Key extends keyof NonNullable<Parent> ? TypeLevelChild<Child[Key], NonNullable<Parent>[Key]> : Child[Key];
+} : Child) & RuntimeInvisibleTags<Parent>;
+
+// @public (undocumented)
+type TypeLevelElement<Parent> = NonNullable<Parent> extends readonly (infer Element)[] ? Element : unknown;
 
 // @public
 export type UniqueConstraint<S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
@@ -701,6 +1045,9 @@ type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Re
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
+
+// @public
+export function validateTargetMapEntries(name: string, from: readonly NodeType[] | undefined, to: unknown): asserts to is EdgeTargetMap;
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";

@@ -1,5 +1,22 @@
 /**
- * PostgreSQL backend adapter for TypeGraph.
+ * PostgreSQL engine profile for TypeGraph.
+ *
+ * `createPostgresBackend` builds a `SqlEngineProfile`
+ * (`buildPostgresEngineProfile`) and hands it to `createSqlBackend`
+ * (`./engine`), which assembles the mirrored member groups — fulltext,
+ * vector, contribution, identity, graph-template, base-schema,
+ * index-materialization, kind-removal, schema-version — that this file
+ * shares with `sqlite.ts` through `./engine/members/*.ts`. What stays here
+ * is the PostgreSQL-owned island `createSqlBackend` cannot share: the
+ * execution adapter and its driver-shape detection, the advisory-lock write
+ * fence, the GUC-wrapped vector search path, transaction framing
+ * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
+ * `trustedImport` / `extensions`), the DDL and extension provisioning
+ * `EngineProvisioning` wires through, the dialect's own operation-backend
+ * construction (deferred, via `assembleEngine`'s `buildOperations`, until
+ * the contribution materializer exists), and `hybridSearch` (an
+ * embedding-adjacent member kept inline on both dialects rather than part
+ * of the shared assembly).
  *
  * Works with any Drizzle PostgreSQL database instance. Tested against:
  * - `drizzle-orm/node-postgres` (pg Pool / Client)
@@ -35,46 +52,111 @@ import {
   getTableName,
   inArray,
   isNull,
+  lte,
   type SQL,
   sql,
 } from "drizzle-orm";
-import { PgTransaction } from "drizzle-orm/pg-core";
+import { PgTransaction, type PgTransactionConfig } from "drizzle-orm/pg-core";
 
-import { CompilerInvariantError, ConfigurationError } from "../../errors";
+import {
+  BaseSchemaAdoptionTimeoutError,
+  CompilerInvariantError,
+  ConfigurationError,
+  SchemaFenceTimeoutError,
+  StaleVersionError,
+} from "../../errors";
+import {
+  adjacencyIndexAdoptionDdl,
+  generateGraphIdOrderIndexDDL,
+  graphIdOrderIndexTables,
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
+import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
-  buildFulltextCapabilities,
   type FulltextStrategy,
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
   assertPgvectorEfSearch,
+  isPgvectorStrategy,
   pgvectorStrategy,
 } from "../../query/dialect/vector/pgvector-strategy";
 import {
   assertVectorSearchLimit,
-  buildVectorCapabilities,
+  resolveEfSearchOverride,
+  vectorSearchFrontierTuning,
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import {
-  isSqlFragment,
-  sql as portableSql,
-  type SqlFragment,
-} from "../../query/sql-fragment";
+import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
 import {
   annIndexScanTypes,
+  asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
-import { chunk as chunkArray } from "../../utils/array";
+import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
   isMissingTableError,
+  isPostgresConcurrentDdlRaceError,
+  isPostgresLockTimeout,
 } from "../../utils/sql-errors";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
+import {
+  type AtomicEdgeConvergenceInput,
+  type AtomicEdgeConvergenceResult,
+  type AtomicEdgeMutationProgramExecutor,
+  type AtomicEdgeResolvedMutationSetInput,
+  type AtomicEdgeResolvedMutationSetResult,
+  carryAtomicMutationSessionRegistration,
+  registerAtomicMutationPrograms,
+} from "../capabilities/atomic-mutation-program";
+import {
+  type AtomicSqlProgramExecutor,
+  createAtomicSqlProgramExecutor,
+  registerAtomicSqlProgram,
+} from "../capabilities/atomic-sql-program";
+import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../capabilities/batch-write-verdict";
+import {
+  assertNoLegacyTransactionCapability,
+  sealCapabilityDeclaration,
+} from "../capabilities/declarations";
+import { scopeAtomicBatchToSession } from "../capabilities/execution";
+import { resolveNodeRowLockPlan } from "../capabilities/node-row-lock-plan";
+import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../capabilities/retried-unit";
+import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
+import {
+  markFirstPartyFactory,
+  registerFirstPartyProfile,
+  requireWriteFence,
+  resolveWriteFencePlan,
+  type WriteFencePlan,
+  type WriteFenceTarget,
+} from "../capabilities/write-fence";
+import {
+  FENCE_ISOLATION_COLUMN,
+  observesEveryEarlierFenceHolder,
+  readGraphWriteFenceAcquisition,
+} from "../command-contract";
+import { deriveBackend } from "../derive-backend";
+import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
-  coerceNumericScore,
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+  recordedAnchorAdoptionTimeoutBudget,
+} from "../recorded-storage";
+import { REVISION_JOURNAL_ENTITY } from "../revision-journal";
+import {
   createEdgeRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
@@ -83,80 +165,129 @@ import {
   POSTGRES_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
 import {
+  registerDriverSavepointScope,
+  runSessionSavepoint,
+} from "../session-savepoint";
+import {
+  resolveDeclaredBackendResource,
+  type SerializedResourceDeclaration,
+} from "../transaction-resource";
+import {
   type AdapterBackend,
+  type AdoptedSchemaWriteTransaction,
   type BackendCapabilities,
+  type BackendCatalogProbes,
+  type BundledBackendCapabilityOverrides,
+  type CatalogColumn,
   type ClaimIndexMaterializationParams,
-  type CommitSchemaVersionParams,
-  type ContributionMaterializationIdentity,
-  type ContributionMaterializationRow,
-  createBackendOverlay,
-  type CreateVectorIndexParams,
-  type DeleteEmbeddingParams,
-  type DeleteFulltextBatchParams,
-  type DeleteFulltextParams,
-  type DropVectorIndexParams,
-  type FulltextSearchParams,
-  type FulltextSearchResult,
+  DATABASE_EXTENSION_NAMES,
+  type DatabaseExtensionName,
+  type EngineRecordedTimeMembers,
+  type GraphBackend,
+  type GraphWriteFenceAcquisition,
+  type HeterogeneousNodeUpsertParams,
   type HybridSearchParams,
   type HybridSearchRow,
-  type IndexMaterializationRow,
+  type IndexState,
+  type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
-  type KindRemovalRow,
+  type LineageMembers,
+  type LockSchemaVersionForWriteParams,
+  type ManagedNodeCreatePlan,
+  type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
-  type RecordContributionMaterializationParams,
-  type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
-  type SchemaVersionRow,
-  type SetActiveVersionParams,
+  type SchemaProvisioning,
+  type SchemaWriteTransactionBackend,
+  type TableState,
   type TransactionBackend,
+  type TrustedImportOptions,
   type TrustedImportSession,
-  type UpsertEmbeddingBatchParams,
-  type UpsertEmbeddingParams,
-  type UpsertFulltextBatchParams,
-  type UpsertFulltextParams,
   type VectorSearchParams,
-  type VectorSearchResult,
 } from "../types";
+import { assertBaseSchemaVersionCurrent } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
-  createContributionMaterializer,
+  ensureAdoptedVectorSlots,
   gateFulltext,
-  gateFulltextMethods,
   mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
+  type RawContributionMaterializationRow,
 } from "./contribution-materializations";
-import { generatePgCreateTableSQL, generatePostgresDDL } from "./ddl";
+import {
+  edgeMatchIdentityPairCheckName,
+  edgeMatchIdentityUniqueIndexName,
+  generatePgCreateIndexSQL,
+  generatePgCreateTableSQL,
+  generatePostgresDDL,
+  generatePostgresEdgeMatchIdentityUpgradeDDL,
+  postgresContributions,
+  postgresIdentifierRegclassName,
+  postgresRecordedAnchorRetentionAdoptionDDL,
+} from "./ddl";
+import {
+  type BaseSchemaRuntime,
+  type ContributionRuntime,
+  createSqlBackend,
+  type EngineProvisioning,
+  type GraphTemplateRuntime,
+  type IdentityRuntime,
+  type IndexMaterializationRuntime,
+  type KindRemovalRuntime,
+  type SqlEngineProfile,
+} from "./engine";
+import { assembleEngine } from "./engine/assembly";
+import { createContributionOperationMembers } from "./engine/members/contribution-members";
+import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createVectorMembers } from "./engine/members/vector-members";
+import {
+  buildCommonOperationOptions,
+  createEngineOperationBackend,
+} from "./engine/operation-layer";
+import {
+  type EngineAssemblyContext,
+  type EngineLateMembers,
+  type EngineOperationsContext,
+  resolveSchemaProvisioning,
+} from "./engine/profile";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
+  getPgliteClient,
+  getPinnedPostgresTransactionClient,
+  hasFunctionProperty,
   isNeonHttpClient,
+  isPgliteDatabase,
+  isPostgresJsClient,
+  PGLITE_MAX_BIND_PARAMETERS,
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import { createPostgresTransactionSession } from "./execution/postgres-transaction-session";
+import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
+import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
-  mapMaterializationRow,
   POSTGRES_INDEX_MAT_TIMESTAMPS,
 } from "./index-materializations";
 import {
   buildKindRemovalInsertValues,
   buildKindRemovalOnConflictSet,
-  mapKindRemovalRow,
   POSTGRES_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
+  assertActiveSchemaVersion,
   assertAdoptedDialect,
-  type CommonOperationBackend,
   createCommonOperationBackend,
   type InternalOperationBackend,
 } from "./operation-backend-core";
@@ -164,8 +295,23 @@ import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
+  tableExistsFromRow,
 } from "./operations/strategy";
 import {
+  allocationSchemaOfTables,
+  allocationSchemaPin,
+  backendRelationSchema,
+  markAllocationSchemaBackend,
+  relationInBackendSchema,
+} from "./postgres-allocation-schema";
+import {
+  advisoryLockSingleExpression,
+  postgresDdlLockStatement,
+  postgresFenceSql,
+} from "./postgres-fence-sql";
+import {
+  createPostgresTables as buildPostgresTables,
+  type PostgresTableNames,
   type PostgresTables,
   tables as defaultTables,
 } from "./schema/postgres";
@@ -180,8 +326,6 @@ import {
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
-  vectorSlotFromCreateIndexParams,
-  vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
 } from "./vector-runtime";
 
@@ -193,6 +337,8 @@ import {
  * Options for creating a PostgreSQL backend.
  */
 export type PostgresBackendOptions = Readonly<{
+  /** Opt in to transactional DDL in a caller-owned schema transaction. */
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Custom table definitions. Use createPostgresTables() to customize table names.
    * Defaults to standard TypeGraph table names.
@@ -205,8 +351,15 @@ export type PostgresBackendOptions = Readonly<{
    * expression, and snippet generation — for alternate Postgres
    * backends like ParadeDB (`pg_search`), pg_trgm similarity, or
    * pgroonga without forking TypeGraph.
+   *
+   * Pass `false` to disable fulltext support entirely. The backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/
+   * search methods, mirroring `vector: false`. A fulltext predicate, a
+   * `searchable()` field, `store.search.fulltext`, and hybrid search all
+   * refuse with a typed error instead of running SQL against a table
+   * this backend never creates.
    */
-  fulltext?: FulltextStrategy;
+  fulltext?: FulltextStrategy | false;
   /**
    * Vector strategy override. Defaults to `pgvectorStrategy` (pgvector's
    * `vector(N)` columns + HNSW/IVFFlat). The strategy owns per-`(kind,
@@ -214,7 +367,9 @@ export type PostgresBackendOptions = Readonly<{
    * ANN index lifecycle — and advertises `strategy.capabilities` as
    * `capabilities.vector`. Pass a custom strategy to swap the entire
    * vector stack for an alternate Postgres extension without forking
-   * TypeGraph.
+   * TypeGraph. For multiple TypeGraph allocations sharing a database,
+   * `createPgvectorStrategy(allocationId)` gives each allocation its own
+   * physical table and index namespace.
    *
    * Pass `false` to disable vector support entirely. The backend then
    * advertises no `capabilities.vector` and omits the embedding/search
@@ -229,15 +384,17 @@ export type PostgresBackendOptions = Readonly<{
    * Override specific backend capabilities. Useful when the underlying
    * driver doesn't support a feature TypeGraph would otherwise assume —
    * for example, an HTTP-only Postgres driver that can't hold a session
-   * across statements would need `{ transactions: false }` so
-   * TypeGraph falls through to non-transactional execution paths.
+   * across statements would need
+   * `{ execution: { interactiveTransactions: false } }` so TypeGraph refuses
+   * paths that require an interactive transaction. Root atomic-batch support
+   * is transport-derived and cannot be overridden here.
    *
-   * `drizzle-orm/neon-http` is auto-detected and has `transactions`
+   * `drizzle-orm/neon-http` is auto-detected and has interactive transactions
    * disabled without an explicit override; this option exists for
    * other HTTP-style drivers and for tests that need to simulate a
    * capability gap.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
   /**
    * Use server-side prepared statements (named statements cached per
    * pg connection) on the node-postgres / neon-serverless fast path.
@@ -251,57 +408,679 @@ export type PostgresBackendOptions = Readonly<{
    */
   prepareStatements?: boolean;
   /**
-   * Cap on the number of distinct SQL strings tracked for
-   * prepared-statement naming. Defaults to 256. The cache is LRU-
-   * bounded so high-cardinality SQL text (variable-length IN-lists,
-   * generated aliases, `backend.execute()` calls with one-off SQL)
-   * doesn't grow unbounded in either the Node process or in
-   * PostgreSQL's per-session prepared-statement memory. Worst-case
-   * server-side footprint is roughly `cap × pool size` statements
-   * across all pooled connections. Ignored when
-   * `prepareStatements` is `false`.
+   * Cap on the number of distinct SQL strings retained in TypeGraph's
+   * in-process SQL-to-statement-name lookup. Defaults to 256. Eviction never
+   * reuses a name, so this does not deallocate or bound prepared statements
+   * retained on live PostgreSQL connections. Set `prepareStatements: false`
+   * for high-cardinality SQL text when server-side statement retention is not
+   * acceptable. Ignored when `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
+  /**
+   * Declare the connection this backend serializes every statement onto, when
+   * TypeGraph's driver predicates cannot see it (Bun `SQL` at `{ max: 1 }`,
+   * `pg-proxy`, a postgres-js client capped through a non-numeric string the
+   * driver does not coerce) — or declare that it serializes on nothing, when
+   * detection is wrong for your topology.
+   *
+   * Defaults to `{ mode: "detect" }`. See
+   * {@link SerializedResourceDeclaration} for what each mode means and for the
+   * one refusal it cannot lift (`same-sqlite-backend`, which is SQLite-only and
+   * therefore never reached from here).
+   */
+  serializedResource?: SerializedResourceDeclaration;
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
-const EDGE_INSERT_PARAM_COUNT = 12;
-const POSTGRES_NODE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / NODE_INSERT_PARAM_COUNT),
-);
-const POSTGRES_EDGE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / EDGE_INSERT_PARAM_COUNT),
-);
-const POSTGRES_GET_NODES_ID_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - 2,
-);
-const POSTGRES_GET_EDGES_ID_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - 1,
-);
+const SCHEMA_FENCE_PARAM_COUNT = 2;
+// Durable edge rows bind match-identity name and key in addition to the
+// ordinary edge shape. Budget for the widest supported row so native batches
+// never cross the driver's parameter ceiling.
+const EDGE_INSERT_PARAM_COUNT = 14;
+const GET_NODES_FIXED_PARAM_COUNT = 2;
+const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const FULLTEXT_UPSERT_PARAM_COUNT = 6;
 const FULLTEXT_DELETE_FIXED_PARAM_COUNT = 2;
-const POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / FULLTEXT_UPSERT_PARAM_COUNT),
-);
-const POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
-);
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;
-const POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE = Math.max(
-  1,
-  POSTGRES_MAX_BIND_PARAMETERS - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
-);
+const UNIQUE_DELETE_FIXED_PARAM_COUNT = 2;
 const UNIQUE_INSERT_PARAM_COUNT = 6;
-const POSTGRES_UNIQUE_INSERT_BATCH_SIZE = Math.max(
-  1,
-  Math.floor(POSTGRES_MAX_BIND_PARAMETERS / UNIQUE_INSERT_PARAM_COUNT),
-);
+
+type PostgresBatchChunkSizes = Readonly<{
+  checkUniqueBatchChunkSize: number;
+  edgeInsertBatchSize: number;
+  edgeSchemaFencedInsertBatchSize: number;
+  embeddingUpsertBatchSize: number;
+  findEdgesEndpointChunkSize: number;
+  fulltextDeleteChunkSize: number;
+  fulltextUpsertBatchSize: number;
+  getEdgesChunkSize: number;
+  getNodesChunkSize: number;
+  nodeInsertBatchSize: number;
+  nodeSchemaFencedInsertBatchSize: number;
+  uniqueDeleteChunkSize: number;
+  uniqueInsertBatchSize: number;
+}>;
+
+type RevisionJournalTableNames = Readonly<{
+  nodes: string;
+  edges: string;
+  identityAssertions: string;
+  recordedClock: string;
+  revisionChanges: string;
+}>;
+
+function quoteRevisionJournalIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+const REVISION_CHANGE_FUNCTION = "typegraph_record_revision_change";
+
+function postgresRevisionChangeTargets(names: RevisionJournalTableNames) {
+  return [
+    { entity: REVISION_JOURNAL_ENTITY.node, table: names.nodes },
+    { entity: REVISION_JOURNAL_ENTITY.edge, table: names.edges },
+    {
+      entity: REVISION_JOURNAL_ENTITY.identity,
+      table: names.identityAssertions,
+    },
+  ] as const;
+}
+
+function revisionChangeTriggerName(entity: string, table: string): string {
+  return `tg_rc_${entity}_${table.slice(0, 32)}`;
+}
+
+function postgresRevisionChangeTriggers(
+  names: RevisionJournalTableNames,
+): readonly string[] {
+  const functionDdl = `CREATE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}()
+RETURNS trigger LANGUAGE plpgsql AS $tg$
+DECLARE changed_graph text; changed_kind text; changed_id text; next_revision bigint;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    changed_graph := OLD.graph_id;
+    changed_kind := COALESCE(to_jsonb(OLD)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(OLD)->>'id', '');
+  ELSE
+    changed_graph := NEW.graph_id;
+    changed_kind := COALESCE(to_jsonb(NEW)->>'kind', '');
+    changed_id := COALESCE(to_jsonb(NEW)->>'id', '');
+  END IF;
+  IF TG_ARGV[2] = 'identity' THEN
+    changed_kind := '';
+    changed_id := '';
+  END IF;
+  IF to_regclass(format('%I', TG_ARGV[1])) IS NULL THEN
+    next_revision := 1;
+  ELSE
+    EXECUTE format('SELECT COALESCE((SELECT revision FROM %I WHERE graph_id = $1), 0) + 1', TG_ARGV[1])
+      INTO next_revision USING changed_graph;
+  END IF;
+  EXECUTE format('INSERT INTO %I (entry_id, graph_id, revision, complete, entity, kind, id) VALUES (md5(random()::text || clock_timestamp()::text || txid_current()::text || $1), $1, $2, $3, $4, $5, $6)', TG_ARGV[0])
+    USING changed_graph, next_revision, TG_ARGV[2] <> 'identity', TG_ARGV[2], changed_kind, changed_id;
+  RETURN NULL;
+END; $tg$`;
+  const installFunctionDdl = `DO $install$ BEGIN
+  ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)}
+  IF to_regprocedure('${REVISION_CHANGE_FUNCTION}()') IS NULL THEN
+    EXECUTE $definition$ ${functionDdl} $definition$;
+  END IF;
+END; $install$`;
+  const triggerDdl = postgresRevisionChangeTargets(names).map(
+    ({ entity, table }) => {
+      const triggerName = revisionChangeTriggerName(entity, table);
+      const relation = postgresIdentifierRegclassName(table).replaceAll(
+        "'",
+        "''",
+      );
+      const trigger = triggerName.replaceAll("'", "''");
+      const journal = names.revisionChanges.replaceAll("'", "''");
+      const clock = names.recordedClock.replaceAll("'", "''");
+      return `DO $tg$ BEGIN ${postgresDdlLockStatement(REVISION_CHANGE_FUNCTION)} IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '${trigger}' AND tgrelid = '${relation}'::regclass) THEN CREATE TRIGGER ${quoteRevisionJournalIdentifier(triggerName)} AFTER INSERT OR UPDATE OR DELETE ON ${quoteRevisionJournalIdentifier(table)} FOR EACH ROW EXECUTE FUNCTION ${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION)}('${journal}', '${clock}', '${entity}'); END IF; END; $tg$`;
+    },
+  );
+  return [installFunctionDdl, ...triggerDdl];
+}
+
+function vectorSlotsFromManagedNodeCreatePlan(
+  params: InsertNodeParams,
+  plan: ManagedNodeCreatePlan,
+): readonly VectorSlot[] {
+  return plan.projections.flatMap((projection) =>
+    projection.kind === "embedding" ?
+      [
+        {
+          graphId: params.graphId,
+          nodeKind: params.kind,
+          fieldPath: projection.fieldPath,
+          dimensions: projection.dimensions,
+          metric: projection.metric,
+          indexType: projection.indexType,
+        },
+      ]
+    : [],
+  );
+}
+
+function computePostgresBatchChunkSizes(
+  maxBindParameters: number,
+): PostgresBatchChunkSizes {
+  return {
+    checkUniqueBatchChunkSize: Math.max(
+      1,
+      maxBindParameters - CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT,
+    ),
+    edgeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    edgeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          EDGE_INSERT_PARAM_COUNT,
+      ),
+    ),
+    embeddingUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / EMBEDDING_UPSERT_PARAM_COUNT),
+    ),
+    findEdgesEndpointChunkSize: Math.max(
+      1,
+      maxBindParameters - FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT,
+    ),
+    fulltextDeleteChunkSize: Math.max(
+      1,
+      maxBindParameters - FULLTEXT_DELETE_FIXED_PARAM_COUNT,
+    ),
+    fulltextUpsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / FULLTEXT_UPSERT_PARAM_COUNT),
+    ),
+    getEdgesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_EDGES_FIXED_PARAM_COUNT,
+    ),
+    getNodesChunkSize: Math.max(
+      1,
+      maxBindParameters - GET_NODES_FIXED_PARAM_COUNT,
+    ),
+    nodeInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    nodeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          NODE_INSERT_PARAM_COUNT,
+      ),
+    ),
+    uniqueDeleteChunkSize: Math.max(
+      1,
+      maxBindParameters - UNIQUE_DELETE_FIXED_PARAM_COUNT,
+    ),
+    uniqueInsertBatchSize: Math.max(
+      1,
+      Math.floor(maxBindParameters / UNIQUE_INSERT_PARAM_COUNT),
+    ),
+  };
+}
+
+/**
+ * THE one-shot retry every idempotent catalog write in this backend shares.
+ *
+ * PostgreSQL's IF NOT EXISTS check cannot see another session's uncommitted
+ * catalog row. The loser waits for the winner and is then handed the winner's
+ * conflict instead of a harmless notice; retrying after that wait observes the
+ * committed object. Which failures mean that is
+ * {@link isPostgresConcurrentDdlRaceError}'s single decision — anything else
+ * (and anything the retry cannot clear) stays loud.
+ *
+ * Takes a thunk rather than a statement because one caller — the extension
+ * install — runs its statement inside its own transaction, and the retry
+ * decision must be the same one whether the unit of work is one statement or a
+ * locked pair.
+ */
+async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isPostgresConcurrentDdlRaceError(error)) throw error;
+    return await run();
+  }
+}
+
+/**
+ * The advisory-lock key an extension install serializes on.
+ *
+ * Per extension rather than one global key: the fence exists to stop two
+ * installers of the SAME catalog row from colliding, and a shared key would
+ * additionally queue `vector` behind `pg_trgm` at boot for no benefit. The
+ * names it interpolates are allowlisted before they reach here.
+ */
+function extensionDdlLockKey(extension: DatabaseExtensionName): string {
+  return `typegraph:extension-ddl:${extension}`;
+}
+
+/**
+ * The keyed-exclusion namespace both halves of the schema fence acquire
+ * under `mechanism: "row"` — `acquireSchemaWriteFence` (the commit side) and
+ * `lockActiveSchemaVersion` (the write side) — so a concurrent commit and a
+ * concurrent write contend on the SAME fence row. That serializes them on a
+ * waiting engine (`conflict: "wait"`) and gives the loser a commit-time
+ * conflict on an optimistic one (`conflict: "commit-time"`), matching what
+ * the `FOR UPDATE`/`FOR SHARE` pair already does under `mechanism: "lock"`.
+ * The fused managed-entity insert stays advisory-only under `row` (its own
+ * `schemaFenceInsertLockClause` above never reads this namespace) — only
+ * these two standalone statements take the fence row.
+ */
+const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
+
+/** The transaction TypeGraph opens for a schema write under the advisory fence. */
+const SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION = {
+  isolationLevel: "read committed",
+} as const satisfies PgTransactionConfig;
+
+/**
+ * Refuses a schema write, under the advisory schema fence, whose session
+ * cannot observe every managed writer that held the fence before it. Those
+ * writers lock the active schema row `FOR SHARE` and change nothing, so only
+ * an isolation that takes a fresh snapshot per statement sees what they
+ * committed while the schema writer waited — the rows a tightening preflight
+ * or an emptiness probe must check. `acquisition` is what the fence statement
+ * itself read on the session.
+ *
+ * @throws ConfigurationError `SCHEMA_WRITE_REQUIRES_READ_COMMITTED`
+ */
+function assertSchemaWriteObservesEarlierWriters(
+  graphId: string,
+  acquisition: GraphWriteFenceAcquisition,
+): void {
+  if (observesEveryEarlierFenceHolder(acquisition)) return;
+  throw new ConfigurationError(
+    "A PostgreSQL schema write requires read_committed isolation on the session that holds the schema fence.",
+    {
+      code: "SCHEMA_WRITE_REQUIRES_READ_COMMITTED",
+      graphId,
+      isolation: acquisition.isolation,
+    },
+    {
+      suggestion:
+        "Run the schema write in a read_committed transaction. A snapshot isolation keeps a snapshot older than the writers the schema fence waited for, so its data checks would miss their rows.",
+    },
+  );
+}
+
+/** PostgreSQL renders lock_timeout with a duration suffix, except zero. */
+function postgresLockTimeoutMilliseconds(value: string): number | undefined {
+  if (value === "0") return 0;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|min|h|d)$/.exec(value);
+  if (match === null) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2] ?? "";
+  switch (unit) {
+    case "ms": {
+      return amount;
+    }
+    case "s": {
+      return amount * 1000;
+    }
+    case "min": {
+      return amount * 60_000;
+    }
+    case "h": {
+      return amount * 3_600_000;
+    }
+    case "d": {
+      return amount * 86_400_000;
+    }
+    default: {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * Normalizes one PostgreSQL declared column type to the family
+ * `catalog.columnTypes` reports. PostgreSQL's own type system already
+ * distinguishes these exactly, unlike SQLite's affinity rules, so this is
+ * an exact match rather than a substring test.
+ */
+function normalizePostgresColumnKind(
+  declaredType: string,
+): NormalizedColumnKind {
+  if (declaredType === "bigint") return "integer";
+  if (declaredType === "timestamp with time zone") {
+    return "timestamp-with-time-zone";
+  }
+  return "other";
+}
+
+/** DDL PostgreSQL refuses inside a transaction block: `CREATE`/`DROP INDEX CONCURRENTLY`. */
+function isTransactionRefusedDdl(ddl: string): boolean {
+  return /\bCONCURRENTLY\b/iu.test(ddl);
+}
+
+/** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
+async function executeRawDdl(
+  db: AnyPgDatabase,
+  ddl: string,
+  adapter?: PostgresExecutionAdapter,
+): Promise<void> {
+  if (adapter !== undefined) {
+    await adapter.execute(portableSql.raw(ddl));
+    return;
+  }
+  await db.execute(sql.raw(ddl));
+}
+
+/**
+ * The one decision that a caller-owned session may run an allocation's DDL:
+ * its current schema is the allocation's. The caller owns that session's
+ * search path, so it is checked, never rewritten.
+ */
+async function assertCallerSessionInAllocationSchema(
+  adapter: PostgresExecutionAdapter,
+  allocationSchema: string,
+  operation: string,
+): Promise<void> {
+  const [session] = await adapter.execute<{ schema: string | null }>(
+    sql`SELECT current_schema() AS schema`,
+  );
+  if (session?.schema === allocationSchema) return;
+  throw new ConfigurationError(
+    `${operation} over a working-copy allocation must run on a session whose current schema is "${allocationSchema}".`,
+    {
+      code: "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+      allocationSchema,
+      sessionSchema: session?.schema,
+    },
+  );
+}
+
+/**
+ * Builds this dialect's `catalog` probes bound to one execution session —
+ * the profile's own connection for the root backend, or a transaction's
+ * pinned client for a transaction-scoped backend, via `db` and
+ * `executionAdapter` supplied by the caller. Bound this way rather than
+ * closed over the profile's own connection, so a probe issued through a
+ * transaction-scoped backend's `catalog` runs on that transaction's own
+ * session — reading its own uncommitted state, not the outer connection's.
+ *
+ * `transactionScoped` governs `dropInvalidIndex` only: PostgreSQL refuses
+ * `DROP INDEX CONCURRENTLY` inside a transaction block (every other probe
+ * here is a plain read, unaffected), so a transaction-scoped bag refuses
+ * that one member instead of issuing DDL its own session cannot run.
+ */
+function createPostgresCatalogProbes(
+  db: AnyPgDatabase,
+  executionAdapter: PostgresExecutionAdapter,
+  operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
+  transactionScoped: boolean,
+  allocationSchema: string | undefined,
+): BackendCatalogProbes {
+  async function indexStates(
+    names: readonly string[],
+  ): Promise<readonly IndexState[]> {
+    if (names.length === 0) return [];
+    // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
+    // DDL a caller issues against these names, unless the backend is bound to
+    // an allocation: then to the allocation's schema.
+    const rows = await executionAdapter.execute<{
+      name: string;
+      valid: boolean;
+    }>(
+      portableSql`
+          SELECT c.relname AS name, i.indisvalid AS valid
+          FROM pg_class c
+          JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND ${relationInBackendSchema(allocationSchema)}
+        `,
+    );
+    const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
+    return names.map((name) => {
+      const valid = byName.get(name);
+      return { name, exists: valid !== undefined, invalid: valid === false };
+    });
+  }
+
+  return {
+    async tableExists(tableName: string): Promise<boolean> {
+      const rows = await executionAdapter.execute<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      );
+      return tableExistsFromRow(rows[0]);
+    },
+    async tablesExist(
+      names: readonly string[],
+    ): Promise<readonly TableState[]> {
+      if (names.length === 0) return [];
+      const rows = await executionAdapter.execute<{ name: string }>(
+        portableSql`
+          SELECT c.relname AS name
+          FROM pg_class c
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND c.relkind IN ('r', 'p')
+            AND ${relationInBackendSchema(allocationSchema)}
+        `,
+      );
+      const existing = new Set(rows.map((row) => row.name));
+      return names.map((name) => ({ name, exists: existing.has(name) }));
+    },
+    indexStates,
+    async dropInvalidIndex(name: string): Promise<void> {
+      if (transactionScoped) {
+        throw new ConfigurationError(
+          "dropInvalidIndex requires a root PostgreSQL backend: PostgreSQL refuses DROP INDEX CONCURRENTLY inside a transaction block, so a transaction()-scoped catalog cannot issue it.",
+          {
+            code: "CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND",
+            operation: "dropInvalidIndex",
+          },
+          {
+            suggestion:
+              "Call dropInvalidIndex through the root backend (the object createPostgresBackend returned), not a transaction() handle.",
+          },
+        );
+      }
+      // A no-op for a valid or absent index on every engine: only an
+      // interrupted `CREATE INDEX CONCURRENTLY` leftover is ever dropped.
+      const [state] = await indexStates([name]);
+      if (!state?.invalid) return;
+      const quoted = `"${name.replaceAll('"', '""')}"`;
+      await executeRawDdl(db, `DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
+    },
+    async columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      const rows = await executionAdapter.execute<{
+        name: unknown;
+        type: unknown;
+      }>(
+        portableSql`
+          SELECT column_name AS name, data_type AS type
+          FROM information_schema.columns
+          WHERE table_schema = ${backendRelationSchema(allocationSchema)}
+            AND table_name = ${table}
+        `,
+      );
+      return rows.flatMap((row) => {
+        if (typeof row.name !== "string" || typeof row.type !== "string") {
+          return [];
+        }
+        const declaredType = row.type.trim().toLowerCase();
+        return [
+          {
+            name: row.name,
+            kind: normalizePostgresColumnKind(declaredType),
+            declaredType,
+          },
+        ];
+      });
+    },
+    indexBehavior: {
+      concurrentBuilds: true,
+      hasInvalidIndexState: true,
+      supportsGinFamily: true,
+    },
+  };
+}
+
+type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
+
+function parallelWorkerResetSql(tableName: string): string {
+  return `ALTER TABLE "${tableName.replaceAll('"', '""')}" RESET (parallel_workers);`;
+}
+
+function parallelWorkerResetError(
+  tableName: string,
+  resetError: unknown,
+): Error {
+  return new Error(
+    `PostgreSQL did not restore the durable parallel_workers setting on vector table ${JSON.stringify(tableName)}. Run ${parallelWorkerResetSql(tableName)} before retrying index materialization.`,
+    { cause: resetError },
+  );
+}
+
+function vectorSerialFallbackPreparationError(
+  step: "drop-index" | "disable-parallel-workers",
+  parallelBuildError: unknown,
+  preparationError: unknown,
+): AggregateError {
+  const action =
+    step === "drop-index" ?
+      "drop the partial vector index"
+    : "disable parallel workers for the serial retry";
+  return new AggregateError(
+    [preparationError],
+    `PostgreSQL could not ${action} after the parallel vector index build exhausted resources.`,
+    { cause: parallelBuildError },
+  );
+}
+
+function reportParallelWorkerResetFailure(
+  tableName: string,
+  resetError: unknown,
+): void {
+  try {
+    if (typeof console === "undefined" || typeof console.error !== "function") {
+      return;
+    }
+    const reported = (
+      console.error as (...data: readonly unknown[]) => unknown
+    )(
+      `[typegraph] The serial vector index rebuild failed and cleanup also failed. ${parallelWorkerResetError(tableName, resetError).message}`,
+      resetError,
+    );
+    void Promise.resolve(reported).catch(() => {
+      // Reporting must not displace the index-build failure.
+    });
+  } catch {
+    // A hostile or replaced logger cannot displace the index-build failure.
+  }
+}
+
+async function resetVectorParallelWorkers(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+): Promise<void> {
+  try {
+    await execute(
+      portableSql`ALTER TABLE ${portableSql.identifier(tableName)} RESET (parallel_workers)`,
+    );
+  } catch (resetError) {
+    throw parallelWorkerResetError(tableName, resetError);
+  }
+}
+
+/** @internal */
+export async function runVectorIndexBuildWithSerialFallback(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  // The strategy table is TypeGraph-owned, and parallel_workers is only set
+  // temporarily by the fallback below. Reset it before every materialization
+  // attempt so cleanup survives backend and process recreation. Keep this
+  // outside the resource-failure catch: a cleanup error must never be
+  // mistaken for a failed parallel build whose valid index should be dropped.
+  await resetVectorParallelWorkers(execute, tableName);
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    if (!isInsufficientResourcesError(error)) throw error;
+    if (dropStatement !== undefined) {
+      try {
+        await execute(dropStatement);
+      } catch (dropError) {
+        throw vectorSerialFallbackPreparationError(
+          "drop-index",
+          error,
+          dropError,
+        );
+      }
+    }
+    await runSerialVectorIndexBuild(execute, tableName, indexStatement, error);
+  }
+}
+
+/** @internal */
+export async function runPostgresVectorIndexBuild(
+  vectorStrategy: VectorStrategy,
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  dropStatement?: ExecutableSql,
+): Promise<void> {
+  if (!isPgvectorStrategy(vectorStrategy)) {
+    await execute(indexStatement);
+    return;
+  }
+  await runVectorIndexBuildWithSerialFallback(
+    execute,
+    tableName,
+    indexStatement,
+    dropStatement,
+  );
+}
+
+/** @internal */
+export async function runSerialVectorIndexBuild(
+  execute: ExecutePostgresStatement,
+  tableName: string,
+  indexStatement: ExecutableSql,
+  parallelBuildError?: unknown,
+): Promise<void> {
+  const table = portableSql.identifier(tableName);
+  try {
+    await execute(portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`);
+  } catch (setError) {
+    if (parallelBuildError === undefined) throw setError;
+    throw vectorSerialFallbackPreparationError(
+      "disable-parallel-workers",
+      parallelBuildError,
+      setError,
+    );
+  }
+
+  let buildFailure: Readonly<{ error: unknown }> | undefined;
+  try {
+    await execute(indexStatement);
+  } catch (error) {
+    buildFailure = { error };
+  }
+
+  try {
+    await execute(portableSql`ALTER TABLE ${table} RESET (parallel_workers)`);
+  } catch (resetError) {
+    if (buildFailure === undefined) {
+      throw parallelWorkerResetError(tableName, resetError);
+    }
+    reportParallelWorkerResetFailure(tableName, resetError);
+  }
+
+  if (buildFailure !== undefined) throw buildFailure.error;
+}
 
 // ============================================================
 // Utilities
@@ -313,19 +1092,6 @@ const toUniqueRow = createUniqueRowMapper(POSTGRES_ROW_MAPPER_CONFIG);
 const toSchemaVersionRow = createSchemaVersionRowMapper(
   POSTGRES_ROW_MAPPER_CONFIG,
 );
-
-function buildPostgresCapabilities(
-  fulltextStrategy: FulltextStrategy,
-  vectorStrategy: VectorStrategy | undefined,
-): BackendCapabilities {
-  return {
-    ...POSTGRES_CAPABILITIES,
-    ...(vectorStrategy === undefined ?
-      {}
-    : { vector: buildVectorCapabilities(vectorStrategy) }),
-    fulltext: buildFulltextCapabilities(fulltextStrategy),
-  };
-}
 
 // ============================================================
 // Backend Factory
@@ -344,8 +1110,101 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
+  if (db instanceof PgTransaction) {
+    assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
+    return createPostgresTransactionBackend(db, options);
+  }
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfile(db, options)),
+    options,
+  );
+}
+
+/**
+ * Creates a full PostgreSQL backend on a transaction owned by the caller.
+ * Every TypeGraph statement is queued on the transaction's pinned connection,
+ * including statements started concurrently by one Store operation. The caller
+ * must await its work before the transaction callback returns.
+ *
+ * Use this when TypeGraph has its own tables in a host application's
+ * transaction. Pass custom `tables` when those tables use a prefix.
+ */
+export function createPostgresTransactionBackend(
+  tx: AnyPgTransaction,
+  options: PostgresBackendOptions = {},
+): AdapterBackend<AnyPgTransaction> {
+  assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
+  return markAllocationBound(
+    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
+    options,
+  );
+}
+
+/** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */
+function markAllocationBound<TBackend extends GraphBackend>(
+  backend: TBackend,
+  options: PostgresBackendOptions,
+): TBackend {
+  const schema =
+    options.tables === undefined ?
+      undefined
+    : allocationSchemaOfTables(options.tables);
+  if (schema !== undefined) markAllocationSchemaBackend(backend, schema);
+  return backend;
+}
+
+/**
+ * Builds the PostgreSQL {@link SqlEngineProfile} `createSqlBackend` (from
+ * `./engine`) assembles into a backend: the head data and dialect-owned
+ * late members (`transactions`, `fence`, `rawSql`, `maintenance`,
+ * `trustedImport`, `extensions`) only PostgreSQL supplies, plus the runtime
+ * deps (`contributionRuntime`, `identityRuntime`, `graphTemplateRuntime`,
+ * `baseSchemaRuntime`, `indexMaterializationRuntime`, `kindRemovalRuntime`)
+ * `createSqlBackend` uses to assemble the mirrored member groups from
+ * `members/*.ts`.
+ */
+export function buildPostgresEngineProfile(
+  db: AnyPgDatabase,
+  options: PostgresBackendOptions = {},
+): SqlEngineProfile<AnyPgTransaction> {
+  if (db instanceof PgTransaction) {
+    throw new ConfigurationError(
+      "A PostgreSQL transaction requires createPostgresTransactionBackend(tx, options).",
+      { backend: "postgres", code: "TRANSACTION_REQUIRES_SCOPED_BACKEND" },
+    );
+  }
+  return buildPostgresEngineProfileInternal(db, options, false);
+}
+
+function buildPostgresEngineProfileInternal(
+  db: AnyPgDatabase,
+  options: PostgresBackendOptions,
+  transactionScoped: boolean,
+): SqlEngineProfile<AnyPgTransaction> {
+  assertNoLegacyTransactionCapability(options.capabilities);
+  // Resolved before the backend exists so marking it below is a lookup, never
+  // work that could fail after a wrapper already observed an unmarked backend.
+  // A `serializedResource` declaration that contradicts detection is refused
+  // here too, before any object a caller could hold has been built.
+  const resourceAudit = resolveDeclaredBackendResource(
+    getSerializedPostgresClient(db),
+    options.serializedResource,
+  );
   const tables = options.tables ?? defaultTables;
-  const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
+  // Set only for tables built from a working-copy allocation's names: every
+  // DDL this backend issues then runs where the allocation lives.
+  const allocationSchema = allocationSchemaOfTables(tables);
+  const allocationPin =
+    allocationSchema === undefined ? undefined : (
+      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
+    );
+  // `fulltext: false` disables fulltext entirely — mirroring `vector`
+  // below, required for an engine or role with no fulltext implementation
+  // of its own to build a TypeGraph backend without a stub strategy.
+  const fulltextStrategy =
+    options.fulltext === false ?
+      undefined
+    : (options.fulltext ?? tsvectorStrategy);
   // pgvector is compiled into a standalone Postgres server, so it is wired
   // unconditionally by default (overridable for alternate Postgres vector
   // stacks). `vector: false` disables it — required for an in-process
@@ -357,10 +1216,12 @@ export function createPostgresBackend(
   // backend so the pgvector version check runs — and its pre-0.8 warning
   // fires — at most once per backend, not once per `store.transaction()`.
   const iterativeScanProbe = createIterativeScanProbe();
-  const baseCapabilities = buildPostgresCapabilities(
-    fulltextStrategy,
-    vectorStrategy,
-  );
+  // `vector` and `fulltext` are deliberately absent from this base: both are
+  // derived once, from `profile.vector` / `profile.fulltext`, by
+  // `finalizeEngineCapabilities` (`./engine/capabilities`) — baking either
+  // here would give this profile's `declaredCapabilities` a copy that a
+  // caller overriding the strategy field could leave stale.
+  const baseCapabilities = POSTGRES_CAPABILITIES;
   // HTTP-only drivers (notably `drizzle-orm/neon-http`) can't hold a
   // session across statements, so multi-statement transactions are
   // unavailable regardless of what we declare. Auto-detect and downgrade
@@ -369,18 +1230,84 @@ export function createPostgresBackend(
   const httpOnlyOverrides =
     isNeonHttpClient(db) ?
       {
-        transactions: false,
+        execution: {
+          ...POSTGRES_CAPABILITIES.execution,
+          interactiveTransactions: false,
+          atomicBatch: "root" as const,
+        },
         graphAnalytics: {
           ...(baseCapabilities.graphAnalytics ?? { mathFunctions: true }),
           supported: false,
         },
       }
     : {};
-  const capabilities = normalizeGraphAnalyticsCapabilities({
-    ...baseCapabilities,
-    ...httpOnlyOverrides,
-    ...options.capabilities,
-  });
+  const configuredMaxBindParameters =
+    options.capabilities?.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS;
+  const driverBindParameterOverrides =
+    isPgliteDatabase(db) ?
+      {
+        maxBindParameters: Math.min(
+          configuredMaxBindParameters,
+          PGLITE_MAX_BIND_PARAMETERS,
+        ),
+      }
+    : {};
+  // A PostgreSQL pool is never itself an engine with a single writer slot,
+  // so `mechanism: "engine-serialized"` is a false claim about this engine —
+  // the one shape this factory refuses. `"caller-serialized"` is a
+  // different claim — a promise about the DEPLOYMENT, not the engine — and
+  // is accepted: this pool still carries its own `fenceSql` underneath it
+  // (harmless, since every keyed and drain site under `caller-serialized`
+  // already takes no statement), so nothing about this factory's assembly
+  // needs to change to honor it.
+  const requestedWriteFence = options.capabilities?.writeFence;
+  if (requestedWriteFence?.mechanism === "engine-serialized") {
+    throw new ConfigurationError(
+      'PostgreSQL backend capability overrides cannot declare writeFence.mechanism: "engine-serialized".',
+      { requestedWriteFence },
+      {
+        suggestion:
+          'Declare writeFence.mechanism as "advisory" (this pool\'s own fence) or "caller-serialized" (a deployment-level promise); use a custom backend only when the underlying engine really provides a single writer slot.',
+      },
+    );
+  }
+  const declaredCapabilities = sealCapabilityDeclaration(
+    normalizeGraphAnalyticsCapabilities({
+      ...baseCapabilities,
+      ...httpOnlyOverrides,
+      ...options.capabilities,
+      execution: {
+        ...baseCapabilities.execution,
+        ...httpOnlyOverrides.execution,
+        ...options.capabilities?.execution,
+      },
+      ...driverBindParameterOverrides,
+    }),
+  );
+  if (
+    allocationSchema !== undefined &&
+    !declaredCapabilities.execution.interactiveTransactions
+  ) {
+    throw new ConfigurationError(
+      "A backend over a working-copy allocation needs interactive transactions: its DDL runs in a transaction that fixes the allocation schema, which a driver that cannot hold a session (drizzle-orm/neon-http) cannot provide.",
+      {
+        code: "ALLOCATION_SCHEMA_REQUIRES_INTERACTIVE_TRANSACTIONS",
+        allocationSchema,
+        capability: "execution.interactiveTransactions",
+      },
+      {
+        suggestion:
+          "Connect the working copy with a node-postgres, postgres-js, or neon-serverless (WebSocket) driver.",
+      },
+    );
+  }
+  // Derived last and not overridable: how far up the contribution health
+  // ladder this backend goes is a structural fact about the wiring below
+  // (durable markers, a catalog probe, a strategy that declares teardown
+  // DDL, a transactional schema fence), and a caller who declared a
+  // rebuild this backend cannot perform would be advertising a lie. The
+  // HTTP-only drivers land on `rebuild: false` here because they cannot
+  // hold a session across statements, so there is no fence to run under.
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
       {}
@@ -388,25 +1315,83 @@ export function createPostgresBackend(
     ...(options.preparedStatementCacheMax === undefined ?
       {}
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
+    maxBindParameters:
+      declaredCapabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+    interactiveAtomicBatch:
+      declaredCapabilities.execution.interactiveTransactions &&
+      (resourceAudit.kind === "independent" || isPgliteDatabase(db)),
   };
-  const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
-  const tableNames: ResolvedSqlTableNames = {
+  const unqueuedExecutionAdapter = createPostgresExecutionAdapter(
+    db,
+    adapterOptions,
+  );
+  const rawClient: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  const bareClient =
+    (
+      typeof rawClient === "object" &&
+      rawClient !== null &&
+      isBarePgClient(rawClient as Readonly<Record<string, unknown>>)
+    ) ?
+      rawClient
+    : undefined;
+  const queueOwner =
+    transactionScoped ?
+      (getPinnedPostgresTransactionClient(db) ?? db)
+    : bareClient;
+  const executionAdapter =
+    queueOwner === undefined ?
+      unqueuedExecutionAdapter
+    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
+  const atomicSqlProgramExecutor =
+    createAtomicSqlProgramExecutor(executionAdapter);
+  // `declaredCapabilities` above is this profile's contribution; the
+  // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
+  // that derives `execution.atomicBatch`, `vector` (from `vectorStrategy`
+  // above), `fulltext` (from `fulltextStrategy`), and `contributions` from it
+  // runs once, in `createSqlBackend`, which then hands the finalized result
+  // back through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .capabilities` — `buildOperations` and `lateMembers` below read it off
+  // `ctx` rather than re-deriving a local copy.
+  const tableNames = {
+    schemaVersions: getTableName(tables.schemaVersions),
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
     recordedNodes: getTableName(tables.recordedNodes),
     recordedEdges: getTableName(tables.recordedEdges),
     recordedClock: getTableName(tables.recordedClock),
+    recordedAnchors: getTableName(tables.recordedAnchors),
+    storeOperations: getTableName(tables.storeOperations),
     revisionOrigins: getTableName(tables.revisionOrigins),
+    revisionChanges: getTableName(tables.revisionChanges),
+    identityAssertions: getTableName(tables.identityAssertions),
+    recordedIdentityAssertions: getTableName(tables.recordedIdentityAssertions),
+    identityClosure: getTableName(tables.identityClosure),
+    identitySeparation: getTableName(tables.identitySeparation),
+    identityTransitions: getTableName(tables.identityTransitions),
+    identityTransitionRetention: getTableName(
+      tables.identityTransitionRetention,
+    ),
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
-  };
+    edgeClaims: getTableName(tables.edgeClaims),
+    fences: getTableName(tables.fences),
+    baseSchemaVersions: getTableName(tables.baseSchemaVersions),
+    graphTemplates: getTableName(tables.graphTemplates),
+    indexMaterializations: getTableName(tables.indexMaterializations),
+    contributionMaterializations: getTableName(
+      tables.contributionMaterializations,
+    ),
+    kindRemovals: getTableName(tables.kindRemovals),
+    reconciliationMarkers: getTableName(tables.reconciliationMarkers),
+  } satisfies PostgresTableNames;
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
-  // ANALYZE statements on every call. The recorded relations are ANALYZEd
-  // separately under an existence guard (see refreshStatistics): a schema
-  // created before recorded-time history landed (bring-your-own-pool, no DDL
-  // re-run) has no recorded tables, and Postgres fails the whole ANALYZE if any
-  // named relation is missing. Per-field vector tables are created lazily and
-  // live outside this base set, so they are not ANALYZEd here.
+  // ANALYZE statements on every call. The recorded and identity relations
+  // are ANALYZEd separately under an existence guard (see refreshStatistics):
+  // a schema created before recorded-time history or Operational Identity
+  // landed (bring-your-own-pool, no DDL re-run) has no recorded_* / identity_*
+  // tables, and Postgres fails the whole ANALYZE if any named relation is
+  // missing. Per-field vector tables are created lazily and live outside this
+  // base set, so they are not ANALYZEd here.
   //
   // ONE statement per table with SKIP_LOCKED, never `ANALYZE a, b, c`:
   // ANALYZE takes a ShareUpdateExclusive lock, the same class CREATE INDEX
@@ -421,29 +1406,34 @@ export function createPostgresBackend(
     tableNames.nodes,
     tableNames.edges,
     getTableName(tables.uniques),
-    tableNames.fulltext,
+    ...(fulltextStrategy === undefined ? [] : [tableNames.fulltext]),
   ].map((name) =>
     toDrizzleSql(
       portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(name)}`,
       "postgres",
     ),
   );
-  const recordedAnalyzeTables = [
+  const guardedAnalyzeTables = [
     tableNames.recordedNodes,
     tableNames.recordedEdges,
     tableNames.recordedClock,
+    tableNames.recordedIdentityAssertions,
+    tableNames.identityAssertions,
+    tableNames.identityClosure,
+    tableNames.identitySeparation,
   ] as const;
   const operationStrategy = createPostgresOperationStrategy(
     tables,
     fulltextStrategy,
+    vectorStrategy,
   );
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
-  // uses — so refreshStatistics() never ANALYZEs a recorded relation that a
-  // bring-your-own-pool schema has not yet created. The Postgres probe is
-  // search_path-aware, so positive results are deliberately not cached by bare
-  // table name.
-  const recordedTableExists = createCachedTableExistence(
+  // uses — so refreshStatistics() never ANALYZEs a recorded or identity
+  // relation that a bring-your-own-pool schema has not yet created. The
+  // Postgres probe is search_path-aware, so positive results are deliberately
+  // not cached by bare table name.
+  const guardedTableExists = createCachedTableExistence(
     async (tableName) => {
       const rows = await executionAdapter.execute<Record<string, unknown>>(
         operationStrategy.buildTableExists(tableName),
@@ -462,690 +1452,1801 @@ export function createPostgresBackend(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
-  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await db.execute(sql.raw(generatePgCreateTableSQL(matTable)));
+  /**
+   * Runs one IDEMPOTENT DDL statement — `CREATE ... IF NOT EXISTS` or
+   * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — with the one-shot retry a
+   * concurrent boot needs.
+   */
+  async function executeConcurrentCreateDdl(ddl: string): Promise<void> {
+    const statement = sql.raw(ddl);
+    await withConcurrentCreateRetry(() => runDdlStatement(statement));
   }
-
-  async function getContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<ContributionMaterializationRow | undefined> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return mapContributionMaterializationRow(
-      row,
-      POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-    );
-  }
-
-  async function getContributionMaterializationRows(
-    graphId: string,
-  ): Promise<readonly ContributionMaterializationRow[]> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(eq(matTable.graphId, graphId));
-    return rows.map((row) =>
-      mapContributionMaterializationRow(
-        row,
-        POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-      ),
-    );
-  }
-
-  async function recordContributionMaterializationRow(
-    params: RecordContributionMaterializationParams,
-  ): Promise<void> {
-    await db
-      .insert(matTable)
-      .values(
-        buildContributionInsertValues(
-          params,
-          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-        ),
-      )
-      .onConflictDoUpdate({
-        target: [
-          matTable.graphId,
-          matTable.logicalName,
-          matTable.owner,
-          matTable.tableName,
-        ],
-        set: buildContributionOnConflictSet(
-          matTable.materializedAt,
-          params.materializedAt,
-        ),
-      });
-  }
-
-  async function deleteContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<void> {
-    await db
-      .delete(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-  }
-
-  const contributionMaterializer = createContributionMaterializer({
-    dialect: "postgres",
-    fulltextStrategy,
-    fulltextTableName: tables.fulltextTableName,
-    vectorStrategy,
-    execDdl: async (statement) => {
-      await db.execute(sql.raw(statement));
-    },
-    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarkers: getContributionMaterializationRows,
-    recordMarker: recordContributionMaterializationRow,
-    deleteMarker: deleteContributionMaterializationRow,
-  });
-
-  const operations = createPostgresOperationBackend({
-    db,
-    executionAdapter,
-    adapterOptions,
-    operationStrategy,
-    tableNames,
-    capabilities,
-    fulltextStrategy,
-    vectorStrategy,
-    contributionMaterializer,
-    iterativeScanProbe,
-  });
 
   /**
-   * Runs `fn` inside a Postgres transaction, holding an
-   * `pg_advisory_xact_lock` keyed on the graph id. The advisory lock
-   * serializes all schema commits per-graph: the read-then-write CAS in
-   * `commitSchemaVersion` is safe even for the initial-commit case
-   * where there is no row yet to `SELECT ... FOR UPDATE`.
-   *
-   * Refuses on backends that don't support transactions
-   * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
-   * eliminated without atomicity, so silent best-effort degradation is
-   * worse than a typed error.
+   * Runs one DDL statement where this backend's relations live. Over an
+   * allocation the statement shares a transaction with the search-path pin, so
+   * an unqualified `CREATE ... IF NOT EXISTS` finds the allocation's relation
+   * or creates it there, whatever the pooled connection's own `search_path`.
+   * A statement PostgreSQL refuses inside a transaction (`CONCURRENTLY`) takes
+   * {@link executeUnpinnedDdl}: an index is created in its table's schema, so
+   * the table it names anchors it. A backend over a caller's own transaction
+   * does not rewrite that session's search path: it checks the session's
+   * schema instead.
    */
-  function runSchemaWriteTransaction<T>(
-    graphId: string,
-    fn: (tx: CommonOperationBackend) => Promise<T>,
-  ): Promise<T> {
-    if (!capabilities.transactions) {
+  async function runDdlStatement(
+    statement: ReturnType<typeof sql.raw>,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) {
+      await db.execute(statement);
+      return;
+    }
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        executionAdapter,
+        allocationSchema,
+        "Lazy DDL",
+      );
+      await db.execute(statement);
+      return;
+    }
+    await db.transaction(async (transaction) => {
+      await transaction.execute(allocationPin);
+      await transaction.execute(statement);
+    });
+  }
+
+  /**
+   * Fixes the session a schema write's DDL runs on to the allocation schema. A
+   * transaction this backend opened is pinned; when the backend was built over
+   * a caller's transaction, `tx` is a savepoint whose `set_config` would
+   * outlive it, so the caller's schema is checked instead.
+   */
+  async function bindSchemaWriteSessionToAllocation(
+    tx: AnyPgTransaction,
+  ): Promise<void> {
+    if (allocationPin === undefined || allocationSchema === undefined) return;
+    if (db instanceof PgTransaction) {
+      await assertCallerSessionInAllocationSchema(
+        createPostgresExecutionAdapter(tx, adapterOptions),
+        allocationSchema,
+        "Schema write",
+      );
+      return;
+    }
+    await tx.execute(allocationPin);
+  }
+
+  function executeUnpinnedDdl(ddl: string): Promise<void> {
+    return executeRawDdl(db, ddl, executionAdapter);
+  }
+
+  /** The `executeDdl` primitive: one statement, no concurrency handling. */
+  function executeSingleDdl(ddl: string): Promise<void> {
+    return allocationPin === undefined || isTransactionRefusedDdl(ddl) ?
+        executeUnpinnedDdl(ddl)
+      : runDdlStatement(sql.raw(ddl));
+  }
+
+  /**
+   * THE one place this backend installs a database extension, for every
+   * extension and every caller.
+   *
+   * An extension is database-global while the claims that reach it are not (an
+   * index-materialization claim is per index), so two callers wanting different
+   * objects still race on `pg_extension_name_index`. Two fences answer that,
+   * and both are here because they answer different halves of it:
+   *
+   *  - the resolved write-fence plan's keyed exclusion — spelled through
+   *    `fencePlan.sql.acquireKeyed`, like every other lock site, rather than
+   *    inline — serializes same-key installers inside this process group so
+   *    the common case never raises at all (#475). It is keyed on the
+   *    extension so installing `vector` does not queue behind `pg_trgm`. This
+   *    is the one lock site that DEGRADES instead of refusing: a plan that
+   *    resolves `engine-serialized` or `unfenced` takes no lock, and so does
+   *    `row` — a row-mechanism acquisition writes to the fences relation,
+   *    which this call cannot assume exists yet (extension install can run
+   *    before the base schema that creates it), and the retry-only path
+   *    below needs no fences row to be correct — and falls through to the
+   *    same retry-only path as the non-interactive branch below, because the
+   *    retry — not the lock — is what makes a concurrent install correct;
+   *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
+   *    NOT take the lock can still hand us — a peer on an older version, whose
+   *    lock key differs, a `capabilities.execution.interactiveTransactions: false`
+   *    backend which has no transaction to hang the lock on (#446), or a
+   *    backend whose resolved plan takes no lock at all.
+   *
+   * The lock runs in its own transaction on purpose: a 23505 poisons an
+   * enclosing transaction (the next statement fails `25P02`), so the retry is
+   * sound only when the failed unit of work is one this function owns
+   * end-to-end.
+   */
+  // Takes `capabilities` and `fencePlan` explicitly rather than closing over
+  // head-level constants: this backend's finalized capabilities and its
+  // resolved write-fence plan are `createSqlBackend`'s
+  // (`EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .fencePlan`), and this function's only caller — `lateMembers.extensions`
+  // — already has both values on `ctx`.
+  async function ensureDatabaseExtension(
+    capabilities: BackendCapabilities,
+    fencePlan: WriteFencePlan,
+    name: DatabaseExtensionName,
+  ): Promise<void> {
+    // The name reaches DDL by interpolation, so the allowlist — not the
+    // caller's type — is what makes the identifier trustworthy at runtime.
+    const validated = DATABASE_EXTENSION_NAMES.find(
+      (candidate) => candidate === name,
+    );
+    if (validated === undefined) {
       throw new ConfigurationError(
-        "commitSchemaVersion and setActiveVersion require atomic transactions, " +
-          "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
-          "driver communicates over HTTP and cannot hold a session across statements; " +
-          "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
+        `Unsupported database extension "${name}".`,
+        { extension: name, supported: DATABASE_EXTENSION_NAMES },
         {
-          backend: "postgres",
-          capability: "transactions",
-          supportsTransactions: false,
+          suggestion: `Request one of: ${DATABASE_EXTENSION_NAMES.join(", ")}.`,
         },
       );
     }
-
-    return db.transaction(async (tx) => {
-      // Advisory lock: hashtext($graphId) is collision-tolerant for the
-      // size of an active graph set; collisions just serialize unrelated
-      // graphs which is harmless. Held until the transaction commits.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`);
-      // Advisory lock is held here, so the schema-write-capable
-      // InternalOperationBackend is used intentionally (see its type).
-      const { backend: txBackend, drainAndClose } = createTransactionBackend({
-        db: tx,
-        adapterOptions,
-        operationStrategy,
-        tableNames,
-        capabilities,
-        fulltextStrategy,
-        vectorStrategy,
-        contributionMaterializer,
-        iterativeScanProbe,
-      });
-      try {
-        return await fn(txBackend);
-      } finally {
-        await drainAndClose();
-      }
-    });
-  }
-
-  // Shared by `transaction()` (TypeGraph opens the tx) and
-  // `adoptTransaction()` (#134 — the caller already opened it): bind a
-  // tx-scoped backend to the *literal* `tx` client and gate fulltext on
-  // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
-    backend: TransactionBackend;
-    drainAndClose: () => Promise<void>;
-  }> {
-    const { backend, drainAndClose } = createTransactionBackend({
-      db: tx,
-      adapterOptions,
-      operationStrategy,
-      tableNames,
-      capabilities,
-      fulltextStrategy,
-      vectorStrategy,
-      contributionMaterializer,
-      iterativeScanProbe,
-    });
-    return {
-      backend: gateFulltext(
-        backend,
-        contributionMaterializer.assertInitialized,
-      ),
-      drainAndClose,
-    };
-  }
-
-  const backend: AdapterBackend<AnyPgTransaction> = {
-    ...operations,
-
-    ...((
-      capabilities.transactions &&
-      executionAdapter.executeCompiled !== undefined
-    ) ?
-      {
-        async trustedImport<T>(
-          fn: (session: TrustedImportSession) => Promise<T>,
-        ): Promise<T> {
-          return backend.transactionWithNative(async (tx, rawSql) => {
-            const trustedExecutionAdapter = createPostgresExecutionAdapter(
-              rawSql,
-              { ...adapterOptions, useTransactionClient: true },
-            );
-            const executeCompiled = trustedExecutionAdapter.executeCompiled;
-            if (executeCompiled === undefined) {
-              throw new ConfigurationError(
-                "Trusted import could not bind raw execution to the PostgreSQL transaction.",
-                { capability: "trustedImport", dialect: "postgres" },
-              );
-            }
-            const trustedTx = createBackendOverlay(tx, {
-              executeRaw<T>(
-                sqlText: string,
-                params: readonly unknown[],
-              ): Promise<readonly T[]> {
-                return executeCompiled<T>({ params, sql: sqlText });
-              },
-            });
-            await lockPostgresTrustedImportTables(trustedTx, tableNames);
-            await assertTrustedImportDatabaseEmpty(trustedTx, tableNames);
-            const indexDefinitions = await suspendPostgresSecondaryIndexes(
-              trustedTx,
-              tableNames,
-            );
-            const result = await fn(
-              createPostgresTrustedImportSession(trustedTx, tableNames),
-            );
-            await restoreSecondaryIndexes(trustedTx, indexDefinitions);
-            await analyzeImportedTables(trustedTx, tableNames);
-            return result;
-          });
-        },
-      }
-    : {}),
-
-    async bootstrapTables(): Promise<void> {
-      const statements = generatePostgresDDL(tables, fulltextStrategy);
-      for (const statement of statements) {
-        await db.execute(sql.raw(statement));
-      }
-    },
-
-    async ensureRevisionOriginsTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.revisionOrigins)),
-      );
-    },
-
-    // Every fulltext-touching method asserts the durable marker instead
-    // of lazily emitting DDL. Steady state performs zero ensure; an
-    // uninitialized database throws `StoreNotInitializedError` loudly
-    // rather than self-healing on a read/write path (#135). Shared
-    // verbatim with the tx-scoped gate via `gateFulltextMethods`.
-    ...gateFulltextMethods(
-      operations,
-      contributionMaterializer.assertInitialized,
-    ),
-
-    async executeDdl(ddl: string): Promise<void> {
-      await db.execute(sql.raw(ddl));
-    },
-
-    async ensureIndexMaterializationsTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.indexMaterializations)),
-      );
-      // Deployments created before the build-claim columns existed get
-      // them additively; fresh installs already have them from the
-      // CREATE TABLE above.
-      const tableName = getTableName(tables.indexMaterializations);
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
-        ),
-      );
-      await db.execute(
-        sql.raw(
-          `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
-        ),
-      );
-    },
-
-    async claimIndexMaterialization(
-      params: ClaimIndexMaterializationParams,
-    ): Promise<boolean> {
-      const t = tables.indexMaterializations;
-      // Atomic claim: insert a fresh claim row, or take over an existing
-      // row only when no live claim is on it (NULL or lease-expired
-      // building_since). The WHERE on the conflict update makes losing
-      // racers see zero returned rows — the row's own atomicity is the
-      // mutex, so this works identically through pools and across
-      // processes (unlike session advisory locks, which pin a
-      // connection).
-      const rows = await db.execute(sql`
-        INSERT INTO ${t} (
-          "index_name", "graph_id", "entity", "kind", "signature",
-          "schema_version", "last_attempted_at", "building_since",
-          "claim_token"
-        )
-        VALUES (
-          ${params.indexName}, ${params.graphId}, ${params.entity},
-          ${params.kind}, ${params.signature}, ${params.schemaVersion},
-          now(), now(), ${params.token}
-        )
-        ON CONFLICT ("index_name") DO UPDATE SET
-          "building_since" = now(),
-          "claim_token" = EXCLUDED."claim_token"
-        WHERE ${t}."building_since" IS NULL
-           OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
-        RETURNING "index_name"
-      `);
-      const result = rows;
-      const returned =
-        Array.isArray(result) ? result : (
-          ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
-        );
-      return returned.length > 0;
-    },
-
-    async releaseIndexMaterializationClaim(
-      params: ReleaseIndexMaterializationClaimParams,
-    ): Promise<void> {
-      const t = tables.indexMaterializations;
-      // Token-guarded: a lease-expired claim taken over by another
-      // materializer must not be released by the original holder.
-      await db.execute(sql`
-        UPDATE ${t}
-        SET "building_since" = NULL, "claim_token" = NULL
-        WHERE "index_name" = ${params.indexName}
-          AND "claim_token" = ${params.token}
-      `);
-    },
-
-    async getIndexMaterialization(
-      indexName: string,
-    ): Promise<IndexMaterializationRow | undefined> {
-      const t = tables.indexMaterializations;
-      const rows = await db.select().from(t).where(eq(t.indexName, indexName));
-      const row = rows[0];
-      if (row === undefined) return undefined;
-      return mapMaterializationRow(row, POSTGRES_INDEX_MAT_TIMESTAMPS.decode);
-    },
-
-    async getIndexMaterializations(
-      statusKeys: readonly string[],
-    ): Promise<readonly IndexMaterializationRow[]> {
-      if (statusKeys.length === 0) return [];
-      const t = tables.indexMaterializations;
-      const rows = await db
-        .select()
-        .from(t)
-        .where(inArray(t.indexName, [...statusKeys]));
-      return rows.map((row) =>
-        mapMaterializationRow(row, POSTGRES_INDEX_MAT_TIMESTAMPS.decode),
-      );
-    },
-
-    async recordIndexMaterialization(
-      params: RecordIndexMaterializationParams,
-    ): Promise<void> {
-      const t = tables.indexMaterializations;
-      await db
-        .insert(t)
-        .values(
-          buildMaterializationInsertValues(
-            params,
-            POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
-          ),
-        )
-        .onConflictDoUpdate({
-          target: t.indexName,
-          set: buildMaterializationOnConflictSet(params.materializedAt),
-        });
-    },
-
-    async ensureContributionMaterializationsTable(): Promise<void> {
-      await ensureContributionMaterializationsTableImpl();
-    },
-
-    async getContributionMaterialization(
-      identity: ContributionMaterializationIdentity,
-    ): Promise<ContributionMaterializationRow | undefined> {
-      return getContributionMaterializationRow(identity);
-    },
-
-    async recordContributionMaterialization(
-      params: RecordContributionMaterializationParams,
-    ): Promise<void> {
-      await recordContributionMaterializationRow(params);
-    },
-
-    async assertRuntimeContributionsInitialized(
-      graphId: string,
-    ): Promise<void> {
-      await contributionMaterializer.assertInitialized(graphId);
-    },
-
-    async ensureKindRemovalsTable(): Promise<void> {
-      await db.execute(sql.raw(generatePgCreateTableSQL(tables.kindRemovals)));
-    },
-
-    async getPendingKindRemovals(
-      graphId: string,
-    ): Promise<readonly KindRemovalRow[]> {
-      const t = tables.kindRemovals;
-      const rows = await db
-        .select()
-        .from(t)
-        .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
-      return rows.map((row) =>
-        mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
-      );
-    },
-
-    async getAllKindRemovals(
-      graphId: string,
-    ): Promise<readonly KindRemovalRow[]> {
-      const t = tables.kindRemovals;
-      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-      return rows.map((row) =>
-        mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
-      );
-    },
-
-    async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
-      const t = tables.kindRemovals;
-      await db
-        .insert(t)
-        .values(
-          buildKindRemovalInsertValues(
-            params,
-            POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
-          ),
-        )
-        .onConflictDoUpdate({
-          target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-          set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-        });
-    },
-
-    async ensureReconciliationMarkersTable(): Promise<void> {
-      await db.execute(
-        sql.raw(generatePgCreateTableSQL(tables.reconciliationMarkers)),
-      );
-    },
-
-    async ensureRuntimeContributions(graphId: string): Promise<void> {
-      await contributionMaterializer.ensureRuntimeContributions(graphId);
-    },
-
-    /**
-     * Superseded by `ensureRuntimeContributions(graphId)` (#129).
-     * Retained as a thin back-compat wrapper for callers predating
-     * #129; #135 routed it through the durable-marker writer.
-     */
-    async ensureFulltextTable(graphId: string): Promise<void> {
-      await contributionMaterializer.ensureRuntimeContributions(graphId);
-    },
-
-    // Vector counterparts of the runtime-contribution methods. Present
-    // only when a vector strategy is wired (omitted under `vector: false`,
-    // mirroring the embedding/search methods), so a no-vector backend
-    // doesn't advertise vector materialization it can't perform.
-    ...(vectorStrategy === undefined ?
-      {}
-    : {
-        async ensureVectorSlotContribution(
-          slot: VectorSlot,
-          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
-        ): Promise<void> {
-          await contributionMaterializer.ensureVectorSlot(slot, options_);
-        },
-
-        async ensureVectorSlotContributions(
-          slots: readonly VectorSlot[],
-          options_?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
-        ): Promise<void> {
-          await contributionMaterializer.ensureVectorSlots(slots, options_);
-        },
-
-        async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
-          await contributionMaterializer.assertVectorSlot(slot);
-        },
-
-        async assertVectorSlotsInitialized(
-          slots: readonly VectorSlot[],
-        ): Promise<void> {
-          await contributionMaterializer.assertVectorSlots(slots);
-        },
-
-        async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
-          await contributionMaterializer.dropVectorSlot(slot);
-        },
-      }),
-
-    async getReconciliationMarker(
-      graphId: string,
-    ): Promise<number | undefined> {
-      const t = tables.reconciliationMarkers;
-      const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-      return rows[0]?.reconciledToVersion;
-    },
-
-    async setReconciliationMarker(
-      graphId: string,
-      version: number,
-    ): Promise<void> {
-      const t = tables.reconciliationMarkers;
-      await db
-        .insert(t)
-        .values({ graphId, reconciledToVersion: version })
-        .onConflictDoUpdate({
-          target: t.graphId,
-          set: { reconciledToVersion: version },
-        });
-    },
-
-    async refreshStatistics(): Promise<void> {
-      // Scoped to TypeGraph-managed tables only — we don't touch
-      // unrelated tables in the same database. Without fresh stats
-      // after a bulk load the planner can pick a reverse-index scan
-      // with a filter (5ms forward traversal instead of 0.5ms) until
-      // autovacuum catches up. Sequential per-table statements — see
-      // coreAnalyzeStatements for why they are never combined.
-      for (const statement of coreAnalyzeStatements) {
-        await db.execute(statement);
-      }
-      // The recorded relations may be absent on a schema created before
-      // recorded-time history landed (bring-your-own-pool, no DDL re-run).
-      // Postgres fails an ANALYZE naming a missing relation, so ANALYZE
-      // only the recorded tables that exist.
-      const tablePresence = await Promise.all(
-        recordedAnalyzeTables.map(async (tableName) => ({
-          tableName,
-          exists: await recordedTableExists(tableName),
-        })),
-      );
-      const presentRecordedTables = tablePresence
-        .filter((entry) => entry.exists)
-        .map((entry) => entry.tableName);
-      for (const tableName of presentRecordedTables) {
-        await db.execute(
+    const ddl = `CREATE EXTENSION IF NOT EXISTS "${validated}";`;
+    if (
+      !capabilities.execution.interactiveTransactions ||
+      fencePlan.kind !== "lock"
+    ) {
+      await executeConcurrentCreateDdl(ddl);
+      return;
+    }
+    await withConcurrentCreateRetry(async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute(
           toDrizzleSql(
-            portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
+            fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
             "postgres",
           ),
         );
-      }
-    },
+        await tx.execute(sql.raw(ddl));
+      });
+    });
+  }
 
-    async commitSchemaVersion(
-      params: CommitSchemaVersionParams,
-    ): Promise<SchemaVersionRow> {
-      return runSchemaWriteTransaction(params.graphId, (target) =>
-        target.commitSchemaVersion(params),
+  // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
+  // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
+  // `vectorStrategy` (the profile head), `fenceTarget` (built by `createSqlBackend`
+  // from its finalized capabilities), `ensureTable`/`execute`/`operationStrategy`
+  // (`provisioning`/`execution`/`strategy`), and `schemaWriteTransaction` (the
+  // fence's own late member, once it exists).
+  const contributionRuntime: ContributionRuntime = {
+    fulltextTableName: tables.fulltextTableName,
+    contributionTableDdl: generatePgCreateTableSQL(matTable),
+    reconciliationMarkersTableDdl: generatePgCreateTableSQL(
+      tables.reconciliationMarkers,
+    ),
+    timestamps: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
+    contributionMarkerColumns: matTable,
+    contributionMarkerRows: {
+      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      async upsert(params) {
+        await db
+          .insert(matTable)
+          .values(
+            buildContributionInsertValues(
+              params,
+              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [
+              matTable.graphId,
+              matTable.logicalName,
+              matTable.owner,
+              matTable.tableName,
+            ],
+            set: buildContributionOnConflictSet(
+              matTable.materializedAt,
+              params.materializedAt,
+            ),
+          });
+      },
+      async deleteWhere(condition) {
+        await db.delete(matTable).where(condition);
+      },
+    },
+    reconciliationMarkerColumns: tables.reconciliationMarkers,
+    reconciliationMarkerRows: {
+      selectWhere: (condition) =>
+        db.select().from(tables.reconciliationMarkers).where(condition),
+      async upsert(graphId, version) {
+        await db
+          .insert(tables.reconciliationMarkers)
+          .values({ graphId, reconciledToVersion: version })
+          .onConflictDoUpdate({
+            target: tables.reconciliationMarkers.graphId,
+            set: { reconciledToVersion: version },
+          });
+      },
+    },
+  };
+
+  // Deps for `createIdentityMembers`, beyond `ensureTable` (`provisioning`)
+  // and `contributionTableExists` (from the contribution member group
+  // `createSqlBackend` builds first).
+  const identityRuntime: IdentityRuntime = {
+    revisionOriginsTableDdl: generatePgCreateTableSQL(tables.revisionOrigins),
+    revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
+    revisionChangesTriggerDdl: postgresRevisionChangeTriggers(tableNames),
+    async revisionChangesJournalReady(): Promise<boolean> {
+      const expectedTriggers = portableSql.join(
+        postgresRevisionChangeTargets(tableNames).map(
+          ({ entity, table }) =>
+            portableSql`(${postgresIdentifierRegclassName(table)}, ${revisionChangeTriggerName(entity, table)}, ${entity})`,
+        ),
+        portableSql`, `,
       );
-    },
-
-    async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
-      await runSchemaWriteTransaction(params.graphId, (target) =>
-        target.setActiveVersion(params),
+      const [state] = await executionAdapter.execute<{ ready?: unknown }>(
+        portableSql`SELECT
+          to_regclass(${postgresIdentifierRegclassName(tableNames.revisionChanges)}) IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES ${expectedTriggers}) AS expected(relation_name, trigger_name, entity)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM pg_trigger AS trigger
+              WHERE trigger.tgrelid = to_regclass(expected.relation_name)
+                AND trigger.tgname = expected.trigger_name
+                AND trigger.tgenabled IN ('O', 'A')
+                AND (trigger.tgtype & 31) = 29
+                AND trigger.tgfoid = to_regprocedure(${quoteRevisionJournalIdentifier(REVISION_CHANGE_FUNCTION) + "()"})
+                AND trigger.tgargs =
+                  convert_to(${tableNames.revisionChanges}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(${tableNames.recordedClock}, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(expected.entity, 'UTF8') || decode('00', 'hex')
+            )
+          ) AS ready`,
       );
+      return state?.ready === true;
     },
+    executeDdl: executeSingleDdl,
+    contributionsForTableNames: (overrides) =>
+      postgresContributions(
+        buildPostgresTables(overrides),
+        fulltextStrategy ?? false,
+      ),
+    primaryKeyConstraintNameFor: (tableName) => `${tableName}_pkey`,
+  };
 
-    async transaction<T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
-      options?: InternalTransactionOptions,
-    ): Promise<T> {
-      return backend.transactionWithNative((tx) => fn(tx), options);
+  /**
+   * Builds this profile's top-level `InternalOperationBackend`, deferred
+   * until `createSqlBackend` has resolved the assembled pipeline's
+   * capabilities, fence target, and contribution materializer (`ctx` — its
+   * `buildCommonOperationOptions` assembly needs the materializer for the
+   * projection-evidence callbacks) — everything else here is a plain
+   * closure capture, unchanged from when this call site built `operations`
+   * directly.
+   */
+  function buildOperations(
+    ctx: EngineOperationsContext,
+  ): InternalOperationBackend {
+    return createPostgresOperationBackend({
+      db,
+      executionAdapter,
+      ...(atomicSqlProgramExecutor === undefined ?
+        {}
+      : { atomicSqlProgramExecutor }),
+      adapterOptions,
+      operationStrategy,
+      tableNames,
+      capabilities: ctx.capabilities,
+      fulltextStrategy,
+      vectorStrategy,
+      contributionMaterializer: ctx.contributionMaterializer,
+      iterativeScanProbe,
+      schemaVersionsTable: tables.schemaVersions,
+      fenceTarget: ctx.fenceTarget,
+      transactionScoped,
+      // The SAME object exposed as `backend.catalog` (via
+      // `provisioning.catalog`), not a second one built from this call's own
+      // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
+      catalog: provisioning.catalog,
+    });
+  }
+
+  async function ensureEdgeMatchIdentityStorage(): Promise<void> {
+    const edgeTableName = getTableName(tables.edges);
+    const [storage] = await executionAdapter.execute<{
+      has_check?: unknown;
+      has_index?: unknown;
+      has_key?: unknown;
+      has_name?: unknown;
+      table_name?: unknown;
+    }>(
+      portableSql`SELECT
+        to_regclass(${postgresIdentifierRegclassName(edgeTableName)}) AS table_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND attname = 'match_identity_name' AND NOT attisdropped
+        ) AS has_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND attname = 'match_identity_key' AND NOT attisdropped
+        ) AS has_key,
+        EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND conname = ${edgeMatchIdentityPairCheckName(edgeTableName)}
+        ) AS has_check,
+        to_regclass(${postgresIdentifierRegclassName(edgeMatchIdentityUniqueIndexName(edgeTableName))}) IS NOT NULL AS has_index`,
+    );
+    if (typeof storage?.table_name !== "string") return;
+    const statements =
+      generatePostgresEdgeMatchIdentityUpgradeDDL(edgeTableName);
+    const missingStatements = [
+      storage.has_name === true ? undefined : statements[0],
+      storage.has_key === true ? undefined : statements[1],
+      storage.has_check === true ? undefined : statements[2],
+      storage.has_index === true ? undefined : statements[3],
+    ].filter((statement): statement is string => statement !== undefined);
+    for (const statement of missingStatements) {
+      await executeConcurrentCreateDdl(statement);
+    }
+  }
+
+  /**
+   * Reads the base-schema marker on `session`: the root connection by
+   * default, or a caller-owned transaction a schema-write adoption checks on.
+   */
+  async function readBaseSchemaVersion(
+    session: Pick<AnyPgDatabase, "select"> = db,
+  ): Promise<number | undefined> {
+    try {
+      const rows = await session
+        .select({ version: tables.baseSchemaVersions.version })
+        .from(tables.baseSchemaVersions)
+        .where(eq(tables.baseSchemaVersions.installation, 1));
+      return rows.at(0)?.version;
+    } catch (error) {
+      if (isMissingTableError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async function writeBaseSchemaVersion(
+    version: number,
+  ): Promise<number | undefined> {
+    const marker = tables.baseSchemaVersions;
+    const timestamp = new Date();
+    await db
+      .insert(marker)
+      .values({ installation: 1, version, updatedAt: timestamp })
+      .onConflictDoUpdate({
+        target: marker.installation,
+        set: { version, updatedAt: timestamp },
+        setWhere: lte(marker.version, version),
+      });
+    // Read back on this backend's primary connection: remote adapters do not
+    // all support RETURNING. The monotonic upsert plus same-primary read makes
+    // this two-statement observation safe when a concurrent adopter is ahead.
+    return readBaseSchemaVersion();
+  }
+
+  /**
+   * PostgreSQL's additive-column migration for an index-materializations
+   * table created before the build-claim columns existed; fresh installs
+   * already have them from `ensureIndexMaterializationsTable`'s CREATE
+   * TABLE. These take the concurrent-DDL retry for the same reason the
+   * CREATE does, and it is the same loop two replicas run at boot: ADD
+   * COLUMN IF NOT EXISTS cannot see another session's uncommitted
+   * pg_attribute row, so the loser waits and is then handed 42701 (or
+   * `tuple concurrently updated`) instead of the notice — a spuriously
+   * failed boot (#445).
+   */
+  async function ensureIndexMaterializationColumns(
+    tableName: string,
+  ): Promise<void> {
+    await executeConcurrentCreateDdl(
+      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
+    );
+    await executeConcurrentCreateDdl(
+      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
+    );
+  }
+
+  const provisioning: EngineProvisioning = {
+    executeDdl: executeSingleDdl,
+    ensureTable: executeConcurrentCreateDdl,
+    generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
+    ensureIndexMaterializationColumns,
+    catalog: createPostgresCatalogProbes(
+      db,
+      executionAdapter,
+      operationStrategy,
+      transactionScoped,
+      allocationSchema,
+    ),
+  };
+
+  // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
+  // (`provisioning`), `execute` (the operation layer's own `execute`, built
+  // once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`), and `fencePlan` (the plan `createSqlBackend` resolves
+  // once, before it builds this member group — `instantiateStatement` below
+  // reads it to decide whether the fused CTE's advisory lock is still sound).
+  const graphTemplateRuntime: GraphTemplateRuntime = {
+    graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
+    tableNames: {
+      schemaVersions: getTableName(tables.schemaVersions),
+      graphTemplates: getTableName(tables.graphTemplates),
+      contributionMaterializations: getTableName(
+        tables.contributionMaterializations,
+      ),
     },
-
-    async transactionWithNative<T>(
-      fn: (tx: TransactionBackend, sql: AnyPgTransaction) => Promise<T>,
-      options?: InternalTransactionOptions,
-    ): Promise<T> {
-      // #134/#135: NO DDL or ensure here. The tx-scoped backend's
-      // fulltext-touching methods assert the durable contribution
-      // marker (one cached SELECT — never DDL) at point of use, exactly
-      // like the non-tx wrappers. A transaction that never touches
-      // fulltext never asserts; one that does runs pure DML against an
-      // already-materialized table, with the "no DDL in the business
-      // transaction" guarantee backed by the durable fact.
-      const temporaryWrites =
-        options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
-      if (temporaryWrites && options.accessMode !== "read_only") {
-        throw new ConfigurationError(
-          "Temporary-write transactions must be semantically read-only.",
-          { dialect: "postgres" },
+    async instantiateStatement(params, execute, fencePlan, fenceTarget) {
+      if (fencePlan.kind !== "row") {
+        return execute<Record<string, unknown>>(
+          asCompiledRowsSql(
+            postgresInstantiateGraphTemplateStatement(params, fencePlan),
+          ),
         );
       }
-      const txConfig =
-        (
-          options?.isolationLevel !== undefined ||
-          options?.accessMode !== undefined ||
-          temporaryWrites
-        ) ?
-          {
-            ...(options.isolationLevel === undefined ?
-              {}
-            : {
-                isolationLevel: options.isolationLevel.replace("_", " ") as
-                  | "read uncommitted"
-                  | "read committed"
-                  | "repeatable read"
-                  | "serializable",
-              }),
-            ...(options.accessMode === undefined && !temporaryWrites ?
-              {}
-            : {
-                accessMode:
-                  temporaryWrites ?
-                    ("read write" as const)
-                  : (requireDefined(options.accessMode).replace("_", " ") as
-                      "read only" | "read write"),
-              }),
-          }
-        : undefined;
-
-      return db.transaction(async (tx) => {
-        const { backend: txBackend, drainAndClose } =
-          bindTransactionBackend(tx);
-        try {
-          return await fn(txBackend, tx);
-        } finally {
-          // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
-          // instant the callback settles, and those control statements do not
-          // travel through the backend's statement queue. Wait for whatever is
-          // on the wire, and refuse anything the callback left running — a
-          // `Promise.all` that rejects orphans its siblings, whose statements
-          // would otherwise overlap the ROLLBACK and then land on a connection
-          // the pool had already handed to somebody else.
-          await drainAndClose();
-        }
-      }, txConfig);
-    },
-
-    adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
-      // #134: cross-store atomicity is unsafe without real rollback —
-      // the caller's relational write on `externalTx` *would* still
-      // commit even though the graph write could not be undone. Refuse
-      // loudly rather than silently degrade.
-      if (!capabilities.transactions) {
+      // Under `row`, the fused CTE below carries no lock of its own (its
+      // `locked` CTE is gone) — the schema-commit fence's exclusion instead
+      // comes from taking the SAME fence row `acquireSchemaWriteFence`'s row
+      // arm takes, as a preceding statement in an explicit transaction, so
+      // the acquisition and the CTE commit or roll back together the way the
+      // single fused statement always has under `mechanism: "lock"`.
+      if (!declaredCapabilities.execution.interactiveTransactions) {
         throw new ConfigurationError(
-          "Cross-store atomicity is unavailable on this Postgres backend: " +
-            "its driver does not support transactions (drizzle-orm/neon-http, " +
-            "Cloudflare D1). Adopting an external transaction here would let " +
-            "the caller's relational write commit with no way to roll back " +
-            "the graph write. Use a node-postgres or neon-serverless " +
-            "(Pool/WebSocket) connection for cross-store transactions.",
+          "Graph-template instantiation under a row-mechanism write fence " +
+            "requires atomic transactions, but this Postgres backend does " +
+            "not provide them. The drizzle-orm/neon-http driver communicates " +
+            "over HTTP and cannot hold a session across statements; use " +
+            "drizzle-orm/neon-serverless (websocket) instead.",
           {
+            code: "GRAPH_TEMPLATE_WRITE_FENCE_UNAVAILABLE",
             backend: "postgres",
-            capability: "transactions",
-            supportsTransactions: false,
+            capability: "execution.interactiveTransactions",
+            supportsInteractiveTransactions: false,
           },
         );
       }
-      assertAdoptedDialect<AnyPgTransaction>(
-        externalTx,
-        PgTransaction,
-        "postgres",
+      // Fresh `tx`/`txAdapter` every call, so a replayed attempt never
+      // reuses a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      const attempt = (): Promise<readonly Record<string, unknown>[]> =>
+        db.transaction(async (tx) => {
+          const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
+          await txAdapter.execute(
+            fencePlan.sql.acquireKeyed(
+              SCHEMA_COMMIT_FENCE_NAMESPACE,
+              params.graphId,
+            ),
+          );
+          return txAdapter.execute<Record<string, unknown>>(
+            asCompiledRowsSql(
+              postgresInstantiateGraphTemplateStatement(params, fencePlan),
+            ),
+          );
+        });
+      // Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+      // concurrent instantiations can both acquire the fence row and only one
+      // COMMITs; the other's whole attempt — open, fence-row acquisition, CTE
+      // — replays from the top. Every other resolved plan, including `row`
+      // with `conflict: "wait"`, runs the one attempt above unchanged: a
+      // waiting mechanism excludes the second acquirer instead of failing it.
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "instantiateGraphTemplate",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
       );
-      // The caller owns BEGIN/COMMIT/ROLLBACK via its own
-      // `db.transaction(...)`. We adopt the literal `tx` client and run
-      // pure DML on it — no transaction is opened or closed here, and no
-      // DDL is emitted inside the caller's business transaction.
-      //
-      // Statements still serialize onto the pinned connection, but the queue
-      // is never closed: only the caller knows when their transaction ends,
-      // so it is on them to await every graph write before committing.
-      return bindTransactionBackend(externalTx).backend;
     },
+    toSchemaVersionRow,
+    rowAccess: {
+      async insertIgnoringConflict(params) {
+        const t = tables.graphTemplates;
+        await db
+          .insert(t)
+          .values({
+            templateId: params.templateId,
+            schemaHash: params.schemaHash,
+            schemaDoc: params.schemaDoc,
+            createdAt: new Date(),
+          })
+          .onConflictDoNothing();
+      },
+      async selectByTemplateId(templateId) {
+        const t = tables.graphTemplates;
+        const templateRows = await db
+          .select()
+          .from(t)
+          .where(eq(t.templateId, templateId));
+        const row = templateRows.at(0);
+        if (row === undefined) return;
+        return {
+          templateId: row.templateId,
+          schemaHash: row.schemaHash,
+          schemaDoc: JSON.stringify(row.schemaDoc),
+          createdAt: row.createdAt.toISOString(),
+        };
+      },
+    },
+    // PostgreSQL's own statement already copies the template's
+    // contribution markers inside its CTE (see `graph-template-sql.ts`),
+    // so this profile supplies no `copyContributionMarkers` dep.
+  };
 
+  // Deps for `createBaseSchemaMembers`, beyond `ensureTable`/`executeDdl`/
+  // `generateDdl` (`provisioning`) and `ensureGraphTemplatesTable` (from the
+  // graph-template member group `createSqlBackend` builds first).
+  const baseSchemaRuntime: BaseSchemaRuntime = {
+    baseSchemaVersionsTableDdl: generatePgCreateTableSQL(
+      tables.baseSchemaVersions,
+    ),
+    readVersion: readBaseSchemaVersion,
+    writeVersion: writeBaseSchemaVersion,
+    ensureEdgeMatchIdentityStorage,
+    fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    storeOperationsDdl: [generatePgCreateTableSQL(tables.storeOperations)],
+    async ensureRecordedAnchorRetentionStorage(clockProvisioned) {
+      const tableName = getTableName(tables.recordedClock);
+      const relation =
+        allocationSchema === undefined ?
+          postgresIdentifierRegclassName(tableName)
+        : `${postgresIdentifierRegclassName(allocationSchema)}.${postgresIdentifierRegclassName(tableName)}`;
+      // Existing storage needs no DDL. Missing storage uses a bounded queued
+      // ALTER, allowing it to make progress through overlapping writers.
+      const readStorage = async () => {
+        const [storage] = await executionAdapter.execute<{
+          table_name?: unknown;
+          has_retention?: unknown;
+        }>(portableSql`
+          SELECT to_regclass(${relation}) AS table_name,
+            EXISTS (SELECT 1 FROM pg_attribute
+              WHERE attrelid=to_regclass(${relation})
+                AND attname=${RECORDED_ANCHOR_RETENTION_COLUMN} AND NOT attisdropped) AS has_retention
+        `);
+        return storage;
+      };
+      const storage = await readStorage();
+      if (storage?.has_retention === true) return;
+      if (!clockProvisioned && typeof storage?.table_name !== "string") {
+        await executeConcurrentCreateDdl(
+          generatePgCreateTableSQL(tables.recordedClock),
+        );
+        const createdStorage = await readStorage();
+        if (createdStorage?.has_retention === true) return;
+      }
+      try {
+        const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
+        if (db instanceof PgTransaction) {
+          // Savepoint rollback restores both the caller's session and GUC after a timeout.
+          await withConcurrentCreateRetry(() =>
+            db.transaction(async (transaction: AnyPgTransaction) => {
+              await bindSchemaWriteSessionToAllocation(transaction);
+              await transaction.execute(sql.raw(ddl));
+            }),
+          );
+        } else {
+          await executeConcurrentCreateDdl(ddl);
+        }
+      } catch (error) {
+        const waitBudgetMs = recordedAnchorAdoptionTimeoutBudget(error);
+        if (waitBudgetMs === undefined) throw error;
+        throw new BaseSchemaAdoptionTimeoutError(
+          tableName,
+          waitBudgetMs,
+          error,
+        );
+      }
+    },
+    recordedAnchorsDdl: [
+      generatePgCreateTableSQL(tables.recordedAnchors),
+      ...generatePgCreateIndexSQL(tables.recordedAnchors),
+    ],
+    adjacencyIndexDdl: adjacencyIndexAdoptionDdl(
+      getTableName(tables.recordedEdges),
+      "postgres",
+    ),
+    sinceIndexDdl: [
+      generatePgCreateTableSQL(tables.recordedNodes),
+      ...generatePgCreateIndexSQL(tables.recordedNodes),
+      generatePgCreateTableSQL(tables.recordedEdges),
+      ...generatePgCreateIndexSQL(tables.recordedEdges),
+      generatePgCreateTableSQL(tables.recordedIdentityAssertions),
+      ...generatePgCreateIndexSQL(tables.recordedIdentityAssertions),
+      ...sinceIndexAdoptionDdl({
+        recordedNodes: getTableName(tables.recordedNodes),
+        recordedEdges: getTableName(tables.recordedEdges),
+        recordedIdentityAssertions: getTableName(
+          tables.recordedIdentityAssertions,
+        ),
+      }),
+    ],
+    revisionChangesTableDdl: generatePgCreateTableSQL(tables.revisionChanges),
+    revisionChangesIndexDdl: generatePgCreateIndexSQL(tables.revisionChanges),
+    graphIdOrderIndexDdl: graphIdOrderIndexTables(tableNames).map(({ table }) =>
+      generateGraphIdOrderIndexDDL(table),
+    ),
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
+  };
+
+  // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
+  // `ensureIndexMaterializationColumns` (both `provisioning`).
+  const indexMaterializationRuntime: IndexMaterializationRuntime = {
+    indexMaterializationsTableDdl: generatePgCreateTableSQL(
+      tables.indexMaterializations,
+    ),
+    tableName: getTableName(tables.indexMaterializations),
+    timestamps: POSTGRES_INDEX_MAT_TIMESTAMPS,
+    rowAccess: {
+      async selectByIndexName(indexName) {
+        const t = tables.indexMaterializations;
+        return db.select().from(t).where(eq(t.indexName, indexName));
+      },
+      async selectByIndexNames(indexNames) {
+        const t = tables.indexMaterializations;
+        return db
+          .select()
+          .from(t)
+          .where(inArray(t.indexName, [...indexNames]));
+      },
+      async upsert(params) {
+        const t = tables.indexMaterializations;
+        await db
+          .insert(t)
+          .values(
+            buildMaterializationInsertValues(
+              params,
+              POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: t.indexName,
+            set: buildMaterializationOnConflictSet(params.materializedAt),
+          });
+      },
+    },
+  };
+
+  // Deps for `createKindRemovalMembers`, beyond `ensureTable` (`provisioning`).
+  const kindRemovalRuntime: KindRemovalRuntime = {
+    kindRemovalsTableDdl: generatePgCreateTableSQL(tables.kindRemovals),
+    timestamps: POSTGRES_KIND_REMOVAL_TIMESTAMPS,
+    rowAccess: {
+      async selectPending(graphId) {
+        const t = tables.kindRemovals;
+        return db
+          .select()
+          .from(t)
+          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+      },
+      async selectAll(graphId) {
+        const t = tables.kindRemovals;
+        return db.select().from(t).where(eq(t.graphId, graphId));
+      },
+      async upsert(params: RecordKindRemovalParams) {
+        const t = tables.kindRemovals;
+        await db
+          .insert(t)
+          .values(
+            buildKindRemovalInsertValues(
+              params,
+              POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+          });
+      },
+    },
+  };
+
+  function lateMembers(
+    ctx: EngineAssemblyContext<AnyPgTransaction>,
+  ): EngineLateMembers<AnyPgTransaction> {
+    // The factory's finalized capabilities, ONE fence target/plan, and
+    // first-party standing — resolved once by `createSqlBackend`, never
+    // re-derived here. Aliased to bare names so every existing
+    // capabilities/fence-gated call below reads exactly as it did when this
+    // dialect built its own (stale-prone) copies.
+    const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
+
+    /**
+     * THE one resolution of the PostgreSQL schema-commit fence, refusing an
+     * unfenced backend. Shared by the transaction a schema write opens, whose
+     * isolation it decides, and by {@link acquireSchemaWriteFence}, which takes
+     * it, so the two cannot disagree about which fence is in force.
+     */
+    function resolveSchemaCommitFence() {
+      return requireWriteFence(
+        resolveWriteFencePlan(fenceTarget),
+        "The PostgreSQL schema-commit fence",
+        "keyed",
+      );
+    }
+    type SchemaCommitFence = ReturnType<typeof resolveSchemaCommitFence>;
+
+    /**
+     * Where the advisory schema fence learns the session's isolation, which it
+     * must check before trusting the data checks that follow it.
+     *
+     * - `read-with-lock`: a transaction TypeGraph opened reads it in the lock
+     *   statement itself. A refusal there rolls that transaction (or, on a
+     *   transaction-scoped backend, its savepoint) back, and the lock with it.
+     * - `observed`: a caller's adopted transaction outlives a refusal, so its
+     *   isolation is read before anything is acquired or changed on it and the
+     *   fence refuses before its first statement.
+     */
+    type SchemaFenceIsolationSource =
+      | Readonly<{ kind: "read-with-lock" }>
+      | Readonly<{ kind: "observed"; acquisition: GraphWriteFenceAcquisition }>;
+
+    /**
+     * The per-graph schema-commit fence.
+     *
+     * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
+     * unconditionally, so the decision has the same one owner every other lock
+     * site reads — and then REFUSES, like every other fence that guards a
+     * read-then-write spanning statements, rather than degrading.
+     *
+     * It fences a read-then-write sequence that spans STATEMENTS, not a
+     * predicate carried inside one. `commitSchemaVersion` reads the row for the
+     * incoming version, reads the active version, and only then runs the
+     * `deactivateAll` / `activateVersion` pair — and its own comment names this
+     * fence as what serializes that ("BEGIN IMMEDIATE on SQLite,
+     * pg_advisory_xact_lock on Postgres"). Skipping the lock does not leave a
+     * slower-but-correct path, it leaves a check-then-write window in which a
+     * concurrent commit lands between the read and the flip. The partial unique
+     * index on `(graph_id) WHERE is_active` still refuses a SECOND active row,
+     * but it cannot order two commits that each read a version the other is
+     * about to replace.
+     *
+     * `engine-serialized` is the exception `requireWriteFence` already encodes:
+     * the writer slot IS the fence, so there is no concurrent commit to order.
+     *
+     * The row-locking clause rides the `lock` arm rather than a fact of its
+     * own: it is never taken without the advisory lock above it, so no shipped
+     * or plausible engine distinguishes them. An engine that implements
+     * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
+     * member of `WriteFenceDeclaration` would earn its place.
+     */
+    async function acquireSchemaWriteFence(
+      tx: AnyPgTransaction,
+      graphId: string,
+      plan: SchemaCommitFence,
+      isolation: SchemaFenceIsolationSource,
+      beforeAcquisition?: (
+        phase: "schema-advisory" | "schema-row",
+      ) => Promise<void>,
+    ): Promise<void> {
+      switch (plan.kind) {
+        case "lock": {
+          if (isolation.kind === "observed") {
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              isolation.acquisition,
+            );
+          }
+          await beforeAcquisition?.("schema-advisory");
+          // Advisory lock: hashtext($graphId) is collision-tolerant for the
+          // size of an active graph set; collisions just serialize unrelated
+          // graphs which is harmless. Held until the transaction commits.
+          //
+          // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
+          // occupies a different lock space than the two-argument (int4, int4)
+          // form every namespaced TypeGraph lock uses (`typegraph:identity`,
+          // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL
+          // stores the two forms with different locktag field4 values, so a
+          // bigint key can never collide with an (int4, int4) key however the
+          // hashes land — the schema fence is therefore independent of every
+          // lock taken INSIDE it. Normalizing this to the two-argument form
+          // would merge the spaces and put that independence at the mercy of
+          // `hashtext` collisions. `advisoryLockSingleExpression` is the one
+          // owner of this spelling; under this same `"lock"` plan kind, the
+          // graph-template instantiation statement takes the identical
+          // advisory lock on the identical key so the two mutually exclude.
+          // Under `"row"` (below), the graph-template statement instead
+          // takes the same fence row this fence's `"row"` arm takes, as a
+          // preceding statement in its own transaction — no advisory lock is
+          // in play on either side.
+          //
+          // The session's isolation is checked before the data checks that
+          // follow: a managed writer holds this schema's row `FOR SHARE`
+          // without changing it, so a schema writer whose snapshot predates
+          // that writer's commit gets no serialization failure when its
+          // `FOR UPDATE` below is granted. Only a fresh snapshot per statement
+          // lets those checks — a tightening preflight, an emptiness probe —
+          // see the rows that writer committed while this one waited. A
+          // transaction TypeGraph opened reads it in this same statement.
+          if (isolation.kind === "read-with-lock") {
+            const isolationFactExpression = requireDefined(
+              plan.sql.isolationFactExpression,
+              "acquireSchemaWriteFence: isolationFactExpression was validated present by the resolved advisory plan",
+            );
+            const [acquired] = await createPostgresExecutionAdapter(
+              tx,
+              adapterOptions,
+            ).execute<Record<string, unknown>>(
+              asCompiledRowsSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
+              ),
+            );
+            assertSchemaWriteObservesEarlierWriters(
+              graphId,
+              readGraphWriteFenceAcquisition(acquired),
+            );
+          } else {
+            await tx.execute(
+              toDrizzleSql(
+                portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
+                "postgres",
+              ),
+            );
+          }
+          await beforeAcquisition?.("schema-row");
+          // Managed entity writers lock this row FOR SHARE. Locking it FOR
+          // UPDATE before any emptiness probe makes a writer-first commit
+          // wait; a schema-first snapshot-isolated writer gets PostgreSQL's
+          // native serialization failure instead of validating a stale row
+          // version.
+          // eslint-disable-next-line unicorn/template-indent -- this SQL text is snapshot-asserted verbatim (tests/engine-profile-parity.test.ts); autofix would reindent it to this closure's nesting depth and change the captured statement text.
+          await tx.execute(sql`
+          SELECT ${tables.schemaVersions.version}
+          FROM ${tables.schemaVersions}
+          WHERE ${tables.schemaVersions.graphId} = ${graphId}
+            AND ${tables.schemaVersions.isActive} = TRUE
+          FOR UPDATE
+        `);
+          return;
+        }
+        case "row": {
+          await beforeAcquisition?.("schema-row");
+          // Takes the portable fence row instead of the `pg_advisory_xact_lock`/
+          // `FOR UPDATE` pair `mechanism: "lock"` uses — `lockActiveSchemaVersion`
+          // takes the SAME row on the write side, so a concurrent commit and a
+          // concurrent write contend on it exactly as the advisory pair does.
+          // The fused schema + graph-write command still stays advisory-only
+          // under `row` (`schemaFenceFusionPlan.kind === "lock"`, below): it
+          // reaches the schema table inside one statement it composes itself,
+          // which a standalone fence-row acquisition cannot embed into.
+          await tx.execute(
+            toDrizzleSql(
+              plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
+              "postgres",
+            ),
+          );
+          return;
+        }
+        case "engine-serialized":
+        case "caller-serialized": {
+          // The writer slot IS the fence; the commit already runs alone, which
+          // is the guarantee `commitSchemaVersion`'s own comment names
+          // ("BEGIN IMMEDIATE on SQLite"). Under `caller-serialized`, the
+          // deployment's own serialization promise plays the same role.
+          // Nothing to take.
+          return;
+        }
+        default: {
+          plan satisfies never;
+        }
+      }
+    }
+
+    /**
+     * Runs `fn` inside a Postgres transaction, under whatever fence
+     * {@link resolveSchemaCommitFence} resolves and {@link acquireSchemaWriteFence}
+     * takes. On a `lock` backend that is an
+     * `pg_advisory_xact_lock` keyed on the graph id, which serializes all
+     * schema commits per-graph: the read-then-write CAS in
+     * `commitSchemaVersion` is safe even for the initial-commit case where
+     * there is no row yet to `SELECT ... FOR UPDATE`. On an `unfenced` one
+     * that initial-commit case falls back to the storage layer — the partial
+     * unique index on `(graph_id) WHERE is_active` fails the loser of a
+     * concurrent first commit rather than admitting two active rows.
+     *
+     * Refuses on backends that don't support transactions
+     * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
+     * eliminated without atomicity, so silent best-effort degradation is
+     * worse than a typed error.
+     *
+     * Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+     * concurrent callers can both acquire the fence row and only one
+     * COMMITs; the other's whole attempt — open, fence-row acquisition,
+     * `fn` — replays through `runRetriedUnit`, `fenceTarget` naming the
+     * object its serialization classifier was registered against. Every
+     * other resolved plan, including `row` with `conflict: "wait"`, runs the
+     * one attempt below unchanged. This is the ONE place that wraps
+     * `runSchemaWriteTransaction`: `commitSchemaVersion`,
+     * `commitSchemaVersionIfKindsEmpty`, `commitSchemaVersionWithPreflight`,
+     * and `setActiveVersion` (`schema-version-members.ts`) all delegate to
+     * this function and inherit the replay with no wrapping of their own. A
+     * caller that itself retries around a call into this function — the
+     * contribution rebuilder re-reads its own pre-fence state on retry, for
+     * one — composes safely: {@link runRetriedUnit}'s `unwrapNestedConflict`
+     * reports THIS function's own exhaustion `TransactionConflictError` by
+     * its unwrapped cause, so an outer retry classifies the underlying
+     * driver conflict exactly as it would a single-attempt nested unit.
+     */
+    function runSchemaWriteTransaction<T>(
+      graphId: string,
+      fn: (tx: InternalOperationBackend) => Promise<T>,
+    ): Promise<T> {
+      if (!capabilities.execution.interactiveTransactions) {
+        const verdict = resolveBatchWriteVerdict(ctx.self(), {
+          needs: "schema-commit",
+        });
+        throw new ConfigurationError(
+          "Schema writes and removal cleanup require atomic transactions, " +
+            "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
+            "driver communicates over HTTP and cannot hold a session across statements; " +
+            "use drizzle-orm/neon-serverless (websocket) for transactional writes." +
+            batchRefusalSuffix(verdict),
+          {
+            backend: "postgres",
+            capability: "execution.interactiveTransactions",
+            supportsInteractiveTransactions: false,
+            ...batchRefusalDetails(verdict),
+          },
+        );
+      }
+
+      // Fresh `tx`/`txBackend` every call, so a replayed attempt never reuses
+      // a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      //
+      // Under the advisory fence the transaction asks for read committed
+      // rather than inheriting the server's default: that fence refuses a
+      // session at any other isolation (`acquireSchemaWriteFence`), and a
+      // deployment whose default is a snapshot isolation would otherwise have
+      // every schema write refused. The fence-row form needs no such request:
+      // every managed writer advances the row it takes, so a stale snapshot
+      // fails there with a serialization failure at any isolation.
+      const fence = resolveSchemaCommitFence();
+      const transactionConfig =
+        fence.kind === "lock" ?
+          SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
+        : undefined;
+      const attempt = (): Promise<T> =>
+        db.transaction(async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              contributionMaterializationsTable:
+                tables.contributionMaterializations,
+              fenceTarget,
+              allocationSchema,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+            });
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
+        }, transactionConfig);
+
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "runSchemaWriteTransaction",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
+      );
+    }
+
+    // Shared by `transaction()` (TypeGraph opens the tx) and
+    // `adoptTransaction()` (#134 — the caller already opened it): bind a
+    // tx-scoped backend to the *literal* `tx` client and gate fulltext on
+    // the durable marker (a cached SELECT, never DDL). `txIsFirstParty` is
+    // threaded explicitly rather than closing over the outer `isFirstParty`
+    // alias: `adoptTransaction` passes `false` regardless of this profile's
+    // own standing, since an adopted transaction's lifetime is the
+    // caller's, not one TypeGraph has audited.
+    function bindTransactionBackend(
+      tx: AnyPgTransaction,
+      txIsFirstParty: boolean,
+    ): Readonly<{
+      backend: TransactionBackend;
+      privilegedBackend: InternalOperationBackend;
+      drainAndClose: () => Promise<void>;
+    }> {
+      const { backend, contributionReadGate, drainAndClose } =
+        createTransactionBackend({
+          db: tx,
+          adapterOptions,
+          operationStrategy,
+          tableNames,
+          capabilities,
+          fulltextStrategy,
+          vectorStrategy,
+          contributionMaterializer: ctx.contributionMaterializer,
+          iterativeScanProbe,
+          schemaVersionsTable: tables.schemaVersions,
+          contributionMaterializationsTable:
+            tables.contributionMaterializations,
+          fenceTarget,
+          allocationSchema,
+          lineage: provisioning.lineage,
+          recordedTime: provisioning.recordedTime,
+          isFirstParty: txIsFirstParty,
+        });
+      const gatedBackend = carryAtomicMutationSessionRegistration(
+        backend,
+        gateFulltext(
+          backend,
+          contributionReadGate.assertInitialized,
+          contributionReadGate.refuseUnavailableFulltext,
+        ),
+      );
+      return {
+        backend: gatedBackend,
+        privilegedBackend: backend,
+        drainAndClose,
+      };
+    }
+
+    return {
+      transactions: {
+        async transaction<T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          options?: InternalTransactionOptions,
+        ): Promise<T> {
+          return ctx.self().transactionWithNative((tx) => fn(tx), options);
+        },
+
+        async transactionWithNative<T>(
+          fn: (tx: TransactionBackend, sql: AnyPgTransaction) => Promise<T>,
+          options?: InternalTransactionOptions,
+        ): Promise<T> {
+          // #134/#135: NO DDL or ensure here. The tx-scoped backend's
+          // fulltext-touching methods assert the durable contribution
+          // marker (one cached SELECT — never DDL) at point of use, exactly
+          // like the non-tx wrappers. A transaction that never touches
+          // fulltext never asserts; one that does runs pure DML against an
+          // already-materialized table, with the "no DDL in the business
+          // transaction" guarantee backed by the durable fact.
+          const temporaryWrites =
+            options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+          if (temporaryWrites && options.accessMode !== "read_only") {
+            throw new ConfigurationError(
+              "Temporary-write transactions must be semantically read-only.",
+              { dialect: "postgres" },
+            );
+          }
+          const txConfig =
+            (
+              options?.isolationLevel !== undefined ||
+              options?.accessMode !== undefined ||
+              temporaryWrites
+            ) ?
+              {
+                ...(options.isolationLevel === undefined ?
+                  {}
+                : {
+                    isolationLevel: options.isolationLevel.replace("_", " ") as
+                      | "read uncommitted"
+                      | "read committed"
+                      | "repeatable read"
+                      | "serializable",
+                  }),
+                ...(options.accessMode === undefined && !temporaryWrites ?
+                  {}
+                : {
+                    accessMode:
+                      temporaryWrites ?
+                        ("read write" as const)
+                      : (requireDefined(options.accessMode).replace(
+                          "_",
+                          " ",
+                        ) as "read only" | "read write"),
+                  }),
+              }
+            : undefined;
+
+          return db.transaction(async (tx) => {
+            const { backend: txBackend, drainAndClose } =
+              bindTransactionBackend(tx, isFirstParty);
+            try {
+              return await fn(
+                markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+                tx,
+              );
+            } finally {
+              // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+              // instant the callback settles, and those control statements do not
+              // travel through the backend's statement queue. Wait for whatever is
+              // on the wire, and refuse anything the callback left running — a
+              // `Promise.all` that rejects orphans its siblings, whose statements
+              // would otherwise overlap the ROLLBACK and then land on a connection
+              // the pool had already handed to somebody else.
+              await drainAndClose();
+            }
+          }, txConfig);
+        },
+
+        adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
+          // #134: cross-store atomicity is unsafe without real rollback —
+          // the caller's relational write on `externalTx` *would* still
+          // commit even though the graph write could not be undone. Refuse
+          // loudly rather than silently degrade.
+          if (!capabilities.execution.interactiveTransactions) {
+            throw new ConfigurationError(
+              "Cross-store atomicity is unavailable on this Postgres backend: " +
+                "its driver does not support transactions (drizzle-orm/neon-http, " +
+                "Cloudflare D1). Adopting an external transaction here would let " +
+                "the caller's relational write commit with no way to roll back " +
+                "the graph write. Use a node-postgres or neon-serverless " +
+                "(Pool/WebSocket) connection for cross-store transactions.",
+              {
+                backend: "postgres",
+                capability: "execution.interactiveTransactions",
+                supportsInteractiveTransactions: false,
+              },
+            );
+          }
+          assertAdoptedDialect<AnyPgTransaction>(
+            externalTx,
+            PgTransaction,
+            "postgres",
+          );
+          // The caller owns BEGIN/COMMIT/ROLLBACK via its own
+          // `db.transaction(...)`. We adopt the literal `tx` client and run
+          // pure DML on it — no transaction is opened or closed here, and no
+          // DDL is emitted inside the caller's business transaction.
+          //
+          // Statements still serialize onto the pinned connection, but the queue
+          // is never closed: only the caller knows when their transaction ends,
+          // so it is on them to await every graph write before committing.
+          // `false` regardless of this profile's own first-party standing:
+          // the caller opened this transaction, its lifetime is not one
+          // TypeGraph has audited, and it must not qualify for the
+          // dialect-derivation fallback or the lazy schema-fence lease.
+          return bindTransactionBackend(externalTx, false).backend;
+        },
+
+        ...(capabilities.execution.interactiveTransactions ?
+          {
+            adoptSchemaWriteTransaction:
+              async function adoptSchemaWriteTransaction(
+                externalTx: AnyPgTransaction,
+                graphId: string,
+                options: Readonly<{ waitBudgetMs: number }>,
+              ): Promise<AdoptedSchemaWriteTransaction> {
+                if (!capabilities.execution.interactiveTransactions) {
+                  throw new ConfigurationError(
+                    "Schema-write adoption requires an interactive PostgreSQL transaction.",
+                    { capability: "execution.interactiveTransactions" },
+                  );
+                }
+                assertAdoptedDialect<AnyPgTransaction>(
+                  externalTx,
+                  PgTransaction,
+                  "postgres",
+                );
+                if (
+                  !Number.isSafeInteger(options.waitBudgetMs) ||
+                  options.waitBudgetMs <= 0
+                ) {
+                  throw new ConfigurationError(
+                    "Schema fence waitBudgetMs must be a positive finite integer.",
+                    { waitBudgetMs: options.waitBudgetMs },
+                  );
+                }
+                const schemaFencePlan = resolveWriteFencePlan(fenceTarget);
+                if (
+                  schemaFencePlan.kind !== "lock" &&
+                  schemaFencePlan.kind !== "row"
+                ) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires a database-enforced PostgreSQL schema fence on the caller's session.",
+                    {
+                      capability: "schemaWriteAdoption.fence",
+                      fenceKind: schemaFencePlan.kind,
+                    },
+                  );
+                }
+
+                // SAVEPOINT refuses outside an explicit transaction. Release it
+                // immediately: this proves the literal pinned session is active,
+                // without opening another transaction or changing application data.
+                // The scope issues nothing, so no driver scope is needed to
+                // attribute a failure inside it.
+                try {
+                  await runSessionSavepoint(
+                    {
+                      executeControl: (statement) =>
+                        externalTx.execute(sql.raw(statement)),
+                    },
+                    "typegraph_schema_adoption_probe",
+                    () =>
+                      Promise.resolve({ action: "release", value: undefined }),
+                  );
+                } catch (error) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires a live caller-owned PostgreSQL transaction on this session.",
+                    { capability: "postgres.activeNativeTransaction" },
+                    { cause: error },
+                  );
+                }
+
+                const { privilegedBackend } = bindTransactionBackend(
+                  externalTx,
+                  false,
+                );
+                const schemaVersionsTableName = getTableName(
+                  tables.schemaVersions,
+                );
+                if (
+                  !(await privilegedBackend.tableExists(
+                    schemaVersionsTableName,
+                  ))
+                ) {
+                  throw new ConfigurationError(
+                    "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
+                    { tableName: schemaVersionsTableName },
+                  );
+                }
+                // The commit this adoption admits must not land on a database
+                // an earlier release still opens. The marker is read on the
+                // caller's session: a root read would wait for the connection
+                // this very transaction holds. A missing marker table is
+                // checked first, since a failed read would abort the caller's
+                // transaction rather than refuse it.
+                assertBaseSchemaVersionCurrent(
+                  (await privilegedBackend.tableExists(
+                    getTableName(tables.baseSchemaVersions),
+                  )) ?
+                    await readBaseSchemaVersion(externalTx)
+                  : undefined,
+                );
+
+                const settingAdapter = createPostgresExecutionAdapter(
+                  externalTx,
+                  adapterOptions,
+                );
+                if (allocationSchema !== undefined) {
+                  await assertCallerSessionInAllocationSchema(
+                    settingAdapter,
+                    allocationSchema,
+                    "Schema adoption",
+                  );
+                }
+                // The caller's transaction outlives a refusal, so its
+                // isolation is read here — already fixed by the statements
+                // above, and before anything is acquired or changed on it —
+                // for the schema fence to refuse before its first statement.
+                const isolationFactExpression =
+                  schemaFencePlan.sql.isolationFactExpression;
+                const [setting] = await settingAdapter.execute<
+                  Record<string, unknown>
+                >(
+                  asCompiledRowsSql(
+                    isolationFactExpression === undefined ?
+                      portableSql`SELECT current_setting('lock_timeout') AS value`
+                    : portableSql`SELECT current_setting('lock_timeout') AS value, ${isolationFactExpression()} AS ${portableSql.raw(FENCE_ISOLATION_COLUMN)}`,
+                  ),
+                );
+                const previousTimeout =
+                  typeof setting?.["value"] === "string" ?
+                    setting["value"]
+                  : undefined;
+                const callerTimeout =
+                  previousTimeout === undefined ? undefined : (
+                    postgresLockTimeoutMilliseconds(previousTimeout)
+                  );
+                if (
+                  callerTimeout === undefined ||
+                  previousTimeout === undefined
+                ) {
+                  throw new ConfigurationError(
+                    "Cannot preserve this transaction's PostgreSQL lock_timeout setting.",
+                    { lockTimeout: previousTimeout },
+                  );
+                }
+
+                const deadline = performance.now() + options.waitBudgetMs;
+                let phase: "schema-advisory" | "schema-row" = "schema-advisory";
+                try {
+                  await acquireSchemaWriteFence(
+                    externalTx,
+                    graphId,
+                    schemaFencePlan,
+                    {
+                      kind: "observed",
+                      acquisition: readGraphWriteFenceAcquisition(setting),
+                    },
+                    async (acquisitionPhase) => {
+                      phase = acquisitionPhase;
+                      const remainingMs = deadline - performance.now();
+                      if (remainingMs <= 0) {
+                        throw new SchemaFenceTimeoutError(
+                          graphId,
+                          acquisitionPhase,
+                          options.waitBudgetMs,
+                        );
+                      }
+                      const effectiveMs =
+                        callerTimeout === 0 ? remainingMs : (
+                          Math.min(callerTimeout, remainingMs)
+                        );
+                      await externalTx.execute(
+                        sql`SELECT set_config('lock_timeout', ${`${Math.max(1, Math.floor(effectiveMs))}ms`}, true)`,
+                      );
+                    },
+                  );
+                  // A lock_timeout is per acquisition, so confirm that the entire
+                  // ordered advisory/row sequence respected the caller's deadline.
+                  if (performance.now() >= deadline) {
+                    throw new SchemaFenceTimeoutError(
+                      graphId,
+                      phase,
+                      options.waitBudgetMs,
+                    );
+                  }
+                  await externalTx.execute(
+                    sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
+                  );
+                } catch (error) {
+                  // A database lock timeout aborts the native transaction. Do not
+                  // issue a restore or diagnostic statement on that failed session.
+                  if (isPostgresLockTimeout(error)) {
+                    throw new SchemaFenceTimeoutError(
+                      graphId,
+                      phase,
+                      options.waitBudgetMs,
+                      error,
+                    );
+                  }
+                  throw error;
+                }
+
+                const activeSchema =
+                  await privilegedBackend.getActiveSchema(graphId);
+                return {
+                  backend: Object.defineProperty(
+                    privilegedBackend,
+                    "ensureVectorSlotContributions",
+                    {
+                      value: (
+                        slots: readonly VectorSlot[],
+                        slotOptions?: Readonly<{ onDrift?: "throw" | "skip" }>,
+                      ) =>
+                        ensureAdoptedVectorSlots(
+                          privilegedBackend,
+                          slots,
+                          slotOptions,
+                          {
+                            dialect: "postgres",
+                            fenceTarget,
+                            vectorStrategy,
+                            fulltextStrategy,
+                            fulltextTableName: tables.fulltextTableName,
+                            markerTableName: getTableName(
+                              tables.contributionMaterializations,
+                            ),
+                            decodeMarkerTimestamp:
+                              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+                          },
+                        ),
+                      enumerable: true,
+                    },
+                  ) as unknown as AdoptedSchemaWriteTransaction["backend"],
+                  activeSchema,
+                };
+              },
+          }
+        : {}),
+
+        async schemaWriteTransaction<T>(
+          graphId: string,
+          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+        ): Promise<T> {
+          return runSchemaWriteTransaction(graphId, (target) => fn(target));
+        },
+      },
+
+      fence: {
+        runSchemaWriteTransaction,
+      },
+
+      rawSql: {
+        execute: ctx.operations.execute,
+        ...(ctx.operations.executeRaw === undefined ?
+          {}
+        : { executeRaw: ctx.operations.executeRaw }),
+      },
+
+      maintenance: {
+        async refreshStatistics(): Promise<void> {
+          // Scoped to TypeGraph-managed tables only — we don't touch
+          // unrelated tables in the same database. Without fresh stats
+          // after a bulk load the planner can pick a reverse-index scan
+          // with a filter (5ms forward traversal instead of 0.5ms) until
+          // autovacuum catches up. Sequential per-table statements — see
+          // coreAnalyzeStatements for why they are never combined.
+          for (const statement of coreAnalyzeStatements) {
+            await db.execute(statement);
+          }
+          // The recorded and identity relations may be absent on a schema created
+          // before recorded-time history or Operational Identity landed
+          // (bring-your-own-pool, no DDL re-run). Postgres fails an ANALYZE naming
+          // a missing relation, so ANALYZE only the guarded tables that exist.
+          const tablePresence = await Promise.all(
+            guardedAnalyzeTables.map(async (tableName) => ({
+              tableName,
+              exists: await guardedTableExists(tableName),
+            })),
+          );
+          const presentGuardedTables = tablePresence
+            .filter((entry) => entry.exists)
+            .map((entry) => entry.tableName);
+          for (const tableName of presentGuardedTables) {
+            await db.execute(
+              toDrizzleSql(
+                portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
+                "postgres",
+              ),
+            );
+          }
+        },
+      },
+
+      ...((
+        capabilities.execution.interactiveTransactions &&
+        executionAdapter.executeCompiled !== undefined
+      ) ?
+        {
+          async trustedImport<T>(
+            fn: (session: TrustedImportSession) => Promise<T>,
+            options_?: TrustedImportOptions,
+          ): Promise<T> {
+            return ctx.self().transactionWithNative(async (tx, rawSql) => {
+              if (options_?.schemaWrite !== undefined) {
+                await requireDefined(tx.lockSchemaVersionForWrite)({
+                  ...options_.schemaWrite,
+                });
+              }
+              const trustedExecutionAdapter = createPostgresExecutionAdapter(
+                rawSql,
+                { ...adapterOptions, useTransactionClient: true },
+              );
+              const executeCompiled = trustedExecutionAdapter.executeCompiled;
+              if (executeCompiled === undefined) {
+                throw new ConfigurationError(
+                  "Trusted import could not bind raw execution to the PostgreSQL transaction.",
+                  { capability: "trustedImport", dialect: "postgres" },
+                );
+              }
+              const trustedTx = deriveBackend(tx, {
+                executeRaw<T>(
+                  sqlText: string,
+                  params: readonly unknown[],
+                ): Promise<readonly T[]> {
+                  return executeCompiled<T>({ params, sql: sqlText });
+                },
+              });
+              await lockPostgresTrustedImportTables(trustedTx, tableNames);
+              await assertTrustedImportDatabaseEmpty(trustedTx, tableNames);
+              const indexDefinitions = await suspendPostgresSecondaryIndexes(
+                trustedTx,
+                tableNames,
+                allocationSchema,
+              );
+              const result = await fn(
+                createPostgresTrustedImportSession(trustedTx, tableNames),
+              );
+              await restoreSecondaryIndexes(trustedTx, indexDefinitions);
+              await analyzeImportedTables(trustedTx, tableNames);
+              return result;
+            });
+          },
+        }
+      : {}),
+
+      extensions: {
+        ensureExtension: (name) =>
+          ensureDatabaseExtension(capabilities, fencePlan, name),
+        ensureTrigramExtension(): Promise<void> {
+          return ensureDatabaseExtension(capabilities, fencePlan, "pg_trgm");
+        },
+        async claimIndexMaterialization(
+          params: ClaimIndexMaterializationParams,
+        ): Promise<boolean> {
+          const t = tables.indexMaterializations;
+          // Atomic claim: insert a fresh claim row, or take over an existing
+          // row only when no live claim is on it (NULL or lease-expired
+          // building_since). The WHERE on the conflict update makes losing
+          // racers see zero returned rows — the row's own atomicity is the
+          // mutex, so this works identically through pools and across
+          // processes (unlike session advisory locks, which pin a
+          // connection).
+          const rows = await db.execute(sql`
+            INSERT INTO ${t} (
+              "index_name", "graph_id", "entity", "kind", "signature",
+              "schema_version", "last_attempted_at", "building_since",
+              "claim_token"
+            )
+            VALUES (
+              ${params.indexName}, ${params.graphId}, ${params.entity},
+              ${params.kind}, ${params.signature}, ${params.schemaVersion},
+              now(), now(), ${params.token}
+            )
+            ON CONFLICT ("index_name") DO UPDATE SET
+              "building_since" = now(),
+              "claim_token" = EXCLUDED."claim_token"
+            WHERE ${t}."building_since" IS NULL
+               OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
+            RETURNING "index_name"
+          `);
+          const result = rows;
+          const returned =
+            Array.isArray(result) ? result : (
+              ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
+            );
+          return returned.length > 0;
+        },
+
+        async releaseIndexMaterializationClaim(
+          params: ReleaseIndexMaterializationClaimParams,
+        ): Promise<void> {
+          const t = tables.indexMaterializations;
+          // Token-guarded: a lease-expired claim taken over by another
+          // materializer must not be released by the original holder.
+          await db.execute(sql`
+            UPDATE ${t}
+            SET "building_since" = NULL, "claim_token" = NULL
+            WHERE "index_name" = ${params.indexName}
+              AND "claim_token" = ${params.token}
+          `);
+        },
+
+        ensureEdgeMatchIdentityStorage,
+      },
+    };
+  }
+
+  // Assigned to an explicitly typed `const` rather than passed to
+  // `registerFirstPartyProfile` as an inline literal: excess-property
+  // checking only runs against a fresh object literal assigned to a KNOWN
+  // type, and `registerFirstPartyProfile<T extends object>` would otherwise
+  // infer `T` from the literal itself, checking nothing. Registered by
+  // object identity on the exact object returned below — so
+  // `createSqlBackend` marks this backend and its fence target first-party
+  // — rather than by a field a copy or spread could carry forward.
+  const profile: SqlEngineProfile<AnyPgTransaction> = {
+    dialect: "postgres",
+    fenceSql: postgresFenceSql,
+    tableNames,
+    execution: executionAdapter,
+    strategy: operationStrategy,
+    fulltext: fulltextStrategy,
+    vector: vectorStrategy,
+    declaredCapabilities,
+    schemaProvisioning: resolveSchemaProvisioning(options.schemaProvisioning),
+    resourceAudit,
+    autocommit: { singleStatementDurable: true },
+    provisioning,
+    contributionRuntime,
+    identityRuntime,
+    graphTemplateRuntime,
+    baseSchemaRuntime,
+    indexMaterializationRuntime,
+    kindRemovalRuntime,
     async close(): Promise<void> {
       // Drizzle doesn't expose a close method
       // Users manage connection lifecycle themselves
     },
+    assembly: assembleEngine({ buildOperations, lateMembers }),
   };
+  // The caller controls a supplied transaction's lifetime. The factory can
+  // serialize its statements, but it cannot attest that the transaction was
+  // opened under TypeGraph's schema-fence protocol.
+  return transactionScoped ? profile : registerFirstPartyProfile(profile);
+}
 
-  return backend;
+/**
+ * Returns the client object a Drizzle Postgres database serializes ALL of its
+ * statements onto, or `undefined` when statements can run on independent
+ * connections.
+ *
+ * Marked (single connection — an open transaction on one wrapper blocks or
+ * captures every other wrapper's statements):
+ *
+ * - **PGlite** — one in-process WASM Postgres connection.
+ * - **A bare `pg` / `@neondatabase/serverless` `Client`** — one owned socket.
+ *   An export's `BEGIN ... READ ONLY` stays open across the whole stream, so a
+ *   concurrent import's INSERT lands inside it ("cannot execute INSERT in a
+ *   read-only transaction").
+ * - **A `Pool` whose resolved cap is one connection** — the export checks out the
+ *   pool's only connection for the duration, so a concurrent import waits for a
+ *   connection that is never released. Every spelling pg-pool resolves into that
+ *   cap counts; {@link isSingleConnectionPgPoolCap} owns which ones those are.
+ * - **A postgres-js client whose resolved cap is one connection** — the same cap
+ *   on a CALLABLE client. postgres-js's `begin` reserves a connection from its
+ *   own pool for the transaction, so with a pool of one an export snapshot holds
+ *   the only connection every other wrapper's statement needs.
+ *   {@link isSingleConnectionPostgresJsCap} owns that driver's reading of a cap,
+ *   which is NOT the same decision as pg-pool's.
+ *
+ * Deliberately NOT marked: a default pool (independent connection per
+ * checkout), a postgres-js client at default size (`max` defaults to 10), a
+ * neon-http tagged template (session-less HTTP), and anything unrecognized. A
+ * false positive refuses legitimate concurrent work, so the predicate requires
+ * positive evidence and abstains otherwise. A pool capped at one connection by
+ * means other than the cap pg-pool resolves (a global `pg.defaults.max`, a
+ * `pg` connection string's `?max=1` — neither of which pg honors, so neither
+ * caps anything) is therefore not detected, and a serialized-connection import
+ * there still fails the way it did before this guard existed.
+ */
+function getSerializedPostgresClient(db: AnyPgDatabase): object | undefined {
+  const pgliteClient = getPgliteClient(db);
+  if (pgliteClient !== undefined) return pgliteClient;
+  const client: unknown = (db as Readonly<{ $client?: unknown }>).$client;
+  // Callable clients are examined before the object arms: a tagged-template
+  // client is a FUNCTION, so `typeof client !== "object"` would drop it before
+  // its connection cap was ever read.
+  if (typeof client === "function") {
+    return isSingleConnectionCallablePgClient(client) ? client : undefined;
+  }
+  if (typeof client !== "object" || client === null) return undefined;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  if (!hasFunctionProperty(candidate, "query")) return undefined;
+  if (isSingleConnectionPgPool(candidate)) return client;
+  return isBarePgClient(candidate) ? client : undefined;
+}
+
+/** Whether a `pg`-shaped client is a pool whose only connection is shared. */
+function isSingleConnectionPgPool(
+  candidate: Readonly<Record<string, unknown>>,
+): boolean {
+  // `options` is a pg.Pool member (pg.Client has none), and holds the resolved
+  // pool configuration. The default is 10, so an absent/other `max` says
+  // nothing; what a cap of one looks like is the cap predicate's decision.
+  const options: unknown = candidate["options"];
+  if (typeof options !== "object" || options === null) return false;
+  return isSingleConnectionPgPoolCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a pg-pool `options.max` means ONE connection.
+ *
+ * Numeric 1 is the obvious form. A STRING `"1"` is not a typo: pg-pool's
+ * `options.max = options.max || options.poolSize || 10` (pg-pool 3.x
+ * `index.js:89`) never coerces, so `new Pool({ max: process.env.PG_MAX })` —
+ * and the legacy `new Pool({ poolSize: "1" })`, which lands in the same
+ * `options.max` — keeps a string that its own `this._clients.length >=
+ * this.options.max` comparison (`index.js:120`) then coerces. The pool really
+ * is capped at one.
+ *
+ * `"5"` is NOT evidence: `1 >= "5"` is false, so that pool genuinely opens five
+ * connections. This is the whole reason the decision is per driver — postgres-js
+ * reads the identical value differently, and
+ * {@link isSingleConnectionPostgresJsCap} owns that reading.
+ */
+function isSingleConnectionPgPoolCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
+}
+
+/**
+ * Whether a CALLABLE Postgres client (a tagged-template `Sql`) is capped at one
+ * connection, and is therefore one serialized resource for every wrapper over it.
+ *
+ * Two pieces of positive evidence, both required:
+ *
+ * - {@link isPostgresJsClient} — the driver identity, owned by the execution
+ *   adapter that already discriminates postgres-js from the other callable
+ *   client (neon-http). Without it, `options.max` on an unknown callable means
+ *   nothing we can act on.
+ * - {@link isSingleConnectionPostgresJsCap} — postgres-js exposes its RESOLVED
+ *   options on the callable, and its `max` defaults to 10, so only a cap of one
+ *   says "every statement lands on the same connection". An absent or larger
+ *   `max` abstains: postgres-js at default size hands each `begin` its own
+ *   connection and marking it would refuse concurrent work that succeeds.
+ *
+ * NOT covered: Bun's `SQL`. Nothing in this package positively identifies that
+ * driver (the SQLite side recognizes `BunSQLiteSession`; there is no Postgres
+ * equivalent), and a cap we cannot attribute to a known driver is not evidence.
+ * A `Bun.SQL` capped at one connection remains a known gap (#434).
+ */
+function isSingleConnectionCallablePgClient(client: unknown): boolean {
+  if (client === undefined || client === null) return false;
+  // Read before the driver check narrows the type: postgres-js's `Sql` type
+  // declares no `options` member, so the property is reached through the
+  // untyped client rather than the narrowed one.
+  const options: unknown = (client as Readonly<Record<string, unknown>>)[
+    "options"
+  ];
+  if (!isPostgresJsClient(client)) return false;
+  if (typeof options !== "object" || options === null) return false;
+  return isSingleConnectionPostgresJsCap(
+    (options as Readonly<Record<string, unknown>>)["max"],
+  );
+}
+
+/**
+ * Whether a postgres-js `options.max` means ONE connection.
+ *
+ * postgres-js resolves `max` from the options object, the URL query string and
+ * the `PGMAX` environment variable, and does not coerce it (`max` is absent from
+ * its `ints` list, postgres@3.4.9 `src/index.js:447`). So `postgres(url +
+ * "?max=1")` and `PGMAX=1` both yield the STRING `"1"`, which is one connection
+ * and is marked, exactly as the numeric `postgres(url, { max: 1 })` is.
+ *
+ * KNOWN, DELIBERATE GAP: `[...Array(options.max)]` (`src/index.js:65`) yields
+ * length 1 for ANY non-numeric string, so `postgres(url + "?max=5")` also opens
+ * exactly one connection today and can genuinely wedge a stream pair. It is NOT
+ * marked, because marking on it means marking on an upstream bug: the moment
+ * postgres-js coerces `max`, that configuration becomes a five-connection pool
+ * and the mark would refuse legitimate concurrent work. This is why the decision
+ * is separate from {@link isSingleConnectionPgPoolCap} — the two predicates read
+ * the same value with two justifications, and it is those justifications, not
+ * the bodies, that will diverge as either driver changes.
+ */
+function isSingleConnectionPostgresJsCap(value: unknown): boolean {
+  return value === 1 || (typeof value === "string" && Number(value) === 1);
+}
+
+/** Whether a `pg`-shaped client owns exactly one connection (Client, not Pool). */
+function isBarePgClient(candidate: Readonly<Record<string, unknown>>): boolean {
+  // Refuse every pool marker first: `Pool` exposes checkout accounting and its
+  // resolved `options`; `Client` exposes none of them.
+  if (
+    candidate["options"] !== undefined ||
+    candidate["totalCount"] !== undefined ||
+    candidate["idleCount"] !== undefined ||
+    candidate["waitingCount"] !== undefined
+  ) {
+    return false;
+  }
+  // Positive `pg.Client` evidence: the connection lifecycle pair plus
+  // `escapeIdentifier`, which pg defines on Client and not on Pool.
+  return (
+    hasFunctionProperty(candidate, "connect") &&
+    hasFunctionProperty(candidate, "end") &&
+    hasFunctionProperty(candidate, "escapeIdentifier")
+  );
+}
+
+/**
+ * Exported for unit tests that assert the marking predicate directly against
+ * real `pg` `Client` / `Pool` instances; production code reaches it only
+ * through {@link createPostgresBackend}.
+ *
+ * @internal
+ */
+export function isSerializedPostgresClient(client: unknown): boolean {
+  return (
+    getSerializedPostgresClient({
+      $client: client,
+    } as unknown as AnyPgDatabase) !== undefined
+  );
 }
 
 /**
@@ -1216,6 +3317,7 @@ export function createIterativeScanProbe(): IterativeScanProbe {
 type CreatePostgresOperationBackendOptions = Readonly<{
   db: AnyPgDatabase;
   executionAdapter: PostgresExecutionAdapter;
+  atomicSqlProgramExecutor?: AtomicSqlProgramExecutor;
   /**
    * Adapter tuning (prepared-statement cache settings). Used to bind a
    * fresh, equivalently-configured adapter to a transaction client when
@@ -1225,18 +3327,21 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
-  fulltextStrategy: FulltextStrategy;
+  /**
+   * Active fulltext strategy (`tsvectorStrategy` unless overridden), or
+   * `undefined` when fulltext support is disabled (`fulltext: false`).
+   */
+  fulltextStrategy: FulltextStrategy | undefined;
   /**
    * Active vector strategy (`pgvectorStrategy` unless overridden), or
    * `undefined` when vector support is disabled (`vector: false`).
    */
   vectorStrategy: VectorStrategy | undefined;
   /**
-   * Shared durable-marker materializer. The vector methods assert a
-   * slot's marker (SELECT, never DDL) on the hot path and `createVectorIndex`
-   * ensures it (privileged) — replacing the old in-process ensure-latch.
-   * Shared across the outer backend and every transaction-scoped backend
-   * so a slot's marker is resolved at most once per process.
+   * Durable-marker materializer. Root operations use the root instance;
+   * transaction operations receive a read gate bound to their pinned session
+   * and its own cache, so an earlier transaction snapshot cannot reuse a
+   * marker witnessed by another session.
    */
   contributionMaterializer: ContributionMaterializer;
   /**
@@ -1245,6 +3350,46 @@ type CreatePostgresOperationBackendOptions = Readonly<{
    * transaction backend so the warning fires once per backend instance.
    */
   iterativeScanProbe: IterativeScanProbe;
+  schemaVersionsTable: PostgresTables["schemaVersions"];
+  /**
+   * The factory's shared write-fence target. `lockSchemaVersionForWrite`
+   * resolves its plan instead of taking `FOR SHARE` unconditionally,
+   * so a managed write and the schema commit it fences against read the
+   * same decision.
+   */
+  fenceTarget: WriteFenceTarget;
+  /** Whether this operation backend is bound to an explicit transaction. */
+  transactionScoped: boolean;
+  /**
+   * The root backend's own `catalog` bag, threaded through so this call
+   * exposes the SAME object rather than building a second one from `db` /
+   * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
+   * transaction-scoped call, which has no root bag to share and instead
+   * builds its own probes bound to the transaction's own session.
+   */
+  catalog?: BackendCatalogProbes | undefined;
+  /** The allocation schema the backend's tables are bound to, if any; its catalog probes read there. */
+  allocationSchema?: string | undefined;
+  /**
+   * The root backend's own `lineage` bag, threaded through so a
+   * transaction-scoped call exposes the SAME object — see
+   * `EngineProvisioning.lineage`. Unlike `catalog`, there is nothing to
+   * rebuild when this is omitted: a profile-supplied `lineage` is a
+   * read-only bag of engine-wide queries bound to nothing session-specific,
+   * so a transaction-scoped call with no `lineage` passed through simply
+   * carries none, matching the root.
+   */
+  lineage?: LineageMembers | undefined;
+  /**
+   * The root backend's own `recordedTime` bag, threaded through so a
+   * transaction-scoped call exposes the SAME object — see
+   * `EngineProvisioning.recordedTime`. Like `lineage`, there is nothing to
+   * rebuild when this is omitted: a profile-supplied `recordedTime` is a
+   * read-only source function and revision-clock read bound to nothing
+   * session-specific, so a transaction-scoped call with no `recordedTime`
+   * passed through simply carries none, matching the root.
+   */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -1253,13 +3398,32 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
-  fulltextStrategy: FulltextStrategy;
+  /** Active fulltext strategy. See {@link CreatePostgresOperationBackendOptions}. */
+  fulltextStrategy: FulltextStrategy | undefined;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
   vectorStrategy: VectorStrategy | undefined;
-  /** Shared durable-marker materializer. See {@link CreatePostgresOperationBackendOptions}. */
+  /** Root materializer, rebound to this transaction's marker reads below. */
   contributionMaterializer: ContributionMaterializer;
   /** Shared iterative-scan probe. See {@link CreatePostgresOperationBackendOptions}. */
   iterativeScanProbe: IterativeScanProbe;
+  schemaVersionsTable: PostgresTables["schemaVersions"];
+  contributionMaterializationsTable: PostgresTables["contributionMaterializations"];
+  /** Shared write-fence target. See {@link CreatePostgresOperationBackendOptions}. */
+  fenceTarget: WriteFenceTarget;
+  /**
+   * Whether the transaction handle this call builds should carry
+   * `markFirstPartyFactory` — the caller's own resolved standing, never
+   * re-derived here. `false` on the `adoptTransaction` path regardless of
+   * the profile's own standing: an adopted transaction's lifetime is the
+   * caller's, not one TypeGraph has audited.
+   */
+  isFirstParty: boolean;
+  /** The allocation schema the backend's tables are bound to. See {@link CreatePostgresOperationBackendOptions}. */
+  allocationSchema?: string | undefined;
+  /** The root backend's own `lineage` bag. See {@link CreatePostgresOperationBackendOptions}. */
+  lineage?: LineageMembers | undefined;
+  /** The root backend's own `recordedTime` bag. See {@link CreatePostgresOperationBackendOptions}. */
+  recordedTime?: EngineRecordedTimeMembers | undefined;
 }>;
 
 function createPostgresOperationBackend(
@@ -1268,6 +3432,7 @@ function createPostgresOperationBackend(
   const {
     db,
     executionAdapter,
+    atomicSqlProgramExecutor,
     adapterOptions,
     operationStrategy,
     tableNames,
@@ -1276,8 +3441,14 @@ function createPostgresOperationBackend(
     vectorStrategy,
     contributionMaterializer,
     iterativeScanProbe,
+    schemaVersionsTable,
+    fenceTarget,
+    transactionScoped,
+    catalog,
+    allocationSchema,
+    lineage,
+    recordedTime,
   } = options;
-
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
   // postgres-js) are normalized in one place.
@@ -1296,24 +3467,6 @@ function createPostgresOperationBackend(
 
   type VectorSearchRow = Readonly<{ node_id: string; score: number }>;
 
-  // One warning per backend instance when `efSearch` is supplied but the
-  // driver can't hold a transaction to scope `SET LOCAL` to.
-  let efSearchUnsupportedWarned = false;
-  function warnEfSearchUnsupported(): void {
-    if (efSearchUnsupportedWarned) return;
-    efSearchUnsupportedWarned = true;
-    if (typeof console === "undefined" || typeof console.warn !== "function") {
-      return;
-    }
-    console.warn(
-      "[typegraph] efSearch (hnsw.ef_search override) was ignored: this " +
-        "Postgres backend has transactions disabled (e.g. drizzle-orm/neon-http), " +
-        "and SET LOCAL needs a transaction to scope the override. Use a " +
-        "transactional driver (node-postgres / neon-serverless / postgres-js) " +
-        "to apply efSearch.",
-    );
-  }
-
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
 
@@ -1330,8 +3483,10 @@ function createPostgresOperationBackend(
    * The transaction-local GUC overrides for one vector search:
    *
    * - `hnsw.ef_search` when the caller supplied `efSearch` (validated
-   *   upstream; warned-and-skipped on transactionless drivers, where
-   *   `SET LOCAL` cannot be scoped).
+   *   upstream; whether it may be applied at all — and under which parameter
+   *   name — is {@link resolveEfSearchOverride}, the predicate the SQLite
+   *   backend reads too, which refuses a non-HNSW slot and a transactionless
+   *   driver where `SET LOCAL` cannot be scoped).
    * - `hnsw.iterative_scan = strict_order` on HNSW slots (pgvector >= 0.8):
    *   the search SQL constrains results to live candidate nodes (and
    *   optionally `minScore`), and a plain HNSW scan yields only `ef_search`
@@ -1351,26 +3506,30 @@ function createPostgresOperationBackend(
     params: Pick<VectorSearchParams, "efSearch" | "indexType">,
   ): Promise<readonly SearchGucOverride[]> {
     const overrides: SearchGucOverride[] = [];
-    if (params.efSearch !== undefined) {
-      if (capabilities.transactions) {
-        overrides.push({
-          name: "hnsw.ef_search",
-          value: String(params.efSearch),
-        });
-      } else {
-        warnEfSearchUnsupported();
-      }
+    const efSearchParameter = resolveEfSearchOverride({
+      efSearch: params.efSearch,
+      indexType: params.indexType,
+      tuning: vectorSearchFrontierTuning(vectorStrategy),
+      interactiveTransactions: capabilities.execution.interactiveTransactions,
+      dialect: "PostgreSQL",
+      engine: vectorStrategy?.name ?? "this backend",
+    });
+    if (efSearchParameter !== undefined) {
+      overrides.push({
+        name: efSearchParameter,
+        value: String(params.efSearch),
+      });
     }
     if (
       params.indexType === "hnsw" &&
-      capabilities.transactions &&
+      capabilities.execution.interactiveTransactions &&
       (await pgvectorIterativeScanSupported())
     ) {
       overrides.push({ name: "hnsw.iterative_scan", value: "strict_order" });
     }
     if (
       params.indexType === "ivfflat" &&
-      capabilities.transactions &&
+      capabilities.execution.interactiveTransactions &&
       (await pgvectorIterativeScanSupported())
     ) {
       overrides.push({
@@ -1476,42 +3635,165 @@ function createPostgresOperationBackend(
     });
   }
 
-  const batchConfig = {
-    checkUniqueBatchChunkSize: POSTGRES_CHECK_UNIQUE_BATCH_CHUNK_SIZE,
-    edgeInsertBatchSize: POSTGRES_EDGE_INSERT_BATCH_SIZE,
-    // Unlike the static siblings, the embedding upsert honors a runtime
-    // `maxBindParameters` override so its chunk size tracks the connection's
-    // actual bind budget.
-    embeddingUpsertBatchSize: Math.max(
-      1,
-      Math.floor(
-        (capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS) /
-          EMBEDDING_UPSERT_PARAM_COUNT,
-      ),
-    ),
-    getEdgesChunkSize: POSTGRES_GET_EDGES_ID_CHUNK_SIZE,
-    getNodesChunkSize: POSTGRES_GET_NODES_ID_CHUNK_SIZE,
-    nodeInsertBatchSize: POSTGRES_NODE_INSERT_BATCH_SIZE,
-    uniqueInsertBatchSize: POSTGRES_UNIQUE_INSERT_BATCH_SIZE,
-  };
+  const batchConfig = computePostgresBatchChunkSizes(
+    capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+  );
 
-  const commonBackend = createCommonOperationBackend({
-    batchConfig,
-    execution: {
-      execAll,
-      execGet,
-      execRun,
-    },
-    nowIso,
+  const fulltextMembers =
+    fulltextStrategy === undefined ?
+      createFulltextMembers({ fulltextStrategy: undefined })
+    : createFulltextMembers({
+        fulltextStrategy,
+        strategy: operationStrategy,
+        execution: { execAll, execRun },
+        batchConfig,
+      });
+
+  const contributionOperationMembers = createContributionOperationMembers({
+    execRun,
     operationStrategy,
-    rowMappers: {
-      toEdgeRow,
-      toNodeRow,
-      toSchemaVersionRow,
-      toUniqueRow,
-    },
-    tableExistenceCache: { cacheExisting: false },
   });
+
+  /**
+   * The third consumer of the schema fence's `FOR SHARE`, and the
+   * writer-side half that managed entity inserts carry INSIDE their own
+   * statement rather than taking beforehand.
+   *
+   * `buildInsertNodeWithSchemaFence` (and its edge and projection siblings)
+   * fold the fence into the INSERT as a subquery that both ASSERTS the
+   * expected active version and locks the row it matched. Only the lock
+   * needs the engine's cooperation: with an empty clause the subquery still
+   * yields no row when the expected version is no longer active, so the
+   * INSERT still writes nothing — which is exactly the posture SQLite has
+   * always run in, where this clause is `sql.raw("")`.
+   *
+   * So it resolves the SAME {@link resolveWriteFencePlan} the two fences
+   * above do — one `FOR UPDATE`/`FOR SHARE` contract, one decision, three
+   * consumers — but it is the ONE that may degrade, and the reason is
+   * structural: those two fence sequences that span statements, where
+   * dropping the lock opens a check-then-write window, while this predicate
+   * is evaluated INSIDE the INSERT that depends on it. One statement cannot
+   * race itself. With an
+   * empty clause the subquery still yields no row when the expected version
+   * is no longer active, so the INSERT still writes nothing — which is why
+   * SQLite has always run this path with `sql.raw("")`.
+   *
+   * It reads the plan directly rather than calling `requireWriteFence`
+   * because it is a construction-time constant on a backend that may never
+   * open a schema-managed store at all; the refusal an `unfenced` backend
+   * earns is owed by the two fences above, at the moment such a store is
+   * actually built.
+   *
+   * `sql.raw("")` and not `undefined`: `undefined` means "this backend has
+   * no schema-fenced insert program at all", which sends the Store down the
+   * unfused fallback path. The fused program is still correct here; it is
+   * the lock inside it that is not available.
+   *
+   * The resolved plan is also what gates whether `fenceTarget.fenceSql` is
+   * threaded into `fusion` below (which is what lets the fused
+   * `lockSchemaVersionAndGraphWrite` command build at all): this factory
+   * keeps carrying `fenceSql` regardless of what the declared write fence
+   * resolves to, so gating fusion on `fenceSql`'s mere presence rather than
+   * on this SAME plan would let a resolved `caller-serialized`/`unfenced`
+   * backend still take the advisory lock the declaration says it does not
+   * need — the one decision this module makes, read twice, must read the
+   * same answer both times.
+   */
+  const schemaFenceFusionPlan = resolveWriteFencePlan(fenceTarget);
+  const schemaFenceInsertLockClause: SQL =
+    schemaFenceFusionPlan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
+
+  const commonOperationMembers = createCommonOperationBackend(
+    buildCommonOperationOptions({
+      batchConfig,
+      commandSession: transactionScoped ? "transaction" : "root",
+      execution: {
+        compile: executionAdapter.compile,
+        execAll,
+        execGet,
+        execRun,
+      },
+      atomicSqlProgramExecutor,
+      nowIso,
+      maxBindParameters:
+        capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+      operationStrategy,
+      rowMappers: {
+        toEdgeRow,
+        toNodeRow,
+        toSchemaVersionRow,
+        toUniqueRow,
+      },
+      schemaFenceLockClause: schemaFenceInsertLockClause,
+      nodeRowLocks: resolveNodeRowLockPlan(schemaFenceFusionPlan),
+      contributionMaterializer,
+      fusion: {
+        atomicProgramsAtTransactionScope: true,
+        nodeProjectionInsertFusion: true,
+        dynamicEdgeConvergence: true,
+        ...((
+          schemaFenceFusionPlan.kind === "lock" &&
+          fenceTarget.fenceSql !== undefined
+        ) ?
+          { fenceSql: fenceTarget.fenceSql }
+        : {}),
+        async beforeNodeProjectionInsert(params, plan): Promise<void> {
+          const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
+            params,
+            plan,
+          );
+          await contributionMaterializer.assertNodeInsertProjections(
+            params.graphId,
+            {
+              fulltext: plan.projections.some(
+                (projection) => projection.kind === "fulltext",
+              ),
+              vectorSlots,
+            },
+          );
+        },
+        async refuseNodeProjectionError(params, plan, error): Promise<never> {
+          const embeddingProjections = plan.projections.filter(
+            (projection) => projection.kind === "embedding",
+          );
+          const dimensionProjection =
+            embeddingProjections.find(
+              (projection) =>
+                projection.embedding.length !== projection.dimensions,
+            ) ??
+            (embeddingProjections.length === 1 ?
+              embeddingProjections[0]
+            : undefined);
+          if (dimensionProjection !== undefined) {
+            const mapped = mapVectorWriteError(error, {
+              nodeKind: params.kind,
+              fieldPath: dimensionProjection.fieldPath,
+            });
+            if (mapped !== error) throw mapped;
+          }
+          return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+            params.graphId,
+            {
+              fulltext: plan.projections.some(
+                (projection) => projection.kind === "fulltext",
+              ),
+              vectorSlots: vectorSlotsFromManagedNodeCreatePlan(params, plan),
+            },
+            error,
+          );
+        },
+        ...(transactionScoped ?
+          {
+            schemaGraphWriteLockNamespace:
+              RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+            edgeCardinalityInsertFusion: true,
+            nodeClaimInsertFusion: true,
+          }
+        : {}),
+        tableExistenceCache: { cacheExisting: false },
+      },
+    }),
+  );
 
   const executeCompiled = executionAdapter.executeCompiled;
   const executeRawMethod: Pick<TransactionBackend, "executeRaw"> =
@@ -1526,142 +3808,73 @@ function createPostgresOperationBackend(
         },
       };
 
-  // Embedding write/search methods are present only when a vector strategy
-  // is wired. With `vector: false` (e.g. PGlite without pgvector) they are
-  // omitted, so `capabilities.vector` is absent and the store never routes
-  // embedding work here — mirroring a SQLite connection without sqlite-vec.
-  const vectorEmbeddingMethods =
+  // Embedding write/search/index methods are present only when a vector
+  // strategy is wired. With `vector: false` (e.g. PGlite without pgvector)
+  // they are omitted, so `capabilities.vector` is absent and the store never
+  // routes embedding work here — mirroring a SQLite connection without
+  // sqlite-vec. Shared verbatim with the SQLite backend via
+  // `createVectorMembers`; the two genuine per-engine differences (the
+  // GUC-wrapped, ceiling-validated search override and the serial-fallback
+  // index build) are threaded through as `applySearchOverrides` and
+  // `runIndexBuild`.
+  const vectorMembers =
     vectorStrategy === undefined ?
-      {}
-    : {
-        async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-          const slot = vectorSlotFromParams(params);
-          // Assert the slot's durable marker (SELECT, cached) — never DDL.
-          // The per-field table is provisioned by the privileged migrator
-          // (`createStoreWithSchema` → `materializeVectorContributions`), so
-          // a least-privilege runtime role writes embeddings without CREATE.
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
-          try {
-            for (const statement of statements) {
-              await execRun(statement);
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-
-        async upsertEmbeddingBatch(
-          params: UpsertEmbeddingBatchParams,
-        ): Promise<void> {
-          if (params.rows.length === 0) return;
-          const slot = vectorSlotFromParams(params);
-          // Same SELECT-only marker assert as the single-row path — never DDL.
-          await contributionMaterializer.assertVectorSlot(slot);
-          // Last-write-wins dedupe: a multi-row upsert cannot affect one
-          // row twice.
-          const rowsById = new Map(
-            params.rows.map((row) => [row.nodeId, row] as const),
-          );
-          const rows = [...rowsById.values()];
-          const timestamp = nowIso();
-          try {
-            for (const chunk of chunkArray(
-              rows,
-              batchConfig.embeddingUpsertBatchSize,
-            )) {
-              const statements =
-                vectorStrategy.buildUpsertBatch === undefined ?
-                  chunk.flatMap((row) =>
-                    vectorStrategy.buildUpsert(
-                      slot,
-                      {
-                        graphId: params.graphId,
-                        nodeKind: params.nodeKind,
-                        nodeId: row.nodeId,
-                        fieldPath: params.fieldPath,
-                        embedding: row.embedding,
-                        dimensions: params.dimensions,
-                        metric: params.metric,
-                        indexType: params.indexType,
-                      },
-                      timestamp,
-                    ),
-                  )
-                : vectorStrategy.buildUpsertBatch(
-                    slot,
-                    { ...params, rows: chunk },
-                    timestamp,
-                  );
-              for (const statement of statements) {
-                await execRun(statement);
-              }
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-
-        async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Assert the slot's durable marker before deleting. A delete can
-          // run before any embedding was ever written for the field (e.g. a
-          // node hard-deleted having never carried one); the per-field table
-          // was provisioned at boot, so the DELETE targets an existing
-          // (possibly empty) table and is a clean no-op — never a DELETE
-          // against a missing relation, which would abort an enclosing
-          // Postgres transaction. SELECT-only assert, never DDL.
-          const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildDelete(slot, params);
-          for (const statement of statements) {
-            await execRun(statement);
-          }
-        },
-
-        async vectorSearch(
-          params: VectorSearchParams,
-        ): Promise<readonly VectorSearchResult[]> {
-          assertVectorSearchLimit(params.limit);
+      createVectorMembers({ vectorStrategy: undefined })
+    : createVectorMembers({
+        vectorStrategy,
+        execution: { execRun },
+        batchConfig,
+        tableNames,
+        contributionMaterializer,
+        operationStrategy,
+        async applySearchOverrides(query, params) {
           // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
           // before `runVectorSearch` applies it via `set_config`.
           assertPgvectorEfSearch(params.efSearch);
-          const slot = vectorSlotFromParams(params);
-          // Deliberately NOT marker-gated: search is read-only (no DDL
-          // hazard to gate), and its params carry the caller's runtime
-          // metric override, which legitimately diverges from the
-          // provisioned shape on strategies that bake the metric into the
-          // DDL (sqlite-vec; pgvector's table DDL is metric-free but the
-          // contract is kept identical across dialects). An unprovisioned
-          // slot surfaces the engine's missing-relation error — the same
-          // contract as a query-builder `similarTo()` predicate;
-          // `createVerifiedStore` catches both at attach.
-          const query = vectorStrategy.buildSearch(
-            slot,
-            params,
-            // Store-compiled candidates (predicates + subclass + currency)
-            // take precedence; the live-node default covers direct backend use.
-            params.candidates ??
-              buildLiveNodeCandidates(
-                tableNames.nodes,
-                params.graphId,
-                params.nodeKind,
-                nowIso(),
-              ),
-          );
           const gucOverrides = await vectorSearchGucOverrides(params);
-          let rows: readonly { node_id: string; score: number }[];
-          try {
-            rows = await runVectorSearch(gucOverrides, query);
-          } catch (error) {
-            // A query vector whose dimension no longer matches the stored
-            // column surfaces the same typed error as the write path.
-            throw mapVectorWriteError(error, params);
-          }
-          return rows.map((row) => ({
-            nodeId: row.node_id,
-            score: row.score,
-          }));
+          return runVectorSearch(gucOverrides, query);
         },
+        async runIndexBuild({ slot, indexStatement }) {
+          // Honor the `concurrent` flag materializeIndexes passes on Postgres
+          // so the ANN build doesn't take a write-blocking lock on a live
+          // table. execRun is autocommit, which CONCURRENTLY requires.
+          // Built-in pgvector HNSW/IVFFlat builds stage the build graph in
+          // dynamic shared memory, and resource-constrained hosts reject the
+          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
+          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
+          // from dsm_impl_posix). Retry serially: drop the INVALID
+          // leftover the failed CONCURRENTLY build leaves behind (its
+          // IF NOT EXISTS would otherwise mask the retry), pin the
+          // strategy table to parallel_workers = 0 (maintenance builds
+          // take min(storage parameter, max_parallel_maintenance_workers)),
+          // rebuild in local memory, and restore the setting.
+          const strategyTableName = vectorStrategy.tableName(
+            slot.graphId,
+            slot.nodeKind,
+            slot.fieldPath,
+          );
+          await runPostgresVectorIndexBuild(
+            vectorStrategy,
+            execRun,
+            strategyTableName,
+            indexStatement,
+            vectorStrategy.buildDropIndex?.(slot),
+          );
+        },
+      });
+
+  // `hybridSearch` is the one embedding-adjacent member NOT shared with
+  // SQLite (it composes the vector leg with `operationStrategy`'s
+  // single-statement hybrid SQL, which is dialect-owned) — kept inline,
+  // gated the same way `vectorEmbeddingMethods` always has been. It also
+  // needs an active fulltext strategy for its fulltext leg, so it is
+  // additionally gated on `fulltextStrategy` — a fulltext-off backend
+  // falls back to the store's multi-statement RRF path just like a
+  // vector-off one already does.
+  const vectorEmbeddingMethods =
+    vectorStrategy === undefined || fulltextStrategy === undefined ?
+      {}
+    : {
         // Single-statement hybrid needs ROW_NUMBER(); a capability
         // profile that disables window functions keeps the store's
         // multi-statement fallback by simply not exposing the member.
@@ -1684,7 +3897,9 @@ function createPostgresOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              // Read-only, not marker-gated — see vectorSearch above.
+              // Read-only, not marker-gated — see
+              // `createVectorMembers`'s vectorSearch
+              // (engine/members/vector-members.ts) for why.
               const candidates =
                 params.candidates ??
                 buildLiveNodeCandidates(
@@ -1740,197 +3955,256 @@ function createPostgresOperationBackend(
         : {}),
       };
 
-  const operationBackend: InternalOperationBackend = {
-    ...commonBackend,
-    ...executeRawMethod,
-    ...vectorEmbeddingMethods,
+  /**
+   * The managed writer's side of the schema fence: takes the
+   * transaction-scoped share lock on the graph's active schema row,
+   * returning the version it locked — or `undefined` when the statement found
+   * no active row to lock, which at `read committed` does not by itself mean the
+   * graph has no active version — see the fence that calls this.
+   *
+   * Resolves the SAME {@link resolveWriteFencePlan} the schema-commit fence
+   * does, and refuses
+   * with it: the two halves of one `FOR UPDATE`/`FOR SHARE` contract must
+   * never disagree about whether the engine honors row locks.
+   *
+   * The `FOR SHARE` is not merely a WAIT. This transaction HOLDS it for its
+   * remainder, which is what makes the version it just asserted binding
+   * through to the writes that follow — a concurrent schema commit's
+   * `FOR UPDATE` blocks on it and cannot deactivate the row underneath
+   * an in-flight write. Reading the version without the lock would still
+   * ASSERT it, and then let the very flip the assertion was checking for
+   * land before the write. That is a check-then-write race, not a degraded
+   * fence, so `unfenced` is refused here.
+   *
+   * `engine-serialized` skips the clause instead, and correctly: SQLite's
+   * `lockSchemaVersionForWrite` already runs exactly this way, on the
+   * strength of the writer slot no concurrent commit can hold.
+   *
+   * Under `mechanism: "row"` the schema-versions row itself carries no
+   * clause — there is no portable `FOR SHARE` to embed — so this instead
+   * takes the SAME fence row `acquireSchemaWriteFence` takes on the commit
+   * side, as its own statement, before the plain read below. That gives a
+   * concurrent commit and a concurrent write the row to contend on, which is
+   * what makes the version this read observes binding through to the writes
+   * that follow, exactly as holding `FOR SHARE` does under `lock`.
+   */
+  async function lockActiveSchemaVersion(
+    graphId: string,
+  ): Promise<number | undefined> {
+    const plan = requireWriteFence(
+      resolveWriteFencePlan(fenceTarget),
+      "The PostgreSQL schema write fence",
+      "keyed",
+    );
+    if (plan.kind === "row") {
+      await execRun(
+        toDrizzleSql(
+          plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
+          "postgres",
+        ),
+      );
+    }
+    const shareLock = plan.kind === "lock" ? sql`FOR SHARE` : sql``;
+    const active = await execGet<{ version: number }>(sql`
+      SELECT ${schemaVersionsTable.version} AS version
+      FROM ${schemaVersionsTable}
+      WHERE ${schemaVersionsTable.graphId} = ${graphId}
+        AND ${schemaVersionsTable.isActive} = TRUE
+      ${shareLock}
+    `);
+    return active?.version;
+  }
+
+  /**
+   * The write-fence half of a managed write on PostgreSQL: locks the active
+   * schema row (or refuses, per the resolved fence plan) and asserts the
+   * version it holds. An empty locked read is not evidence of an absent
+   * active version — see `lockActiveSchemaVersion`'s own comment — so the
+   * settled-version read below is a fresh, unlocked read naming the version
+   * honestly rather than a retry of the locked one.
+   */
+  async function lockSchemaVersionForWrite(
+    params: LockSchemaVersionForWriteParams,
+  ): Promise<void> {
+    if (!transactionScoped) {
+      throw new ConfigurationError(
+        "The schema write fence requires an explicit PostgreSQL transaction.",
+        {
+          code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+          graphId: params.graphId,
+        },
+      );
+    }
+    const locked = await lockActiveSchemaVersion(params.graphId);
+    if (locked !== undefined) {
+      assertActiveSchemaVersion(params.graphId, params.expectedVersion, locked);
+      return;
+    }
+
+    // An empty locked read is not evidence of an absent active version. At
+    // `read committed`, a `FOR SHARE` read that blocks behind an in-flight
+    // schema commit rechecks only the row versions its own statement snapshot
+    // saw: once that commit lands, the row this statement waited on no longer
+    // satisfies `is_active = TRUE`, and the winner's freshly inserted active
+    // row was never in the snapshot to be substituted in.
+    //
+    // Either way this transaction holds no share lock on an active row, so the
+    // write is rejected. That is why the version reported below needs no lock
+    // of its own — and why the fence must NOT retry the locked read: the
+    // dropped row keeps the share lock the first read took on it, so a second
+    // `FOR SHARE` waits on the row the *next* schema commit has already taken
+    // `FOR UPDATE` while that commit waits on the dropped row in its
+    // deactivate-all. PostgreSQL breaks the cycle by killing one of the two,
+    // and the schema commit — waiting first, so timing out first — is the one
+    // that dies.
+    //
+    // A non-locking read names the version honestly: a schema commit's
+    // deactivate-then-insert pair is atomic, so no committed state has zero
+    // active rows for a graph that has one, and an ordinary read never waits
+    // and so has no recheck to be fooled by. It yields `0` only for a graph
+    // that genuinely has no active version. A rollback landing back on
+    // `expectedVersion` reports `expected === actual`; the rejection stands,
+    // because nothing is holding the fence.
+    const settled = await commonOperationMembers.getActiveSchema(
+      params.graphId,
+    );
+    throw new StaleVersionError({
+      graphId: params.graphId,
+      expected: params.expectedVersion,
+      actual: settled?.version ?? 0,
+    });
+  }
+
+  const operations = createEngineOperationBackend({
+    commonOperationMembers,
+    contributionOperationMembers,
+    vectorMembers,
+    fulltextMembers,
+    rawSqlMembers: {
+      ...executeRawMethod,
+      async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
+        // Statements the compiler branded as containing an ANN index scan
+        // (inline `approximate: true`) get the same pgvector GUC wrapping
+        // the search facade applies — most importantly
+        // `hnsw.iterative_scan = strict_order`, without which a filtered
+        // approximate query starves at the default ef_search frontier.
+        // On pgvector < 0.8 the override list is empty and this falls
+        // through to the plain fast path.
+        const annTypes =
+          isSqlFragment(query) ? annIndexScanTypes(query) : undefined;
+        if (annTypes !== undefined && vectorStrategy !== undefined) {
+          const overrides: SearchGucOverride[] = [];
+          for (const indexType of annTypes) {
+            if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
+            overrides.push(...(await vectorSearchGucOverrides({ indexType })));
+          }
+          return runVectorSearch<T>(overrides, query);
+        }
+        return executionAdapter.execute<T>(query);
+      },
+    },
+    lockSchemaVersionForWrite,
+    compile: executionAdapter.compile,
     capabilities,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
     dialect: "postgres",
     tableNames,
+    ...(fenceTarget.fenceSql === undefined ?
+      {}
+    : { fenceSql: fenceTarget.fenceSql }),
+  });
 
-    // === Vector Index Operations ===
-
-    async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table + its durable marker first (privileged,
-      // idempotent), then create its ANN index. pgvector's `ownedTables`
-      // builds the table only — the HNSW/IVFFlat index is created here (and
-      // only here) so it picks up the declared `m`/`ef_construction`/`lists`
-      // from `slot.indexParams` rather than defaults.
-      await contributionMaterializer.ensureVectorSlot(slot);
-      // Honor the `concurrent` flag materializeIndexes passes on Postgres so the
-      // ANN build doesn't take a write-blocking lock on a live table. execRun is
-      // autocommit, which CONCURRENTLY requires.
-      const indexStatement = vectorStrategy.buildCreateIndex?.(slot, {
-        concurrent: params.concurrent === true,
-      });
-      if (indexStatement !== undefined) {
-        try {
-          await execRun(indexStatement);
-        } catch (error) {
-          if (!isInsufficientResourcesError(error)) throw error;
-          // Parallel HNSW/IVFFlat builds stage the build graph in dynamic
-          // shared memory, and resource-constrained hosts reject the
-          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
-          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
-          // from dsm_impl_posix). Retry serially: drop the INVALID
-          // leftover the failed CONCURRENTLY build leaves behind (its
-          // IF NOT EXISTS would otherwise mask the retry), pin the
-          // strategy table to parallel_workers = 0 (maintenance builds
-          // take min(storage parameter, max_parallel_maintenance_workers)),
-          // rebuild in local memory, and restore the setting.
-          const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-          if (dropStatement !== undefined) {
-            await execRun(dropStatement);
-          }
-          const table = portableSql.identifier(
-            vectorStrategy.tableName(
-              slot.graphId,
-              slot.nodeKind,
-              slot.fieldPath,
+  // `hybridSearch` is not part of the shared assembly — see
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is the root's
+  // own bag when the caller supplied one (`options.catalog`, threaded
+  // through from `EngineProvisioning.catalog` — the SAME object exposed as
+  // `backend.catalog`, built once); when absent — the transaction-scoped
+  // call, which shares no bag of its own — this builds a fresh one bound to
+  // THIS call's own `db`/`executionAdapter` (the pinned transaction client),
+  // so every catalog probe on a transaction-scoped backend runs on the
+  // transaction's own session. `lineage` and `recordedTime`, unlike
+  // `catalog`, have no transaction-scoped fallback to build: each is simply
+  // carried through (`options.lineage`/`options.recordedTime`, the SAME
+  // objects exposed as `backend.lineage`/`backend.recordedTime`) so a
+  // profile-supplied capability reaches a `transaction()` handle exactly as
+  // `catalog` does, and stays absent when the profile declares none.
+  return {
+    ...operations,
+    ...(transactionScoped ?
+      {
+        async upsertHeterogeneousNodes(params: HeterogeneousNodeUpsertParams) {
+          if (params.entries.length === 0) return [];
+          const timestamp = nowIso();
+          const storedLowerBound = resolveStampedValidityLowerBound(
+            undefined,
+            undefined,
+            timestamp,
+          );
+          const inputRows = sql.join(
+            params.entries.map(
+              (entry, index) =>
+                sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${JSON.stringify(entry.updateProps)}, ${index})`,
             ),
+            sql`, `,
           );
-          await execRun(
-            portableSql`ALTER TABLE ${table} SET (parallel_workers = 0)`,
+          const nodes = sql.identifier(tableNames.nodes);
+          const schemaVersions = sql.identifier(
+            requireDefined(tableNames.schemaVersions),
           );
-          try {
-            await execRun(indexStatement);
-          } finally {
-            await execRun(
-              portableSql`ALTER TABLE ${table} RESET (parallel_workers)`,
-            );
-          }
-        }
+          const query = sql`
+            WITH "schema_fence" AS (
+              SELECT 1 FROM ${schemaVersions}
+              WHERE graph_id = ${params.schemaFence.graphId}
+                AND version = ${params.schemaFence.expectedVersion}
+                AND is_active = TRUE
+              FOR SHARE
+            ), "input_rows" (graph_id, kind, id, create_props, update_props, ord) AS (
+              VALUES ${inputRows}
+            ), "upserted" AS (
+              INSERT INTO ${nodes} AS "target"
+                (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
+              SELECT graph_id, kind, id, create_props::jsonb, 1, ${storedLowerBound}, NULL, ${timestamp}, ${timestamp}
+              FROM "input_rows" CROSS JOIN "schema_fence"
+              ON CONFLICT (graph_id, kind, id) DO UPDATE SET
+                props = CASE
+                  WHEN "target".deleted_at IS NULL THEN "target".props || (
+                    SELECT update_props::jsonb FROM "input_rows"
+                    WHERE graph_id = "target".graph_id
+                      AND kind = "target".kind
+                      AND id = "target".id
+                  )
+                  ELSE EXCLUDED.props
+                END,
+                version = "target".version + 1,
+                valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END,
+                valid_to = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_to ELSE EXCLUDED.valid_to END,
+                deleted_at = NULL,
+                updated_at = EXCLUDED.updated_at
+              RETURNING *
+            )
+            SELECT "upserted".* FROM "upserted"
+            JOIN "input_rows" USING (graph_id, kind, id)
+            ORDER BY "input_rows".ord
+          `;
+          const rows = await execAll<Record<string, unknown>>(query);
+          return rows.map((row) => toNodeRow(row));
+        },
       }
-    },
-
-    // === Fulltext Operations ===
-
-    async upsertFulltext(params: UpsertFulltextParams): Promise<void> {
-      const timestamp = nowIso();
-      const statements = operationStrategy.buildUpsertFulltext(
-        params,
-        timestamp,
-      );
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async deleteFulltext(params: DeleteFulltextParams): Promise<void> {
-      const statements = operationStrategy.buildDeleteFulltext(params);
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async upsertFulltextBatch(
-      params: UpsertFulltextBatchParams,
-    ): Promise<void> {
-      if (params.rows.length === 0) return;
-      const timestamp = nowIso();
-      // The strategy emits ONE statement over every row it is given, so
-      // the bind budget is enforced here — same contract as node/edge
-      // batch inserts.
-      for (const rows of chunkArray(
-        params.rows,
-        POSTGRES_FULLTEXT_UPSERT_BATCH_SIZE,
-      )) {
-        const statements = operationStrategy.buildUpsertFulltextBatch(
-          { ...params, rows },
-          timestamp,
-        );
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async deleteFulltextBatch(
-      params: DeleteFulltextBatchParams,
-    ): Promise<void> {
-      if (params.nodeIds.length === 0) return;
-      for (const nodeIds of chunkArray(
-        params.nodeIds,
-        POSTGRES_FULLTEXT_DELETE_CHUNK_SIZE,
-      )) {
-        const statements = operationStrategy.buildDeleteFulltextBatch({
-          ...params,
-          nodeIds,
-        });
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async fulltextSearch(
-      params: FulltextSearchParams,
-    ): Promise<readonly FulltextSearchResult[]> {
-      const query = operationStrategy.buildFulltextSearch(params);
-      // pg returns `numeric` as a string to preserve precision; coerce at the
-      // backend boundary so FulltextSearchResult.score is always `number`.
-      const rows = await execAll<{
-        node_id: string;
-        score: number | string;
-        snippet: string | null;
-      }>(query);
-      return rows.map((row, index) => ({
-        nodeId: row.node_id,
-        score: coerceNumericScore(row.score),
-        rank: index + 1,
-        ...(row.snippet === null ? {} : { snippet: row.snippet }),
-      }));
-    },
-
-    async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromDropIndexParams(params);
-      const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-      if (dropStatement === undefined) return;
-      try {
-        await execRun(dropStatement);
-      } catch (error) {
-        // The per-field table (and thus its index) may never have been
-        // materialized; treat a missing relation as already-dropped.
-        if (!isMissingTableError(error)) throw error;
-      }
-    },
-
-    // === Query Execution ===
-
-    async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
-      // Statements the compiler branded as containing an ANN index scan
-      // (inline `approximate: true`) get the same pgvector GUC wrapping
-      // the search facade applies — most importantly
-      // `hnsw.iterative_scan = strict_order`, without which a filtered
-      // approximate query starves at the default ef_search frontier.
-      // On pgvector < 0.8 the override list is empty and this falls
-      // through to the plain fast path.
-      const annTypes =
-        isSqlFragment(query) ? annIndexScanTypes(query) : undefined;
-      if (annTypes !== undefined && vectorStrategy !== undefined) {
-        const overrides: SearchGucOverride[] = [];
-        for (const indexType of annTypes) {
-          if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
-          overrides.push(...(await vectorSearchGucOverrides({ indexType })));
-        }
-        return runVectorSearch<T>(overrides, query);
-      }
-      return executionAdapter.execute<T>(query);
-    },
-
-    compileSql(
-      query: SqlFragment,
-    ): Readonly<{ sql: string; params: readonly unknown[] }> {
-      return executionAdapter.compile(query);
-    },
+    : {}),
+    ...vectorEmbeddingMethods,
+    catalog:
+      catalog ??
+      createPostgresCatalogProbes(
+        db,
+        executionAdapter,
+        operationStrategy,
+        transactionScoped,
+        allocationSchema,
+      ),
+    ...(lineage === undefined ? {} : { lineage }),
+    ...(recordedTime === undefined ? {} : { recordedTime }),
   };
-
-  return operationBackend;
 }
 
 /**
@@ -1939,8 +4213,39 @@ function createPostgresOperationBackend(
  */
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
+  contributionReadGate: ContributionMaterializer;
   drainAndClose: () => Promise<void>;
 }>;
+
+function resolvedSetOnlyEdgeMutationProgram(
+  executor: AtomicEdgeMutationProgramExecutor,
+): AtomicEdgeMutationProgramExecutor {
+  function execute(
+    input: AtomicEdgeResolvedMutationSetInput,
+  ): Promise<AtomicEdgeResolvedMutationSetResult>;
+  function execute(
+    input: AtomicEdgeConvergenceInput,
+  ): Promise<readonly AtomicEdgeConvergenceResult[]>;
+  function execute(
+    input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+  ):
+    | Promise<AtomicEdgeResolvedMutationSetResult>
+    | Promise<readonly AtomicEdgeConvergenceResult[]> {
+    if (input.kind === "resolved-set") return executor(input);
+    return Promise.reject<readonly AtomicEdgeConvergenceResult[]>(
+      new CompilerInvariantError(
+        "A transaction-session edge mutation profile received durable convergence outside its declared envelope.",
+      ),
+    );
+  }
+
+  return Object.assign(execute, {
+    maxEntries: Object.freeze({
+      resolvedSet: executor.maxEntries.resolvedSet,
+      durableConvergence: 0,
+    }),
+  });
+}
 
 function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
@@ -1952,32 +4257,117 @@ function createTransactionBackend(
   // The wrap is unconditional because the overlap is created inside TypeGraph
   // (the node write pipeline syncs embeddings and fulltext concurrently), not
   // only by user code.
+  const session = createPostgresTransactionSession(
+    options.db,
+    options.adapterOptions,
+  );
+  const executeCompiled = session.compiled.executeCompiled;
+  const { enterDriverScope } = session;
+  // Preserve the established Drizzle-routed execution surface for ordinary
+  // transaction work. Only a closed atomic program needs the pinned client's
+  // compiled-text seam; changing every statement to that seam would also
+  // bypass driver logging and other Drizzle session behavior merely because
+  // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
-    createPostgresExecutionAdapter(options.db, options.adapterOptions),
+    session.operation,
+    getPinnedPostgresTransactionClient(options.db) ?? options.db,
+  );
+  const runExclusive = txExecutionAdapter.runExclusive;
+  const sessionAtomicBatchAdapter =
+    executeCompiled === undefined ? undefined : (
+      createSessionAtomicBatchAdapter({
+        executeCompiled,
+        runExclusive,
+        enterDriverScope,
+      })
+    );
+  const sessionAtomicSqlProgramExecutor =
+    sessionAtomicBatchAdapter === undefined ? undefined : (
+      createAtomicSqlProgramExecutor(sessionAtomicBatchAdapter)
+    );
+  const sessionCapabilities = scopeAtomicBatchToSession(
+    options.capabilities,
+    sessionAtomicSqlProgramExecutor !== undefined,
   );
 
-  // The transaction-scoped backend shares the outer backend's
-  // contribution materializer: the per-field vector table is provisioned
-  // (DDL) only by the privileged outer backend, so a tx-scoped vector op
-  // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
-  // anything on rollback. The shared per-instance cache means a slot
-  // confirmed once stays a pure `Set.has` inside every later transaction.
-  const backend = createPostgresOperationBackend({
+  // A marker confirmed by the root backend can be invisible to an older
+  // transaction snapshot. Resolve assertions on this exact pinned session;
+  // the bound materializer owns a cache that cannot leak across transactions.
+  const markerTable = portableSql.identifier(
+    getTableName(options.contributionMaterializationsTable),
+  );
+  const txContributionMaterializer =
+    options.contributionMaterializer.bindReadSession(async (graphIds) => {
+      if (graphIds.length === 0) return [];
+      const rows =
+        await txExecutionAdapter.execute<RawContributionMaterializationRow>(
+          portableSql`
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
+            graphIds.map((graphId) => portableSql`${graphId}`),
+            portableSql`, `,
+          )})
+        `,
+        );
+      return rows.map((row) =>
+        mapContributionMaterializationRow(
+          row,
+          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+        ),
+      );
+    });
+  const txOperationBackend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
+    ...(sessionAtomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor: sessionAtomicSqlProgramExecutor }),
     adapterOptions: options.adapterOptions,
     operationStrategy: options.operationStrategy,
     tableNames: options.tableNames,
-    capabilities: options.capabilities,
+    capabilities: sessionCapabilities,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
+    contributionMaterializer: txContributionMaterializer,
     // The probe is process-wide truth, so the outer instance's is reused
     // rather than a fresh one per transaction.
     iterativeScanProbe: options.iterativeScanProbe,
+    schemaVersionsTable: options.schemaVersionsTable,
+    fenceTarget: options.fenceTarget,
+    transactionScoped: true,
+    allocationSchema: options.allocationSchema,
+    lineage: options.lineage,
+    recordedTime: options.recordedTime,
   });
+  const backend =
+    options.isFirstParty ?
+      markFirstPartyFactory(txOperationBackend)
+    : txOperationBackend;
+  if (enterDriverScope !== undefined) {
+    registerDriverSavepointScope(backend, enterDriverScope);
+  }
 
-  return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
+  if (sessionAtomicBatchAdapter !== undefined) {
+    registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);
+    const mutateEdges = requireDefined(
+      backend.executeAtomicEdgeMutationProgram,
+    );
+    registerAtomicMutationPrograms(backend, {
+      mutateNodes: requireDefined(backend.executeAtomicNodeResolvedMutationSet),
+      mutateEdges: resolvedSetOnlyEdgeMutationProgram(mutateEdges),
+      replaceNodes: requireDefined(backend.executeAtomicNodeReplacementBatch),
+    });
+  }
+
+  return {
+    backend,
+    contributionReadGate: txContributionMaterializer,
+    drainAndClose: txExecutionAdapter.drainAndClose,
+  };
 }
 
 // Re-export schema utilities

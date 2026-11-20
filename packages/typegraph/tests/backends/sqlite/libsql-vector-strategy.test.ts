@@ -398,6 +398,18 @@ describe("libsqlVectorStrategy (executed against @libsql/client)", () => {
       ).toEqual({ mode: "post-filter", guaranteesFullPage: false });
     });
 
+    it("declares that DiskANN has no per-search frontier to tune", () => {
+      // `vector_top_k(idx, q, k)` takes no other parameter and `search_l` is
+      // fixed when the index is created, so a caller's `efSearch` can only be
+      // refused. Declared here rather than silently dropped at the backend —
+      // the second SQLite engine in the same class as sqlite-vec (#433).
+      expect(libsqlVectorStrategy.capabilities.searchFrontierTuning).toEqual({
+        tunable: false,
+        reason:
+          "`vector_top_k` takes only (index, query, k); DiskANN's search_l is fixed at index-creation time",
+      });
+    });
+
     it("fills the page when the surviving candidates sit inside the over-fetch headroom", async () => {
       const s = slot("hnsw");
       await createStorage(s);

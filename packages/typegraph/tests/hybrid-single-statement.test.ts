@@ -37,6 +37,7 @@ import { embedding } from "../src/core/embedding";
 import { createStoreWithSchema } from "../src/store";
 import { type HybridSearchHit } from "../src/store/search";
 import { requireDefined } from "../src/utils/presence";
+import { provisionPostgresTestDatabase } from "./postgres-test-database";
 
 const GRAPH_ID = "hybrid_single_stmt";
 const FIELD_PATH = "embedding";
@@ -266,12 +267,13 @@ function pickActiveFulltextMinScore(scores: readonly number[]): number {
   return (min + max) / 2;
 }
 
+// Resolving this suite's own Postgres database needs a top-level await, so it
+// lives at module scope and the suite body closes over it.
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+
 describe("single-statement hybrid search", () => {
   const libsql = libsqlDescriptor();
 
-  const TEST_DATABASE_URL =
-    process.env["POSTGRES_URL"] ??
-    "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
   let postgresPool: Pool | undefined;
 
   beforeAll(async () => {
@@ -301,6 +303,11 @@ describe("single-statement hybrid search", () => {
       const pool = requireDefined(postgresPool);
       await pool.query(`
         DROP TABLE IF EXISTS typegraph_index_materializations CASCADE;
+        -- The durable contribution markers (#135) go with the per-field
+        -- vector tables dropped below: a marker that outlives its table makes
+        -- the next store boot trust it and skip the CREATE, so the first
+        -- embedding write hits a missing relation.
+        DROP TABLE IF EXISTS typegraph_contribution_materializations CASCADE;
         DROP TABLE IF EXISTS typegraph_node_embeddings CASCADE;
         DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
         DROP TABLE IF EXISTS typegraph_node_fulltext CASCADE;

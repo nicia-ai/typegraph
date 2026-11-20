@@ -76,6 +76,9 @@ function assertNonEmptyId(value: string, path: string): void {
 // Node Type
 // ============================================================
 
+/** A primitive JSON value, excluding arrays and objects. */
+export type JsonScalar = null | string | number | boolean;
+
 /**
  * Any JSON-serializable value.
  *
@@ -84,12 +87,7 @@ function assertNonEmptyId(value: string, path: string): void {
  * this is the one place in the public API that uses `null` over `undefined`.
  */
 export type JsonValue =
-  | null
-  | string
-  | number
-  | boolean
-  | readonly JsonValue[]
-  | Readonly<{ [key: string]: JsonValue }>;
+  JsonScalar | readonly JsonValue[] | Readonly<{ [key: string]: JsonValue }>;
 
 /**
  * Consumer-owned per-kind annotations.
@@ -115,6 +113,17 @@ export type JsonValue =
 export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 
 /**
+ * Consumer-owned annotations for a graph as a whole.
+ *
+ * This is the schema-level counterpart to {@link KindAnnotations}: display
+ * names, descriptions, capability declarations, and other JSON metadata that
+ * describes the materialization itself rather than one node or edge kind.
+ * Values participate in canonical schema hashing and annotation-only changes
+ * are safe schema changes.
+ */
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+/**
  * A node type definition.
  *
  * Created via `defineNode()`. Represents a type of node in the graph
@@ -125,6 +134,13 @@ export type NodeType<
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
 > = Readonly<{
   [NODE_TYPE_BRAND]: true;
+  /**
+   * Compile-time only, never present at runtime: the declared kind again,
+   * kept where `PolymorphicNodeType` widens `kind` to `string`. It keeps
+   * a widened `NodeId` brand nominal, so another kind's id with the same
+   * properties is not taken for this kind's.
+   */
+  __nodeKind?: K;
   kind: K;
   schema: S;
   description: string | undefined;
@@ -169,19 +185,30 @@ export type NodeProps<N extends NodeType> = z.infer<N["schema"]>;
 // ============================================================
 
 /**
+ * Target mapping from source kind name to allowed target node types.
+ */
+export type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+/**
+ * Valid edge target definitions: either a Cartesian array of target nodes,
+ * or a source-to-target map for source-dependent endpoints.
+ */
+export type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+/**
  * An edge type definition.
  *
  * Created via `defineEdge()`. Represents a type of edge in the graph
  * with an optional Zod schema for properties.
  *
- * Optionally includes `from` and `to` arrays that define the allowed
+ * Optionally includes `from` and `to` arrays or mappings that define the allowed
  * source and target node types (domain and range constraints).
  */
 export type EdgeType<
   K extends string = string,
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
   From extends readonly NodeType[] | undefined = undefined,
-  To extends readonly NodeType[] | undefined = undefined,
+  To extends EdgeTargets | undefined = undefined,
 > = Readonly<{
   [EDGE_TYPE_BRAND]: true;
   kind: K;
@@ -199,7 +226,7 @@ export type AnyEdgeType = EdgeType<
   string,
   z.ZodObject<z.ZodRawShape>,
   readonly NodeType[] | undefined,
-  readonly NodeType[] | undefined
+  EdgeTargets | undefined
 >;
 
 /**
@@ -210,7 +237,7 @@ export type EdgeTypeWithEndpoints = EdgeType<
   string,
   z.ZodObject<z.ZodRawShape>,
   readonly NodeType[],
-  readonly NodeType[]
+  EdgeTargets
 >;
 
 /**
@@ -245,6 +272,14 @@ export function asEdgeId<E extends AnyEdgeType = AnyEdgeType>(
  */
 export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
 
+/**
+ * The graph-local fields that identify an edge for durable matching.
+ */
+export type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
+  name: string;
+  fields: readonly (keyof z.infer<E["schema"]> & string)[];
+}>;
+
 // ============================================================
 // Configuration Types
 // ============================================================
@@ -262,6 +297,14 @@ export type Cardinality =
   | "one" // At most one edge of this kind from any source node
   | "unique" // At most one edge of this kind between any (source, target) pair
   | "oneActive"; // At most one edge with valid_to IS NULL from any source
+
+/**
+ * The target-side cardinalities. Derived from {@link Cardinality} rather than
+ * spelled again, so the vocabulary has one owner; `"unique"` is excluded
+ * because it is a property of the endpoint PAIR, which the source-side option
+ * already declares — a second pair declaration would be the same axis twice.
+ */
+export type TargetCardinality = Exclude<Cardinality, "unique">;
 
 /**
  * Endpoint existence modes for edge validation.
@@ -361,13 +404,47 @@ export type EdgeRegistration<
   E extends AnyEdgeType = AnyEdgeType,
   FromTypes extends NodeType = NodeType,
   ToTypes extends NodeType = NodeType,
+  ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets
+  : readonly ToTypes[],
 > = Readonly<{
   type: E;
   from: readonly FromTypes[];
-  to: readonly ToTypes[];
+  to: ToDef;
   cardinality?: Cardinality;
+  /**
+   * The maximum number of edges of this kind that may point AT one target
+   * node.
+   *
+   * Independent of {@link cardinality}, which bounds the edges leaving one
+   * source. Target `"one"` with source `"many"` is many-to-one ownership: a
+   * source may point at many targets, a target may be pointed at once.
+   */
+  targetCardinality?: TargetCardinality;
   endpointExistence?: EndpointExistence;
+  matchIdentity?: EdgeMatchIdentity<E>;
+  /**
+   * When true, the live relation formed by this edge kind is a DAG: no write
+   * may create a path from an edge's `to` endpoint back to its `from`
+   * endpoint, and a self-loop is a cycle of length one. Enforced under the
+   * per-graph write fence; refused on a backend that cannot hold one.
+   *
+   * Orthogonal to `cardinality`, `matchIdentity`, `endpointExistence` and
+   * `onDelete` — `cardinality: "many", acyclic: true` (a dependency graph)
+   * is the common case and still takes the fence even though its
+   * cardinality does not.
+   */
+  acyclic?: boolean;
 }>;
+
+/**
+ * Base edge registration type for use in constraints - accepts any endpoint configuration.
+ */
+export type AnyEdgeRegistration = EdgeRegistration<
+  AnyEdgeType,
+  NodeType,
+  NodeType,
+  EdgeTargets
+>;
 
 // ============================================================
 // Graph Defaults
@@ -416,11 +493,19 @@ export function isEdgeType(value: unknown): value is AnyEdgeType {
 export function isEdgeTypeWithEndpoints(
   value: unknown,
 ): value is EdgeTypeWithEndpoints {
-  return (
-    isEdgeType(value) &&
-    Array.isArray(value.from) &&
-    value.from.length > 0 &&
-    Array.isArray(value.to) &&
-    value.to.length > 0
-  );
+  if (!isEdgeType(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    !Array.isArray(candidate["from"]) ||
+    candidate["from"].length === 0 ||
+    typeof candidate["to"] !== "object" ||
+    candidate["to"] === null
+  ) {
+    return false;
+  }
+  return Array.isArray(candidate["to"]) ?
+      candidate["to"].length > 0
+    : Object.keys(candidate["to"]).length > 0;
 }

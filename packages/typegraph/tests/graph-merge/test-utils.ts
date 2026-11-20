@@ -14,7 +14,11 @@ import {
   type PostgresTableNames,
   type PostgresTables,
 } from "../../src/backend/drizzle/schema/postgres";
+import { captureMergePlanTargetFence } from "../../src/graph-merge/merge";
+import type { MergePlanArtifactV3 } from "../../src/graph-merge/plan-schema";
+import { constructMergePlanArtifact } from "../../src/graph-merge/plan-wire";
 import type { Embedder } from "../../src/graph-merge/types";
+import type { importGraph } from "../../src/interchange";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 
@@ -34,18 +38,20 @@ export function getBackendProperty(
 /**
  * Backend test fixtures for the graph-merge suite.
  *
- * Two backends run fully in-process and ALWAYS run under plain `pnpm test`:
+ * Two backends run fully in-process under plain `pnpm test`:
  * SQLite via better-sqlite3 (`createLocalSqliteBackend`) and Postgres via
  * PGlite + pgvector (`createLocalPgliteBackend`) — no Docker, no
  * `POSTGRES_URL`, no 5432 dependency.
  *
- * When `POSTGRES_URL` IS set (the `pnpm test:postgres` lane), a third entry
- * runs every suite against the real server-Postgres backend (node-postgres
+ * When `POSTGRES_URL` IS set, a third entry runs every suite against the real
+ * server-Postgres backend (node-postgres
  * `Pool` + Drizzle) — the production driver and transaction wiring PGlite
  * cannot exercise. Each fixture gets its own throwaway schema on the shared
  * server (merge fixtures must be EMPTY and several live simultaneously per
  * test: a base plus its branches), created on `make()` and dropped by
  * `cleanup()`.
+ * The `test:postgres` script selects only that server entry; the normal unit,
+ * property and coverage lanes retain SQLite and PGlite.
  */
 
 /**
@@ -156,14 +162,27 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     recordedNodes: `${prefix}_recorded_nodes`,
     recordedEdges: `${prefix}_recorded_edges`,
     recordedClock: `${prefix}_recorded_clock`,
+    recordedAnchors: `${prefix}_recorded_anchors`,
+    storeOperations: `${prefix}_store_operations`,
     revisionOrigins: `${prefix}_revision_origins`,
+    revisionChanges: `${prefix}_revision_changes`,
+    identityAssertions: `${prefix}_identity_assertions`,
+    recordedIdentityAssertions: `${prefix}_recorded_identity_assertions`,
+    identityClosure: `${prefix}_identity_closure`,
+    identitySeparation: `${prefix}_identity_separation`,
+    identityTransitions: `${prefix}_identity_transitions`,
+    identityTransitionRetention: `${prefix}_identity_transition_retention`,
     uniques: `${prefix}_uniques`,
+    edgeClaims: `${prefix}_edge_claims`,
+    baseSchemaVersions: `${prefix}_base_schema_versions`,
     schemaVersions: `${prefix}_schema_versions`,
     fulltext: `${prefix}_fulltext`,
     indexMaterializations: `${prefix}_index_materializations`,
     contributionMaterializations: `${prefix}_contribution_materializations`,
     kindRemovals: `${prefix}_kind_removals`,
     reconciliationMarkers: `${prefix}_reconciliation_markers`,
+    graphTemplates: `${prefix}_graph_templates`,
+    fences: `${prefix}_fences`,
   };
 }
 
@@ -301,6 +320,47 @@ export async function fakeEmbeddings(
   return lookup;
 }
 
+/** The identity profile the merge suites' interchange fixtures declare. */
+const IDENTITY_PROFILE = "typegraph-identity-v1" as const;
+
+/**
+ * A minimal interchange document carrying ONE `same` assertion between two
+ * nodes of `kind` — how a merge test stages identity truth into a branch
+ * through `importGraph`. The endpoints are emitted in code-point order because
+ * the import path rejects a non-normalized pair.
+ */
+export function identityAssertionDocument(
+  kind: string,
+  id: string,
+  a: string,
+  b: string,
+  validFrom = new Date().toISOString(),
+): Parameters<typeof importGraph>[1] {
+  const refA = { kind, id: a };
+  const refB = { kind, id: b };
+  const [left, right] = a < b ? [refA, refB] : [refB, refA];
+  return {
+    formatVersion: "2.0",
+    exportedAt: "2024-01-01T00:00:00.000Z",
+    source: { type: "external" },
+    nodes: [],
+    edges: [],
+    identity: {
+      profile: IDENTITY_PROFILE,
+      mode: "state",
+      assertions: [
+        {
+          id,
+          relation: "same",
+          a: left,
+          b: right,
+          validFrom,
+        },
+      ],
+    },
+  };
+}
+
 /**
  * A named backend factory used to parameterize `describe.each` suites.
  */
@@ -310,13 +370,28 @@ export type BackendMatrixEntry = Readonly<{
 }>;
 
 /**
- * Returns the backend matrix. The in-process SQLite and PGlite entries always
- * run; the server-Postgres entry (production `pg` driver over Docker/CI
- * Postgres) joins only when `POSTGRES_URL` is set — the `pnpm test:postgres`
- * lane. SQLite's synchronous factory is wrapped so every entry shares the
- * async `make()` signature.
+ * Returns the default local matrix, adding the server when POSTGRES_URL is
+ * set. TYPEGRAPH_TEST_BACKEND=postgres selects only the server for the dedicated
+ * lane and refuses to run without a URL. SQLite's synchronous factory is
+ * wrapped so every entry shares the async make() signature.
  */
 export function backendMatrix(): readonly BackendMatrixEntry[] {
+  const selectedBackend = process.env["TYPEGRAPH_TEST_BACKEND"];
+  if (selectedBackend !== undefined && selectedBackend !== "postgres") {
+    throw new Error(`Unsupported TYPEGRAPH_TEST_BACKEND: ${selectedBackend}`);
+  }
+  const postgresUrl = process.env["POSTGRES_URL"];
+  if (selectedBackend === "postgres") {
+    if (postgresUrl === undefined || postgresUrl === "") {
+      throw new Error("TYPEGRAPH_TEST_BACKEND=postgres requires POSTGRES_URL");
+    }
+    return [
+      {
+        name: "Postgres",
+        make: () => createServerPostgresMergeBackend(postgresUrl),
+      },
+    ];
+  }
   const entries: BackendMatrixEntry[] = [
     {
       name: "SQLite",
@@ -327,7 +402,6 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
       make: () => createPgliteMergeBackend(),
     },
   ];
-  const postgresUrl = process.env["POSTGRES_URL"];
   if (postgresUrl !== undefined && postgresUrl !== "") {
     entries.push({
       name: "Postgres",
@@ -335,4 +409,28 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * Re-fences `artifact` to the target's CURRENT revision, as a forged or
+ * replayed artifact would be, so a test can reach apply's own in-transaction
+ * re-verification of a conflict the planner now refuses: plan before the
+ * target write that causes the conflict, make the write, re-fence, apply.
+ */
+export async function refenceMergePlan<G extends GraphDef>(
+  target: Store<G>,
+  artifact: MergePlanArtifactV3,
+): Promise<MergePlanArtifactV3> {
+  const { digest: _digest, ...input } = artifact;
+  const fence = await captureMergePlanTargetFence(target);
+  return constructMergePlanArtifact({
+    ...input,
+    target: {
+      ...fence,
+      revision: {
+        ...fence.revision,
+        owner: requireDefined(fence.revision.owner),
+      },
+    },
+  });
 }

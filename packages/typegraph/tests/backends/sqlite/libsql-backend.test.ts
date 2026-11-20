@@ -1,13 +1,11 @@
 /**
  * libsql Backend Integration Tests
  *
- * Runs the shared adapter and integration test suites against a libsql
- * backend, plus libsql-specific tests for lifecycle and known caveats.
+ * Runs the shared adapter test suite against a libsql backend, plus
+ * libsql-specific tests for lifecycle and known caveats. The shared
+ * cross-backend integration suite runs from this lane's
+ * `libsql-integration-slice-*.test.ts` files.
  */
-import { existsSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -18,11 +16,14 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
-import { wrapWithManagedClose } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { createIntegrationTestSuite } from "../integration-test-suite";
+import {
+  cleanupTemporaryFiles,
+  createTemporaryDbPath,
+} from "./libsql-temporary-database";
 
 const ConcurrencyPerson = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -33,35 +34,6 @@ const concurrencyGraph = defineGraph({
   nodes: { Person: { type: ConcurrencyPerson } },
   edges: {},
 });
-
-// ============================================================
-// Temp File Helpers
-// ============================================================
-
-// Temp files exercise the persistent-file layout the shared suites assume.
-// (In-memory databases also work — local clients frame transactions with raw
-// BEGIN/COMMIT instead of client.transaction(), which would abandon the
-// connection: tursodatabase/libsql-client-ts#229 — see the specific tests.)
-
-const temporaryFiles: string[] = [];
-
-function createTemporaryDbPath(): string {
-  const dbPath = path.join(
-    tmpdir(),
-    `typegraph-libsql-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`,
-  );
-  temporaryFiles.push(dbPath);
-  return dbPath;
-}
-
-function cleanupTemporaryFiles(): void {
-  for (const dbPath of temporaryFiles.splice(0)) {
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const filePath = dbPath + suffix;
-      if (existsSync(filePath)) unlinkSync(filePath);
-    }
-  }
-}
 
 afterEach(cleanupTemporaryFiles);
 
@@ -80,27 +52,36 @@ createAdapterTestSuite("libsql", async () => {
 });
 
 // ============================================================
-// Shared Integration Test Suite
-// ============================================================
-
-createIntegrationTestSuite("libsql", async () => {
-  const dbPath = createTemporaryDbPath();
-  const client = createClient({ url: `file:${dbPath}` });
-  const { backend } = await createLibsqlBackend(client);
-  return {
-    backend,
-    cleanup: async () => {
-      await backend.close();
-      client.close();
-    },
-  };
-});
-
-// ============================================================
 // libsql-Specific Tests
 // ============================================================
 
 describe("libsql Backend - Specific", () => {
+  it("preserves committed data when a fixture file is closed and reopened", async () => {
+    const dbPath = createTemporaryDbPath();
+    const client = createClient({ url: `file:${dbPath}` });
+    try {
+      await client.execute("CREATE TABLE fixture_probe (value TEXT)");
+      await client.execute("INSERT INTO fixture_probe VALUES ('committed')");
+    } finally {
+      client.close();
+    }
+
+    const reopened = createClient({ url: `file:${dbPath}` });
+    try {
+      expect(reopened.protocol).toBe("file");
+      const persisted = await reopened.execute(
+        "SELECT value FROM fixture_probe",
+      );
+      const synchronous = await reopened.execute("PRAGMA synchronous");
+      const journalMode = await reopened.execute("PRAGMA journal_mode");
+      expect(persisted.rows).toEqual([{ value: "committed" }]);
+      expect(synchronous.rows).toEqual([{ synchronous: 2 }]);
+      expect(journalMode.rows).toEqual([{ journal_mode: "delete" }]);
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("exposes the Drizzle database instance", async () => {
     const client = createClient({ url: "file::memory:" });
     const { backend, db } = await createLibsqlBackend(client);
@@ -144,11 +125,12 @@ describe("libsql Backend - Specific", () => {
     client.close();
   });
 
-  // Regression: local libsql clients must never route through
-  // client.transaction(), which permanently hands the client's connection to
-  // the transaction and lazily opens a fresh — empty — database afterwards
-  // (tursodatabase/libsql-client-ts#229). With raw BEGIN/COMMIT framing, the
-  // documented in-memory setup survives transactional writes.
+  // Regression: before @libsql/client 0.18, client.transaction() permanently
+  // hands a local client's connection to the transaction and lazily opens a
+  // fresh — empty — database afterwards (tursodatabase/libsql-client-ts#229),
+  // so those clients frame transactions as raw BEGIN/COMMIT. From 0.18 the
+  // transaction's connection returns to the pool. Either way the documented
+  // in-memory setup survives transactional writes.
   it("supports in-memory databases across transactional writes", async () => {
     const client = createClient({ url: "file::memory:" });
     const { backend } = await createLibsqlBackend(client);

@@ -5,9 +5,19 @@
  * This allows the compiler to work with custom table names instead of
  * hard-coded defaults.
  */
+import {
+  type EngineRecordedRevision,
+  type EngineRecordedTimeMembers,
+} from "../../backend/capabilities/recorded-time";
+import { type GraphBackend } from "../../backend/types";
 import { type VectorIndexType, type VectorMetric } from "../../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
-import { ConfigurationError } from "../../errors";
+import { type GraphAllocationOwner } from "../../core/allocation-owner";
+import {
+  parseRecordedInstant,
+  type RecordedInstantParts,
+} from "../../core/temporal";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { typeGraphGlobalSymbol } from "../../utils/global-symbol";
 import { isSqlFragment, sql, type SqlFragment } from "../sql-fragment";
 
@@ -17,14 +27,17 @@ const SQL_SCHEMA_BRAND: unique symbol = typeGraphGlobalSymbol("sql-schema-v1");
  * Table names for TypeGraph SQL schema.
  *
  * Carries every customizable physical-table name the backend exposes,
- * including the secondary tables (`uniques`) that the query compiler
- * itself doesn't reference but `materializeRemovals` and other
- * cleanup paths need to address by name. Backends without a
+ * including the secondary tables (`uniques`, `edgeClaims`, `fences`) that
+ * the query compiler itself doesn't reference but `materializeRemovals` and
+ * other cleanup paths (or, for `fences`, `resolveFenceStatements`'s
+ * `row`-mechanism derivation) need to address by name. Backends without a
  * `uniques` table (custom embeddings-only stores) leave it as the
  * default — the cleanup path is a no-op for kinds with no unique
  * rows.
  */
 export type SqlTableNames = Readonly<{
+  /** Active schema version relation; absent on backends without checked reads. */
+  schemaVersions?: string | undefined;
   /** Nodes table name (default: "typegraph_nodes") */
   nodes: string;
   /** Edges table name (default: "typegraph_edges") */
@@ -35,15 +48,52 @@ export type SqlTableNames = Readonly<{
   recordedEdges?: string | undefined;
   /** Recorded-time commit clock table name (default: "typegraph_recorded_clock") */
   recordedClock?: string | undefined;
+  /** Retained origin-bound recorded allocation anchors. */
+  recordedAnchors?: string | undefined;
+  /** Durable caller-key ordinary Store mutation outcomes. */
+  storeOperations?: string | undefined;
   /** Durable per-graph revision-origin table name (default: "typegraph_revision_origins") */
   revisionOrigins?: string | undefined;
+  /** Per-revision entity-key journal used when revision tracking runs without history. */
+  revisionChanges?: string | undefined;
+  /** Identity assertion ledger (default: "typegraph_identity_assertions") */
+  identityAssertions?: string | undefined;
+  /** Recorded identity assertion relation */
+  recordedIdentityAssertions?: string | undefined;
+  /** Derived current identity closure */
+  identityClosure?: string | undefined;
+  /** Derived separation relation over identity classes */
+  identitySeparation?: string | undefined;
+  /** Identity transition log — append-only annotation on the recorded axis (default: "typegraph_identity_transitions") */
+  identityTransitions?: string | undefined;
+  /** Per-graph identity-transition retention watermark (default: "typegraph_identity_transition_retention") */
+  identityTransitionRetention?: string | undefined;
   /** Node fulltext table name (default: "typegraph_node_fulltext") */
   fulltext: string;
   /** Node uniques table name (default: "typegraph_node_uniques") */
   uniques: string;
+  /** Edge cardinality claim table name (default: "typegraph_edge_claims") */
+  edgeClaims?: string | undefined;
+  /**
+   * Write-fence rows table name (default: "typegraph_fences") — the
+   * never-dropped relation a `row`-mechanism write fence acquires a keyed
+   * exclusion against. Part of the base schema on every backend, whether or
+   * not any target ever declares `writeFence.mechanism: "row"`.
+   */
+  fences?: string | undefined;
+  /** Per-deployment index materialization status (default: "typegraph_index_materializations") */
+  indexMaterializations?: string | undefined;
+  /** Strategy-owned table contribution markers (default: "typegraph_contribution_materializations") */
+  contributionMaterializations?: string | undefined;
+  /** Pending extension-kind removal cleanup (default: "typegraph_kind_removals") */
+  kindRemovals?: string | undefined;
+  /** Removal reconciliation high-water marks (default: "typegraph_reconciliation_markers") */
+  reconciliationMarkers?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
+  /** Active schema version relation; absent on backends without checked reads. */
+  schemaVersions?: string;
   /** Nodes table name */
   nodes: string;
   /** Edges table name */
@@ -54,12 +104,33 @@ export type ResolvedSqlTableNames = Readonly<{
   recordedEdges: string;
   /** Recorded-time commit clock table name */
   recordedClock: string;
+  recordedAnchors?: string;
+  storeOperations?: string;
   /** Durable per-graph revision-origin table name */
   revisionOrigins: string;
+  revisionChanges?: string;
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   /** Node fulltext table name */
   fulltext: string;
   /** Node uniques table name */
   uniques: string;
+  /** Edge cardinality claim table name */
+  edgeClaims: string;
+  /** Write-fence rows table name */
+  fences: string;
+  /** Index materialization status table name */
+  indexMaterializations?: string;
+  /** Contribution marker table name */
+  contributionMaterializations?: string;
+  /** Kind removal cleanup table name */
+  kindRemovals?: string;
+  /** Removal reconciliation marker table name */
+  reconciliationMarkers?: string;
 }>;
 
 type SqlSchemaFields = Readonly<{
@@ -77,6 +148,18 @@ type SqlSchemaFields = Readonly<{
   recordedClockTable: SqlFragment;
   /** Get a `SqlFragment` reference to the durable per-graph revision origins. */
   revisionOriginsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the identity assertion ledger. */
+  identityAssertionsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the recorded identity assertion relation. */
+  recordedIdentityAssertionsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the derived identity closure. */
+  identityClosureTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the derived identity separation relation. */
+  identitySeparationTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the identity transition log. */
+  identityTransitionsTable: SqlFragment;
+  /** Get a `SqlFragment` reference to the identity-transition retention watermark. */
+  identityTransitionRetentionTable: SqlFragment;
   /** Get a `SqlFragment` reference to the fulltext table. */
   fulltextTable: SqlFragment;
 }>;
@@ -97,6 +180,12 @@ export abstract class SqlSchema implements SqlSchemaFields {
   abstract readonly recordedEdgesTable: SqlFragment;
   abstract readonly recordedClockTable: SqlFragment;
   abstract readonly revisionOriginsTable: SqlFragment;
+  abstract readonly identityAssertionsTable: SqlFragment;
+  abstract readonly recordedIdentityAssertionsTable: SqlFragment;
+  abstract readonly identityClosureTable: SqlFragment;
+  abstract readonly identitySeparationTable: SqlFragment;
+  abstract readonly identityTransitionsTable: SqlFragment;
+  abstract readonly identityTransitionRetentionTable: SqlFragment;
   abstract readonly fulltextTable: SqlFragment;
 }
 
@@ -109,6 +198,12 @@ class SqlSchemaDescriptor extends SqlSchema {
   readonly recordedEdgesTable: SqlFragment;
   readonly recordedClockTable: SqlFragment;
   readonly revisionOriginsTable: SqlFragment;
+  readonly identityAssertionsTable: SqlFragment;
+  readonly recordedIdentityAssertionsTable: SqlFragment;
+  readonly identityClosureTable: SqlFragment;
+  readonly identitySeparationTable: SqlFragment;
+  readonly identityTransitionsTable: SqlFragment;
+  readonly identityTransitionRetentionTable: SqlFragment;
   readonly fulltextTable: SqlFragment;
 
   constructor(fields: SqlSchemaFields) {
@@ -126,6 +221,14 @@ class SqlSchemaDescriptor extends SqlSchema {
     this.recordedEdgesTable = fields.recordedEdgesTable;
     this.recordedClockTable = fields.recordedClockTable;
     this.revisionOriginsTable = fields.revisionOriginsTable;
+    this.identityAssertionsTable = fields.identityAssertionsTable;
+    this.recordedIdentityAssertionsTable =
+      fields.recordedIdentityAssertionsTable;
+    this.identityClosureTable = fields.identityClosureTable;
+    this.identitySeparationTable = fields.identitySeparationTable;
+    this.identityTransitionsTable = fields.identityTransitionsTable;
+    this.identityTransitionRetentionTable =
+      fields.identityTransitionRetentionTable;
     this.fulltextTable = fields.fulltextTable;
     Object.freeze(this);
   }
@@ -134,31 +237,90 @@ class SqlSchemaDescriptor extends SqlSchema {
 /**
  * Default table names matching the standard TypeGraph schema.
  */
-const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
+const DEFAULT_TABLE_NAMES = {
+  schemaVersions: "typegraph_schema_versions",
   nodes: "typegraph_nodes",
   edges: "typegraph_edges",
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  recordedAnchors: "typegraph_recorded_anchors",
+  storeOperations: "typegraph_store_operations",
   revisionOrigins: "typegraph_revision_origins",
+  revisionChanges: "typegraph_revision_changes",
+  identityAssertions: "typegraph_identity_assertions",
+  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
+  identityClosure: "typegraph_identity_closure",
+  identitySeparation: "typegraph_identity_separation",
+  identityTransitions: "typegraph_identity_transitions",
+  identityTransitionRetention: "typegraph_identity_transition_retention",
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
-};
+  edgeClaims: "typegraph_edge_claims",
+  fences: "typegraph_fences",
+  indexMaterializations: "typegraph_index_materializations",
+  contributionMaterializations: "typegraph_contribution_materializations",
+  kindRemovals: "typegraph_kind_removals",
+  reconciliationMarkers: "typegraph_reconciliation_markers",
+} satisfies ResolvedSqlTableNames;
 
 function resolveTableNames(
   names: Partial<SqlTableNames>,
-): ResolvedSqlTableNames {
+): ResolvedSqlTableNames &
+  Readonly<{
+    revisionChanges: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+  }> {
   return {
     nodes: names.nodes ?? DEFAULT_TABLE_NAMES.nodes,
     edges: names.edges ?? DEFAULT_TABLE_NAMES.edges,
     recordedNodes: names.recordedNodes ?? DEFAULT_TABLE_NAMES.recordedNodes,
     recordedEdges: names.recordedEdges ?? DEFAULT_TABLE_NAMES.recordedEdges,
     recordedClock: names.recordedClock ?? DEFAULT_TABLE_NAMES.recordedClock,
+    recordedAnchors:
+      names.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+    storeOperations:
+      names.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations,
     revisionOrigins:
       names.revisionOrigins ?? DEFAULT_TABLE_NAMES.revisionOrigins,
+    revisionChanges: resolveRevisionChangesTableName(names),
+    identityAssertions:
+      names.identityAssertions ?? DEFAULT_TABLE_NAMES.identityAssertions,
+    recordedIdentityAssertions:
+      names.recordedIdentityAssertions ??
+      DEFAULT_TABLE_NAMES.recordedIdentityAssertions,
+    identityClosure:
+      names.identityClosure ?? DEFAULT_TABLE_NAMES.identityClosure,
+    identitySeparation:
+      names.identitySeparation ?? DEFAULT_TABLE_NAMES.identitySeparation,
+    identityTransitions:
+      names.identityTransitions ?? DEFAULT_TABLE_NAMES.identityTransitions,
+    identityTransitionRetention:
+      names.identityTransitionRetention ??
+      DEFAULT_TABLE_NAMES.identityTransitionRetention,
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
+    edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
+    fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
+    schemaVersions: names.schemaVersions ?? DEFAULT_TABLE_NAMES.schemaVersions,
+    indexMaterializations:
+      names.indexMaterializations ?? DEFAULT_TABLE_NAMES.indexMaterializations,
+    contributionMaterializations:
+      names.contributionMaterializations ??
+      DEFAULT_TABLE_NAMES.contributionMaterializations,
+    kindRemovals: names.kindRemovals ?? DEFAULT_TABLE_NAMES.kindRemovals,
+    reconciliationMarkers:
+      names.reconciliationMarkers ?? DEFAULT_TABLE_NAMES.reconciliationMarkers,
   };
+}
+
+export function resolveRevisionChangesTableName(
+  tables: Readonly<{ revisionChanges?: string | undefined }>,
+): string {
+  return tables.revisionChanges ?? DEFAULT_TABLE_NAMES.revisionChanges;
 }
 
 /**
@@ -261,9 +423,39 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.recordedNodes, "recordedNodes");
   validateTableName(tables.recordedEdges, "recordedEdges");
   validateTableName(tables.recordedClock, "recordedClock");
+  validateTableName(
+    tables.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations,
+    "storeOperations",
+  );
+  validateTableName(
+    tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+    "recordedAnchors",
+  );
   validateTableName(tables.revisionOrigins, "revisionOrigins");
+  validateTableName(tables.revisionChanges, "revisionChanges");
+  validateTableName(tables.identityAssertions, "identityAssertions");
+  validateTableName(
+    tables.recordedIdentityAssertions,
+    "recordedIdentityAssertions",
+  );
+  validateTableName(tables.identityClosure, "identityClosure");
+  validateTableName(tables.identitySeparation, "identitySeparation");
+  validateTableName(tables.identityTransitions, "identityTransitions");
+  validateTableName(
+    tables.identityTransitionRetention,
+    "identityTransitionRetention",
+  );
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
+  validateTableName(tables.edgeClaims, "edgeClaims");
+  validateTableName(tables.fences, "fences");
+  validateTableName(tables.indexMaterializations, "indexMaterializations");
+  validateTableName(
+    tables.contributionMaterializations,
+    "contributionMaterializations",
+  );
+  validateTableName(tables.kindRemovals, "kindRemovals");
+  validateTableName(tables.reconciliationMarkers, "reconciliationMarkers");
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),
@@ -273,6 +465,16 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
     recordedEdgesTable: sql.identifier(tables.recordedEdges),
     recordedClockTable: sql.identifier(tables.recordedClock),
     revisionOriginsTable: sql.identifier(tables.revisionOrigins),
+    identityAssertionsTable: sql.identifier(tables.identityAssertions),
+    recordedIdentityAssertionsTable: sql.identifier(
+      tables.recordedIdentityAssertions,
+    ),
+    identityClosureTable: sql.identifier(tables.identityClosure),
+    identitySeparationTable: sql.identifier(tables.identitySeparation),
+    identityTransitionsTable: sql.identifier(tables.identityTransitions),
+    identityTransitionRetentionTable: sql.identifier(
+      tables.identityTransitionRetention,
+    ),
     fulltextTable: sql.identifier(tables.fulltext),
   });
 }
@@ -291,14 +493,112 @@ const EXTERNAL_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
   "external-recorded-read-source-v1",
 );
 
-export type ExternalRecordedReadSource = Readonly<{
-  source: "external";
-  schema: SqlSchema;
-  [EXTERNAL_RECORDED_READ_SOURCE]: true;
+/**
+ * The relation a {@link RecordedReadSource} sources rows from: the two entity
+ * tables the query compiler swaps to for a recorded read, and the identity
+ * assertion ledger the identity reconstruction path consults.
+ */
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+/**
+ * The one seam every recorded read consults instead of spelling the relation
+ * swap and the recorded-time interval itself.
+ *
+ * `source` names the relation (or table expression) holding `table`'s
+ * recorded rows for `revision`. TypeGraph's own capture and external
+ * bindings both return the matching recorded relation regardless of
+ * `revision` — the relation carries every revision, and `predicate` narrows
+ * it afterward. A binding whose `source` already scopes its rows to exactly
+ * one revision (an engine-native temporal table expression, say) returns
+ * `undefined` from `predicate` instead of re-spelling a redundant filter.
+ *
+ * `carriesInterval` names the other fact every binding-shape-aware reader
+ * needs: whether `source`'s rows carry the `recorded_from`/`recorded_to`
+ * columns a TypeGraph-relation-backed source's every revision has. A reader
+ * that needs to order or filter on that interval (`recorded-read-service.ts`'s
+ * point-read and scan `ORDER BY`) consults this instead of re-deriving the
+ * fact from `binding.kind` itself, so a fourth binding kind cannot leave one
+ * site still assuming a column the new binding's source does not have.
+ */
+export type RecordedReadSource = Readonly<{
+  source: (
+    table: RecordedSourceTable,
+    revision: RecordedInstantParts,
+  ) => SqlFragment;
+  predicate: (
+    prefix: SqlFragment,
+    revision: RecordedInstantParts,
+  ) => SqlFragment | undefined;
+  carriesInterval: boolean;
 }>;
 
+/**
+ * `source`/`predicate` shared by every TypeGraph-relation-backed binding: the
+ * recorded relation named by `schema`, narrowed by the `recorded_from <= r
+ * AND r < recorded_to` interval every recorded row carries. `recordedRelation`
+ * and the built-in capture binding both build their seam this way, so the
+ * relation swap and the interval cannot drift apart between the two kinds.
+ */
+function typeGraphRelationRecordedReadSource(
+  schema: SqlSchema,
+): RecordedReadSource {
+  return {
+    source(
+      table: RecordedSourceTable,
+      _revision: RecordedInstantParts,
+    ): SqlFragment {
+      switch (table) {
+        case "nodes": {
+          return schema.recordedNodesTable;
+        }
+        case "edges": {
+          return schema.recordedEdgesTable;
+        }
+        case "identityAssertions": {
+          return schema.recordedIdentityAssertionsTable;
+        }
+      }
+    },
+    predicate(
+      prefix: SqlFragment,
+      revision: RecordedInstantParts,
+    ): SqlFragment {
+      if (revision.kind !== "typegraph") {
+        // Every caller resolves `revision` by parsing the SAME coordinate this
+        // binding was bound to source rows from — reaching here with an
+        // engine-native (`e1`) revision would mean a coordinate minted for one
+        // ownership form reached the read binding of the other, which the
+        // construction-time and asOfRecorded ownership checks both refuse
+        // before a read is ever compiled.
+        throw new CompilerInvariantError(
+          "A TypeGraph-relation recorded read binding received an engine-native revision.",
+          { revisionKind: revision.kind },
+        );
+      }
+      const recordedFrom = sql`${prefix}recorded_from`;
+      const recordedTo = sql`${prefix}recorded_to`;
+      const { revision: revisionNumber } = revision;
+      return sql`${recordedFrom} <= ${revisionNumber} AND ${revisionNumber} < ${recordedTo}`;
+    },
+    carriesInterval: true,
+  };
+}
+
+export type ExternalRecordedReadSource = Readonly<{
+  kind: "external";
+  schema: SqlSchema;
+  /** External adapter ownership, read on the actual session when supplied. */
+  owner?:
+    | ((
+        target: Pick<GraphBackend, "execute">,
+      ) => Promise<GraphAllocationOwner | undefined>)
+    | undefined;
+  [EXTERNAL_RECORDED_READ_SOURCE]: true;
+}> &
+  RecordedReadSource;
+
 type ExternalRecordedReadSourceCandidate = Readonly<{
-  source?: unknown;
+  kind?: unknown;
   schema?: unknown;
   [EXTERNAL_RECORDED_READ_SOURCE]?: unknown;
 }>;
@@ -308,28 +608,116 @@ const TYPEGRAPH_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
 );
 
 export type TypeGraphRecordedReadSource = Readonly<{
-  source: "typegraph-capture";
+  kind: "typegraph-capture";
   schema: SqlSchema;
   [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
-}>;
+}> &
+  RecordedReadSource;
 
-type RecordedReadSource =
-  ExternalRecordedReadSource | TypeGraphRecordedReadSource;
+const ENGINE_RECORDED_READ_SOURCE: unique symbol = typeGraphGlobalSymbol(
+  "engine-recorded-read-source-v1",
+);
 
-export type RecordedReadBinding = RecordedReadSource;
+/**
+ * The recorded read binding for a backend that owns recorded time itself
+ * (`GraphBackend.recordedTime`, `backend/capabilities/recorded-time.ts`).
+ * `source` defers to `recordedTime.source`, converting the parsed
+ * engine-native revision into the `EngineRecordedRevision` shape that member
+ * expects; `predicate` always returns `undefined` — the engine's own source
+ * expression already scopes every row to exactly one revision, so there is no
+ * separate interval to layer on top the way the TypeGraph-relation source
+ * needs one.
+ */
+export type EngineRecordedReadSource = Readonly<{
+  kind: "engine-native";
+  schema: SqlSchema;
+  [ENGINE_RECORDED_READ_SOURCE]: true;
+}> &
+  RecordedReadSource;
+
+export type RecordedReadBinding =
+  | ExternalRecordedReadSource
+  | TypeGraphRecordedReadSource
+  | EngineRecordedReadSource;
+
+/**
+ * Narrows a parsed recorded revision to the engine-native shape
+ * `EngineRecordedTimeMembers.source`/`revisionNow` traffic in. Symmetric with
+ * `typeGraphRelationRecordedReadSource`'s own guard: a TypeGraph-owned (`r1`)
+ * revision reaching an engine-native binding means a coordinate minted for
+ * the other ownership form got here, which construction and `asOfRecorded`
+ * both refuse ahead of any read.
+ */
+function requireEngineRecordedRevision(
+  revision: RecordedInstantParts,
+): EngineRecordedRevision {
+  if (revision.kind !== "engine") {
+    throw new CompilerInvariantError(
+      "An engine-native recorded read binding received a TypeGraph-owned revision.",
+      { revisionKind: revision.kind },
+    );
+  }
+  return { revision: revision.revision, recordedAt: revision.recordedAt };
+}
+
+/**
+ * Builds the recorded read binding for an engine-native backend, wrapping its
+ * `recordedTime` member as the {@link RecordedReadSource} seam every recorded
+ * read consults. `schema` is carried only for shape parity with the other two
+ * binding kinds (`recordedReadSqlSchema` still needs a live schema to copy the
+ * non-swapped table references from) — the engine's own `source` never reads
+ * from it.
+ */
+export function createEngineRecordedReadBinding(
+  recordedTime: EngineRecordedTimeMembers,
+  schema: SqlSchema,
+): EngineRecordedReadSource {
+  const readSchema = requireSqlSchema(
+    schema,
+    "engine recorded read binding schema",
+  );
+  return Object.freeze({
+    kind: "engine-native",
+    schema: readSchema,
+    [ENGINE_RECORDED_READ_SOURCE]: true as const,
+    source(table: RecordedSourceTable, revision: RecordedInstantParts) {
+      return recordedTime.source(
+        table,
+        requireEngineRecordedRevision(revision),
+      );
+    },
+    predicate(): undefined {
+      return;
+    },
+    carriesInterval: false,
+  });
+}
 
 export type RecordedRelationOptions = Readonly<{
   schema: SqlSchema;
+  /** Supply when recorded relations are managed without TypeGraph origin metadata. */
+  owner?:
+    | ((
+        target: Pick<GraphBackend, "execute">,
+      ) => Promise<GraphAllocationOwner | undefined>)
+    | undefined;
 }>;
 
 export function recordedRelation(
   options: RecordedRelationOptions,
 ): ExternalRecordedReadSource {
   const schema = requireSqlSchema(options.schema, "recordedRelation schema");
+  if (options.owner !== undefined && typeof options.owner !== "function")
+    throw new ConfigurationError(
+      "External recorded ownership must be a reader function.",
+      { code: "EXTERNAL_RECORDED_OWNER_INVALID" },
+    );
   return Object.freeze({
-    source: "external",
+    kind: "external",
     schema,
+    ...(options.owner === undefined ? {} : { owner: options.owner }),
     [EXTERNAL_RECORDED_READ_SOURCE]: true as const,
+    ...typeGraphRelationRecordedReadSource(schema),
   });
 }
 
@@ -354,7 +742,7 @@ function isExternalRecordedReadSource(
   if (typeof source !== "object" || source === null) return false;
   const candidate = source as ExternalRecordedReadSourceCandidate;
   return (
-    candidate.source === "external" &&
+    candidate.kind === "external" &&
     candidate[EXTERNAL_RECORDED_READ_SOURCE] === true &&
     isSqlSchema(candidate.schema) &&
     Object.isFrozen(candidate)
@@ -366,9 +754,10 @@ export function createRecordedReadBinding(
 ): TypeGraphRecordedReadSource {
   const readSchema = requireSqlSchema(schema, "recorded read binding schema");
   return Object.freeze({
-    source: "typegraph-capture",
+    kind: "typegraph-capture",
     schema: readSchema,
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true as const,
+    ...typeGraphRelationRecordedReadSource(readSchema),
   });
 }
 
@@ -398,7 +787,7 @@ export function requireRecordedReadBinding(
 }
 
 type TypeGraphRecordedReadSourceCandidate = Readonly<{
-  source?: unknown;
+  kind?: unknown;
   schema?: unknown;
   [TYPEGRAPH_RECORDED_READ_SOURCE]?: unknown;
 }>;
@@ -409,8 +798,27 @@ function isTypeGraphRecordedReadSource(
   if (typeof source !== "object" || source === null) return false;
   const candidate = source as TypeGraphRecordedReadSourceCandidate;
   return (
-    candidate.source === "typegraph-capture" &&
+    candidate.kind === "typegraph-capture" &&
     candidate[TYPEGRAPH_RECORDED_READ_SOURCE] === true &&
+    isSqlSchema(candidate.schema) &&
+    Object.isFrozen(candidate)
+  );
+}
+
+type EngineRecordedReadSourceCandidate = Readonly<{
+  kind?: unknown;
+  schema?: unknown;
+  [ENGINE_RECORDED_READ_SOURCE]?: unknown;
+}>;
+
+function isEngineRecordedReadSource(
+  source: unknown,
+): source is EngineRecordedReadSource {
+  if (typeof source !== "object" || source === null) return false;
+  const candidate = source as EngineRecordedReadSourceCandidate;
+  return (
+    candidate.kind === "engine-native" &&
+    candidate[ENGINE_RECORDED_READ_SOURCE] === true &&
     isSqlSchema(candidate.schema) &&
     Object.isFrozen(candidate)
   );
@@ -421,29 +829,40 @@ function isRecordedReadBinding(
 ): binding is RecordedReadBinding {
   return (
     isExternalRecordedReadSource(binding) ||
-    isTypeGraphRecordedReadSource(binding)
+    isTypeGraphRecordedReadSource(binding) ||
+    isEngineRecordedReadSource(binding)
   );
 }
 
 /**
  * Returns a schema view whose primary node/edge sources are the recorded-time
- * relations. The recorded relations are row-compatible with the live tables
- * for every column the query compiler, subgraph extractor, and algorithms
- * already read; the temporal filter adds the `recorded_from/to` predicate.
+ * relations for `revision`, resolved through `binding.source` — the single
+ * place the relation swap and the recorded-time predicate ({@link
+ * recordedReadSchemaFor}'s caller, via `compileTemporalFilter`) both consult
+ * the same seam. The recorded relations are row-compatible with the live
+ * tables for every column the query compiler, subgraph extractor, and
+ * algorithms already read.
  */
-export function recordedReadSqlSchema(binding: RecordedReadBinding): SqlSchema {
-  const { schema } = requireRecordedReadBinding(
-    binding,
-    "recorded-read-schema",
-  );
+export function recordedReadSqlSchema(
+  binding: RecordedReadBinding,
+  revision: RecordedInstantParts,
+): SqlSchema {
+  const validated = requireRecordedReadBinding(binding, "recorded-read-schema");
+  const { schema } = validated;
   return freezeSqlSchema({
     tables: schema.tables,
-    nodesTable: schema.recordedNodesTable,
-    edgesTable: schema.recordedEdgesTable,
+    nodesTable: validated.source("nodes", revision),
+    edgesTable: validated.source("edges", revision),
     recordedNodesTable: schema.recordedNodesTable,
     recordedEdgesTable: schema.recordedEdgesTable,
     recordedClockTable: schema.recordedClockTable,
     revisionOriginsTable: schema.revisionOriginsTable,
+    identityAssertionsTable: schema.identityAssertionsTable,
+    recordedIdentityAssertionsTable: schema.recordedIdentityAssertionsTable,
+    identityClosureTable: schema.identityClosureTable,
+    identitySeparationTable: schema.identitySeparationTable,
+    identityTransitionsTable: schema.identityTransitionsTable,
+    identityTransitionRetentionTable: schema.identityTransitionRetentionTable,
     fulltextTable: schema.fulltextTable,
   });
 }
@@ -461,7 +880,11 @@ export function recordedReadSchemaFor(
 ): SqlSchema {
   const baseSchema = requireSqlSchema(schema, `${surface} schema`);
   if (recordedAsOf === undefined) return baseSchema;
-  return recordedReadSqlSchema(requireRecordedReadBinding(binding, surface));
+  const revision = parseRecordedInstant(recordedAsOf, "recordedAsOf");
+  return recordedReadSqlSchema(
+    requireRecordedReadBinding(binding, surface),
+    revision,
+  );
 }
 
 /**
@@ -488,7 +911,7 @@ export type VectorSlotDescriptor = Readonly<{
  * fieldPath)` that declares an embedding field, so the compiler's
  * `field.similarTo(...)` CTE can UNION ALL the per-field tables for the
  * kinds in an alias that actually declare the field (only
- * `includeSubClasses` yields more than one).
+ * `expansion: "subclasses"` yields more than one).
  */
 export type VectorSlotMap = ReadonlyMap<string, VectorSlotDescriptor>;
 
@@ -506,3 +929,15 @@ export const ALIAS_CTE_PREFIX = "cte_" as const;
 export const EMBEDDINGS_CTE_ALIAS = "cte_embeddings" as const;
 export const FULLTEXT_CTE_ALIAS = "cte_fulltext" as const;
 export const HYBRID_CANDIDATES_CTE_ALIAS = "cte_relevance_candidates" as const;
+
+/** Retained anchor storage under the same physical-name configuration as capture. */
+export function recordedAnchorsTable(schema: SqlSchema): SqlFragment {
+  return sql.identifier(
+    schema.tables.recordedAnchors ?? DEFAULT_TABLE_NAMES.recordedAnchors,
+  );
+}
+
+/** Physical outcome-relation name, shared by storage and allocation-scope binding. */
+export function storeOperationsTableName(schema: SqlSchema): string {
+  return schema.tables.storeOperations ?? DEFAULT_TABLE_NAMES.storeOperations;
+}

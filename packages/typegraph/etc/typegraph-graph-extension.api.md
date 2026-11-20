@@ -4,14 +4,52 @@
 
 ```ts
 
+import { z } from 'zod';
+
 // @public (undocumented)
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
+
+// @public
+type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+type CompositionExistence = "optional" | "required";
+
+// @public
+type CompositionPartSide = "from" | "to";
+
+// @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
 
 // @public
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
-export function defineGraphExtension(input: GraphExtension): GraphExtension;
+export function defineGraphExtension<const T extends GraphExtension>(input: T): T & GraphExtension;
+
+// @public
+const EDGE_TYPE_BRAND: "__edgeType";
+
+// @public
+type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
+    [EDGE_TYPE_BRAND]: true;
+    kind: K;
+    schema: S;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+    from: From;
+    to: To;
+}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -30,13 +68,19 @@ export type ExtensionBooleanProperty = Readonly<{
     type: "boolean";
 }> & ExtensionPropertyModifiers;
 
+// @public (undocumented)
+type ExtensionDefinedOutput<P extends ExtensionPropertyType> = P extends ExtensionStringProperty ? string : P extends ExtensionNumberProperty ? number : P extends ExtensionBooleanProperty ? boolean : P extends ExtensionEnumProperty ? P["values"][number] : P extends ExtensionArrayProperty ? readonly ExtensionPropertyOutput<P["items"]>[] : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]> : never;
+
 // @public
 export type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -51,6 +95,11 @@ export type ExtensionEdgeIndex = Readonly<{
     scope?: "graphAndKind" | "graph" | "none";
     where?: ExtensionIndexWhere;
 }>;
+
+// @public
+export type ExtensionEdgeProperties<D extends ExtensionEdgeDef> = D extends (Readonly<{
+    properties: infer P extends Readonly<Record<string, ExtensionPropertyType>>;
+}>) ? P : Readonly<Record<never, never>>;
 
 // @public
 export type ExtensionEmbeddingModifier = Readonly<{
@@ -104,25 +153,51 @@ export type ExtensionNumberProperty = Readonly<{
 export type ExtensionObjectFieldProperty = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionArrayProperty;
 
 // @public
+export type ExtensionObjectOutput<P extends Readonly<Record<string, ExtensionPropertyType>>> = Readonly<{
+    [K in keyof P as P[K] extends {
+        optional: true;
+    } ? never : K]: ExtensionPropertyOutput<P[K]>;
+} & {
+    [K in keyof P as P[K] extends {
+        optional: true;
+    } ? K : never]?: ExtensionPropertyOutput<P[K]>;
+}>;
+
+// @public
 export type ExtensionObjectProperty = Readonly<{
     type: "object";
     properties: Readonly<Record<string, ExtensionObjectFieldProperty>>;
 }> & ExtensionPropertyModifiers;
 
 // @public
+export type ExtensionObjectSchema<P extends Readonly<Record<string, ExtensionPropertyType>>> = z.ZodObject<{
+    [K in keyof P]: ExtensionPropertySchema<P[K]>;
+}>;
+
+// @public
 export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-}>;
+}> & CompositionRealization;
 
 // @public
-type ExtensionPropertyModifiers = Readonly<{
+export type ExtensionPropertyModifiers = Readonly<{
     optional?: boolean;
     searchable?: ExtensionSearchableModifier;
     embedding?: ExtensionEmbeddingModifier;
     description?: string;
 }>;
+
+// @public
+export type ExtensionPropertyOutput<P extends ExtensionPropertyType> = P extends {
+    optional: true;
+} ? ExtensionDefinedOutput<P> | undefined : ExtensionDefinedOutput<P>;
+
+// @public (undocumented)
+type ExtensionPropertySchema<P extends ExtensionPropertyType> = P extends {
+    optional: true;
+} ? z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>> : z.ZodType<ExtensionDefinedOutput<P>>;
 
 // @public
 export type ExtensionPropertyType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionArrayProperty | ExtensionObjectProperty;
@@ -157,18 +232,32 @@ export type ExtensionUniqueWhere = Readonly<{
 }>;
 
 // @public
-export const GRAPH_EXTENSION_ISSUE_CODES: readonly ["UNSUPPORTED_PROPERTY_TYPE", "INVALID_PROPERTY_REFINEMENT", "NESTED_ARRAY", "NESTED_OBJECT_TOO_DEEP", "INVALID_MODIFIER_TARGET", "INVALID_ENUM_VALUES", "INVALID_NUMBER_BOUNDS", "INVALID_LENGTH_BOUNDS", "INVALID_PATTERN", "INVALID_EMBEDDING_DIMENSIONS", "INVALID_SEARCHABLE_LANGUAGE", "RESERVED_PROPERTY_NAME", "INVALID_KIND_NAME", "DUPLICATE_KIND_NAME", "EMPTY_PROPERTIES", "EMPTY_FROM_OR_TO", "DUPLICATE_UNIQUE_CONSTRAINT", "EMPTY_UNIQUE_FIELDS", "DUPLICATE_UNIQUE_FIELD", "UNKNOWN_UNIQUE_FIELD", "INVALID_UNIQUE_WHERE_OP", "UNKNOWN_UNIQUE_WHERE_FIELD", "INVALID_ANNOTATION", "UNKNOWN_META_EDGE", "ONTOLOGY_CYCLE", "ONTOLOGY_SELF_LOOP", "ONTOLOGY_DISJOINT_CONFLICT", "DUPLICATE_ONTOLOGY_RELATION", "INVALID_DOCUMENT_SHAPE", "UNKNOWN_DOCUMENT_KEY", "UNSUPPORTED_STRING_FORMAT", "INVALID_INDEX_DECLARATION", "DUPLICATE_INDEX_NAME", "EMPTY_INDEX_FIELDS", "UNKNOWN_PROPERTY_KEY"];
+export const GRAPH_EXTENSION_ISSUE_CODES: readonly ["UNSUPPORTED_PROPERTY_TYPE", "INVALID_PROPERTY_REFINEMENT", "NESTED_ARRAY", "NESTED_OBJECT_TOO_DEEP", "INVALID_MODIFIER_TARGET", "INVALID_ENUM_VALUES", "INVALID_NUMBER_BOUNDS", "INVALID_LENGTH_BOUNDS", "INVALID_PATTERN", "INVALID_EMBEDDING_DIMENSIONS", "INVALID_SEARCHABLE_LANGUAGE", "RESERVED_PROPERTY_NAME", "INVALID_KIND_NAME", "DUPLICATE_KIND_NAME", "EMPTY_PROPERTIES", "EMPTY_FROM_OR_TO", "DUPLICATE_UNIQUE_CONSTRAINT", "EMPTY_UNIQUE_FIELDS", "DUPLICATE_UNIQUE_FIELD", "UNKNOWN_UNIQUE_FIELD", "INVALID_UNIQUE_WHERE_OP", "UNKNOWN_UNIQUE_WHERE_FIELD", "INVALID_ANNOTATION", "UNKNOWN_META_EDGE", "ONTOLOGY_CYCLE", "ONTOLOGY_SELF_LOOP", "ONTOLOGY_DISJOINT_CONFLICT", "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS", "DUPLICATE_ONTOLOGY_RELATION", "ONTOLOGY_COMPOSITION_VIA_REQUIRED", "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN", "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN", "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN", "INVALID_DOCUMENT_SHAPE", "UNKNOWN_DOCUMENT_KEY", "UNSUPPORTED_STRING_FORMAT", "INVALID_INDEX_DECLARATION", "DUPLICATE_INDEX_NAME", "EMPTY_INDEX_FIELDS", "UNKNOWN_PROPERTY_KEY"];
 
 // @public
-export const GRAPH_EXTENSION_TOP_LEVEL_KEYS: readonly ["version", "nodes", "edges", "ontology", "indexes"];
+export const GRAPH_EXTENSION_TOP_LEVEL_KEYS: readonly ["version", "annotations", "nodes", "edges", "ontology", "indexes"];
+
+// @public
+type GraphAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
 export type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
     indexes?: readonly ExtensionIndex[];
+}>;
+
+// @public (undocumented)
+export type GraphExtensionEdgeIntrospection = Readonly<{
+    name: string;
+    description: string | undefined;
+    from: readonly string[];
+    to: readonly string[];
+    properties: JsonSchema;
+    annotations: KindAnnotations | undefined;
 }>;
 
 // @public
@@ -195,6 +284,20 @@ export type GraphExtensionIssue = Readonly<{
 // @public (undocumented)
 export type GraphExtensionIssueCode = (typeof GRAPH_EXTENSION_ISSUE_CODES)[number];
 
+// @public
+export type GraphExtensionKindIntrospection = Readonly<{
+    name: string;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+    properties: JsonSchema;
+    unique: readonly Readonly<{
+        name: string;
+        fields: readonly string[];
+        scope: "kind" | "kindWithSubClasses";
+        collation: "binary" | "caseInsensitive";
+    }>[];
+}>;
+
 // @public (undocumented)
 export type GraphExtensionTopLevelKey = (typeof GRAPH_EXTENSION_TOP_LEVEL_KEYS)[number];
 
@@ -209,6 +312,17 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
     readonly endpoint: string;
     // (undocumented)
     readonly side: "from" | "to";
+}
+
+// @public
+export class GraphExtensionUnresolvedOntologyEndpointError extends GraphExtensionError {
+    constructor(metaEdge: "inverseOf" | "implies", endpoint: string, graphId: string);
+    // (undocumented)
+    readonly code: "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT";
+    // (undocumented)
+    readonly endpoint: string;
+    // (undocumented)
+    readonly metaEdge: "inverseOf" | "implies";
 }
 
 // @public
@@ -262,7 +376,46 @@ export class IncompatibleChangeError extends GraphExtensionError {
 export type IncompatibleChangeType = (typeof INCOMPATIBLE_CHANGE_TYPES)[number];
 
 // @public
-type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+export function introspectGraphExtension(extension: GraphExtension): Readonly<{
+    kinds: readonly GraphExtensionKindIntrospection[];
+    edges: readonly GraphExtensionEdgeIntrospection[];
+}>;
+
+// @public
+type JsonScalar = null | string | number | boolean;
+
+// @public
+type JsonSchema = Readonly<{
+    $schema?: string;
+    type?: string | readonly string[];
+    properties?: Record<string, JsonSchema>;
+    required?: readonly string[];
+    items?: JsonSchema | boolean;
+    prefixItems?: readonly JsonSchema[];
+    minItems?: number;
+    maxItems?: number;
+    additionalProperties?: boolean | JsonSchema;
+    propertyNames?: JsonSchema;
+    enum?: readonly unknown[];
+    const?: unknown;
+    anyOf?: readonly JsonSchema[];
+    oneOf?: readonly JsonSchema[];
+    allOf?: readonly JsonSchema[];
+    not?: JsonSchema;
+    description?: string;
+    default?: unknown;
+    minimum?: number;
+    maximum?: number;
+    multipleOf?: number;
+    minLength?: number;
+    maxLength?: number;
+    pattern?: string;
+    format?: string;
+    [key: string]: unknown;
+}>;
+
+// @public
+type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -307,6 +460,19 @@ export const LEGACY_GRAPH_EXTENSION_VERSION: 1;
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
+const NODE_TYPE_BRAND: "__nodeType";
+
+// @public
+type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    [NODE_TYPE_BRAND]: true;
+    __nodeKind?: K;
+    kind: K;
+    schema: S;
+    description: string | undefined;
+    annotations: KindAnnotations | undefined;
+}>;
+
+// @public
 type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
@@ -328,6 +494,42 @@ type Result<T, E = Error> = Readonly<{
     success: false;
     error: E;
 }>;
+
+// @public (undocumented)
+const RUNTIME_KIND_TOKEN_BRAND: unique symbol;
+
+// @public
+export type RuntimeEdgeKind<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    entity: "edge";
+    kind: K;
+    [RUNTIME_KIND_TOKEN_BRAND]: S;
+}>;
+
+// @public
+export type RuntimeEdgeTypeFor<T extends RuntimeEdgeKind> = T extends RuntimeEdgeKind<infer K, infer S> ? EdgeType<K, S, readonly NodeType[] | undefined, readonly NodeType[] | undefined> : never;
+
+// @public
+export class RuntimeKindTokenError extends TypeGraphError {
+    constructor(reason: RuntimeKindTokenFailure, entity: KindEntity, details?: Readonly<Record<string, unknown>>);
+    // (undocumented)
+    readonly reason: RuntimeKindTokenFailure;
+}
+
+// @public (undocumented)
+export type RuntimeKindTokenFailure = "invalid" | "wrong-entity" | "wrong-kind" | "wrong-store" | "stale" | "schema-mismatch" | "unreconciled";
+
+// @public
+export type RuntimeNodeKind<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
+    entity: "node";
+    kind: K;
+    [RUNTIME_KIND_TOKEN_BRAND]: S;
+}>;
+
+// @public
+export type RuntimeNodeTypeFor<T extends RuntimeNodeKind> = T extends RuntimeNodeKind<infer K, infer S> ? NodeType<K, S> : never;
+
+// @public
+type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 class TypeGraphError extends Error {

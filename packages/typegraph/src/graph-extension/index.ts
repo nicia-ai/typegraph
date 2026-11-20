@@ -13,6 +13,11 @@
 
 // Public entry
 export { defineGraphExtension } from "./define-graph-extension";
+export {
+  type GraphExtensionEdgeIntrospection,
+  type GraphExtensionKindIntrospection,
+  introspectGraphExtension,
+} from "./introspect";
 
 // Document type surface
 export {
@@ -22,6 +27,7 @@ export {
   type ExtensionBooleanProperty,
   type ExtensionEdgeDef,
   type ExtensionEdgeIndex,
+  type ExtensionEdgeProperties,
   type ExtensionEmbeddingModifier,
   type ExtensionEnumProperty,
   type ExtensionIndex,
@@ -30,8 +36,12 @@ export {
   type ExtensionNodeIndex,
   type ExtensionNumberProperty,
   type ExtensionObjectFieldProperty,
+  type ExtensionObjectOutput,
   type ExtensionObjectProperty,
+  type ExtensionObjectSchema,
   type ExtensionOntologyRelation,
+  type ExtensionPropertyModifiers,
+  type ExtensionPropertyOutput,
   type ExtensionPropertyType,
   type ExtensionSearchableModifier,
   type ExtensionStringProperty,
@@ -51,6 +61,7 @@ export {
   type GraphExtensionIssue,
   type GraphExtensionIssueCode,
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   GraphExtensionValidationError,
   GraphExtensionVersionUnsupportedError,
   INCOMPATIBLE_CHANGE_TYPES,
@@ -65,3 +76,12 @@ export {
 
 // Result-returning validator (for callers that prefer Result-style)
 export { validateGraphExtension } from "./validation";
+
+// Kind tokens for runtime-declared (extension) kinds
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
+export { RuntimeKindTokenError, type RuntimeKindTokenFailure } from "../errors";

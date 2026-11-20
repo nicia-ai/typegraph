@@ -120,7 +120,7 @@ want to choose how the Store is created.
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
 
 // In-memory database (data lost on restart)
-const { backend } = createLocalSqliteBackend();
+const inMemory = createLocalSqliteBackend();
 
 // File-based database (persistent)
 const { backend, db } = createLocalSqliteBackend({ path: "./my-app.db" });
@@ -436,6 +436,19 @@ const myTasks = await store
   }))
   .execute();
 ```
+
+`whereNode()` and `whereEdge()` constrain graph matches while traversal is
+built. Use `.where((ctx) => ...)` when a condition should filter completed
+rows, including optional or recursive results. Each successful traversal
+combination is one row, so fanout can repeat a source entity; project an
+identity and call relation `.distinct()` when the intended result is one row
+per entity.
+
+Traversal continues from the latest target by default. Reusable branching
+fragments should state their source explicitly with `{ from: "alias" }` so
+their behavior does not depend on which traversal preceded them. Direction,
+ontology expansion, and temporal coordinates retain their ordinary query
+defaults.
 
 ## Transactions
 

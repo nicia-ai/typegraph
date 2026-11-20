@@ -48,6 +48,10 @@ import { type ReadInstantMode, withPinnedReadInstant } from "./temporal";
 export { getDialect } from "../dialect";
 export { type DialectAdapter, type SqlDialect } from "../dialect/types";
 
+import {
+  assumeRecursiveTraversalSupported,
+  type RecursiveTraversalVerdict,
+} from "../../backend/capabilities/recursive-traversal";
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import {
   type AggregateExpr,
@@ -66,6 +70,7 @@ import {
   type SqlDialect,
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import type { DatabaseExpression } from "../expressions";
 import { sql, type SqlFragment } from "../sql-fragment";
 import {
   annIndexScanTypes,
@@ -73,6 +78,7 @@ import {
   type CompiledSelectSql,
   markAnnIndexScan,
 } from "../sql-intent";
+import { compileDatabaseExpression } from "./database-expressions";
 import { emitStandardQuerySql } from "./emitter";
 import {
   buildLateMaterializedOuterOrderBy,
@@ -89,6 +95,7 @@ import {
   buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
@@ -96,6 +103,11 @@ import {
   lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
 } from "./emitter";
+import {
+  type ExpressionAliasScope,
+  namespaceExpressionSubquery,
+} from "./expression-subquery-scope";
+import { compileIdentityClassCte } from "./identity-traversal";
 import { type TemporalFilterPass } from "./passes";
 import { type LogicalPlan, type LogicalPlanNode } from "./plan";
 import {
@@ -111,6 +123,7 @@ import {
   compileVariableLengthQuery,
   hasVariableLengthTraversal,
 } from "./recursive";
+import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
@@ -149,11 +162,13 @@ export type CompileQueryOptions = Readonly<{
   /**
    * Fulltext strategy override. When set, overrides the dialect's
    * default fulltext strategy for `$fulltext.matches()` compilation.
-   * Callers typically read this from `backend.fulltextStrategy` so a
-   * backend-declared strategy (e.g. ParadeDB) wins over the dialect
-   * default (tsvector).
+   * Callers typically read this from `resolveBackendFulltext(backend)` so
+   * a backend-declared strategy (e.g. ParadeDB) wins over the dialect
+   * default (tsvector), and `false` (a backend built with
+   * `fulltext: false`) compiles a `matches()` predicate to a typed
+   * refusal instead of the dialect default.
    */
-  fulltextStrategy?: FulltextStrategy | undefined;
+  fulltextStrategy?: FulltextStrategy | false | undefined;
   /**
    * Vector strategy override. When set, `field.similarTo(...)`
    * predicates compile against the strategy's per-`(kind, field)`
@@ -167,6 +182,8 @@ export type CompileQueryOptions = Readonly<{
    * `ROW_NUMBER()`. Defaults to true for direct compiler callers.
    */
   windowFunctions?: boolean | undefined;
+  /** Whether ordered scalar collection aggregates are supported. Defaults to true for direct compiler callers. */
+  orderedAggregates?: boolean | undefined;
   /**
    * Declared embedding slots `(kind, fieldPath) -> descriptor` used by
    * the `field.similarTo(...)` CTE to know which kinds in an alias
@@ -190,7 +207,47 @@ export type CompileQueryOptions = Readonly<{
    * across executions with a fresh "now" each call. See {@link ReadInstantMode}.
    */
   readInstant?: ReadInstantMode | undefined;
+  /** Equal-id behavior for historical identity traversal reconstruction. */
+  identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+  /** Registered node kinds allowed to conduct historical identity. */
+  identityRegisteredKinds?: readonly string[] | undefined;
+  /**
+   * Whether the active backend can compute a bounded transitive closure in
+   * one round trip. Defaults to {@link COMPILER_DEFAULT_RECURSIVE_TRAVERSAL}
+   * for direct compiler callers, mirroring `windowFunctions`.
+   */
+  recursiveTraversal?: RecursiveTraversalVerdict | undefined;
 }>;
+
+/**
+ * Every key {@link CompileQueryOptions} declares, kept in sync with the type
+ * by {@link Assert}<{@link Equal}> in `tests/compile-query-option-coverage.test.ts`
+ * so a new option cannot be added to one without the other noticing.
+ */
+export const COMPILE_QUERY_OPTION_KEYS = [
+  "dialect",
+  "schema",
+  "fulltextStrategy",
+  "vectorStrategy",
+  "windowFunctions",
+  "orderedAggregates",
+  "vectorSlots",
+  "fulltextLanguages",
+  "recordedReadBinding",
+  "readInstant",
+  "identitySameIdAcrossKinds",
+  "identityRegisteredKinds",
+  "recursiveTraversal",
+] as const;
+
+/**
+ * The single sanctioned way to obtain a {@link RecursiveTraversalVerdict}
+ * without a backend: `compileQuery`'s public entry point takes no backend at
+ * all, so it has no capabilities to resolve a verdict from. This is the one
+ * `assumeRecursiveTraversalSupported` call site in `src/**`.
+ */
+export const COMPILER_DEFAULT_RECURSIVE_TRAVERSAL =
+  assumeRecursiveTraversalSupported("compileQuery called without a backend");
 
 /**
  * Compiles a query AST to SQL.
@@ -223,6 +280,22 @@ export function compileQuery(
   graphId: string,
   options: CompileQueryOptions | SqlDialect = "sqlite",
 ): CompiledSelectSql {
+  return compileQueryInExpressionContext(ast, graphId, options, {
+    aliasScopes: new Map(),
+    depth: 0,
+  });
+}
+
+function compileQueryInExpressionContext(
+  ast: QueryAst,
+  graphId: string,
+  options: CompileQueryOptions | SqlDialect,
+  expressionContext: Readonly<{
+    aliasScopes: ReadonlyMap<symbol, ExpressionAliasScope>;
+    depth: number;
+    recursiveResultAliases?: ReadonlyMap<symbol, string>;
+  }>,
+): CompiledSelectSql {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;
@@ -239,6 +312,38 @@ export function compileQuery(
   );
 
   const adapter = resolveDialectAdapter(dialect, options_.fulltextStrategy);
+  const expressionCompileDepth = expressionContext.depth;
+  const expressionAliasScopes = new Map(expressionContext.aliasScopes);
+  const recursiveResultAliases = new Map(
+    expressionContext.recursiveResultAliases,
+  );
+  const variableLength = hasVariableLengthTraversal(ast);
+  const loweredRecursive =
+    variableLength ? tryLowerSingleHopRecursiveTraversal(ast) : undefined;
+  const recursiveResultAlias =
+    variableLength && loweredRecursive === undefined ?
+      `__tg_recursive_result_${expressionCompileDepth}`
+    : undefined;
+  if (
+    ast.expressionScope !== undefined &&
+    !expressionAliasScopes.has(ast.expressionScope)
+  ) {
+    expressionAliasScopes.set(
+      ast.expressionScope,
+      new Map([
+        [ast.start.alias, ast.start.alias],
+        ...ast.traversals.flatMap(
+          (traversal) =>
+            [
+              [traversal.edgeAlias, traversal.nodeAlias],
+              [traversal.nodeAlias, traversal.nodeAlias],
+            ] as const,
+        ),
+      ]),
+    );
+  }
+  if (ast.expressionScope !== undefined && recursiveResultAlias !== undefined)
+    recursiveResultAliases.set(ast.expressionScope, recursiveResultAlias);
   // Collects the ANN slot index types the emitter compiles engine-form
   // branches for; a non-empty set brands the finished statement so the
   // backend applies the pgvector iterative-scan GUCs around execution.
@@ -252,16 +357,84 @@ export function compileQuery(
     schema,
     annIndexTypes,
     readInstant: options_.readInstant ?? "literal",
+    ...(options_.recordedReadBinding === undefined ?
+      {}
+    : { recordedReadBinding: options_.recordedReadBinding }),
+    identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds ?? "fold",
+    ...(options_.identityRegisteredKinds === undefined ?
+      {}
+    : { identityRegisteredKinds: options_.identityRegisteredKinds }),
     compileQuery: (subAst, subGraphId) =>
       compileQuery(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
         subGraphId,
         propagateOptions(options_),
       ),
+    compileExpressionSubquery(subAst) {
+      if (subAst.graphId === undefined)
+        throw new CompilerInvariantError(
+          "Expression subquery is missing its graph identifier",
+        );
+      const depth = expressionCompileDepth + 1;
+      const namespaced = namespaceExpressionSubquery(
+        subAst,
+        `__tg_sq_${depth}_`,
+      );
+      const scopes = new Map(expressionAliasScopes);
+      if (subAst.expressionScope !== undefined)
+        scopes.set(subAst.expressionScope, namespaced.aliases);
+      return compileQueryInExpressionContext(
+        namespaced.ast,
+        subAst.graphId,
+        propagateOptions(options_),
+        {
+          aliasScopes: scopes,
+          depth,
+          recursiveResultAliases,
+        },
+      );
+    },
+    compileExpressionOuterReference(
+      expression: DatabaseExpression,
+      outerScopeIdentity: symbol,
+    ) {
+      const aliases = expressionAliasScopes.get(outerScopeIdentity);
+      if (aliases === undefined || expression.node.kind !== "field")
+        throw new CompilerInvariantError(
+          "Expression outer reference has no enclosing query scope",
+        );
+      const recursiveResultAlias =
+        recursiveResultAliases.get(outerScopeIdentity);
+      const outerExpression =
+        recursiveResultAlias === undefined ? expression : (
+          {
+            ...expression,
+            node: {
+              ...expression.node,
+              field: {
+                ...expression.node.field,
+                alias:
+                  aliases.get(expression.node.field.alias) ??
+                  expression.node.field.alias,
+              },
+            },
+          }
+        );
+      return compileDatabaseExpression(outerExpression, {
+        dialect: adapter,
+        resolveFieldCteAlias: (field) =>
+          recursiveResultAlias ??
+          `cte_${aliases.get(field.alias) ?? field.alias}`,
+      });
+    },
     ...(options_.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    orderedAggregates: options_.orderedAggregates ?? true,
+    recursiveTraversal:
+      options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
+    ...(recursiveResultAlias === undefined ? {} : { recursiveResultAlias }),
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -278,12 +451,15 @@ export function compileQuery(
   }
 
   // Check for variable-length traversals
-  if (hasVariableLengthTraversal(ast)) {
-    const lowered = tryLowerSingleHopRecursiveTraversal(ast);
-    if (lowered !== undefined) {
-      return finish(compileStandardQuery(lowered, graphId, ctx));
+  if (variableLength) {
+    if (loweredRecursive !== undefined) {
+      return finish(compileStandardQuery(loweredRecursive, graphId, ctx));
     }
-    return finish(compileVariableLengthQuery(ast, graphId, ctx));
+    return finish(
+      ast.traversals.length > 1 || ast.traversals[0]?.optional === true ?
+        compileMultiStageRecursiveQuery(ast, graphId, ctx)
+      : compileVariableLengthQuery(ast, graphId, ctx),
+    );
   }
 
   // Standard query compilation
@@ -303,12 +479,17 @@ function tryLowerSingleHopRecursiveTraversal(
     return undefined;
   }
 
-  if (variableLength.minDepth !== 1 || variableLength.maxDepth !== 1) {
+  if (
+    variableLength.exhaustive === true ||
+    variableLength.minDepth !== 1 ||
+    variableLength.maxDepth !== 1
+  ) {
     return undefined;
   }
   if (
     variableLength.pathAlias !== undefined ||
-    variableLength.depthAlias !== undefined
+    variableLength.depthAlias !== undefined ||
+    variableLength.stopExpansion !== undefined
   ) {
     return undefined;
   }
@@ -373,12 +554,25 @@ export function compileSetOperation(
  * absent or identical to the dialect default — shipped backends always
  * set `fulltextStrategy`, so this short-circuit keeps the common path
  * from allocating a fresh adapter on every compile.
+ *
+ * `false` (a backend built with `fulltext: false`) is a third, distinct
+ * signal from `undefined`: it declares no fulltext support at all, so a
+ * `matches()` predicate hits the compiler's typed refusal instead of
+ * falling back to the dialect's own default strategy and compiling SQL
+ * against a table this backend never creates.
  */
 function resolveDialectAdapter(
   dialect: SqlDialect,
-  fulltextStrategy: FulltextStrategy | undefined,
+  fulltextStrategy: FulltextStrategy | false | undefined,
 ): DialectAdapter {
   const baseAdapter = getDialect(dialect);
+  if (fulltextStrategy === false) {
+    return {
+      ...baseAdapter,
+      capabilities: { ...baseAdapter.capabilities, supportsFulltext: false },
+      fulltext: undefined,
+    };
+  }
   if (
     fulltextStrategy === undefined ||
     fulltextStrategy === baseAdapter.fulltext
@@ -440,7 +634,17 @@ function recordedSubqueryCoordinateMismatch(
 }
 
 /** Forwards compile options into recursive sub-compile calls. */
-function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
+/**
+ * Forwards compile options into recursive sub-compile calls. Module-private
+ * in every barrel — exported only so the T6 coverage test
+ * (`tests/compile-query-option-coverage.test.ts`) can exercise it directly
+ * against the same `CompileQueryOptions` keys the type declares.
+ *
+ * @internal
+ */
+export function propagateOptions(
+  options_: CompileQueryOptions,
+): CompileQueryOptions {
   return {
     dialect: options_.dialect ?? "sqlite",
     ...(options_.schema === undefined ? {} : { schema: options_.schema }),
@@ -451,6 +655,9 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
       {}
     : { vectorStrategy: options_.vectorStrategy }),
     windowFunctions: options_.windowFunctions ?? true,
+    orderedAggregates: options_.orderedAggregates ?? true,
+    recursiveTraversal:
+      options_.recursiveTraversal ?? COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
     ...(options_.vectorSlots === undefined ?
       {}
     : { vectorSlots: options_.vectorSlots }),
@@ -463,6 +670,14 @@ function propagateOptions(options_: CompileQueryOptions): CompileQueryOptions {
     ...(options_.readInstant === undefined ?
       {}
     : { readInstant: options_.readInstant }),
+    ...(options_.identitySameIdAcrossKinds === undefined ?
+      {}
+    : {
+        identitySameIdAcrossKinds: options_.identitySameIdAcrossKinds,
+      }),
+    ...(options_.identityRegisteredKinds === undefined ?
+      {}
+    : { identityRegisteredKinds: options_.identityRegisteredKinds }),
   };
 }
 
@@ -498,7 +713,11 @@ function resolveCountAggregateFastPath(
   }
 
   if (
-    ast.orderBy?.some((orderSpec) => orderSpec.field.alias !== ast.start.alias)
+    ast.orderBy?.some(
+      (orderSpec) =>
+        orderSpec.field.__type !== "field_ref" ||
+        orderSpec.field.alias !== ast.start.alias,
+    )
   ) {
     return undefined;
   }
@@ -509,7 +728,11 @@ function resolveCountAggregateFastPath(
   }
 
   const groupField = requireDefined(ast.groupBy.fields[0]);
-  if (groupField.alias !== ast.start.alias || !isIdFieldRef(groupField)) {
+  if (
+    groupField.__type !== "field_ref" ||
+    groupField.alias !== ast.start.alias ||
+    !isIdFieldRef(groupField)
+  ) {
     return undefined;
   }
 
@@ -520,6 +743,8 @@ function resolveCountAggregateFastPath(
 
   for (const projectedField of ast.projection.fields) {
     const source = projectedField.source;
+
+    if (source.__type === "database_expression") return undefined;
 
     if (!isAggregateExpr(source)) {
       if (source.alias !== ast.start.alias) {
@@ -580,6 +805,15 @@ function compileCountAggregateFastPath(
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
 ): SqlFragment | undefined {
+  if (
+    ast.traversals.some(
+      (traversal) => traversal.includeIdentityMembers === true,
+    )
+  ) {
+    return undefined;
+  }
+  // Preaggregated traversal counts cannot evaluate completed row predicates.
+  if (ast.resultPredicate !== undefined) return undefined;
   const plan = resolveCountAggregateFastPath(ast);
   if (!plan) {
     return undefined;
@@ -607,7 +841,7 @@ function compileCountAggregateFastPath(
   const edgeKinds = [...new Set(traversal.edgeKinds)];
   const nodeKinds = traversal.nodeKinds;
 
-  const edgeTemporalFilter = temporalFilterPass.forAlias("e");
+  const edgeRowFilter = temporalFilterPass.forTraversalEdges(traversal, "e");
   const nodeTemporalFilter = temporalFilterPass.forAlias("n");
 
   const nodePredicateContext: PredicateCompilerContext = {
@@ -666,7 +900,7 @@ function compileCountAggregateFastPath(
     compileKindFilter(sql.raw("e.kind"), edgeKinds),
     compileKindFilter(sql.raw(`e.${joinKindField}`), previousNodeKinds),
     compileKindFilter(sql.raw(`e.${targetKindField}`), nodeKinds),
-    edgeTemporalFilter,
+    edgeRowFilter,
     ...edgePredicateClauses,
     // INNER JOIN mode: node-side filters in WHERE constrain every aggregate.
     ...(requiresNodeJoin && useInnerJoin ?
@@ -792,6 +1026,12 @@ function compileCountAggregateFastPath(
     ast.projection.fields.map((projectedField) => {
       const source = projectedField.source;
 
+      if (source.__type === "database_expression") {
+        throw new CompilerInvariantError(
+          "Count aggregate fast path cannot compile database expressions",
+        );
+      }
+
       if (!isAggregateExpr(source)) {
         const value = compileFieldValue(
           source,
@@ -839,7 +1079,7 @@ function compileCountAggregateFastPath(
     );
   const limitOffset =
     startCteLimit === undefined ?
-      buildLimitOffsetClause({ limit: ast.limit, offset: ast.offset })
+      buildLimitOffsetClause({ limit: ast.limit, offset: ast.offset, dialect })
     : undefined;
 
   return emitStandardQuerySql({
@@ -874,9 +1114,10 @@ function stripLimitOffsetFromPlanNode(node: LogicalPlanNode): LogicalPlanNode {
 }
 
 /**
- * The start CTE followed by one CTE per traversal — the candidate-set prefix
- * shared by the flat plan and the late-materialization plan (which feeds it a
- * lean AST/column set and no per-traversal limit).
+ * The identity-class relation (when the query needs one), the start
+ * CTE, then one CTE per traversal — the candidate-set prefix shared by the flat
+ * plan and the late-materialization plan (which feeds it a lean AST/column set
+ * and no per-traversal limit).
  */
 function buildStandardStartAndTraversalCtes(
   input: Readonly<{
@@ -900,7 +1141,14 @@ function buildStandardStartAndTraversalCtes(
     temporalFilterPass,
     traversalLimit,
   } = input;
+  const identityClassCte = compileIdentityClassCte({
+    ast,
+    ctx,
+    graphId,
+    temporalFilterPass,
+  });
   const ctes: SqlFragment[] = [
+    ...(identityClassCte === undefined ? [] : [identityClassCte]),
     buildStandardStartCte({
       ast,
       ctx,
@@ -1015,7 +1263,10 @@ function resolveLateMaterializationPlan(
     }
   }
   for (const orderSpec of orderBy) {
-    if (!nodeAliases.has(orderSpec.field.alias)) {
+    if (
+      orderSpec.field.__type !== "field_ref" ||
+      !nodeAliases.has(orderSpec.field.alias)
+    ) {
       return undefined;
     }
   }
@@ -1024,6 +1275,7 @@ function resolveLateMaterializationPlan(
   // them; everything else non-identity is deferred to the outer re-fetch.
   const orderReferenced = new Set<SelectiveField>();
   for (const orderSpec of orderBy) {
+    if (orderSpec.field.__type !== "field_ref") return undefined;
     const matched = findSelectivePropsFieldForFieldRef(
       selectiveFields,
       orderSpec.field,
@@ -1084,7 +1336,7 @@ function compileLateMaterializedQuery(
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
   collapsedTraversalCteAlias: string | undefined,
-  shouldCollapseSelectiveTraversalRowset: boolean,
+  shouldCollapseLinearTraversalRowset: boolean,
 ): SqlFragment | undefined {
   const plan = resolveLateMaterializationPlan(ast);
   if (plan === undefined) {
@@ -1099,7 +1351,7 @@ function compileLateMaterializedQuery(
 
   const ctes = buildStandardStartAndTraversalCtes({
     ast: leanAst,
-    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    carryForwardPreviousColumns: shouldCollapseLinearTraversalRowset,
     ctx,
     graphId,
     predicateIndex,
@@ -1107,8 +1359,10 @@ function compileLateMaterializedQuery(
     temporalFilterPass,
     traversalLimit: undefined,
   });
+  const where = buildStandardResultWhere({ ast: leanAst, ctx });
   ctes.push(
     buildLateMaterializedTopKCte({
+      ...(where === undefined ? {} : { where }),
       ast: leanAst,
       dialect,
       fromClause: buildStandardFromClause({
@@ -1244,7 +1498,7 @@ function compileStandardQueryWithCteStrategy(
     logicalPlan,
     predicateIndex,
     requiredColumnsByAlias,
-    shouldCollapseSelectiveTraversalRowset,
+    shouldCollapseLinearTraversalRowset,
     temporalFilterPass,
     traversalCteLimit,
     vectorPredicate,
@@ -1292,7 +1546,7 @@ function compileStandardQueryWithCteStrategy(
       predicateIndex,
       temporalFilterPass,
       collapsedTraversalCteAlias,
-      shouldCollapseSelectiveTraversalRowset,
+      shouldCollapseLinearTraversalRowset,
     );
     if (lateMaterializedSql) {
       return lateMaterializedSql;
@@ -1302,7 +1556,7 @@ function compileStandardQueryWithCteStrategy(
   // Start + traversal candidate CTEs
   const ctes = buildStandardStartAndTraversalCtes({
     ast,
-    carryForwardPreviousColumns: shouldCollapseSelectiveTraversalRowset,
+    carryForwardPreviousColumns: shouldCollapseLinearTraversalRowset,
     ctx,
     graphId,
     predicateIndex,
@@ -1347,7 +1601,7 @@ function compileStandardQueryWithCteStrategy(
     ...(collapsedTraversalCteAlias === undefined ?
       {}
     : { collapsedTraversalCteAlias }),
-    dialect,
+    ctx,
   });
   const fromClause = buildStandardFromClause({
     ast,
@@ -1357,6 +1611,7 @@ function compileStandardQueryWithCteStrategy(
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
     ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   });
+  const where = buildStandardResultWhere({ ast, ctx });
   const groupBy = buildStandardGroupBy({ ast, dialect });
   const having = buildStandardHaving({ ast, ctx });
 
@@ -1372,11 +1627,13 @@ function compileStandardQueryWithCteStrategy(
   const limitOffset = buildLimitOffsetClause({
     limit: effectiveLimit,
     offset: ast.offset,
+    dialect,
   });
 
   return emitStandardQuerySql({
     ctes,
     fromClause,
+    ...(where === undefined ? {} : { where }),
     ...(groupBy === undefined ? {} : { groupBy }),
     ...(having === undefined ? {} : { having }),
     ...(orderBy === undefined ? {} : { orderBy }),

@@ -7,7 +7,12 @@
  * and `as any` escape hatches that bypass the `JsonValue` type.
  */
 import { ConfigurationError } from "../errors";
-import { isPlainObject } from "../utils/object";
+import { createDataKeyedBag, isPlainObject } from "../utils/object";
+import {
+  type GraphAnnotations,
+  type JsonValue,
+  type KindAnnotations,
+} from "./types";
 
 /**
  * Asserts that `value` is JSON-serializable.
@@ -29,6 +34,73 @@ export function assertJsonValue(
   ownerKind: string,
 ): void {
   walk(value, rootLabel, ownerKind);
+}
+
+/** Validates the object-shaped JSON contract shared by graph annotations. */
+export function assertGraphAnnotations(
+  value: unknown,
+  ownerLabel: string,
+): asserts value is GraphAnnotations {
+  if (!isPlainObject(value)) {
+    throw new ConfigurationError(
+      `${ownerLabel} annotations must be a plain JSON object.`,
+      {
+        path: "annotations",
+        valueKind: Array.isArray(value) ? "array" : typeof value,
+      },
+      {
+        suggestion:
+          "Use an object whose values are strings, numbers, booleans, null, arrays, or plain objects.",
+      },
+    );
+  }
+  assertJsonValue(value, "annotations", ownerLabel);
+}
+
+/**
+ * Copies graph annotations into framework-owned recursively frozen JSON.
+ * Callers retain an independently mutable authoring object; schema hashing
+ * and introspection retain the immutable snapshot accepted at the boundary.
+ */
+export function cloneAndFreezeGraphAnnotations(
+  annotations: GraphAnnotations,
+): GraphAnnotations {
+  return cloneAndFreezeJsonValue(annotations) as GraphAnnotations;
+}
+
+/**
+ * Merges graph annotations by key. A supplied key replaces its complete prior
+ * value; nested objects are deliberately not deep-merged.
+ */
+export function mergeGraphAnnotations(
+  existing: GraphAnnotations | undefined,
+  next: GraphAnnotations | undefined,
+): GraphAnnotations | undefined {
+  if (existing === undefined && next === undefined) return undefined;
+  return cloneAndFreezeGraphAnnotations({ ...existing, ...next });
+}
+
+/** Canonical omission rule shared by serialization and introspection. */
+export function canonicalAnnotations<
+  T extends GraphAnnotations | KindAnnotations,
+>(annotations: T | undefined): T | undefined {
+  if (annotations === undefined || Object.keys(annotations).length === 0) {
+    return undefined;
+  }
+  return annotations;
+}
+
+function cloneAndFreezeJsonValue(value: JsonValue): JsonValue {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    const values = value as readonly JsonValue[];
+    return Object.freeze(values.map((entry) => cloneAndFreezeJsonValue(entry)));
+  }
+  const cloned = createDataKeyedBag<JsonValue>();
+  for (const [key, nested] of Object.entries(value)) {
+    cloned[key] = cloneAndFreezeJsonValue(nested);
+  }
+  return Object.freeze({ ...cloned });
 }
 
 function walk(value: unknown, path: string, ownerKind: string): void {

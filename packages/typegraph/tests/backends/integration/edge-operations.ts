@@ -1,11 +1,123 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { type IntegrationTestContext } from "./test-context";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  EndpointNotFoundError,
+  RestrictedDeleteError,
+} from "../../../src";
+import { RECORDED_MAX_REVISION } from "../../../src/core/temporal";
+import {
+  EDGE_IDENTITY_MISMATCH_CODE,
+  ValidationError,
+} from "../../../src/errors";
+import { EndpointPairError } from "../../../src/errors-entry";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
+import { expectImmutableLowerBoundRefusal } from "../../test-utils";
+import {
+  type InspectableStore,
+  type IntegrationTestContext,
+} from "./test-context";
+
+/**
+ * Local fixture for the `toString`-matchOn regression (issue #424): a schema
+ * legitimately declares an edge prop named after an `Object.prototype`
+ * member. Kept out of the shared `integrationTestGraph` (fixtures.ts) —
+ * every other suite runs against that graph, and this shape is unusual by
+ * design.
+ */
+const ProtoFieldPerson = defineNode("ProtoFieldPerson", {
+  schema: z.object({ name: z.string() }),
+});
+
+const knowsWithProtoField = defineEdge("knowsWithProtoField", {
+  schema: z.object({
+    toString: z.string().optional(),
+  }),
+});
+
+const protoFieldMatchOnGraph = defineGraph({
+  id: "proto_field_matchon_test",
+  nodes: { ProtoFieldPerson: { type: ProtoFieldPerson } },
+  edges: {
+    knowsWithProtoField: {
+      type: knowsWithProtoField,
+      from: [ProtoFieldPerson],
+      to: [ProtoFieldPerson],
+      cardinality: "many",
+    },
+  },
+});
+
+async function expectEdgeIdentityMismatch(
+  operation: Promise<unknown>,
+  expectedOperation: "update" | "delete" | "hardDelete",
+): Promise<void> {
+  try {
+    await operation;
+    throw new Error("Expected edge identity mismatch");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ValidationError);
+    if (!(error instanceof ValidationError)) throw error;
+    expect(error.details.operation).toBe(expectedOperation);
+    expect(error.details.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: EDGE_IDENTITY_MISMATCH_CODE }),
+      ]),
+    );
+  }
+}
+
+type IntegrationStore = ReturnType<IntegrationTestContext["getStore"]>;
+
+/** A worksAt edge tombstoned before one of its endpoints was deleted. */
+async function seedTombstonedEdgeOnDeletedEndpoint(
+  store: IntegrationStore,
+  deleted: "from" | "to",
+) {
+  const alice = await store.nodes.Person.create({ name: "Alice" });
+  const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+  const edge = await store.edges.worksAt.create(alice, acme, {
+    role: "Engineer",
+  });
+  await store.edges.worksAt.delete(edge.id);
+  await (deleted === "to" ?
+    store.nodes.Company.delete(acme.id)
+  : store.nodes.Person.delete(alice.id));
+  return { store, alice, acme, edge };
+}
+
+async function expectEndpointRefusal(
+  operation: Promise<unknown>,
+  endpoint: "from" | "to",
+): Promise<void> {
+  const error: unknown = await operation.then(
+    () => {
+      throw new Error("Expected the resurrection to be refused.");
+    },
+    (error_: unknown) => error_,
+  );
+  expect(error).toBeInstanceOf(EndpointNotFoundError);
+  expect((error as EndpointNotFoundError).details).toMatchObject({
+    edgeKind: "worksAt",
+    endpoint,
+  });
+}
 
 export function registerEdgeOperationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Edge Operations", () => {
+    const FIRST_VALID_FROM = "2019-03-01T00:00:00.000Z";
+    const FIRST_VALID_TO = "2021-08-31T23:59:59.999Z";
+    const SECOND_VALID_FROM = "2022-01-01T00:00:00.000Z";
+    const SECOND_VALID_TO = "2024-12-31T23:59:59.999Z";
+
     it("retrieves edge by ID", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -43,6 +155,246 @@ export function registerEdgeOperationIntegrationTests(
       expect(retrieved).toBeUndefined();
     });
 
+    it("refuses to mutate an edge through a collection of another kind", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "cross-kind-edge" },
+      );
+
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.update(edge.id as never, { role: "Engineer" }),
+        "update",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.delete(edge.id as never),
+        "delete",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.hardDelete(edge.id as never),
+        "hardDelete",
+      );
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.bulkUpsertById([
+          {
+            id: edge.id as never,
+            from: alice,
+            to: bob as never,
+            props: { role: "Engineer" },
+          },
+        ]),
+        "update",
+      );
+
+      const untouched = await store.edges.knows.getById(edge.id);
+      expect(untouched?.since).toBe("2020");
+      expect(untouched?.meta.deletedAt).toBeUndefined();
+
+      await store.edges.knows.delete(edge.id);
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.delete(edge.id as never),
+        "delete",
+      );
+    });
+
+    it("refuses to bulk-delete an edge through a collection of another kind", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const edge = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "cross-kind-bulk-delete" },
+      );
+
+      await expectEdgeIdentityMismatch(
+        store.edges.worksAt.bulkDelete([edge.id as never]),
+        "delete",
+      );
+
+      await expect(store.edges.knows.getById(edge.id)).resolves.toMatchObject({
+        id: edge.id,
+        since: "2020",
+        meta: { deletedAt: undefined },
+      });
+    });
+
+    it("rolls back every earlier delete in the batch when a later id triggers EDGE_IDENTITY_MISMATCH", async () => {
+      // The exact-root program turns a foreign kind into an in-statement
+      // refusal; the portable interpreter resolves the whole identity gate
+      // before its batched update. Either execution mode must keep every
+      // earlier input live, hence this belongs in the cross-backend suite.
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const carol = await store.nodes.Person.create({ name: "Carol" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const firstKnows = await store.edges.knows.create(
+        alice,
+        bob,
+        { since: "2020" },
+        { id: "rollback-knows-1" },
+      );
+      const secondKnows = await store.edges.knows.create(
+        alice,
+        carol,
+        { since: "2021" },
+        { id: "rollback-knows-2" },
+      );
+      // A different edge kind, named LAST so the two knows deletes are already
+      // applied inside the transaction when the mismatch throws.
+      const employment = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { id: "rollback-works-at" },
+      );
+
+      await expectEdgeIdentityMismatch(
+        store.edges.knows.bulkDelete([
+          firstKnows.id,
+          secondKnows.id,
+          employment.id as never,
+        ]),
+        "delete",
+      );
+
+      for (const id of [firstKnows.id, secondKnows.id]) {
+        const after = await store.edges.knows.getById(id, {
+          temporalMode: "includeTombstones",
+        });
+        expect(after?.meta.deletedAt).toBeUndefined();
+      }
+      const employmentAfter = await store.edges.worksAt.getById(employment.id, {
+        temporalMode: "includeTombstones",
+      });
+      expect(employmentAfter?.meta.deletedAt).toBeUndefined();
+    });
+
+    it("refuses bulk-upsert endpoint changes for stored and batch-local edges", async () => {
+      const store = context.getStore();
+      const [alice, bob, charlie] = await store.nodes.Person.bulkCreate([
+        { id: "endpoint-alice", props: { name: "Alice" } },
+        { id: "endpoint-bob", props: { name: "Bob" } },
+        { id: "endpoint-charlie", props: { name: "Charlie" } },
+      ]);
+      const from = requireDefined(alice);
+      const originalTo = requireDefined(bob);
+      const differentTo = requireDefined(charlie);
+      const existing = await store.edges.knows.create(
+        from,
+        originalTo,
+        { since: "2020" },
+        { id: "endpoint-existing" },
+      );
+
+      await expect(
+        store.edges.knows.bulkUpsertById([
+          {
+            id: existing.id,
+            from,
+            to: differentTo,
+            props: { since: "2021" },
+          },
+        ]),
+      ).rejects.toThrow(ValidationError);
+
+      await expect(
+        store.edges.knows.bulkUpsertById([
+          {
+            id: "endpoint-new" as never,
+            from,
+            to: originalTo,
+            props: { since: "2020" },
+          },
+          {
+            id: "endpoint-new" as never,
+            from,
+            to: differentTo,
+            props: { since: "2021" },
+          },
+        ]),
+      ).rejects.toThrow(ValidationError);
+
+      const untouched = await store.edges.knows.getById(existing.id);
+      expect(untouched?.toId).toBe(originalTo.id);
+      expect(untouched?.since).toBe("2020");
+      expect(
+        await store.edges.knows.getById("endpoint-new" as never),
+      ).toBeUndefined();
+    });
+
+    it("rejects inherited prototype names in matchOn", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      // Pins the specific failure, not just "any ValidationError": a
+      // ValidationError unrelated to matchOn field validation would also
+      // satisfy `rejects.toThrow(ValidationError)`, so the message and
+      // issues must name the rejected field.
+      const attempt = store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        { since: "2020" },
+        { matchOn: ["toString" as never] },
+      );
+      await expect(attempt).rejects.toBeInstanceOf(ValidationError);
+      await expect(attempt).rejects.toThrow("toString");
+      await expect(attempt).rejects.toMatchObject({
+        details: { issues: [{ path: "toString" }] },
+      });
+    });
+
+    it("matches consistently on a matchOn field named after a prototype member when the value is absent", async () => {
+      // Regression for issue #424: an edge schema may legitimately declare a
+      // field named after an `Object.prototype` member (`toString`). When
+      // that field is absent, `matchOn` comparisons must read it as
+      // `undefined` — not the inherited prototype function that a plain
+      // `props[field]` read would surface. Passing the field explicitly as
+      // `undefined` (rather than omitting the key) is required here: Zod
+      // itself reads a plain object literal's `toString` key through the
+      // prototype chain when the key is truly absent, so the create-time
+      // `schema.parse({})` throws before this code path is ever reached —
+      // that is a pre-existing Zod quirk with plain-object shape probing,
+      // orthogonal to the matchOn/composite-key defect this test targets.
+      const store = await context.createStore(protoFieldMatchOnGraph);
+      const alice = await store.nodes.ProtoFieldPerson.create({
+        name: "Alice",
+      });
+      const bob = await store.nodes.ProtoFieldPerson.create({ name: "Bob" });
+
+      const first =
+        await store.edges.knowsWithProtoField.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { toString: undefined },
+          { matchOn: ["toString"] },
+        );
+      const second =
+        await store.edges.knowsWithProtoField.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { toString: undefined },
+          { matchOn: ["toString"] },
+        );
+
+      expect(first.action).toBe("created");
+      expect(second.action).toBe("found");
+      expect(second.edge.id).toBe(first.edge.id);
+    });
+
+    // The `endpointKey` delimiter-collision bucketing regression is guarded
+    // in tests/edge-endpoint-bucketing.test.ts: its fixture needs NUL-bearing
+    // kind/id values, which PostgreSQL (22P05) and libsql cannot store, so it
+    // cannot run in this cross-backend suite.
+
     it("deletes edge and excludes from queries", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({ name: "Alice" });
@@ -64,6 +416,788 @@ export function registerEdgeOperationIntegrationTests(
 
       expect(edges).toHaveLength(1);
       expect(edges[0]?.role).toBe("Consultant");
+    });
+
+    it("sets valid time when creating by endpoints and preserves it when found", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM, validTo: FIRST_VALID_TO },
+      );
+      const found = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        { validFrom: SECOND_VALID_FROM, validTo: SECOND_VALID_TO },
+      );
+
+      expect(created.action).toBe("created");
+      expect(created.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(created.edge.meta.validTo).toBe(FIRST_VALID_TO);
+      expect(found.action).toBe("found");
+      expect(found.edge.id).toBe(created.edge.id);
+      expect(found.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(found.edge.meta.validTo).toBe(FIRST_VALID_TO);
+    });
+
+    it("updates validTo but preserves validFrom when updating by endpoints", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      // The update states no lower bound: a live edge's is history, so moving
+      // only the end is the whole of what this leg can do. Naming a DIFFERENT
+      // one is refused by the case below rather than silently preserving this
+      // one, which is what this case used to assert.
+      const updated = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        { ifExists: "update", validTo: SECOND_VALID_TO },
+      );
+
+      expect(updated.action).toBe("updated");
+      expect(updated.edge.id).toBe(created.edge.id);
+      expect(updated.edge.role).toBe("Manager");
+      expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("refuses an endpoint update that states a validFrom the live edge does not hold", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+          },
+        ),
+      );
+
+      // Refused whole: neither the props nor the end moved.
+      const stored = await store.edges.worksAt.getById(created.edge.id);
+      expect(stored?.role).toBe("Engineer");
+      expect(stored?.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(stored?.meta.validTo).toBeUndefined();
+    });
+
+    it("preserves a live edge lower bound when an endpoint update opts in", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      const updated = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        {
+          ifExists: "update",
+          validFrom: SECOND_VALID_FROM,
+          // The source pair is inverted, but the effective stored window is
+          // ordered. Preserve mode must judge the window the write will keep.
+          validTo: FIRST_VALID_TO,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(updated.action).toBe("updated");
+      expect(updated.edge.id).toBe(created.edge.id);
+      expect(updated.edge.role).toBe("Manager");
+      expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated.edge.meta.validTo).toBe(FIRST_VALID_TO);
+    });
+
+    it("still validates a preserved endpoint lower bound", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      await store.edges.worksAt.create(alice, acme, { role: "Engineer" });
+
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: "not-a-date",
+            onImmutableLowerBound: "preserve",
+          },
+        ),
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+    });
+
+    it("still refuses an effectively inverted preserved endpoint window", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(
+          alice,
+          acme,
+          { role: "Manager" },
+          {
+            ifExists: "update",
+            validFrom: "2017-01-01T00:00:00.000Z",
+            validTo: "2018-01-01T00:00:00.000Z",
+            onImmutableLowerBound: "preserve",
+          },
+        ),
+      ).rejects.toThrow(/Inverted validity window/);
+    });
+
+    it("applies a preserved lower bound on create and resurrection", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const created = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        {
+          validFrom: FIRST_VALID_FROM,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+      expect(created.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+
+      await store.edges.worksAt.delete(created.edge.id);
+      const resurrected = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        {
+          validFrom: SECOND_VALID_FROM,
+          validTo: SECOND_VALID_TO,
+          onImmutableLowerBound: "preserve",
+        },
+      );
+
+      expect(resurrected.action).toBe("resurrected");
+      expect(resurrected.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(resurrected.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    describe("resurrecting a tombstoned edge whose endpoint was deleted", () => {
+      // A resurrection makes a live edge, so it owes the same endpoint verdict
+      // a create does. Without it, an edge tombstoned before its endpoint was
+      // deleted came back live on the deleted node.
+      it("getOrCreateByEndpoints refuses with the deleted endpoint", async () => {
+        const { store, alice, acme } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "to");
+        await expectEndpointRefusal(
+          store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+            role: "Engineer",
+          }),
+          "to",
+        );
+        expect(await store.edges.worksAt.findFrom(alice)).toEqual([]);
+      });
+
+      it("bulkGetOrCreateByEndpoints refuses with the deleted endpoint", async () => {
+        const { store, alice, acme } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "from");
+        await expectEndpointRefusal(
+          store.edges.worksAt.bulkGetOrCreateByEndpoints([
+            { from: alice, to: acme, props: { role: "Engineer" } },
+          ]),
+          "from",
+        );
+        expect(await store.edges.worksAt.findTo(acme)).toEqual([]);
+      });
+
+      it("bulkUpsertById refuses with the deleted endpoint", async () => {
+        const { store, alice, acme, edge } =
+          await seedTombstonedEdgeOnDeletedEndpoint(context.getStore(), "to");
+        await expectEndpointRefusal(
+          store.edges.worksAt.bulkUpsertById([
+            { id: edge.id, from: alice, to: acme, props: { role: "Lead" } },
+          ]),
+          "to",
+        );
+        expect(await store.edges.worksAt.findFrom(alice)).toEqual([]);
+      });
+    });
+
+    it("restating the bound a live edge already holds is accepted", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      const updated = await store.edges.worksAt.getOrCreateByEndpoints(
+        alice,
+        acme,
+        { role: "Manager" },
+        {
+          ifExists: "update",
+          validFrom: FIRST_VALID_FROM,
+          validTo: SECOND_VALID_TO,
+        },
+      );
+
+      expect(updated.action).toBe("updated");
+      expect(updated.edge.role).toBe("Manager");
+      expect(updated.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("sets distinct valid-time windows for bulk endpoint writes", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+          validTo: FIRST_VALID_TO,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Manager" },
+          validFrom: SECOND_VALID_FROM,
+          validTo: SECOND_VALID_TO,
+        },
+      ]);
+
+      expect(results[0]?.action).toBe("created");
+      expect(results[0]?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(results[0]?.edge.meta.validTo).toBe(FIRST_VALID_TO);
+      expect(results[1]?.action).toBe("created");
+      expect(results[1]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(results[1]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+
+      // As on the single path: the update states no lower bound, because a live
+      // edge's is history.
+      const [updated] = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+        [
+          {
+            from: alice,
+            to: acme,
+            props: { role: "Principal Engineer" },
+            validTo: SECOND_VALID_TO,
+          },
+        ],
+        { ifExists: "update" },
+      );
+
+      expect(updated?.action).toBe("updated");
+      expect(updated?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(updated?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("keeps delimiter-bearing endpoint tuples distinct in one batch", async () => {
+      const store = context.getStore();
+      const separator = "\u001ECompany\u001E";
+      const firstFrom = await store.nodes.Person.create(
+        { name: "First" },
+        { id: "a" },
+      );
+      const secondFrom = await store.nodes.Person.create(
+        { name: "Second" },
+        { id: `a${separator}b` },
+      );
+      const firstTo = await store.nodes.Company.create(
+        { name: "First company" },
+        { id: `b${separator}c` },
+      );
+      const secondTo = await store.nodes.Company.create(
+        { name: "Second company" },
+        { id: "c" },
+      );
+
+      const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: firstFrom,
+          to: firstTo,
+          props: { role: "Engineer" },
+        },
+        {
+          from: secondFrom,
+          to: secondTo,
+          props: { role: "Manager" },
+        },
+      ]);
+
+      expect(results).toHaveLength(2);
+      expect(results.map((result) => result.action)).toEqual([
+        "created",
+        "created",
+      ]);
+      expect(results[0]?.edge.id).not.toBe(results[1]?.edge.id);
+    });
+
+    it("refuses a bulk endpoint update that states a validFrom the live edge does not hold", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      // Left OPEN so the refused row is readable in current mode afterwards.
+      const [created] = await store.edges.worksAt.bulkGetOrCreateByEndpoints([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Principal Engineer" },
+              validFrom: SECOND_VALID_FROM,
+              validTo: SECOND_VALID_TO,
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      );
+
+      const stored = await store.edges.worksAt.getById(
+        requireDefined(created).edge.id,
+      );
+      expect(stored?.role).toBe("Engineer");
+      expect(stored?.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(stored?.meta.validTo).toBeUndefined();
+    });
+
+    it("applies per-item lower-bound policy across bulk update, resurrection, and create", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const charlie = await store.nodes.Person.create({ name: "Charlie" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+
+      const live = await store.edges.worksAt.create(
+        alice,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      const deleted = await store.edges.worksAt.create(
+        bob,
+        acme,
+        { role: "Engineer" },
+        { validFrom: FIRST_VALID_FROM },
+      );
+      await store.edges.worksAt.delete(deleted.id);
+
+      const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+        [
+          {
+            from: alice,
+            to: acme,
+            props: { role: "Manager" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: FIRST_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+          {
+            from: bob,
+            to: acme,
+            props: { role: "Director" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+          {
+            from: charlie,
+            to: acme,
+            props: { role: "Analyst" },
+            validFrom: SECOND_VALID_FROM,
+            validTo: SECOND_VALID_TO,
+            onImmutableLowerBound: "preserve",
+          },
+        ],
+        { ifExists: "update" },
+      );
+
+      expect(results.map((result) => result.action)).toEqual([
+        "updated",
+        "resurrected",
+        "created",
+      ]);
+      expect(results[0]?.edge.id).toBe(live.id);
+      expect(results[0]?.edge.meta.validFrom).toBe(FIRST_VALID_FROM);
+      expect(results[0]?.edge.meta.validTo).toBe(FIRST_VALID_TO);
+      expect(results[1]?.edge.id).toBe(deleted.id);
+      expect(results[1]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(results[1]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+      expect(results[2]?.edge.meta.validFrom).toBe(SECOND_VALID_FROM);
+      expect(results[2]?.edge.meta.validTo).toBe(SECOND_VALID_TO);
+    });
+
+    it("keeps strict and preserve policies isolated in an atomic bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge, bobEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expectImmutableLowerBoundRefusal(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "refuse",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      );
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      const storedBobEdge = await store.edges.worksAt.getById(
+        requireDefined(bobEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
+      expect(storedBobEdge?.role).toBe("Engineer");
+    });
+
+    it("rejects malformed per-item preserve input before applying a bulk update", async () => {
+      const store = context.getStore();
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const acme = await store.nodes.Company.create({ name: "Acme Corp" });
+      const [aliceEdge] = await store.edges.worksAt.bulkCreate([
+        {
+          from: alice,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+        {
+          from: bob,
+          to: acme,
+          props: { role: "Engineer" },
+          validFrom: FIRST_VALID_FROM,
+        },
+      ]);
+
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints(
+          [
+            {
+              from: alice,
+              to: acme,
+              props: { role: "Manager" },
+              validFrom: SECOND_VALID_FROM,
+              onImmutableLowerBound: "preserve",
+            },
+            {
+              from: bob,
+              to: acme,
+              props: { role: "Director" },
+              validFrom: "not-a-date",
+              onImmutableLowerBound: "preserve",
+            },
+          ],
+          { ifExists: "update" },
+        ),
+      ).rejects.toThrow(/Invalid canonical ISO 8601 datetime for "validFrom"/);
+
+      const storedAliceEdge = await store.edges.worksAt.getById(
+        requireDefined(aliceEdge).id,
+      );
+      expect(storedAliceEdge?.role).toBe("Engineer");
+    });
+  });
+
+  describe("deleting a node touches exactly its own edges", () => {
+    const EndpointItem = defineNode("EndpointItem", {
+      schema: z.object({ name: z.string() }),
+    });
+    const EndpointOther = defineNode("EndpointOther", {
+      schema: z.object({ name: z.string() }),
+    });
+    const endpointLink = defineEdge("endpointLink");
+    const endpointMention = defineEdge("endpointMention");
+    function endpointGraph(id: string, onDelete: "cascade" | "restrict") {
+      return defineGraph({
+        id,
+        nodes: {
+          EndpointItem: { type: EndpointItem, onDelete },
+          EndpointOther: { type: EndpointOther },
+        },
+        edges: {
+          endpointLink: {
+            type: endpointLink,
+            from: [EndpointItem],
+            to: [EndpointItem],
+          },
+          endpointMention: {
+            type: endpointMention,
+            from: [EndpointOther],
+            to: [EndpointItem],
+          },
+        },
+      });
+    }
+
+    async function storedEdgeIds(
+      store: InspectableStore<ReturnType<typeof endpointGraph>>,
+    ): Promise<readonly string[]> {
+      const { edgesTable } = createSqlSchema(store.backend.tableNames);
+      const rows = await store.backend.execute<Readonly<{ id: string }>>(
+        asCompiledRowsSql(
+          sql`SELECT id FROM ${edgesTable} WHERE graph_id = ${store.graphId}`,
+        ),
+      );
+      return rows.map((row) => row.id).toSorted();
+    }
+
+    it("hard delete removes the node's outgoing, incoming, self-loop and soft-deleted edges, and nothing else", async () => {
+      const store = await context.createStore(
+        endpointGraph("endpoint_delete_cascade", "cascade"),
+      );
+      const neighbor = await context.createStore(
+        endpointGraph("endpoint_delete_cascade_neighbor", "cascade"),
+      );
+      const shared = { id: "shared-endpoint" };
+      const target = await store.nodes.EndpointItem.create(
+        { name: "target" },
+        shared,
+      );
+      const b = await store.nodes.EndpointItem.create({ name: "b" });
+      const c = await store.nodes.EndpointItem.create({ name: "c" });
+      const sameIdOtherKind = await store.nodes.EndpointOther.create(
+        { name: "same id, other kind" },
+        shared,
+      );
+      const outgoing = await store.edges.endpointLink.create(target, b);
+      const incoming = await store.edges.endpointLink.create(c, target);
+      const selfLoop = await store.edges.endpointLink.create(target, target);
+      const tombstoned = await store.edges.endpointLink.create(target, c);
+      await store.edges.endpointLink.delete(tombstoned.id);
+      const unrelated = await store.edges.endpointLink.create(b, c);
+      const otherKindSameId = await store.edges.endpointMention.create(
+        sameIdOtherKind,
+        b,
+      );
+
+      const neighborTarget = await neighbor.nodes.EndpointItem.create(
+        { name: "target in another graph" },
+        shared,
+      );
+      const neighborB = await neighbor.nodes.EndpointItem.create({ name: "b" });
+      const neighborEdge = await neighbor.edges.endpointLink.create(
+        neighborTarget,
+        neighborB,
+      );
+
+      expect(await storedEdgeIds(store)).toEqual(
+        [
+          outgoing.id,
+          incoming.id,
+          selfLoop.id,
+          tombstoned.id,
+          unrelated.id,
+          otherKindSameId.id,
+        ].toSorted(),
+      );
+
+      await store.nodes.EndpointItem.hardDelete(target.id);
+
+      expect(await storedEdgeIds(store)).toEqual(
+        [unrelated.id, otherKindSameId.id].toSorted(),
+      );
+      expect(await storedEdgeIds(neighbor)).toEqual([neighborEdge.id]);
+      expect(await store.nodes.EndpointItem.getById(target.id)).toBeUndefined();
+      expect(
+        await store.nodes.EndpointOther.getById(sameIdOtherKind.id),
+      ).toBeDefined();
+    });
+
+    it("hard delete on a history store ends the recorded history of exactly the node's edges, a self-loop once", async () => {
+      const store = await context.createHistoryStore(
+        endpointGraph("endpoint_delete_history", "cascade"),
+      );
+      const target = await store.nodes.EndpointItem.create({ name: "target" });
+      const b = await store.nodes.EndpointItem.create({ name: "b" });
+      const c = await store.nodes.EndpointItem.create({ name: "c" });
+      const outgoing = await store.edges.endpointLink.create(target, b);
+      const incoming = await store.edges.endpointLink.create(c, target);
+      const selfLoop = await store.edges.endpointLink.create(target, target);
+      const unrelated = await store.edges.endpointLink.create(b, c);
+
+      await store.nodes.EndpointItem.hardDelete(target.id);
+
+      const { recordedEdgesTable } = createSqlSchema(store.backend.tableNames);
+      const rows = await store.backend.execute<
+        Readonly<{ id: string; rows: number | string; open: number | string }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT id, COUNT(*) AS rows,
+                 SUM(CASE WHEN recorded_to = ${RECORDED_MAX_REVISION} THEN 1 ELSE 0 END) AS open
+          FROM ${recordedEdgesTable}
+          WHERE graph_id = ${store.graphId}
+          GROUP BY id
+        `),
+      );
+      const history = Object.fromEntries(
+        rows.map((row) => [
+          row.id,
+          { rows: Number(row.rows), open: Number(row.open) },
+        ]),
+      );
+      expect(history).toEqual({
+        [outgoing.id]: { rows: 1, open: 0 },
+        [incoming.id]: { rows: 1, open: 0 },
+        [selfLoop.id]: { rows: 1, open: 0 },
+        [unrelated.id]: { rows: 1, open: 1 },
+      });
+    });
+
+    it("a restricted delete refuses a node whose only live edge is incoming or a self-loop, and deletes an edge-free node", async () => {
+      const store = await context.createStore(
+        endpointGraph("endpoint_delete_restrict", "restrict"),
+      );
+      const source = await store.nodes.EndpointItem.create({ name: "source" });
+      const incomingOnly = await store.nodes.EndpointItem.create({
+        name: "incoming only",
+      });
+      const selfLoopOnly = await store.nodes.EndpointItem.create({
+        name: "self-loop only",
+      });
+      const edgeFree = await store.nodes.EndpointItem.create({
+        name: "edge-free",
+      });
+      await store.edges.endpointLink.create(source, incomingOnly);
+      await store.edges.endpointLink.create(selfLoopOnly, selfLoopOnly);
+
+      await expect(
+        store.nodes.EndpointItem.bulkDelete([incomingOnly.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+      await expect(
+        store.nodes.EndpointItem.bulkDelete([selfLoopOnly.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+
+      await store.nodes.EndpointItem.bulkDelete([edgeFree.id]);
+
+      expect(
+        await store.nodes.EndpointItem.getById(edgeFree.id),
+      ).toBeUndefined();
+      for (const kept of [source, incomingOnly, selfLoopOnly]) {
+        expect(await store.nodes.EndpointItem.getById(kept.id)).toBeDefined();
+      }
+    });
+  });
+
+  describe("source-dependent edge targets across backends", () => {
+    const TaskNode = defineNode("TaskNode", {
+      schema: z.object({ title: z.string() }),
+    });
+    const CourseNode = defineNode("CourseNode", {
+      schema: z.object({ name: z.string() }),
+    });
+    const dependsOn = defineEdge("dependsOn", {
+      from: [TaskNode, CourseNode],
+      to: {
+        TaskNode: [TaskNode],
+        CourseNode: [CourseNode],
+      },
+    });
+    const pairGraph = defineGraph({
+      id: "source_dependent_cross_backend",
+      nodes: {
+        TaskNode: { type: TaskNode },
+        CourseNode: { type: CourseNode },
+      },
+      edges: { dependsOn },
+    });
+
+    it("accepts valid correlated pairs and rejects cross-pairs across backends", async () => {
+      const store = await context.createStore(pairGraph);
+      const t1 = await store.nodes.TaskNode.create({ title: "T1" });
+      const t2 = await store.nodes.TaskNode.create({ title: "T2" });
+      const c1 = await store.nodes.CourseNode.create({ name: "C1" });
+
+      const edge = await store.edges.dependsOn.create(t1, t2);
+      expect(edge.fromId).toBe(t1.id);
+      expect(edge.toId).toBe(t2.id);
+
+      await expect(
+        // @ts-expect-error undeclared endpoint pair
+        store.edges.dependsOn.create(t1, c1),
+      ).rejects.toThrow(EndpointPairError);
     });
   });
 }

@@ -86,22 +86,3 @@ export function runVectorPredicatePass(
 
   return { vectorPredicate };
 }
-
-/**
- * Resolves the query LIMIT in the presence of vector similarity.
- *
- * If a vector predicate is present and AST limit is omitted, use the
- * predicate's built-in limit to bound nearest-neighbor search.
- */
-export function resolveVectorAwareLimit(
-  astLimit?: number,
-  vectorPredicate?: VectorSimilarityPredicate,
-): number | undefined {
-  if (vectorPredicate === undefined) {
-    return astLimit;
-  }
-  if (astLimit === undefined) {
-    return vectorPredicate.limit;
-  }
-  return Math.min(astLimit, vectorPredicate.limit);
-}

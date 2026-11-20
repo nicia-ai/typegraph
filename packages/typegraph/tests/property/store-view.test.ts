@@ -42,24 +42,27 @@ function dayTimestamp(day: number): string {
   return new Date(BASE_MS + day * DAY_MS).toISOString();
 }
 
-const timestampArb = fc
-  .integer({ min: 0, max: 20 })
-  .map((day) => dayTimestamp(day));
-const optionalTimestampArb = fc.option(timestampArb, { nil: undefined });
+const dayArb = fc.integer({ min: 0, max: 20 });
+const timestampArb = dayArb.map((day) => dayTimestamp(day));
 
 // `validFrom` is always set so the chosen `asOf` actually discriminates;
-// `validTo` is optional.
-const nodeSpecArb = fc.record({
-  validFrom: timestampArb,
-  validTo: optionalTimestampArb,
-});
+// `validTo` is optional and, when present, never precedes it. A window is
+// generated as a start plus a non-negative WIDTH rather than two independent
+// instants: the write layer refuses negative width, so an unordered pair would
+// only ever exercise that refusal instead of the view equivalence under test.
+// Zero width stays reachable (width 0) — it is legal and worth covering.
+const windowArb = fc
+  .tuple(dayArb, fc.option(fc.integer({ min: 0, max: 20 }), { nil: undefined }))
+  .map(([startDay, width]) => ({
+    validFrom: dayTimestamp(startDay),
+    validTo: width === undefined ? undefined : dayTimestamp(startDay + width),
+  }));
 
-const edgeSpecArb = fc.record({
-  from: fc.nat(),
-  to: fc.nat(),
-  validFrom: timestampArb,
-  validTo: optionalTimestampArb,
-});
+const nodeSpecArb = windowArb;
+
+const edgeSpecArb = fc
+  .tuple(fc.nat(), fc.nat(), windowArb)
+  .map(([from, to, window]) => ({ from, to, ...window }));
 
 const scenarioArb = fc.record({
   nodes: fc.array(nodeSpecArb, { minLength: 1, maxLength: 8 }),

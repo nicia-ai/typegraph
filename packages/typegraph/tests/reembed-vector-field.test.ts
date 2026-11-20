@@ -9,16 +9,12 @@ import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineGraph,
-  defineNode,
-  embedding,
-  EmbeddingDimensionChangedError,
-  type GraphBackend,
-} from "../src";
+import { defineGraph, defineNode, embedding, type GraphBackend } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { EmbeddingDimensionChangedError } from "../src/errors-entry";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { parseDimensionMismatch } from "../src/utils/sql-errors";
@@ -224,13 +220,12 @@ describe("store.reembedVectorField (sqlite-vec)", () => {
       return;
     }
     const recorded: string[] = [];
-    const recordingBackend: GraphBackend = {
-      ...backend,
+    const recordingBackend: GraphBackend = deriveBackend(backend, {
       vectorSearch: (params) => {
         recorded.push(params.metric);
         return requireDefined(backend.vectorSearch)(params);
       },
-    };
+    });
     const [store] = await createStoreWithSchema(l2Graph, recordingBackend);
     await store.nodes.Doc.create({ title: "a", embedding: [1, 0, 0] });
 

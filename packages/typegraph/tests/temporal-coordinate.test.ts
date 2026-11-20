@@ -1,26 +1,42 @@
 /**
  * Unit tests for the recorded/system-time pieces of the read coordinate:
- * sentinel + canonical-timestamp validation in `withRecordedCoordinate`, and
+ * sentinel + versioned-anchor validation in `withRecordedCoordinate`, and
  * the recorded projection in `describeCoordinate` / `coordinateContext`.
  */
 import { describe, expect, it } from "vitest";
 
 import {
   asRecordedInstant,
+  compareRecordedInstants,
   coordinateContext,
+  createRecordedInstant,
   describeCoordinate,
+  parseRecordedInstant,
   type ReadCoordinate,
-  RECORDED_MAX,
+  RECORDED_MAX_REVISION,
   type RecordedInstant,
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../src/core/temporal";
+import { ValidationError } from "../src/errors";
 
 const VALID_AT = "2026-01-01T00:00:00.000Z";
-const RECORDED_AT = asRecordedInstant("2026-02-02T00:00:00.000Z");
+const RECORDED_AT = asRecordedInstant(
+  "r1:0000000000000042:2026-02-02T00:00:00.000Z",
+);
 
 function validCoordinate(): ReadCoordinate {
   return resolveReadCoordinate("asOf", VALID_AT);
+}
+
+function captureValidationError(action: () => unknown): ValidationError {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof ValidationError) return error;
+    throw error;
+  }
+  throw new Error("Expected action to throw ValidationError");
 }
 
 describe("withRecordedCoordinate", () => {
@@ -35,12 +51,12 @@ describe("withRecordedCoordinate", () => {
     expect(() =>
       withRecordedCoordinate(
         validCoordinate(),
-        RECORDED_MAX as RecordedInstant,
+        RECORDED_MAX_REVISION as unknown as RecordedInstant,
       ),
-    ).toThrow("must be before the recorded-time open sentinel");
+    ).toThrow("canonical versioned recorded instant");
   });
 
-  it("rejects a non-canonical recorded timestamp", () => {
+  it("rejects timestamp-only and malformed recorded anchors", () => {
     expect(() =>
       withRecordedCoordinate(
         validCoordinate(),
@@ -58,9 +74,80 @@ describe("withRecordedCoordinate", () => {
 
 describe("asRecordedInstant", () => {
   it("rejects the open-interval sentinel itself", () => {
-    expect(() => asRecordedInstant(RECORDED_MAX)).toThrow(
-      "must be before the recorded-time open sentinel",
+    expect(() => asRecordedInstant(String(RECORDED_MAX_REVISION))).toThrow(
+      "canonical versioned recorded instant",
     );
+  });
+
+  it("round-trips the logical revision and physical wall time", () => {
+    const instant = createRecordedInstant(42, VALID_AT);
+
+    expect(instant).toBe("r1:0000000000000042:2026-01-01T00:00:00.000Z");
+    expect(parseRecordedInstant(instant)).toEqual({
+      kind: "typegraph",
+      revision: 42,
+      recordedAt: VALID_AT,
+    });
+  });
+
+  it("round-trips r2 ownership and refuses comparisons across origins", () => {
+    const first = createRecordedInstant(42, VALID_AT, {
+      origin: "origin-a",
+      namespace: "a".repeat(32),
+    });
+    expect(first).toBe(
+      `r2:origin-a:${"a".repeat(32)}:0000000000000042:${VALID_AT}`,
+    );
+    expect(parseRecordedInstant(first)).toEqual({
+      kind: "typegraph",
+      origin: "origin-a",
+      namespace: "a".repeat(32),
+      revision: 42,
+      recordedAt: VALID_AT,
+    });
+    expect(
+      compareRecordedInstants(
+        first,
+        createRecordedInstant(43, VALID_AT, {
+          origin: "origin-a",
+          namespace: "a".repeat(32),
+        }),
+      ),
+    ).toBe(-1);
+    expect(() =>
+      compareRecordedInstants(
+        first,
+        createRecordedInstant(42, VALID_AT, {
+          origin: "origin-b",
+          namespace: "a".repeat(32),
+        }),
+      ),
+    ).toThrow("different or retired graph allocation");
+    expect(() =>
+      compareRecordedInstants(first, createRecordedInstant(42, VALID_AT)),
+    ).toThrow("different or retired graph allocation");
+    expect(() =>
+      createRecordedInstant(42, VALID_AT, {
+        origin: "unsafe:origin",
+        namespace: "a".repeat(32),
+      }),
+    ).toThrow();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, RECORDED_MAX_REVISION])(
+    "rejects an unencodable revision (%s)",
+    (revision) => {
+      expect(() => createRecordedInstant(revision, VALID_AT)).toThrow(
+        "createRecordedInstant revision must be a valid recorded revision",
+      );
+    },
+  );
+
+  it("rejects timestamp-only preview anchors with migration guidance", () => {
+    const error = captureValidationError(() => asRecordedInstant(VALID_AT));
+
+    expect(error.suggestion).toContain("migrateLegacyRecordedTime()");
+    expect(error.suggestion).toContain("migrateRecordedAnchor()");
   });
 });
 

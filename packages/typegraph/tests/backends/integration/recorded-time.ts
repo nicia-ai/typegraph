@@ -2,15 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
-  type AnyEdgeType,
-  asRecordedInstant,
-  type CompiledRowsSql,
-  type CompiledStatementSql,
   ConfigurationError,
+  createStore,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
-  defineGraphExtension,
   defineNode,
   type EdgeCollection,
   embedding,
@@ -19,41 +15,150 @@ import {
   type NodeId,
   type NodeType,
   param as parameter,
-  type RecordedInstant,
   searchable,
-  type StoreSearch,
 } from "../../../src";
+import type {
+  CompiledRowsSql,
+  CompiledStatementSql,
+} from "../../../src/backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../../../src/backend/derive-backend";
 import {
   type GraphBackend,
   rowPropsToJsonText,
   type TransactionBackend,
 } from "../../../src/backend/types";
-import { RECORDED_MAX } from "../../../src/core/temporal";
-import { type ReadCoordinate } from "../../../src/core/temporal";
+import {
+  type AnyEdgeType,
+  type RecordedInstant,
+  recordedInstant,
+  recordedInstantRevision,
+} from "../../../src/core";
+import {
+  createRecordedInstant,
+  parseRecordedInstant,
+  type ReadCoordinate,
+  RECORDED_MAX_REVISION,
+  recordedInstantWallTime,
+} from "../../../src/core/temporal";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
+import {
+  applyMergePlan,
+  branch,
+  merge,
+  planMerge,
+  unwrap,
+} from "../../../src/graph-merge";
 import {
   type GraphData,
   importGraph,
   ImportOptionsSchema,
 } from "../../../src/interchange";
 import { compileQuery } from "../../../src/query/compiler/index";
-import { createSqlSchema } from "../../../src/query/compiler/schema";
+import {
+  createSqlSchema,
+  recordedAnchorsTable,
+} from "../../../src/query/compiler/schema";
 import { sql, type SqlFragment } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
+import { recordedRelation } from "../../../src/query-entry";
 import {
   CURRENT_ONLY_READ_NAMES,
   EDGE_BATCH_READ_NAMES,
 } from "../../../src/store/collection-surface";
-import { toCanonicalIso } from "../../../src/store/recorded-capture";
+import { recordedAnchorCandidate } from "../../../src/store/recorded-anchor-log-sql";
+import { recordedAnchorOwner } from "../../../src/store/recorded-anchor-origin";
+import {
+  advanceRevisionClock,
+  lockRecordedGraphWrite,
+  readRecordedClock as readGraphRecordedClock,
+  readRevisionOrigin,
+} from "../../../src/store/recorded-capture";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../../../src/store/types";
+import type { StoreSearch } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
+import { createGate } from "../../concurrency-utils";
+import {
+  recordedInstantFromDriver,
+  recordedRevisionFromDriver,
+} from "../../test-utils";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
 
-type ClockRow = Readonly<{ recorded_at: unknown }>;
+function planNodes(
+  value: unknown,
+): readonly Readonly<Record<string, unknown>>[] {
+  if (Array.isArray(value))
+    return value.flatMap((item: unknown) => planNodes(item));
+  if (value === null || typeof value !== "object") return [];
+  const node = value as Readonly<Record<string, unknown>>;
+  return [node, ...Object.values(node).flatMap((item) => planNodes(item))];
+}
+
+function planText(
+  node: Readonly<Record<string, unknown>>,
+  key: string,
+): string {
+  const value = node[key];
+  return typeof value === "string" ? value : "";
+}
+
+function expectIndexedCandidatePlan(plan: unknown, dialect: string): void {
+  const serialized = JSON.stringify(plan);
+  expect(serialized).toContain("recorded_anchors_time_idx");
+  if (dialect === "sqlite") {
+    expect(serialized).not.toContain("USE TEMP B-TREE");
+    expect(serialized).toContain("recorded_at<?");
+  } else {
+    const nodes = planNodes(plan);
+    expect(
+      nodes.some(
+        (node) => node["Node Type"] === "Limit" && node["Actual Rows"] === 1,
+      ),
+    ).toBe(true);
+    expect(nodes.some((node) => node["Node Type"] === "Sort")).toBe(false);
+  }
+}
+
+function expectIndexedPrunePlan(
+  plan: unknown,
+  dialect: string,
+  table: string,
+): void {
+  const nodes = planNodes(plan);
+  if (dialect === "sqlite") {
+    const details = nodes.map((node) => planText(node, "detail"));
+    expect(
+      details.some((detail) =>
+        /SEARCH anchors .*revision>\? AND revision<\?/.test(detail),
+      ),
+    ).toBe(true);
+    expect(details.some((detail) => detail.includes("SCAN anchors"))).toBe(
+      false,
+    );
+  } else {
+    const scans = nodes.filter(
+      (node) =>
+        node["Relation Name"] === table && node["Node Type"] !== "ModifyTable",
+    );
+    expect(scans.length).toBeGreaterThan(0);
+    expect(scans.some((node) => node["Node Type"] === "Seq Scan")).toBe(false);
+    const conditions = nodes
+      .map((node) => planText(node, "Index Cond"))
+      .join(" ");
+    expect(conditions).toMatch(/revision >=/);
+    expect(conditions).toMatch(/revision <=/);
+  }
+}
+
+type ClockRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type CountRow = Readonly<{ count: unknown }>;
 type RecordedToRow = Readonly<{ recorded_to: unknown }>;
 type RecordedFromRow = Readonly<{ recorded_from: unknown }>;
@@ -321,8 +426,7 @@ function withTransactionBindLimit(
 function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
   const executeStatement = backend.executeStatement;
   const executeRaw = backend.executeRaw;
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     // Advertise the simulated ceiling so recorded reads/writes chunk to it the
     // same way they chunk to a real engine's `maxBindParameters`; the execution
     // guards below then prove no top-level or transaction-scoped statement
@@ -361,7 +465,7 @@ function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
         options,
       );
     },
-  };
+  });
 }
 
 function hideInsertBatchHelpers(
@@ -382,30 +486,28 @@ function hideInsertBatchHelpers(
 function withoutTransactionInsertBatchHelpers(
   backend: GraphBackend,
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     async transaction(fn, options) {
       return backend.transaction(
         (target) => fn(hideInsertBatchHelpers(target)),
         options,
       );
     },
-  };
+  });
 }
 
 // Strips the batch edge-read helper from the transaction target so recorded
 // edge capture must fall back to per-id `getEdge` when reading after-images —
 // the path a minimal custom backend that implements only `getEdge` would hit.
 function withoutTransactionGetEdges(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
     async transaction(fn, options) {
       return backend.transaction((target) => {
         const { getEdges: _getEdges, ...rest } = target;
         return fn(rest);
       }, options);
     },
-  };
+  });
 }
 
 function rejectUniqueFinalization(): Promise<never> {
@@ -413,8 +515,11 @@ function rejectUniqueFinalization(): Promise<never> {
 }
 
 function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
+    capabilities: {
+      ...backend.capabilities,
+      atomicNodeInsertClaims: false,
+    },
     insertUnique(): Promise<void> {
       return rejectUniqueFinalization();
     },
@@ -422,6 +527,10 @@ function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
       return backend.transaction((target) => {
         const failingTarget: TransactionBackend = {
           ...target,
+          capabilities: {
+            ...target.capabilities,
+            atomicNodeInsertClaims: false,
+          },
           insertUnique(): Promise<void> {
             return rejectUniqueFinalization();
           },
@@ -429,7 +538,7 @@ function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
         return fn(failingTarget);
       }, options);
     },
-  };
+  });
 }
 
 function requireBackendHelper<T>(helper: T | undefined, name: string): T {
@@ -468,7 +577,7 @@ async function readRecordedClock(
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<ClockRow>(
     asCompiledRowsSql(sql`
-      SELECT recorded_at
+      SELECT revision, recorded_at
       FROM ${schema.recordedClockTable}
       WHERE graph_id = ${store.graphId}
     `),
@@ -477,9 +586,20 @@ async function readRecordedClock(
   if (row === undefined) {
     throw new Error("Recorded clock row was not written");
   }
-  // The clock high-water mark is a genuine recorded instant (the same source
-  // store.recordedNow() reads), so branding it is correct, not a cast-to-silence.
-  return asRecordedInstant(toCanonicalIso(row.recorded_at));
+  return recordedInstantFromDriver(
+    row.revision,
+    row.recorded_at,
+    await recordedAnchorOwner(
+      schema,
+      requireDefined(
+        await readRevisionOrigin(
+          store[STORE_RUNTIME].backend,
+          schema,
+          store.graphId,
+        ),
+      ),
+    ),
+  );
 }
 
 async function countRecordedNodeRows(
@@ -511,7 +631,7 @@ async function countOpenRecordedNodeRowsByKind(
       FROM ${schema.recordedNodesTable}
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   return Number(rows[0]?.count ?? 0);
@@ -553,7 +673,7 @@ async function readRecordedNodeClosedAt(
   store: RecordedSqlStore,
   kind: string,
   nodeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
@@ -566,14 +686,14 @@ async function readRecordedNodeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded node row for ${nodeId}`);
-  return toCanonicalIso(row.recorded_to);
+  return recordedRevisionFromDriver(row.recorded_to);
 }
 
 async function readRecordedEdgeClosedAt(
   store: RecordedSqlStore,
   kind: string,
   edgeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedToRow>(
     asCompiledRowsSql(sql`
@@ -586,14 +706,14 @@ async function readRecordedEdgeClosedAt(
   );
   const row = rows[0];
   if (row === undefined) throw new Error(`No recorded edge row for ${edgeId}`);
-  return toCanonicalIso(row.recorded_to);
+  return recordedRevisionFromDriver(row.recorded_to);
 }
 
 async function readRecordedNodeOpenFrom(
   store: RecordedSqlStore,
   kind: string,
   nodeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -602,21 +722,21 @@ async function readRecordedNodeOpenFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${nodeId}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded node row for ${nodeId}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readRecordedEdgeOpenFrom(
   store: RecordedSqlStore,
   kind: string,
   edgeId: string,
-): Promise<string> {
+): Promise<number> {
   const schema = createSqlSchema(store[STORE_RUNTIME].backend.tableNames);
   const rows = await store[STORE_RUNTIME].backend.execute<RecordedFromRow>(
     asCompiledRowsSql(sql`
@@ -625,14 +745,14 @@ async function readRecordedEdgeOpenFrom(
       WHERE graph_id = ${store.graphId}
         AND kind = ${kind}
         AND id = ${edgeId}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   const row = rows[0];
   if (row === undefined) {
     throw new Error(`No open recorded edge row for ${edgeId}`);
   }
-  return toCanonicalIso(row.recorded_from);
+  return recordedRevisionFromDriver(row.recorded_from);
 }
 
 async function readRecordedNodeOps(
@@ -702,6 +822,104 @@ function expectSyncContractRefusal(entry: RecordedContractCase): void {
 export function registerRecordedTimeIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("recorded revision requests", () => {
+    it("allocates consecutive revisions without entity changes", async () => {
+      const store = await createHistoryStore(context);
+
+      const first = await store.transactionWithReceipt((tx) => {
+        tx.requestRecordedRevision();
+        return Promise.resolve();
+      });
+      const second = await store.transactionWithReceipt((tx) => {
+        tx.requestRecordedRevision();
+        return Promise.resolve();
+      });
+
+      const firstRecorded = requireRecordedInstant(
+        first.receipt.recorded,
+        "expected first requested revision",
+      );
+      const secondRecorded = requireRecordedInstant(
+        second.receipt.recorded,
+        "expected second requested revision",
+      );
+
+      expect(first.receipt.writes.total).toBe(0);
+      expect(second.receipt.writes.total).toBe(0);
+      expect(recordedInstantRevision(secondRecorded)).toBe(
+        recordedInstantRevision(firstRecorded) + 1,
+      );
+      expect(await store.recordedNow()).toBe(secondRecorded);
+    });
+
+    it("is idempotent and shares one revision with entity writes", async () => {
+      const store = await createHistoryStore(context);
+
+      const outcome = await store.transactionWithReceipt(async (tx) => {
+        tx.requestRecordedRevision();
+        tx.requestRecordedRevision();
+        await tx.nodes.Person.create(
+          { name: "checkpointed", age: 42 },
+          { id: "recorded-revision-request" },
+        );
+      });
+
+      expect(outcome.receipt.recorded).toBeDefined();
+      expect(outcome.receipt.recorded).toBe(await store.recordedNow());
+      expect(
+        recordedInstantRevision(
+          requireRecordedInstant(
+            outcome.receipt.recorded,
+            "expected requested revision",
+          ),
+        ),
+      ).toBe(1);
+    });
+
+    it("rolls back a requested revision with the transaction", async () => {
+      const store = await createHistoryStore(context);
+
+      await expect(
+        store.transaction((tx) => {
+          tx.requestRecordedRevision();
+          return Promise.reject(new Error("roll back checkpoint"));
+        }),
+      ).rejects.toThrow("roll back checkpoint");
+
+      expect(await store.recordedNow()).toBeUndefined();
+    });
+
+    it("refuses a revision request in a read-only transaction", async () => {
+      const store = await createHistoryStore(context);
+
+      await expect(
+        store.transactionWithReceipt(
+          (tx) => {
+            tx.requestRecordedRevision();
+            return Promise.resolve();
+          },
+          { accessMode: "read_only" },
+        ),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+
+      expect(await store.recordedNow()).toBeUndefined();
+    });
+
+    it("keeps the request available on scoped measure contexts", async () => {
+      const store = await createHistoryStore(context);
+
+      const outcome = await store.transactionWithReceipt(async (tx) =>
+        tx.measure((scoped) => {
+          scoped.requestRecordedRevision();
+          return Promise.resolve();
+        }),
+      );
+
+      expect(outcome.receipt.recorded).toBeDefined();
+      expect(outcome.result.receipt.recorded).toBeUndefined();
+    });
+  });
+
   describe("Recorded-time StoreView", () => {
     it("allocates distinct, both-observable recorded instants for same-millisecond commits", async () => {
       // The monotonic same-ms collision guard diverges by backend (Postgres
@@ -738,10 +956,27 @@ export function registerRecordedTimeIntegrationTests(
           "expected second clock commit instant",
         );
 
-        // Same pinned wall instant, but the guard advances the second commit by
-        // one logical millisecond rather than colliding with the first.
-        expect(firstCommit).toBe("2026-06-01T12:00:00.000Z");
-        expect(secondCommit).toBe("2026-06-01T12:00:00.001Z");
+        // Same physical wall instant, distinct logical revisions.
+        expect(firstCommit).toBe(
+          createRecordedInstant(
+            1,
+            "2026-06-01T12:00:00.000Z",
+            await recordedAnchorOwner(
+              store.revisionSchema,
+              await store.allocationOwner().then((owner) => owner.origin),
+            ),
+          ),
+        );
+        expect(secondCommit).toBe(
+          createRecordedInstant(
+            2,
+            "2026-06-01T12:00:00.000Z",
+            await recordedAnchorOwner(
+              store.revisionSchema,
+              await store.allocationOwner().then((owner) => owner.origin),
+            ),
+          ),
+        );
 
         // Both instants are observable and isolate their own commit.
         const atFirst = store.asOfRecorded(firstCommit);
@@ -760,6 +995,53 @@ export function registerRecordedTimeIntegrationTests(
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("fences a stale caller-supplied revision inside the clock UPSERT", async () => {
+      // #440: the clock row refuses a backward move itself. The fence is one
+      // `ON CONFLICT ... DO UPDATE ... WHERE` predicate written once for both
+      // dialects, so it belongs in the shared suite — a SQLite-only assertion
+      // would happily certify a predicate PostgreSQL rejects (AGENTS.md parity
+      // rule #2). Driven at the allocator seam against a graph id of its own,
+      // which is all the clock row is keyed by.
+      const backend = context.getStore().backend;
+      const schema = createSqlSchema(backend.tableNames);
+      const graphId = "recorded_clock_fence";
+      const wallTime = "2026-06-03T00:00:00.000Z";
+
+      const seeded = await advanceRevisionClock(
+        backend,
+        schema,
+        graphId,
+        false,
+        createRecordedInstant(4, wallTime),
+      );
+      expect(parseRecordedInstant(seeded).revision).toBe(5);
+
+      await expect(
+        advanceRevisionClock(
+          backend,
+          schema,
+          graphId,
+          false,
+          createRecordedInstant(2, wallTime),
+        ),
+      ).rejects.toThrow(/moved the graph's revision clock backward/u);
+
+      const survived = requireRecordedInstant(
+        await readGraphRecordedClock(backend, schema, graphId),
+        "expected the fenced clock to survive the stale write",
+      );
+      expect(recordedInstantRevision(survived)).toBe(5);
+
+      const advanced = await advanceRevisionClock(
+        backend,
+        schema,
+        graphId,
+        false,
+        createRecordedInstant(6, wallTime),
+      );
+      expect(parseRecordedInstant(advanced).revision).toBe(7);
     });
 
     it("rolls back live and recorded rows when create finalization fails", async () => {
@@ -942,6 +1224,1354 @@ export function registerRecordedTimeIntegrationTests(
       );
     });
 
+    it("resolves retained allocation timestamps with revision ties, backward clocks, absence, and future bounds", async () => {
+      const store = await createHistoryStore(context);
+      const time = "2026-06-01T12:00:00.000Z";
+      expect(await store.resolveRecordedInstant(time)).toBeUndefined();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(time));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        const first = requireDefined(await store.recordedNow());
+        expect(await store.resolveRecordedInstant(time)).toBe(first);
+        await store.nodes.Person.update(node.id, { name: "second" });
+        const second = requireDefined(await store.recordedNow());
+        expect(first).not.toBe(second);
+        expect(await store.resolveRecordedInstant(time)).toBe(second);
+        vi.setSystemTime(new Date("2025-01-01T00:00:00.000Z"));
+        await store.nodes.Person.update(node.id, { name: "third" });
+        const third = requireDefined(await store.recordedNow());
+        expect(recordedInstantWallTime(third)).toBe(time);
+        expect(await store.resolveRecordedInstant(time)).toBe(third);
+        expect(
+          await store.resolveRecordedInstant("2026-06-01T11:59:59.999Z"),
+        ).toBeUndefined();
+        expect(
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(third);
+        await expect(
+          store.transaction(async (tx) => {
+            await tx.nodes.Person.update(node.id, { name: "rolled back" });
+            throw new Error("rollback allocation");
+          }),
+        ).rejects.toThrow("rollback allocation");
+        expect(await store.resolveRecordedInstant(time)).toBe(third);
+        expect(
+          await store.asOfRecorded(first).nodes.Person.getById(node.id),
+        ).toMatchObject({ name: "first" });
+        await store.clear();
+        expect(await store.resolveRecordedInstant(time)).toBeUndefined();
+        await store.nodes.Person.create({ name: "replacement", age: 1 });
+        expect(await store.resolveRecordedInstant(time)).not.toBe(third);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps naturally gapped allocation logs distinct from pruning", async () => {
+      const store = await createHistoryStore(context);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        const first = requireDefined(await store.recordedNow());
+        const [tracking] = await createStoreWithSchema(
+          integrationTestGraph,
+          context.getBackend(),
+          { revisionTracking: true },
+        );
+        vi.setSystemTime(new Date("2026-06-01T12:00:01.000Z"));
+        await tracking.nodes.Person.update(node.id, { name: "unlogged" });
+        vi.setSystemTime(new Date("2026-06-01T12:00:02.000Z"));
+        await store.nodes.Person.update(node.id, { name: "third" });
+        expect(
+          recordedInstantRevision(requireDefined(await store.recordedNow())),
+        ).toBe(3);
+        expect(
+          await store.resolveRecordedInstant("2026-06-01T12:00:01.500Z"),
+        ).toBe(first);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("prunes allocation metadata without changing ownership, checkpoints, or pre-allocation absence", async () => {
+      const store = await createHistoryStore(context);
+      const owner = await store.allocationOwner();
+      const times = [
+        "2026-06-01T12:00:00.000Z",
+        "2026-06-01T12:00:01.000Z",
+        "2026-06-01T12:00:02.000Z",
+        "2026-06-01T12:00:03.000Z",
+      ] as const;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(times[0]));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        const first = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[1]));
+        await store.nodes.Person.update(node.id, { name: "second" });
+        const saved = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[2]));
+        await store.nodes.Person.update(node.id, { name: "third" });
+        const boundary = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date(times[3]));
+        await store.nodes.Person.update(node.id, { name: "fourth" });
+        const latest = requireDefined(await store.recordedNow());
+
+        await store.pruneRecordedInstants("1900-01-01T00:00:00.000Z");
+        expect(await store.resolveRecordedInstant(times[0])).toBe(first);
+        expect(
+          await store.pruneRecordedInstants("2026-06-01T12:00:02.500Z"),
+        ).toEqual({
+          deletedCount: 2,
+          retainedBoundary: boundary,
+          hasMore: false,
+        });
+        for (const time of [times[0], times[1], "2026-06-01T12:00:01.999Z"]) {
+          await expect(
+            store.resolveRecordedInstant(time),
+          ).rejects.toMatchObject({
+            details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+          });
+        }
+        expect(
+          await store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+        ).toBeUndefined();
+        expect(await store.resolveRecordedInstant(times[2])).toBe(boundary);
+        expect(await store.resolveRecordedInstant(times[3])).toBe(latest);
+        expect(await store.allocationOwner()).toEqual(owner);
+        expect(await store.recordedNow()).toBe(latest);
+        expect(
+          await store.asOfRecorded(saved).nodes.Person.getById(node.id),
+        ).toMatchObject({ name: "second" });
+        const countAnchors = async () => {
+          const rows = await context
+            .getBackend()
+            .execute<CountRow>(
+              asCompiledRowsSql(
+                sql`SELECT count(*) AS count FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+              ),
+            );
+          return Number(requireDefined(rows[0]).count);
+        };
+        expect(await countAnchors()).toBe(2);
+        await store.pruneRecordedInstants(times[2]);
+        await store.pruneRecordedInstants(times[0]);
+        expect(await countAnchors()).toBe(2);
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z");
+        expect(await countAnchors()).toBe(1);
+        expect(
+          await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).toBe(latest);
+        await store.nodes.Person.update(node.id, { name: "same timestamp" });
+        const tied = requireDefined(await store.recordedNow());
+        expect(await store.resolveRecordedInstant(times[3])).toBe(tied);
+        await store.pruneRecordedInstants(times[3]);
+        expect(await store.resolveRecordedInstant(times[3])).toBe(tied);
+        expect(await countAnchors()).toBe(1);
+        await store.clear();
+        expect(await store.resolveRecordedInstant(times[0])).toBeUndefined();
+        await store.pruneRecordedInstants(times[3]);
+        await store.nodes.Person.create({ name: "replacement", age: 1 });
+        expect(await store.allocationOwner()).not.toEqual(owner);
+        expect(await store.resolveRecordedInstant(times[3])).not.toBe(tied);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.runIf(context.serverLaneConcurrency)(
+      "serializes a writer and a competing prune behind an active pruning transaction",
+      async () => {
+        const store = await createHistoryStore(context);
+        const base = context.getBackend();
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          for (let index = 0; index < 6; index += 1) {
+            vi.setSystemTime(new Date(`2026-06-01T12:00:0${index}.000Z`));
+            await store.nodes.Person.create({
+              name: `person-${index}`,
+              age: index,
+            });
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+        const cutoff = "2026-06-01T12:00:04.000Z";
+        const boundary = requireDefined(
+          await store.resolveRecordedInstant(cutoff),
+        );
+        const owner = await store.allocationOwner();
+        const reached = createGate();
+        const release = createGate();
+        const [paused] = await createStoreWithSchema(
+          integrationTestGraph,
+          deriveBackend(base, {
+            transaction(callback, options) {
+              return base.transaction(
+                (target) =>
+                  callback(
+                    deriveBackend(target, {
+                      async execute<T>(query: CompiledRowsSql) {
+                        const rows = await target.execute<T>(query);
+                        const text = requireDefined(base.compileSql)(query).sql;
+                        if (
+                          text.trimStart().startsWith("UPDATE") &&
+                          text.includes('"anchor_retention"=')
+                        ) {
+                          reached.open();
+                          await release.opened;
+                        }
+                        return rows;
+                      },
+                    }),
+                  ),
+                options,
+              );
+            },
+          }),
+          { history: true },
+        );
+        const pruning = paused.pruneRecordedInstants(cutoff, { limit: 2 });
+        await reached.opened;
+        const writing = store.nodes.Person.create({
+          name: "concurrent",
+          age: 7,
+        });
+        const competing = store.pruneRecordedInstants(cutoff, { limit: 2 });
+        try {
+          // Observe server-side waiters: these transactions really overlap on different sessions.
+          await vi.waitFor(
+            async () => {
+              const rows = await base.execute<CountRow>(
+                asCompiledRowsSql(sql`
+                  SELECT count(*) AS count FROM pg_stat_activity
+                  WHERE datname=current_database() AND wait_event='advisory'
+                `),
+              );
+              expect(
+                Number(requireDefined(rows[0]).count),
+              ).toBeGreaterThanOrEqual(2);
+            },
+            { timeout: 5000 },
+          );
+        } finally {
+          release.open();
+        }
+        const [first, second] = await Promise.all([
+          pruning,
+          competing,
+          writing,
+        ]);
+        expect(first).toEqual({
+          deletedCount: 2,
+          retainedBoundary: boundary,
+          hasMore: true,
+        });
+        expect(second).toEqual({
+          deletedCount: 2,
+          retainedBoundary: boundary,
+          hasMore: false,
+        });
+        const remaining = await base.execute<Readonly<{ revision: unknown }>>(
+          asCompiledRowsSql(sql`
+            SELECT revision FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId} ORDER BY revision
+          `),
+        );
+        expect(remaining.map((row) => Number(row.revision))).toEqual([5, 6, 7]);
+        expect(await store.resolveRecordedInstant(cutoff)).toBe(boundary);
+        expect(
+          recordedInstantRevision(
+            requireDefined(
+              await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+            ),
+          ),
+        ).toBe(7);
+        expect(await store.allocationOwner()).toEqual(owner);
+        await expect(
+          store.resolveRecordedInstant("2026-06-01T12:00:02.000Z"),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+        });
+        expect(
+          await store.resolveRecordedInstant("2026-06-01T11:59:59.000Z"),
+        ).toBeUndefined();
+      },
+    );
+
+    it("prunes only the active graph and allocation origin", async () => {
+      const store = await createHistoryStore(context);
+      const base = context.getBackend();
+      await store.nodes.Person.create({ name: "first", age: 1 });
+      await store.nodes.Person.create({ name: "second", age: 2 });
+      await store.nodes.Person.create({ name: "third", age: 3 });
+      const owner = await store.allocationOwner();
+      const foreignGraph = `${store.graphId}-other`;
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(sql`
+          INSERT INTO ${recordedAnchorsTable(store.revisionSchema)} (graph_id, origin, revision, recorded_at)
+          VALUES (${store.graphId}, ${"previous-owner"}, 1, ${"2000-01-01T00:00:00.000Z"}),
+            (${foreignGraph}, ${owner.origin}, 1, ${"2000-01-01T00:00:00.000Z"})
+        `),
+      );
+      const latest = requireDefined(await store.recordedNow());
+      expect(
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).toEqual({ deletedCount: 2, retainedBoundary: latest, hasMore: false });
+      const rows = await base.execute<
+        Readonly<{ graph_id: string; origin: string; revision: unknown }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT graph_id, origin, revision FROM ${recordedAnchorsTable(store.revisionSchema)}
+          WHERE graph_id IN (${store.graphId}, ${foreignGraph})
+        `),
+      );
+      expect(
+        rows.map((row) => ({ ...row, revision: Number(row.revision) })),
+      ).toEqual(
+        expect.arrayContaining([
+          { graph_id: store.graphId, origin: owner.origin, revision: 3 },
+          { graph_id: store.graphId, origin: "previous-owner", revision: 1 },
+          { graph_id: foreignGraph, origin: owner.origin, revision: 1 },
+        ]),
+      );
+      expect(rows).toHaveLength(3);
+    });
+
+    it("checks capture capability before validating either allocation-log entrypoint", async () => {
+      const live = createStore(integrationTestGraph, context.getBackend());
+      for (const time of ["not-a-date", "2026-01-01"]) {
+        await expect(live.resolveRecordedInstant(time)).rejects.toMatchObject({
+          name: "UnsupportedBackendCapabilityError",
+        });
+        await expect(live.pruneRecordedInstants(time)).rejects.toMatchObject({
+          name: "UnsupportedBackendCapabilityError",
+        });
+      }
+    });
+
+    it("prunes successfully after a healthy clock advance between its read and update", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "first", age: 1 });
+      await store.nodes.Person.create({ name: "second", age: 2 });
+      const boundary = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    async execute<T>(query: CompiledRowsSql) {
+                      const rows = await target.execute<T>(query);
+                      if (
+                        requireDefined(base.compileSql)(query).sql.includes(
+                          "SELECT clock.*",
+                        )
+                      ) {
+                        await advanceRevisionClock(
+                          target,
+                          store.revisionSchema,
+                          store.graphId,
+                          false,
+                        );
+                      }
+                      return rows;
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      expect(
+        await observed.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(
+        recordedInstantRevision(requireDefined(await store.recordedNow())),
+      ).toBe(3);
+    });
+
+    it("rejects pruning context failures through its Promise", async () => {
+      const base = context.getBackend();
+      const failure = new Error("context construction failed");
+      let broken = false;
+      const observed = createStore(
+        integrationTestGraph,
+        deriveBackend(base, {
+          get tableNames(): GraphBackend["tableNames"] {
+            if (broken) throw failure;
+            return;
+          },
+        }),
+      );
+      broken = true;
+      expect(
+        await observed
+          .pruneRecordedInstants("2099-01-01T00:00:00.000Z")
+          .catch((error: unknown) => error),
+      ).toBe(failure);
+    });
+
+    it("persists only the initial retention format and refuses obsolete birth fields", async () => {
+      const store = await createHistoryStore(context);
+      const times = [
+        "2026-06-01T12:00:00.000Z",
+        "2026-06-01T12:00:01.000Z",
+      ] as const;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        for (const time of times) {
+          vi.setSystemTime(new Date(time));
+          await store.nodes.Person.create({ name: time, age: 1 });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+      await store.pruneRecordedInstants(times[1]);
+      const state = {
+        version: 1,
+        loggedFromFirstAllocation: true,
+        loggedFrom: times[0],
+        prunedBefore: times[1],
+        retainedRevision: 2,
+      };
+      const base = context.getBackend();
+      const writeState = (state: unknown) =>
+        requireDefined(base.executeStatement)(
+          asCompiledStatementSql(sql`
+            UPDATE ${store.revisionSchema.recordedClockTable} SET anchor_retention=${JSON.stringify(state)} WHERE graph_id=${store.graphId}
+          `),
+        );
+      await writeState(state);
+      expect(
+        await store.resolveRecordedInstant("2026-06-01T11:59:59.000Z"),
+      ).toBeUndefined();
+      await store.pruneRecordedInstants(times[1]);
+      const rows = await base.execute<Readonly<{ anchor_retention: string }>>(
+        asCompiledRowsSql(sql`
+          SELECT anchor_retention FROM ${store.revisionSchema.recordedClockTable} WHERE graph_id=${store.graphId}
+        `),
+      );
+      expect(
+        JSON.parse(requireDefined(rows[0]).anchor_retention),
+      ).toMatchObject({ version: 1, loggedFromFirstAllocation: true });
+      await writeState({
+        ...state,
+        firstAllocationAt: "2026-05-01T00:00:00.000Z",
+      });
+      await expect(
+        store.resolveRecordedInstant("2026-04-15T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_RETENTION_STATE_INVALID" },
+      });
+    });
+
+    it
+      .runIf(context.serverLaneConcurrency)
+      .each(["repeatable_read", "serializable"] as const)(
+      "retries a pruning snapshot taken before a writer releases its fence (%s)",
+      async (isolationLevel) => {
+        const store = await createHistoryStore(context);
+        await store.nodes.Person.create({ name: "first", age: 1 });
+        await store.nodes.Person.create({ name: "second", age: 2 });
+        const base = context.getBackend();
+        const reached = createGate();
+        const release = createGate();
+        const writing = base.transaction(async (target) => {
+          await lockRecordedGraphWrite(target, store.graphId);
+          await advanceRevisionClock(
+            target,
+            store.revisionSchema,
+            store.graphId,
+            false,
+          );
+          reached.open();
+          await release.opened;
+        });
+        await reached.opened;
+        let attempts = 0;
+        const [observed] = await createStoreWithSchema(
+          integrationTestGraph,
+          deriveBackend(base, {
+            transaction(callback, options) {
+              attempts += 1;
+              return base.transaction(callback, { ...options, isolationLevel });
+            },
+          }),
+          { history: true },
+        );
+        attempts = 0;
+        const pruning = observed.pruneRecordedInstants(
+          "2099-01-01T00:00:00.000Z",
+        );
+        try {
+          await vi.waitFor(
+            async () => {
+              const rows = await base.execute<CountRow>(
+                asCompiledRowsSql(sql`
+                  SELECT count(*) AS count FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory'
+                `),
+              );
+              expect(
+                Number(requireDefined(rows[0]).count),
+              ).toBeGreaterThanOrEqual(1);
+            },
+            { timeout: 5000 },
+          );
+        } finally {
+          release.open();
+        }
+        await writing;
+        expect(await pruning).toMatchObject({
+          deletedCount: 1,
+          hasMore: false,
+        });
+        expect(attempts).toBe(2);
+        expect(
+          recordedInstantRevision(requireDefined(await store.recordedNow())),
+        ).toBe(3);
+      },
+    );
+
+    it("publishes a durable watermark and drains only one bounded batch per call", async () => {
+      const store = await createHistoryStore(context);
+      const times = Array.from(
+        { length: 6 },
+        (_, index) => `2026-06-01T12:00:0${index}.000Z`,
+      );
+      vi.useFakeTimers({ toFake: ["Date"] });
+      let nodeId: NodeId<typeof integrationTestGraph.nodes.Person.type>;
+      try {
+        vi.setSystemTime(new Date(requireDefined(times[0])));
+        const node = await store.nodes.Person.create({ name: "first", age: 1 });
+        nodeId = node.id;
+        for (let index = 1; index < times.length; index += 1) {
+          vi.setSystemTime(new Date(requireDefined(times[index])));
+          await store.nodes.Person.update(nodeId, { name: `value-${index}` });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+      const boundary = requireDefined(
+        await store.resolveRecordedInstant(requireDefined(times[4])),
+      );
+      const owner = await store.allocationOwner();
+      const first = await store.pruneRecordedInstants(
+        requireDefined(times[4]),
+        { limit: 1 },
+      );
+      expect(first).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: true,
+      });
+      const base = context.getBackend();
+      const [watermark] = await base.execute<
+        Readonly<{ anchor_retention: string }>
+      >(
+        asCompiledRowsSql(
+          sql`SELECT anchor_retention FROM ${store.revisionSchema.recordedClockTable} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      expect(JSON.parse(requireDefined(watermark).anchor_retention)).toEqual({
+        version: 1,
+        loggedFromFirstAllocation: true,
+        loggedFrom: times[0],
+        prunedBefore: times[4],
+        retainedRevision: 5,
+      });
+      const remaining = await base.execute<Readonly<{ revision: unknown }>>(
+        asCompiledRowsSql(sql`
+          SELECT revision FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId} ORDER BY revision
+        `),
+      );
+      expect(remaining.map((row) => Number(row.revision))).toEqual([
+        2, 3, 4, 5, 6,
+      ]);
+      // Revision two is physically present, but the committed watermark retires its coverage.
+      const [reopened] = await createStoreWithSchema(
+        integrationTestGraph,
+        base,
+        { history: true },
+      );
+      await expect(
+        reopened.resolveRecordedInstant(requireDefined(times[1])),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+      });
+      expect(
+        await reopened.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+      ).toBeUndefined();
+      // A writer can commit BETWEEN batches, and advancing the clock preserves the watermark.
+      await store.nodes.Person.update(nodeId, { name: "between batches" });
+      const latest = requireDefined(await store.recordedNow());
+      for (let index = 0; index < 3; index += 1) {
+        const result = await reopened.pruneRecordedInstants(
+          requireDefined(times[4]),
+          { limit: 1 },
+        );
+        expect(result).toEqual({
+          deletedCount: 1,
+          retainedBoundary: boundary,
+          hasMore: index < 2,
+        });
+      }
+      const finalRows = await base.execute<Readonly<{ revision: unknown }>>(
+        asCompiledRowsSql(sql`
+          SELECT revision FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId} ORDER BY revision
+        `),
+      );
+      expect(finalRows.map((row) => Number(row.revision))).toEqual([5, 6, 7]);
+      expect(await store.resolveRecordedInstant(requireDefined(times[4]))).toBe(
+        boundary,
+      );
+      expect(
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBe(latest);
+      expect(await store.allocationOwner()).toEqual(owner);
+      await expect(
+        store.resolveRecordedInstant(requireDefined(times[1])),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+      });
+    });
+
+    it("distinguishes explicitly pruned coverage from never-logged upgrade history", async () => {
+      const base = context.getBackend();
+      const [tracking] = await createStoreWithSchema(
+        integrationTestGraph,
+        base,
+        { revisionTracking: true },
+      );
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-06-01T12:00:00.000Z"));
+        const node = await tracking.nodes.Person.create({
+          name: "unlogged-one",
+          age: 1,
+        });
+        vi.setSystemTime(new Date("2026-06-01T12:00:01.000Z"));
+        await tracking.nodes.Person.update(node.id, { name: "unlogged-two" });
+        const store = await createHistoryStore(context);
+        vi.setSystemTime(new Date("2026-06-01T12:00:02.000Z"));
+        await store.nodes.Person.update(node.id, { name: "logged-three" });
+        const saved = requireDefined(await store.recordedNow());
+        vi.setSystemTime(new Date("2026-06-01T12:00:03.000Z"));
+        await store.nodes.Person.update(node.id, { name: "logged-four" });
+        const boundary = requireDefined(await store.recordedNow());
+        expect(
+          await store.pruneRecordedInstants(recordedInstantWallTime(boundary)),
+        ).toEqual({
+          deletedCount: 1,
+          retainedBoundary: boundary,
+          hasMore: false,
+        });
+        await expect(
+          store.resolveRecordedInstant("2026-06-01T12:00:01.500Z"),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+        });
+        await expect(
+          store.resolveRecordedInstant("2026-06-01T12:00:02.500Z"),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_LOOKUP_HISTORY_PRUNED" },
+        });
+        expect(
+          await store.asOfRecorded(saved).nodes.Person.getById(node.id),
+        ).toMatchObject({ name: "logged-three" });
+        expect(
+          await store.resolveRecordedInstant(recordedInstantWallTime(boundary)),
+        ).toBe(boundary);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("rolls back the watermark and allocation deletions together when a batch aborts", async () => {
+      const base = context.getBackend();
+      const store = await createHistoryStore(context);
+      const node = await store.nodes.Person.create({ name: "first", age: 1 });
+      const first = requireDefined(await store.recordedNow());
+      await store.nodes.Person.update(node.id, { name: "second" });
+      await store.nodes.Person.update(node.id, { name: "third" });
+      const before = requireDefined(await store.recordedNow());
+      const [aborting] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction: (fn, options) =>
+            base.transaction(
+              (target) =>
+                fn(
+                  deriveBackend(target, {
+                    async execute<T>(query: CompiledRowsSql) {
+                      const rows = await target.execute<T>(query);
+                      if (
+                        requireDefined(base.compileSql)(query)
+                          .sql.trimStart()
+                          .startsWith("DELETE FROM")
+                      )
+                        throw new Error("abort retained batch");
+                      return rows;
+                    },
+                  }),
+                ),
+              options,
+            ),
+        }),
+        { history: true },
+      );
+      await expect(
+        aborting.pruneRecordedInstants("2099-01-01T00:00:00.000Z", {
+          limit: 1,
+        }),
+      ).rejects.toThrow("abort retained batch");
+      expect(await store.recordedNow()).toBe(before);
+      const rows = await base.execute<
+        Readonly<{ revision: unknown; anchor_retention: unknown }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT anchors.revision, clock.anchor_retention FROM ${recordedAnchorsTable(store.revisionSchema)} anchors
+          JOIN ${store.revisionSchema.recordedClockTable} clock ON clock.graph_id=anchors.graph_id
+          WHERE anchors.graph_id=${store.graphId} ORDER BY anchors.revision
+        `),
+      );
+      expect(rows.map((row) => Number(row.revision))).toEqual([1, 2, 3]);
+      expect(
+        rows.every(
+          (row) =>
+            row.anchor_retention === undefined || row.anchor_retention === null,
+        ),
+      ).toBe(true);
+      expect(
+        await store.resolveRecordedInstant(recordedInstantWallTime(first)),
+      ).toBeDefined();
+    });
+
+    it("refuses unsupported or invalid allocation pruning and leaves unlogged coverage unknown", async () => {
+      const base = context.getBackend();
+      const [unsupported] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          capabilities: { ...base.capabilities, recordedAnchorPruning: false },
+        }),
+        { history: true },
+      );
+      await expect(
+        unsupported.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const live = createStore(integrationTestGraph, base);
+      await expect(
+        live.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const store = await createHistoryStore(context);
+      await expect(
+        store.pruneRecordedInstants("2026-01-01"),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+      for (const limit of [0, -1, 1.5, 10_001]) {
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z", { limit }),
+        ).rejects.toMatchObject({ name: "ValidationError" });
+      }
+      expect(
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).toEqual({
+        deletedCount: 0,
+        retainedBoundary: undefined,
+        hasMore: false,
+      });
+      expect(
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBeUndefined();
+      await store.nodes.Person.create({ name: "unlogged", age: 1 });
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z");
+      await expect(
+        store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+    });
+
+    it("reads existing allocation logs without requiring a pruning lifecycle port", async () => {
+      const base = context.getBackend();
+      await createHistoryStore(context);
+      const missingLifecycle = createStore(
+        integrationTestGraph,
+        projectBackendWithout(base, ["assertBaseSchemaCurrent"]),
+        { history: true },
+      );
+      expect(
+        await missingLifecycle.resolveRecordedInstant(
+          "2099-01-01T00:00:00.000Z",
+        ),
+      ).toBeUndefined();
+      for (const time of ["2099-01-01T00:00:00.000Z", "not-a-date"]) {
+        await expect(
+          missingLifecycle.pruneRecordedInstants(time),
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: {
+            capability: "recordedAnchorPruning",
+            missingMember: "assertBaseSchemaCurrent",
+          },
+        });
+      }
+    });
+
+    it("requires a separate pruning capability in addition to allocation lookup", async () => {
+      const base = context.getBackend();
+      await createHistoryStore(context);
+      const { recordedAnchorPruning, ...legacyCapabilities } =
+        base.capabilities;
+      expect(recordedAnchorPruning).toBe(true);
+      const legacy = createStore(
+        integrationTestGraph,
+        deriveBackend(base, { capabilities: legacyCapabilities }),
+        { history: true },
+      );
+      expect(
+        await legacy.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBeUndefined();
+      await expect(
+        legacy.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        name: "UnsupportedBackendCapabilityError",
+        details: { capability: "recordedAnchorPruning" },
+      });
+    });
+
+    it.each(["candidate", "first_retained", "victims", "deletion_range"])(
+      "supports an allocation table named %s without SQL scope collisions",
+      async (tableName) => {
+        const base = context.getBackend();
+        const store = await createHistoryStore(context);
+        for (const name of ["one", "two", "three"])
+          await store.nodes.Person.create({ name, age: 1 });
+        const names = requireDefined(base.tableNames);
+        const original = requireDefined(names.recordedAnchors);
+        const rename = (from: string, to: string) =>
+          requireDefined(base.executeStatement)(
+            asCompiledStatementSql(
+              sql`ALTER TABLE ${sql.identifier(from)} RENAME TO ${sql.identifier(to)}`,
+            ),
+          );
+        await rename(original, tableName);
+        try {
+          const renamed = createStore(
+            integrationTestGraph,
+            deriveBackend(base, {
+              tableNames: { ...names, recordedAnchors: tableName },
+            }),
+            { history: true },
+          );
+          const boundary = requireDefined(
+            await renamed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          );
+          expect(recordedInstantRevision(boundary)).toBe(3);
+          expect(
+            await renamed.pruneRecordedInstants("2099-01-01T00:00:00.000Z", {
+              limit: 1,
+            }),
+          ).toEqual({
+            deletedCount: 1,
+            retainedBoundary: boundary,
+            hasMore: true,
+          });
+          expect(
+            await renamed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+          ).toBe(boundary);
+        } finally {
+          await rename(tableName, original);
+        }
+      },
+    );
+
+    it("returns a constant-size summary for bounded prune selection", async () => {
+      const base = context.getBackend();
+      const selectionRows: number[] = [];
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    async execute<T>(query: CompiledRowsSql) {
+                      const text = requireDefined(base.compileSql)(
+                        query,
+                      ).sql.trimStart();
+                      const rows = await target.execute<T>(query);
+                      if (
+                        text.startsWith("SELECT anchors.revision") ||
+                        text.startsWith("SELECT deletion_range.")
+                      )
+                        selectionRows.push(rows.length);
+                      return rows;
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      for (const name of ["one", "two", "three", "four"])
+        await store.nodes.Person.create({ name, age: 1 });
+      const boundary = await store.recordedNow();
+      expect(
+        await store.pruneRecordedInstants("2099-01-01T00:00:00.000Z", {
+          limit: 2,
+        }),
+      ).toEqual({
+        deletedCount: 2,
+        retainedBoundary: boundary,
+        hasMore: true,
+      });
+      expect(selectionRows).toEqual([1]);
+    });
+
+    it("does not rewrite an unchanged watermark while draining bounded batches", async () => {
+      const base = context.getBackend();
+      const writes: string[] = [];
+      const [store] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    execute<T>(query: CompiledRowsSql) {
+                      const text = requireDefined(base.compileSql)(query).sql;
+                      if (
+                        text.trimStart().startsWith("UPDATE") &&
+                        text.includes('"anchor_retention"=')
+                      )
+                        writes.push(text);
+                      return target.execute<T>(query);
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      for (const name of ["one", "two", "three"])
+        await store.nodes.Person.create({ name, age: 1 });
+      const cutoff = "2099-01-01T00:00:00.000Z";
+      const boundary = await store.recordedNow();
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: true,
+      });
+      expect(writes).toHaveLength(1);
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 1,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(await store.pruneRecordedInstants(cutoff, { limit: 1 })).toEqual({
+        deletedCount: 0,
+        retainedBoundary: boundary,
+        hasMore: false,
+      });
+      expect(writes).toHaveLength(1);
+      await store.nodes.Person.create({ name: "four", age: 1 });
+      expect(await store.pruneRecordedInstants(cutoff)).toMatchObject({
+        deletedCount: 1,
+        hasMore: false,
+      });
+      expect(writes).toHaveLength(2);
+    });
+
+    it("refuses wall-clock resolution without a declared retained-anchor capability", async () => {
+      const base = context.getBackend();
+      const [unsupported] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          capabilities: { ...base.capabilities, recordedAnchorLookup: false },
+        }),
+        { history: true },
+      );
+      await expect(
+        unsupported.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+      const store = await createHistoryStore(context);
+      await expect(
+        store.resolveRecordedInstant("2026-01-01"),
+      ).rejects.toMatchObject({ name: "ValidationError" });
+    });
+
+    it("keeps native merge fences and lineage separate from external read ownership", async () => {
+      const writer = await createHistoryStore(context);
+      const node = await writer.nodes.Person.create({
+        name: "original",
+        age: 1,
+      });
+      const nativeOwner = await writer.allocationOwner();
+      const externalOwner = { ...nativeOwner, origin: "external-origin" };
+      const [target] = await createStoreWithSchema(
+        integrationTestGraph,
+        context.getBackend(),
+        {
+          revisionTracking: true,
+          recordedRead: recordedRelation({
+            schema: writer.revisionSchema,
+            owner: () => Promise.resolve(externalOwner),
+          }),
+        },
+      );
+      expect(await target.allocationOwner()).toEqual(nativeOwner);
+      expect(await target.recordedReadOwner()).toEqual(externalOwner);
+      const revision = requireDefined(await target.lineageRevisionNow());
+      const delta = await target.changesSince(revision);
+      expect(delta.kind).not.toBe("unbounded");
+      const first = unwrap(
+        await branch(target, () => context.createIsolatedBackend()),
+      );
+      try {
+        await first.store.nodes.Person.update(node.id, { name: "merged" });
+        unwrap(await merge(target, [first], {}));
+      } finally {
+        await first.close();
+      }
+      const second = unwrap(
+        await branch(target, () => context.createIsolatedBackend()),
+      );
+      try {
+        await second.store.nodes.Person.update(node.id, { name: "planned" });
+        const plan = unwrap(await planMerge(target, [second], {}));
+        expect(plan.target.revision.owner).toEqual(nativeOwner);
+        unwrap(await applyMergePlan(target, plan));
+      } finally {
+        await second.close();
+      }
+      expect(await target.nodes.Person.getById(node.id)).toMatchObject({
+        name: "planned",
+      });
+      const rotated = await target.rotateAllocationOwner(nativeOwner);
+      expect(rotated).not.toEqual(nativeOwner);
+      expect(await target.recordedReadOwner()).toEqual(externalOwner);
+    });
+
+    it("reads externally owned recorded relations without local origin metadata", async () => {
+      const writer = await createHistoryStore(context);
+      const node = await writer.nodes.Person.create({
+        name: "external",
+        age: 1,
+      });
+      const original = requireDefined(await writer.recordedNow());
+      let owner = await writer.allocationOwner();
+      const anchor = recordedInstant({
+        revision: recordedInstantRevision(original),
+        wallTime: recordedInstantWallTime(original),
+        owner,
+      });
+      const backend = context.getBackend();
+      const external = createStore(integrationTestGraph, backend, {
+        recordedRead: recordedRelation({
+          schema: writer.revisionSchema,
+          owner: () => Promise.resolve(owner),
+        }),
+      });
+      const hiddenOrigins = `${writer.revisionSchema.tables.revisionOrigins}_hidden`;
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`ALTER TABLE ${writer.revisionSchema.revisionOriginsTable} RENAME TO ${sql.identifier(hiddenOrigins)}`,
+        ),
+      );
+      try {
+        expect(await external.recordedReadOwner()).toEqual(owner);
+        const unconfigured = createStore(integrationTestGraph, backend, {
+          recordedRead: recordedRelation({ schema: writer.revisionSchema }),
+        });
+        await expect(unconfigured.recordedReadOwner()).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        await expect(
+          unconfigured.asOfRecorded(anchor).nodes.Person.getById(node.id),
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        await expect(
+          external.rotateAllocationOwner(owner),
+        ).rejects.toMatchObject({
+          name: "ConfigurationError",
+          details: { code: "ALLOCATION_OWNER_REQUIRES_TRACKING" },
+        });
+        const view = external.asOfRecorded(anchor);
+        expect(await view.nodes.Person.getById(node.id)).toMatchObject({
+          name: "external",
+        });
+        expect(
+          await view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+        ).toHaveLength(1);
+        owner = { ...owner, origin: "replacement-origin" };
+        await expect(view.nodes.Person.getById(node.id)).rejects.toMatchObject({
+          code: "GRAPH_ALLOCATION_OWNER_MISMATCH",
+        });
+        await expect(
+          view.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+        ).rejects.toMatchObject({ code: "GRAPH_ALLOCATION_OWNER_MISMATCH" });
+      } finally {
+        await requireDefined(backend.executeStatement)(
+          asCompiledStatementSql(
+            sql`ALTER TABLE ${sql.identifier(hiddenOrigins)} RENAME TO ${writer.revisionSchema.revisionOriginsTable}`,
+          ),
+        );
+      }
+    });
+
+    it("refuses missing upgraded allocation storage with a typed error and rolls the write back", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "before", age: 1 });
+      const before = requireDefined(await store.recordedNow());
+      const backend = context.getBackend();
+      const hiddenAnchors = `${store.revisionSchema.tables.recordedAnchors}_hidden`;
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`ALTER TABLE ${recordedAnchorsTable(store.revisionSchema)} RENAME TO ${sql.identifier(hiddenAnchors)}`,
+        ),
+      );
+      try {
+        await expect(
+          store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          details: {
+            code: "RECORDED_RELATIONS_MISSING",
+            surface: "resolve-recorded-anchor",
+          },
+        });
+
+        await expect(
+          store.nodes.Person.create({ name: "refused", age: 2 }),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        await expect(
+          store.pruneRecordedInstants("2099-01-01T00:00:00.000Z"),
+        ).rejects.toMatchObject({
+          details: { code: "RECORDED_RELATIONS_MISSING" },
+        });
+        expect(await store.nodes.Person.count()).toBe(1);
+        expect(await store.recordedNow()).toBe(before);
+      } finally {
+        await requireDefined(backend.executeStatement)(
+          asCompiledStatementSql(
+            sql`ALTER TABLE ${sql.identifier(hiddenAnchors)} RENAME TO ${recordedAnchorsTable(store.revisionSchema)}`,
+          ),
+        );
+      }
+    });
+
+    it("refuses unlogged history and distinguishes its coverage gap from an empty graph", async () => {
+      const store = await createHistoryStore(context);
+      await store.nodes.Person.create({ name: "before-upgrade", age: 1 });
+      const old = requireDefined(await store.recordedNow());
+      const backend = context.getBackend();
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      await requireDefined(backend.executeStatement)(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${store.revisionSchema.revisionOriginsTable} WHERE graph_id=${store.graphId}`,
+        ),
+      );
+      await expect(
+        store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+      await store.allocationOwner();
+      // Minting the lazy origin must not turn an empty answer into a refusal.
+      expect(
+        recordedInstantRevision(requireDefined(await store.recordedNow())),
+      ).toBe(recordedInstantRevision(old));
+      await expect(
+        store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+      await store.nodes.Person.create({ name: "after-upgrade", age: 2 });
+      const current = requireDefined(await store.recordedNow());
+      expect(
+        await store.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      ).toBe(current);
+      await expect(
+        store.resolveRecordedInstant("1900-01-01T00:00:00.000Z"),
+      ).rejects.toMatchObject({
+        details: { code: "RECORDED_LOOKUP_HISTORY_NOT_LOGGED" },
+      });
+    });
+
+    it("resolves a large retained anchor log with an indexed one-row range lookup", async () => {
+      const store = await createHistoryStore(context);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2024-12-31T23:59:59.999Z"));
+        await store.nodes.Person.create({ name: "seed", age: 1 });
+      } finally {
+        vi.useRealTimers();
+      }
+      const base = context.getBackend();
+      const origin = await store
+        .allocationOwner()
+        .then((owner) => owner.origin);
+      const rows = Array.from(
+        { length: 2048 },
+        (_, index) =>
+          sql`(${store.graphId}, ${origin}, ${index + 2}, ${new Date(Date.UTC(2025, 0, 1) + index).toISOString()})`,
+      );
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(sql`
+          INSERT INTO ${recordedAnchorsTable(store.revisionSchema)} (graph_id, origin, revision, recorded_at)
+          VALUES ${sql.join(rows, sql`, `)}
+        `),
+      );
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(
+          sql`ANALYZE ${recordedAnchorsTable(store.revisionSchema)}`,
+        ),
+      );
+      await requireDefined(base.executeStatement)(
+        asCompiledStatementSql(sql`
+          UPDATE ${store.revisionSchema.recordedClockTable} SET revision=2049, recorded_at=${new Date(Date.UTC(2025, 0, 1) + 2047).toISOString()} WHERE graph_id=${store.graphId}
+        `),
+      );
+      const deletes: CompiledRowsSql[] = [];
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          transaction(callback, options) {
+            return base.transaction(
+              (target) =>
+                callback(
+                  deriveBackend(target, {
+                    execute<T>(query: CompiledRowsSql) {
+                      if (
+                        requireDefined(base.compileSql)(query)
+                          .sql.trimStart()
+                          .startsWith("DELETE")
+                      )
+                        deletes.push(query);
+                      return target.execute<T>(query);
+                    },
+                  }),
+                ),
+              options,
+            );
+          },
+        }),
+        { history: true },
+      );
+      const cutoff = "2025-01-01T00:00:01.000Z";
+      const resolved = requireDefined(
+        await observed.resolveRecordedInstant(cutoff),
+      );
+      expect(recordedInstantRevision(resolved)).toBe(1002);
+      const candidate = recordedAnchorCandidate(
+        store.revisionSchema,
+        store.graphId,
+        cutoff,
+      );
+      const explain =
+        base.dialect === "sqlite" ?
+          "EXPLAIN QUERY PLAN "
+        : "EXPLAIN (ANALYZE, FORMAT JSON) ";
+      const plan = await base.execute(
+        asCompiledRowsSql(sql`${sql.raw(explain)}${candidate}`),
+      );
+      expectIndexedCandidatePlan(plan, base.dialect);
+      expect(
+        await observed.pruneRecordedInstants(cutoff, { limit: 3 }),
+      ).toEqual({ deletedCount: 3, retainedBoundary: resolved, hasMore: true });
+      expect(deletes).toHaveLength(1);
+      const pruneExplain =
+        base.dialect === "sqlite" ?
+          "EXPLAIN QUERY PLAN "
+        : "EXPLAIN (FORMAT JSON) ";
+      const prunePlan = await base.execute(
+        asCompiledRowsSql(
+          sql`${sql.raw(pruneExplain)}${requireDefined(deletes[0])}`,
+        ),
+      );
+      const table = requireDefined(
+        requireDefined(base.tableNames).recordedAnchors,
+      );
+      expectIndexedPrunePlan(prunePlan, base.dialect, table);
+      // Negative control: the inner candidate still uses the time index while the outer DELETE scans every allocation.
+      const unsafe = sql`
+        DELETE FROM ${recordedAnchorsTable(store.revisionSchema)} AS anchors
+                WHERE (SELECT revision FROM (${candidate}) chosen) IS NOT NULL
+      `;
+      const unsafePlan = await base.execute(
+        asCompiledRowsSql(sql`${sql.raw(pruneExplain)}${unsafe}`),
+      );
+      expect(JSON.stringify(unsafePlan)).toContain("recorded_anchors_time_idx");
+      expect(() => {
+        expectIndexedPrunePlan(unsafePlan, base.dialect, table);
+      }).toThrow();
+      expect(await observed.resolveRecordedInstant(cutoff)).toBe(resolved);
+    });
+
+    it("keeps a resolved cut stable when another writer advances after its lookup", async () => {
+      const store = await createHistoryStore(context);
+      const node = await store.nodes.Person.create({ name: "before", age: 1 });
+      const before = requireDefined(await store.recordedNow());
+      const base = context.getBackend();
+      let lookupReads = 0;
+      const [observed] = await createStoreWithSchema(
+        integrationTestGraph,
+        deriveBackend(base, {
+          async execute<T>(query: CompiledRowsSql) {
+            const rows = await base.execute<T>(query);
+            if (
+              requireDefined(base.compileSql)(query).sql.includes(
+                "anchors.recorded_at <=",
+              )
+            ) {
+              lookupReads += 1;
+              await store.nodes.Person.update(node.id, { name: "after" });
+            }
+            return rows;
+          },
+        }),
+        { history: true },
+      );
+      const resolved = requireDefined(
+        await observed.resolveRecordedInstant("2099-01-01T00:00:00.000Z"),
+      );
+      expect(resolved).toBe(before);
+      expect(lookupReads).toBe(1);
+      expect(await store.recordedNow()).not.toBe(resolved);
+      expect(
+        await store.asOfRecorded(resolved).nodes.Person.getById(node.id),
+      ).toMatchObject({ name: "before" });
+    });
+
     it("supports chained valid-time and recorded-time coordinates", async () => {
       const store = await createHistoryStore(context);
 
@@ -986,7 +2616,7 @@ export function registerRecordedTimeIntegrationTests(
         const recordedAtCreate = await readRecordedClock(store);
 
         // Precondition: Alice was genuinely valid-current at the recorded instant.
-        expect(recordedAtCreate < validTo).toBe(true);
+        expect(recordedInstantWallTime(recordedAtCreate) < validTo).toBe(true);
 
         vi.setSystemTime(new Date("2000-06-01T12:00:02.000Z"));
 
@@ -1079,10 +2709,10 @@ export function registerRecordedTimeIntegrationTests(
         {
           surface: "subgraph",
           read: async () => {
-            const subgraph = await recorded.subgraph(alice.id, {
+            const subgraph = await recorded.subgraph(alice, {
               edges: ["knows"],
             });
-            return [...subgraph.nodes.values()]
+            return subgraph.nodes
               .map((node) => (node as { name: string }).name)
               .toSorted();
           },
@@ -1180,10 +2810,10 @@ export function registerRecordedTimeIntegrationTests(
         earlyRanks.reduce((total, row) => total + row.score, 0),
       ).toBeCloseTo(1, 10);
 
-      const earlySubgraph = await early.subgraph(a.id, {
+      const earlySubgraph = await early.subgraph(a, {
         edges: ["knows"],
       });
-      const earlyNames = [...earlySubgraph.nodes.values()]
+      const earlyNames = earlySubgraph.nodes
         .map((node) => (node as { name: string }).name)
         .toSorted();
       expect(earlyNames).toEqual(["A", "B", "C"]);
@@ -1313,7 +2943,9 @@ export function registerRecordedTimeIntegrationTests(
       const alice = await store.nodes.Person.create({ name: "Alice", age: 30 });
       const invalidCoordinate: ReadCoordinate = {
         valid: { mode: "asOf", asOf: "2026-01-01T00:00:00.000Z" },
-        recorded: { asOf: RECORDED_MAX as RecordedInstant },
+        recorded: {
+          asOf: RECORDED_MAX_REVISION as unknown as RecordedInstant,
+        },
       };
 
       await expect(
@@ -1321,10 +2953,10 @@ export function registerRecordedTimeIntegrationTests(
           alice.id,
           {
             edges: ["knows"],
-            recordedAsOf: RECORDED_MAX as RecordedInstant,
+            recordedAsOf: RECORDED_MAX_REVISION as unknown as RecordedInstant,
           } as never,
         ),
-      ).rejects.toThrow("recordedAsOf must be before");
+      ).rejects.toThrow("canonical versioned recorded instant");
     });
 
     it("enforces the public recorded-coordinate boundary across every live read seam", async () => {
@@ -1725,7 +3357,7 @@ export function registerRecordedTimeIntegrationTests(
           );
         });
         await expectMissingRecordedRelations(() =>
-          recorded.subgraph(alice.id, { edges: ["knows"], maxDepth: 1 }),
+          recorded.subgraph(alice, { edges: ["knows"], maxDepth: 1 }),
         );
         await expectMissingRecordedRelations(() =>
           recorded.degree(alice, { edges: ["knows"] }),
@@ -2944,7 +4576,7 @@ export function registerRecordedTimeIntegrationTests(
     it("captures recorded history for a bulk importGraph at one shared instant", async () => {
       const store = await createHistoryStore(context);
       const data: GraphData = {
-        formatVersion: "1.0",
+        formatVersion: "2.0",
         exportedAt: "2026-01-01T00:00:00.000Z",
         source: { type: "external", description: "import-capture test" },
         nodes: [
@@ -3005,12 +4637,14 @@ export function registerRecordedTimeIntegrationTests(
           WHERE graph_id = ${store.graphId}
         `),
       );
-      const instants = new Set(
+      const revisions = new Set(
         [...nodeFroms, ...edgeFroms].map((row) =>
-          toCanonicalIso(row.recorded_from),
+          recordedRevisionFromDriver(row.recorded_from),
         ),
       );
-      expect(instants).toEqual(new Set([recordedInstant]));
+      expect(revisions).toEqual(
+        new Set([recordedInstantRevision(recordedInstant)]),
+      );
 
       const recorded = store.asOfRecorded(recordedInstant);
       const people = await recorded.nodes.Person.getByIds([
@@ -3047,7 +4681,7 @@ export function registerRecordedTimeIntegrationTests(
       ).toBeUndefined();
       expect(await countRecordedEdgeRows(store, edge.id)).toBe(1);
       expect(await readRecordedEdgeClosedAt(store, "knows", edge.id)).not.toBe(
-        RECORDED_MAX,
+        RECORDED_MAX_REVISION,
       );
     });
 
@@ -3090,7 +4724,7 @@ export function registerRecordedTimeIntegrationTests(
         "cascadeKnows",
         edge.id,
       );
-      expect(nodeClosedAt).not.toBe(RECORDED_MAX);
+      expect(nodeClosedAt).not.toBe(RECORDED_MAX_REVISION);
       expect(edgeClosedAt).toBe(nodeClosedAt);
     });
 
@@ -3122,7 +4756,7 @@ export function registerRecordedTimeIntegrationTests(
         "cascadeKnows",
         edge.id,
       );
-      expect(nodeTombstoneFrom).not.toBe(RECORDED_MAX);
+      expect(nodeTombstoneFrom).not.toBe(RECORDED_MAX_REVISION);
       expect(edgeTombstoneFrom).toBe(nodeTombstoneFrom);
 
       // The diagonal recorded read at that instant shows the node already gone.
@@ -3184,7 +4818,7 @@ export function registerRecordedTimeIntegrationTests(
       );
       expect(
         await readRecordedEdgeClosedAt(evolved, "removalLink", edge.id),
-      ).toBe(RECORDED_MAX);
+      ).toBe(RECORDED_MAX_REVISION);
 
       const removed = await evolved.removeKinds(["RemovalTag"]);
       await removed.materializeRemovals();
@@ -3194,11 +4828,11 @@ export function registerRecordedTimeIntegrationTests(
       );
       expect(
         await readRecordedEdgeClosedAt(removed, "removalLink", edge.id),
-      ).not.toBe(RECORDED_MAX);
+      ).not.toBe(RECORDED_MAX_REVISION);
       expect(removed.registry.hasEdgeType("removalLink")).toBe(true);
     });
 
-    it("fails loud when the recorded clock contains an invalid timestamp", async () => {
+    it("fails loud when the recorded clock contains an invalid anchor", async () => {
       const baseBackend = context.getStore().backend;
       const [store] = await createStoreWithSchema(
         integrationTestGraph,
@@ -3209,7 +4843,10 @@ export function registerRecordedTimeIntegrationTests(
         throw new Error("Integration backend should support executeStatement");
       }
       const schema = createSqlSchema(baseBackend.tableNames);
-      const corruptClock = sql`INSERT INTO ${schema.recordedClockTable} (graph_id, recorded_at) VALUES (${store.graphId}, ${"not-a-date"})`;
+      const corruptClock = sql`
+        INSERT INTO ${schema.recordedClockTable} (graph_id, revision, recorded_at)
+        VALUES (${store.graphId}, ${RECORDED_MAX_REVISION}, ${"2026-01-01T00:00:00.000Z"})
+      `;
       const corruptionOutcome = await baseBackend
         .executeStatement(asCompiledStatementSql(corruptClock))
         .then(
@@ -3227,7 +4864,7 @@ export function registerRecordedTimeIntegrationTests(
         : corruptionOutcome;
 
       expect(observed).toMatch(
-        /Recorded clock row contained an invalid timestamp|invalid input syntax for type timestamp/i,
+        /Recorded clock row contained an invalid revision or wall time/i,
       );
     });
 

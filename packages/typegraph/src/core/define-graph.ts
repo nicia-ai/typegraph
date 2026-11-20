@@ -1,3 +1,7 @@
+import { z } from "zod";
+
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../backend/table-contribution";
+import { assertWhereFieldDeclared } from "../constraints";
 import { ConfigurationError } from "../errors/index";
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
@@ -6,11 +10,29 @@ import {
 } from "../indexes/auto-derive";
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
+import { assertClaimAxisSafe } from "../store/claims/axis";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import {
+  isEdgeTargetMap,
+  normalizeTargetMap,
+  projectTargetNodes,
+  validateTargetMapEntries,
+} from "./edge-endpoints";
+import { assertEdgeIntegrityOptions } from "./edge-integrity-options";
+import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
+import {
+  assertGraphAnnotations,
+  cloneAndFreezeGraphAnnotations,
+} from "./json-value";
+import { assertNodeKindNameSafe } from "./node";
+import {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
+  type EdgeTargets,
   type EdgeTypeWithEndpoints,
+  type GraphAnnotations,
   type GraphDefaults,
   isEdgeType,
   isEdgeTypeWithEndpoints,
@@ -19,6 +41,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "./types";
+import {
+  assertUniqueConstraintOptions,
+  NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+  type StatedUniqueConstraintOptions,
+  withUniqueConstraintDefaults,
+} from "./unique-constraint-options";
 
 // ============================================================
 // Graph Definition Brand Symbol
@@ -55,7 +83,13 @@ type NormalizedEdges<
       TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N
       : TNodes[keyof TNodes]["type"],
       TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N
-      : TNodes[keyof TNodes]["type"]
+      : TEdges[K]["to"] extends (
+        Record<string, readonly (infer N extends NodeType)[]>
+      ) ?
+        N
+      : TNodes[keyof TNodes]["type"],
+      TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"]
+      : readonly TNodes[keyof TNodes]["type"][]
     >
   : never;
 };
@@ -91,21 +125,54 @@ function validateConstraintNarrowing(
     }
   }
 
-  const builtInToNames = new Set(edgeType.to.map((node) => node.kind));
-  for (const toNode of registration.to) {
-    if (!builtInToNames.has(toNode.kind)) {
-      throw new ConfigurationError(
-        `Edge "${name}" registration has 'to' kind "${toNode.kind}" ` +
-          `not in edge's built-in range: [${[...builtInToNames].join(", ")}]`,
-        {
-          edgeName: name,
-          invalidTo: toNode.kind,
-          allowedTo: [...builtInToNames],
-        },
-        {
-          suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
-        },
-      );
+  if (!Array.isArray(registration.to)) {
+    validateTargetMapEntries(name, registration.from, registration.to);
+  }
+
+  const builtInIsMap = isEdgeTargetMap(edgeType.to);
+  const registrationIsMap = isEdgeTargetMap(registration.to);
+
+  for (const fromNode of registration.from) {
+    const allowedTargets =
+      builtInIsMap ?
+        new Set<string>(
+          (edgeType.to[fromNode.kind] ?? []).map(
+            (node: NodeType): string => node.kind,
+          ),
+        )
+      : new Set<string>(
+          (edgeType.to as readonly NodeType[]).map(
+            (node: NodeType): string => node.kind,
+          ),
+        );
+
+    const declaredTargets: readonly NodeType[] =
+      registrationIsMap ?
+        (registration.to[fromNode.kind] ?? [])
+      : (registration.to as readonly NodeType[]);
+
+    for (const targetNode of declaredTargets) {
+      if (!allowedTargets.has(targetNode.kind)) {
+        const message =
+          builtInIsMap ?
+            registrationIsMap ?
+              `Edge "${name}" registration has target kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in mapping: [${[...allowedTargets].join(", ")}]`
+            : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in source-dependent targets: [${[...allowedTargets].join(", ")}]. An array-valued registration must not erase built-in endpoint correlation.`
+          : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" not in edge's built-in range: [${[...allowedTargets].join(", ")}]`;
+
+        throw new ConfigurationError(
+          message,
+          {
+            edgeName: name,
+            sourceKind: fromNode.kind,
+            invalidTo: targetNode.kind,
+            allowedTo: [...allowedTargets],
+          },
+          {
+            suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
+          },
+        );
+      }
     }
   }
 }
@@ -117,7 +184,7 @@ function normalizeEdgeEntry(
   name: string,
   entry: EdgeEntry,
   allNodeTypes: readonly NodeType[],
-): EdgeRegistration {
+): AnyEdgeRegistration {
   if (isEdgeType(entry)) {
     if (isEdgeTypeWithEndpoints(entry)) {
       // EdgeType with from/to — convert to EdgeRegistration
@@ -127,31 +194,188 @@ function normalizeEdgeEntry(
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
 
-  // Already EdgeRegistration — validate narrowing if edge has built-in constraints
-  if (isEdgeTypeWithEndpoints(entry.type)) {
-    validateConstraintNarrowing(name, entry.type, entry);
+  assertEdgeIntegrityOptions(name, entry);
+
+  let normalizedRegistration: AnyEdgeRegistration = entry;
+  if (!Array.isArray(entry.to)) {
+    validateTargetMapEntries(name, entry.from, entry.to);
+    normalizedRegistration = { ...entry, to: normalizeTargetMap(entry.to) };
   }
 
-  return entry;
+  // Validate narrowing if edge has built-in constraints
+  if (isEdgeTypeWithEndpoints(normalizedRegistration.type)) {
+    validateConstraintNarrowing(
+      name,
+      normalizedRegistration.type,
+      normalizedRegistration,
+    );
+  }
+
+  return canonicalizeMatchIdentity(name, normalizedRegistration);
+}
+
+/**
+ * Validates and canonicalizes the optional graph-local edge identity.
+ *
+ * Identity fields are persisted as a set, so declaration order is not
+ * semantic. The copied registration also ensures defineGraph never mutates a
+ * caller-owned registration while establishing its canonical form.
+ */
+function canonicalizeMatchIdentity(
+  edgeName: string,
+  registration: EdgeRegistration,
+): EdgeRegistration {
+  const identity = registration.matchIdentity;
+  if (identity === undefined) return registration;
+
+  if (typeof identity.name !== "string" || identity.name.length === 0) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity name must be a non-empty string.`,
+      { edgeName },
+    );
+  }
+  const identityFields: unknown = identity.fields;
+  if (!Array.isArray(identityFields)) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity fields must be an array.`,
+      { edgeName, identityName: identity.name },
+    );
+  }
+
+  const rawShape = (registration.type.schema as { shape?: unknown }).shape;
+  const shape =
+    typeof rawShape === "object" && rawShape !== null ?
+      (rawShape as Readonly<Record<string, unknown>>)
+    : undefined;
+  if (shape === undefined) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity cannot be validated because its schema is not an object schema.`,
+      { edgeName, identityName: identity.name },
+    );
+  }
+
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  for (const field of identityFields) {
+    if (typeof field !== "string") {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity fields must be strings.`,
+        { edgeName, identityName: identity.name },
+      );
+    }
+    if (seen.has(field)) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity repeats field "${field}".`,
+        { edgeName, identityName: identity.name, field },
+      );
+    }
+    seen.add(field);
+    fields.push(field);
+    if (!hasOwnKey(shape, field)) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity references undeclared field "${field}".`,
+        { edgeName, identityName: identity.name, field },
+      );
+    }
+    if (!isPortableMatchIdentityFieldSchema(shape[field])) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity field "${field}" must persist as a JSON scalar.`,
+        {
+          code: "EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR",
+          edgeName,
+          identityName: identity.name,
+          field,
+        },
+        {
+          suggestion:
+            "Use a string, finite number, boolean, portable literal or enum, or an optional/nullable/readonly/default/catch/prefault wrapper or union whose output stays inside those scalar types.",
+        },
+      );
+    }
+  }
+
+  return {
+    ...registration,
+    matchIdentity: {
+      name: identity.name,
+      fields: fields.toSorted(),
+    },
+  };
+}
+
+function isPortableMatchIdentityFieldSchema(fieldSchema: unknown): boolean {
+  if (!(fieldSchema instanceof z.ZodType)) return false;
+  if (
+    fieldSchema instanceof z.ZodString ||
+    fieldSchema instanceof z.ZodNumber ||
+    fieldSchema instanceof z.ZodBoolean ||
+    fieldSchema instanceof z.ZodNull
+  )
+    return true;
+  if (fieldSchema instanceof z.ZodLiteral) {
+    return [...fieldSchema.values].every((value) =>
+      isPortableEdgeMatchIdentityValue(value),
+    );
+  }
+  if (fieldSchema instanceof z.ZodEnum) {
+    return Object.values(fieldSchema.enum).every((value) =>
+      isPortableEdgeMatchIdentityValue(value),
+    );
+  }
+  if (fieldSchema instanceof z.ZodUnion) {
+    return fieldSchema.options.every((option) =>
+      isPortableMatchIdentityFieldSchema(option),
+    );
+  }
+  if (
+    fieldSchema instanceof z.ZodOptional ||
+    fieldSchema instanceof z.ZodNullable ||
+    fieldSchema instanceof z.ZodReadonly ||
+    fieldSchema instanceof z.ZodNonOptional ||
+    fieldSchema instanceof z.ZodDefault ||
+    fieldSchema instanceof z.ZodCatch ||
+    fieldSchema instanceof z.ZodPrefault
+  ) {
+    return isPortableMatchIdentityFieldSchema(fieldSchema.unwrap());
+  }
+  return false;
 }
 
 /**
  * Normalizes all edge entries to EdgeRegistration.
+ *
+ * The accumulator is a {@link createDataKeyedBag}: its keys are EDGE KIND
+ * NAMES, which are data. `isValidKindName` admits `__proto__` exactly as it
+ * admits `toString`, and a graph literal written with a computed key
+ * (`edges: { ["__proto__"]: knows }`) carries it as an own key — so
+ * `result[name] = …` into a `{}` literal would reach `Object.prototype`'s
+ * `__proto__` setter, reparent the accumulator, and drop the declared edge.
+ * `config.nodes` needs no such treatment: it is passed through by reference,
+ * never re-accumulated.
  */
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
   allNodeTypes: readonly NodeType[],
-): Record<string, EdgeRegistration> {
-  const result: Record<string, EdgeRegistration> = {};
+): Record<string, AnyEdgeRegistration> {
+  const result = createDataKeyedBag<AnyEdgeRegistration>();
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }
-  return result;
+  // Spread at the boundary: this becomes `graph.edges` on the returned (and
+  // publicly reachable) `GraphDef`. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 // ============================================================
 // Graph Definition Configuration
 // ============================================================
+
+/** Durable graph-level configuration for the TypeGraph Identity Profile. */
+export type GraphIdentityConfig = Readonly<{
+  /** Whether equal ids in different kinds implicitly join one identity class. */
+  sameIdAcrossKinds: "fold" | "ignore";
+}>;
 
 /**
  * Configuration for defineGraph.
@@ -160,9 +384,12 @@ type GraphDefConfig<
   TNodes extends Record<string, NodeRegistration>,
   TEdges extends Record<string, EdgeEntry>,
   TOntology extends readonly OntologyRelation[],
+  TIdentity extends GraphIdentityConfig | undefined,
 > = Readonly<{
   /** Unique identifier for this graph */
   id: string;
+  /** Consumer-owned JSON metadata describing the graph as a whole. */
+  annotations?: GraphAnnotations;
   /** Node registrations */
   nodes: TNodes;
   /** Edge registrations or EdgeTypes with built-in domain/range */
@@ -171,6 +398,8 @@ type GraphDefConfig<
   ontology?: TOntology;
   /** Graph-wide defaults */
   defaults?: GraphDefaults;
+  /** Enables the TypeGraph Identity Profile for this graph. */
+  identity?: TIdentity;
   /**
    * Index declarations attached to this graph.
    *
@@ -210,12 +439,18 @@ export type GraphDef<
     EdgeRegistration
   >,
   TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[],
+  TIdentity extends GraphIdentityConfig | undefined =
+    GraphIdentityConfig | undefined,
 > = Readonly<{
   [GRAPH_DEF_BRAND]: true;
   id: string;
+  /** Consumer-owned JSON metadata describing the graph as a whole. */
+  annotations: GraphAnnotations | undefined;
   nodes: TNodes;
   edges: TEdges;
   ontology: TOntology;
+  /** Durable graph-level opt-in to the TypeGraph Identity Profile. */
+  identity: TIdentity;
   defaults: Readonly<{
     onNodeDelete: DeleteBehavior;
     temporalMode: TemporalMode;
@@ -335,17 +570,47 @@ export type AllEdgeTypes<G extends GraphDef> = {
 export function defineGraph<
   const TNodes extends Record<string, NodeRegistration<NodeType>>,
   const TEdges extends Record<string, EdgeEntry>,
-  const TOntology extends readonly OntologyRelation[],
+  const TOntology extends readonly OntologyRelation[] = readonly [],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
 >(
-  config: GraphDefConfig<TNodes, TEdges, TOntology>,
-): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology> {
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  if (config.id === DEPLOYMENT_CONTRIBUTION_GRAPH_ID) {
+    throw new ConfigurationError(
+      `Graph id "${config.id}" is reserved for deployment contribution markers.`,
+      { code: "RESERVED_GRAPH_ID" },
+    );
+  }
+  return defineGraphUnchecked(config);
+}
+
+function defineGraphUnchecked<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[] = readonly [],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
   const defaults = {
     onNodeDelete: config.defaults?.onNodeDelete ?? "restrict",
     temporalMode: config.defaults?.temporalMode ?? "current",
   } as const;
 
+  if (config.annotations !== undefined) {
+    assertGraphAnnotations(config.annotations, `Graph "${config.id}"`);
+  }
+  const annotations =
+    config.annotations === undefined ?
+      undefined
+    : cloneAndFreezeGraphAnnotations(config.annotations);
+
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
+  assertEdgeEndpointsRegistered(config.nodes, normalizedEdges);
+  assertClaimNamesAreSafe(config.nodes, normalizedEdges);
+  const nodes = withUniqueConstraintDefaultsWritten(config.nodes);
+  assertUniqueConstraintsAreDeclared(nodes);
   // Vector indexes are auto-derived from `embedding()` brands on node
   // schemas (see `autoDeriveVectorIndexes`). Explicit declarations
   // passed via `defineGraph({ indexes })` win on (kind, fieldPath)
@@ -374,14 +639,40 @@ export function defineGraph<
   return Object.freeze({
     [GRAPH_DEF_BRAND]: true as const,
     id: config.id,
-    nodes: config.nodes,
+    annotations,
+    nodes,
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),
+    identity: config.identity as TIdentity,
     defaults,
     indexes,
     extension: undefined,
     deprecatedKinds: EMPTY_DEPRECATED_KINDS,
-  }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology>;
+  }) as GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity>;
+}
+
+/**
+ * @internal Marks a graph definition as framework-owned rather than
+ * application-authored.
+ *
+ * It builds exactly what {@link defineGraph} builds — the name records the
+ * caller, it does not reserve anything. There is NO reserved id namespace and
+ * no id validation anywhere: an application may define a graph at any id a
+ * framework-owned graph uses, the merge-provenance sidecar's
+ * `<target>::merge-provenance` convention included. That convention is
+ * protected at RUNTIME instead, by the ownership checks in the single gateway
+ * that opens a sidecar (`openProvenanceStore`), which refuses an id occupied by
+ * anything it cannot prove it owns.
+ */
+export function defineInternalGraph<
+  const TNodes extends Record<string, NodeRegistration<NodeType>>,
+  const TEdges extends Record<string, EdgeEntry>,
+  const TOntology extends readonly OntologyRelation[] = readonly [],
+  const TIdentity extends GraphIdentityConfig | undefined = undefined,
+>(
+  config: GraphDefConfig<TNodes, TEdges, TOntology, TIdentity>,
+): GraphDef<TNodes, NormalizedEdges<TNodes, TEdges>, TOntology, TIdentity> {
+  return defineGraphUnchecked(config);
 }
 
 // Sharing one frozen empty Set keeps the canonical-form hash stable
@@ -389,6 +680,152 @@ export function defineGraph<
 const EMPTY_DEPRECATED_KINDS: ReadonlySet<string> = Object.freeze(
   new Set<string>(),
 );
+
+// ============================================================
+// Unique Constraint Validation
+// ============================================================
+
+/**
+ * Refuses any kind name or constraint name that could spell a reserved claim
+ * axis, and any kind name that could spell another node's recursive path token.
+ *
+ * A node kind and a unique constraint name are both written verbatim into the
+ * claim rows a write of that kind reserves, and the axes that are NOT kinds —
+ * the disjoint pair axis, and the reserved constraint name its rows carry — are
+ * built from a code point neither may contain. `defineGraph` is where that is
+ * enforced for the whole graph: `defineNode` already refuses it for kinds it
+ * builds, but the graph-extension compiler builds registrations without going
+ * through it, and constraint names never pass `defineNode` at all.
+ */
+function assertClaimNamesAreSafe(
+  nodes: Record<string, NodeRegistration>,
+  edges: Record<string, AnyEdgeRegistration>,
+): void {
+  for (const registration of Object.values(nodes)) {
+    assertNodeKindNameSafe(registration.type.kind);
+    for (const constraint of registration.unique ?? []) {
+      assertClaimAxisSafe(constraint.name, "Unique constraint");
+    }
+  }
+  // Edge kinds are checked here too: no collision is reachable today or
+  // after `targetCardinality` (a source axis always begins with a
+  // cardinality literal, a target axis always with U+001E), but the
+  // reserved-vocabulary rule should hold for every name that reaches an
+  // axis, not only the ones that currently could collide.
+  for (const registration of Object.values(edges)) {
+    assertClaimAxisSafe(registration.type.kind, "Edge kind");
+  }
+}
+
+/**
+ * `nodes` with every unique constraint's `scope` and `collation` written out,
+ * refusing a stated value outside its domain.
+ *
+ * Every reader of a registration — the claim axis, the serializer, and
+ * through it the stored-schema parser — then sees one declaration, read as
+ * {@link NODE_UNIQUE_CONSTRAINT_DEFAULTS} says. Only an untyped caller can
+ * omit either member, so a graph whose declarations state both is returned
+ * as given.
+ *
+ * @throws ConfigurationError (`UNIQUE_CONSTRAINT_OPTION_INVALID`)
+ */
+function withUniqueConstraintDefaultsWritten<
+  TNodes extends Record<string, NodeRegistration>,
+>(nodes: TNodes): TNodes {
+  const registrations = Object.entries(nodes);
+  for (const [, registration] of registrations) {
+    for (const constraint of registration.unique ?? []) {
+      assertUniqueConstraintOptions(registration.type.kind, constraint);
+    }
+  }
+  const statesEveryOption = registrations.every(([, registration]) =>
+    (registration.unique ?? []).every(
+      (constraint: StatedUniqueConstraintOptions) =>
+        constraint.scope !== undefined && constraint.collation !== undefined,
+    ),
+  );
+  if (statesEveryOption) return nodes;
+  const written = createDataKeyedBag<NodeRegistration>();
+  for (const [kind, registration] of registrations) {
+    written[kind] =
+      registration.unique === undefined ?
+        registration
+      : {
+          ...registration,
+          unique: registration.unique.map((constraint) =>
+            withUniqueConstraintDefaults(
+              constraint,
+              NODE_UNIQUE_CONSTRAINT_DEFAULTS,
+            ),
+          ),
+        };
+  }
+  // Spread at the boundary: this becomes `GraphDef.nodes`. See
+  // `createDataKeyedBag` in ../utils/object.ts.
+  return { ...written } as TNodes;
+}
+
+/**
+ * Refuses any uniqueness constraint whose `where` clause names a field its kind
+ * does not declare.
+ *
+ * `defineGraph` is the one gate every constraint passes before a write can
+ * evaluate it — the store reads constraints off `registration.unique`, and the
+ * only other way a registration is built is `mergeGraphExtension`, whose
+ * documents `validateGraphExtension` already refuses on the same grounds
+ * (`UNKNOWN_UNIQUE_WHERE_FIELD`). Validating here therefore covers every write
+ * path at once, instead of at each `checkWherePredicate` call site.
+ *
+ * Typed callers are already guarded by `UniqueConstraintPredicateBuilder`,
+ * which declares exactly the schema's fields; this is the runtime half, for
+ * untyped callers whose typo would otherwise produce a constraint that quietly
+ * never applies.
+ */
+function assertUniqueConstraintsAreDeclared(
+  nodes: Record<string, NodeRegistration>,
+): void {
+  for (const registration of Object.values(nodes)) {
+    const constraints = registration.unique;
+    if (constraints === undefined || constraints.length === 0) continue;
+
+    const rawShape = (registration.type.schema as { shape?: unknown }).shape;
+    const shape =
+      typeof rawShape === "object" && rawShape !== null ?
+        (rawShape as Readonly<Record<string, unknown>>)
+      : undefined;
+
+    for (const constraint of constraints) {
+      // A schema exposing no `.shape` is not an object schema, so there is no
+      // declared-field set to check the clause against. Skipping the check
+      // silently would disable this guard for exactly the callers it was
+      // written for — untyped ones, who are also the only callers who can put
+      // a non-`ZodObject` here (`defineNode` / `defineEdge` and the
+      // graph-extension compiler all produce `z.object(...)`). So the clause is
+      // REFUSED rather than left unvalidated.
+      //
+      // Narrowly: only a constraint that actually carries a `where` is refused.
+      // A plain `unique: [{ fields }]` needs no shape to be meaningful — it
+      // names props by key and evaluates fine against a non-object schema — and
+      // refusing it would break a working, if unusual, untyped graph for no
+      // safety gain.
+      if (shape === undefined) {
+        if (constraint.where === undefined) continue;
+        throw new ConfigurationError(
+          `Unique constraint "${constraint.name}" on node kind "${registration.type.kind}" has a \`where\` clause, but the kind's schema is not an object schema, so its declared fields cannot be checked.`,
+          {
+            kind: registration.type.kind,
+            constraintName: constraint.name,
+          },
+          {
+            suggestion: `Declare the kind with an object schema (\`z.object({ ... })\`) so the \`where\` clause can be validated, or drop the \`where\` clause.`,
+          },
+        );
+      }
+
+      assertWhereFieldDeclared(registration.type.kind, constraint, shape);
+    }
+  }
+}
 
 // ============================================================
 // Index Normalization
@@ -437,6 +874,46 @@ function normalizeIndexes(
   }
 
   return inputs;
+}
+
+/**
+ * Refuses an edge whose `from` or `to` names a node kind the graph does not
+ * register in `nodes`. Such an edge could never be written (its endpoint kind
+ * has no rows) and every query or traversal through it silently returned
+ * nothing.
+ */
+function assertEdgeEndpointsRegistered(
+  nodes: Record<string, NodeRegistration>,
+  edges: Record<string, AnyEdgeRegistration>,
+): void {
+  const registeredKinds = collectKinds(nodes);
+  for (const [edgeName, registration] of Object.entries(edges)) {
+    const endpoints = [
+      ["from", registration.from],
+      ["to", projectTargetNodes(registration.to)],
+    ] as const;
+    for (const [endpoint, nodeTypes] of endpoints) {
+      for (const nodeType of nodeTypes) {
+        if (registeredKinds.has(nodeType.kind)) continue;
+        throw new ConfigurationError(
+          `Edge "${edgeName}" names node kind "${nodeType.kind}" in "${endpoint}", ` +
+            `which is not registered in this graph's "nodes".`,
+          {
+            code: "EDGE_ENDPOINT_KIND_NOT_REGISTERED",
+            edge: edgeName,
+            endpoint,
+            kind: nodeType.kind,
+            availableKinds: [...registeredKinds],
+          },
+          {
+            suggestion:
+              `Add { ${nodeType.kind}: { type: ${nodeType.kind} } } to defineGraph({ nodes }) ` +
+              `or remove it from edge "${edgeName}"'s "${endpoint}".`,
+          },
+        );
+      }
+    }
+  }
 }
 
 function collectKinds(

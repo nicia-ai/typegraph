@@ -7,10 +7,13 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph/core";
 import {
+  type AdapterBackend,
+  type BackendCapabilities,
   type FulltextStrategy,
   fts5Strategy,
   type InsertNodeParams,
   type NodeRow,
+  resolveStampedValidityLowerBound,
   sql as backendSql,
   type SqlIdentifierChunk,
   type SqlParameterChunk,
@@ -23,29 +26,29 @@ import {
   type EdgeId as RootEdgeId,
   type GraphDef as RootGraphDef,
   type NodeId as RootNodeId,
+  type GraphBackend,
+  type Store,
+  type StoreOptions,
+  createAdapterStore,
+  createStore,
+} from "@nicia-ai/typegraph";
+import {
   type AdapterStore,
-  type AdapterBackend,
   type AdapterHistoryStore,
   type AdapterRecordedReadStore,
-  type BackendCapabilities,
-  type GraphBackend,
-  type GraphExtension,
   type HistoryStore,
   type LiveStoreOptions,
   type RecordedReadStore,
-  type Store,
-  type StoreOptions,
   type StoreRef,
-  type TransactionOptions,
   StoreView,
-  createAdapterStore,
-  createStore,
-  createSqlSchema,
-  recordedRelation,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
+import { createSqlSchema, recordedRelation } from "@nicia-ai/typegraph/query";
 import { createLocalPgliteStore } from "@nicia-ai/typegraph/postgres/pglite";
 import { createLocalSqliteStore } from "@nicia-ai/typegraph/sqlite/local";
-import { defineGraphExtension } from "@nicia-ai/typegraph/graph-extension";
+import {
+  defineGraphExtension,
+  type GraphExtension,
+} from "@nicia-ai/typegraph/graph-extension";
 import { branch } from "@nicia-ai/typegraph/graph-merge";
 import { exportGraph } from "@nicia-ai/typegraph/interchange";
 import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
@@ -87,7 +90,11 @@ const backendNodeRow: NodeRow = {
 const publicTransactionOptions: BackendTransactionOptions = {
   accessMode: "read_only",
 };
-const rootTransactionOptions: TransactionOptions = publicTransactionOptions;
+const backendResolvedLowerBound = resolveStampedValidityLowerBound(
+  undefined,
+  "2026-01-01T00:00:01.000Z",
+  "2026-01-01T00:00:00.000Z",
+);
 if (false) {
   const privilegedOptions: BackendTransactionOptions = {
     // @ts-expect-error Internal temporary-write capabilities are not public transaction options.
@@ -97,8 +104,8 @@ if (false) {
 }
 void backendNodeParams;
 void backendNodeRow;
+void backendResolvedLowerBound;
 void backendSqlTag;
-void rootTransactionOptions;
 void builtInStrategy;
 void chunkVocabulary;
 void publicTransactionOptions;
@@ -157,7 +164,8 @@ function assertFactoryContracts(
 ): void {
   const portableStore = createStore(graph, portableBackend);
   const portableCapabilities: BackendCapabilities = portableStore.capabilities;
-  void portableCapabilities.transactions;
+  void portableCapabilities.execution.interactiveTransactions;
+  void portableCapabilities.execution.atomicBatch;
   void portableCapabilities.vector?.metrics;
   const portableView = new StoreView(portableStore, {
     valid: { mode: "current" },
@@ -430,7 +438,8 @@ export async function exerciseStrictLocalConsumers(): Promise<
     schemaManagement: { systemIndexes: "skip" },
     store: { schema: localSchema },
   });
-  void sqliteStore.capabilities.transactions;
+  void sqliteStore.capabilities.execution.interactiveTransactions;
+  void sqliteStore.capabilities.execution.atomicBatch;
   void sqliteStore.capabilities.vector?.metrics;
   if (false) {
     // @ts-expect-error Managed stores omit caller-owned transaction adoption.
@@ -445,7 +454,8 @@ export async function exerciseStrictLocalConsumers(): Promise<
     store: { schema: localSchema },
     vector: false,
   });
-  void pgliteStore.capabilities.transactions;
+  void pgliteStore.capabilities.execution.interactiveTransactions;
+  void pgliteStore.capabilities.execution.atomicBatch;
   void pgliteStore.capabilities.vector?.metrics;
   if (false) {
     // @ts-expect-error Managed stores omit caller-owned transaction adoption.

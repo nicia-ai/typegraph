@@ -17,36 +17,77 @@
  */
 import { type z } from "zod";
 
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+  missingRequiredExtras,
+} from "../../backend/capabilities/resolve";
+import {
+  type EdgeRow,
   type GraphBackend,
   type LiveNodeRow,
+  type NodePropertyExpectation,
   type NodeRow,
+  type ResolvedNodeUpdateBatchEntry,
   rowPropsToObject,
   type TombstonedNodeRow,
   type TransactionBackend,
+  type UpdateNodeSetResult,
 } from "../../backend/types";
-import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
-import { RestrictedDeleteError } from "../../errors";
+import {
+  type DeleteBehavior,
+  type JsonValue,
+  type UniqueConstraint,
+} from "../../core/types";
+import {
+  ConfigurationError,
+  RestrictedDeleteError,
+  ValidationError,
+} from "../../errors";
+import { validateNodeProps } from "../../errors/validation";
+import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
+import { canonicalEqual } from "../../schema/canonical";
+import { assertsStoredLowerBound } from "../../utils/date";
+import { purgeEdgeClaims } from "../claims/edge-claims";
+import {
+  alreadyAppliedRowWrite,
+  createUniquenessContext,
+  deleteUniquenessEntries,
+  hardDeleteClaimsByNodeIds,
+  type NodeClaimContext,
+  type NodeClaimTransition,
+  planNodeClaimReinsert,
+  planNodeClaimTransition,
+  type UniquenessUpdatePlan,
+  withNodeClaimTransition,
+  withNodeCreateClaimsBatch,
+} from "../claims/node-claims";
+import {
+  resolvedNodeUniqueSidecarBatchIsReachable,
+  validateResolvedNodeClaims,
+} from "../claims/resolved-node-claims";
 import {
   deleteNodeEmbeddings,
+  deleteNodeEmbeddingsBatch,
+  getEmbeddingFields,
   syncEmbeddings,
   syncEmbeddingsBatchForKind,
 } from "../embedding-sync";
 import {
+  assertFulltextMember,
   deleteNodeFulltext,
+  getSearchableFields,
+  refuseFulltextUnavailable,
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import {
-  checkUniquenessConstraints,
-  createUniquenessContext,
-  deleteUniquenessEntries,
-  insertUniquenessEntries,
-  insertUniquenessEntriesBatch,
-  updateUniquenessEntries,
-} from "../uniqueness";
+import { type NodeDeletePlan } from "../types";
+import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
 type Backend = GraphBackend | TransactionBackend;
 
@@ -56,24 +97,27 @@ type Backend = GraphBackend | TransactionBackend;
  * row work (see {@link GraphWriteLock}): the pipeline performs no locking of
  * its own, so requiring the token here makes "sidecar write before lock" a
  * type error at the call site instead of a lock-order inversion in review.
+ *
+ * It is the claim seam's context by definition rather than by coincidence: a
+ * write path hands the same value to {@link withNodeCreateClaims} and to the
+ * sync fans, so the two halves of one insert cannot be given different graphs,
+ * registries, or lock evidence.
  */
-export type NodeWriteContext = Readonly<{
-  graphId: string;
-  registry: KindRegistry;
-  lock: GraphWriteLock;
-}>;
+export type NodeWriteContext = NodeClaimContext;
 
 /** Builds a {@link NodeWriteContext} — the one constructor every call site shares. */
 export function createNodeWriteContext(
   graphId: string,
   registry: KindRegistry,
   lock: GraphWriteLock,
+  claimsVerdict: ClaimsVerdictThunk,
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
 ): NodeWriteContext {
-  return { graphId, registry, lock };
+  return { graphId, registry, lock, claimsVerdict, uniqueSidecarBatch };
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
-type NodeDeleteMode = "soft" | "hard";
+export type NodeDeleteMode = "soft" | "hard";
 
 /**
  * Tunes how a delete treats the node's connected edges.
@@ -87,10 +131,109 @@ type NodeDeleteMode = "soft" | "hard";
  */
 export type NodeDeletePolicy = Readonly<{
   enforceDeleteBehavior: boolean;
+  /**
+   * Edges a caller has already decided to consume outside this delete's own
+   * enforcement: excluded from both the `restrict` count and the `cascade` /
+   * `disconnect` removal, so a consumed edge is evaluated and deleted exactly
+   * once — by whichever caller planned the consumption, not a second time by
+   * this delete's own delete-behavior enforcement.
+   *
+   * Populated by the composition cascade (`node-operations.ts`): every
+   * composition edge id a whole's cascade consumes is folded into the
+   * ROOT's own policy via `withCascadeConsumedEdges`, and each individual
+   * MEMBER delete the cascade drives is itself given a policy naming the
+   * edge that bound it to its (already-being-deleted) whole. Honored on
+   * the SOFT-delete path (`applyNodeSoftDelete`), the HARD-delete path
+   * (`applyNodeHardDelete`), and the batch delete path
+   * (`executeNodeDeleteBatch`, which builds its own per-item policy from
+   * that item's cascade plan internally) — all three route through
+   * `enforceNodeDeleteBehavior`, the one place this field is read.
+   */
+  consumedEdgeIds?: ReadonlySet<string>;
+  /**
+   * Whether a whole delete cascades to its parts. Default `true`.
+   * `planCascadingNodeDelete` (`node-operations.ts`) reads this: `false`
+   * yields an empty plan without touching a single part row. Merge apply
+   * passes `false` (`graph-merge/merge.ts`) because its plan already
+   * carries every part deletion the cascade would otherwise recompute —
+   * apply trusts the plan rather than re-walking the closure a second time
+   * under its own lock.
+   */
+  cascadeComposition?: boolean;
+  /**
+   * The instant each named identity assertion over this node ends at, for
+   * assertions the caller has decided end before the delete does. Merge apply
+   * passes the instant the deleting branch ended each one, so the target's
+   * history agrees with the branch's. Read by the identity cascade
+   * (`detachIdentityForNode`), which still stamps the deleted node as the
+   * cause; an assertion not named ends at the node's own deletion instant.
+   */
+  identityAssertionEnds?: ReadonlyMap<string, string>;
 }>;
 
+/**
+ * What a caller states about one node delete beyond its target: the
+ * {@link NodeDeletePolicy} an internal caller (merge apply, provenance)
+ * narrows enforcement with, and the `expect` plan a public
+ * `delete(id, { expect })` must still match (`node-delete-expectation.ts`).
+ */
+export type NodeDeleteRequest = Readonly<{
+  policy?: NodeDeletePolicy | undefined;
+  expect?: NodeDeletePlan | undefined;
+}>;
+
+/**
+ * Whether a stated {@link NodeDeleteRequest} carries a REQUEST-SHAPED
+ * dimension the fused atomic delete command cannot honor.
+ *
+ * The fused command is a single, read-free SQL shape: it has no notion of
+ * `consumedEdgeIds`, cannot skip its own delete-behavior enforcement, ends
+ * identity assertions only at the delete instant, and computes no plan to
+ * compare an `expect` plan against. A request stating ANY of these —
+ * `policy.enforceDeleteBehavior: false`, a non-empty `policy.consumedEdgeIds`
+ * or `policy.identityAssertionEnds`, or an `expect` plan — must therefore
+ * route around the fused command to the portable path, the only path that
+ * reads and honors them (`enforceNodeDeleteBehavior` and the identity cascade
+ * for the policy, `assertNodeDeletePlanExpected` for the plan). This is the ONE place that
+ * decision is made for these fields: a caller choosing between the fused and
+ * portable delete must call this rather than re-deriving the answer from any
+ * field directly.
+ *
+ * This predicate does NOT own `cascadeComposition`, and is not the only
+ * fused-vs-portable gate in the store. That dimension is registry-shaped,
+ * not request-shaped — "does this kind participate in composition at all"
+ * is knowable from the graph's declaration alone, before any request is
+ * constructed — so it is decided statically by
+ * `resolveAtomicNodeDeleteBatchExecutor`'s composition guard
+ * (`atomic-mutation-program.ts`), which returns no executor for a kind that
+ * is a composition whole (`registry.isCompositionWhole`) or part
+ * (`registry.isCompositionPart`) on either side, unconditionally on the
+ * caller's request. Together these are the two EXHAUSTIVE owners of "should
+ * this delete run the portable path": one for request fields, one for static
+ * composition participation. A future third dimension must extend one of
+ * these two predicates (or, if neither shape fits, add and name a third
+ * owner here) — never re-derive the routing decision inline at a call site.
+ */
+export function nodeDeleteRequiresPortablePath(
+  request: NodeDeleteRequest,
+): boolean {
+  const { policy, expect } = request;
+  if (expect !== undefined) return true;
+  return (
+    policy !== undefined &&
+    (!policy.enforceDeleteBehavior ||
+      (policy.consumedEdgeIds?.size ?? 0) > 0 ||
+      (policy.identityAssertionEnds?.size ?? 0) > 0)
+  );
+}
+
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
-  return createUniquenessContext(ctx.graphId, ctx.registry, backend);
+  return createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+    ctx.uniqueSidecarBatch,
+  );
 }
 
 /**
@@ -112,6 +255,29 @@ function nodeSyncContext(
  * the delete (`restrict`) or are removed alongside the node (`cascade` /
  * `disconnect`). Skipped entirely when the caller's {@link NodeDeletePolicy}
  * disables enforcement.
+ *
+ * `policy.consumedEdgeIds` narrows the edges considered by EITHER arm before
+ * the behavior switch runs: an edge a caller already consumed neither blocks
+ * a `restrict` delete nor gets removed a second time by this delete's own
+ * `cascade` / `disconnect` cleanup. The narrowing is the single seam a future
+ * composition cascade plans against — see {@link NodeDeletePolicy}.
+ *
+ * A composition edge is a SEPARATE, unconditional exclusion from the
+ * `restrict` OBSTACLE count only (by contract, a composition edge is never a
+ * restrict obstacle, on either the part end — a part may always be deleted out of its whole — or an
+ * intermediate whole's upward edge into ITS OWN whole). This holds whether
+ * or not the edge is this delete's own `consumedEdgeIds`, so it is checked
+ * independently via `registry.isCompositionEdge` rather than folded into
+ * that set. Exclusion from the obstacle count is not exclusion from
+ * removal: a `restrict` delete that clears (no non-composition obstacle
+ * remains) still removes every unconsumed composition edge before
+ * returning, through the same {@link deleteEdgesById} owner the
+ * `cascade` / `disconnect` arm uses — otherwise the node would tombstone
+ * while a composition edge still pointed at it, which is the state edges
+ * can never be in (see that arm's own comment). The `cascade` / `disconnect`
+ * arm is untouched by the obstacle exclusion: a composition edge not already
+ * consumed by a policy is still removed alongside the node, exactly as any
+ * other cascaded/disconnected edge is.
  */
 async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
@@ -124,23 +290,109 @@ async function enforceNodeDeleteBehavior(
   backend: Backend,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
-  if (policy?.enforceDeleteBehavior === false) return;
-  const behavior = args.onDelete ?? "restrict";
+  const verdict = await judgeNodeDeleteBehavior(ctx, args, backend, policy);
+  if (verdict.removedEdgeIds.length === 0) return;
+  await deleteEdgesById(ctx, backend, args.mode, verdict.removedEdgeIds);
+}
+
+/**
+ * What one node's delete behavior decides about its connected edges: the edge
+ * rows the delete removes alongside the node. A `restrict` node with a
+ * non-composition edge left has no verdict at all — it refuses.
+ */
+type NodeDeleteBehaviorVerdict = Readonly<{
+  removedEdgeIds: readonly string[];
+}>;
+
+const NO_EDGES_REMOVED: NodeDeleteBehaviorVerdict = { removedEdgeIds: [] };
+
+/**
+ * THE delete-behavior decision, read-only: what {@link enforceNodeDeleteBehavior}
+ * applies, and what a frame that deletes MORE than one node asks for every one
+ * of them before its first statement (the composition cascade and the batch
+ * delete, `node-operations.ts`), so a `restrict` refusal on a later node is
+ * reached while nothing has been written.
+ *
+ * `policy.consumedEdgeIds` is how such a frame states the edges its EARLIER
+ * deletes will already have removed by the time this node's turn comes: the
+ * verdict is then the one the node's own delete reaches in sequence.
+ *
+ * @throws RestrictedDeleteError when a `restrict` node keeps a
+ *   non-composition edge.
+ */
+export async function judgeNodeDeleteBehavior(
+  ctx: Pick<NodeWriteContext, "graphId" | "registry">,
+  args: Readonly<{
+    kind: string;
+    id: string;
+    onDelete: DeleteBehavior | undefined;
+  }>,
+  backend: Pick<Backend, "findEdgesConnectedTo">,
+  policy?: NodeDeletePolicy,
+): Promise<NodeDeleteBehaviorVerdict> {
+  if (policy?.enforceDeleteBehavior === false) return NO_EDGES_REMOVED;
   const connectedEdges = await backend.findEdgesConnectedTo({
     graphId: ctx.graphId,
     nodeKind: args.kind,
     nodeId: args.id,
   });
+  return decideNodeDeleteBehavior(ctx, args, connectedEdges, policy);
+}
 
-  if (connectedEdges.length === 0) return;
+/**
+ * The pure half of {@link judgeNodeDeleteBehavior}: the verdict for one node
+ * given the live edges connected to it, however they were read. The batch hard
+ * delete (`node-operations.ts`) reads those edges for many nodes in one
+ * set-wise statement and decides each node here, so the single and batched
+ * paths share one owner of the delete-behavior decision.
+ *
+ * @throws RestrictedDeleteError when a `restrict` node keeps a
+ *   non-composition edge.
+ */
+export function decideNodeDeleteBehavior(
+  ctx: Pick<NodeWriteContext, "registry">,
+  args: Readonly<{
+    kind: string;
+    id: string;
+    onDelete: DeleteBehavior | undefined;
+  }>,
+  connectedEdges: readonly Pick<EdgeRow, "id" | "kind">[],
+  policy?: NodeDeletePolicy,
+): NodeDeleteBehaviorVerdict {
+  if (policy?.enforceDeleteBehavior === false) return NO_EDGES_REMOVED;
+  const behavior = args.onDelete ?? "restrict";
+  if (connectedEdges.length === 0) return NO_EDGES_REMOVED;
+
+  const { consumedEdgeIds } = policy ?? {};
+  const unconsumedEdges =
+    consumedEdgeIds === undefined ? connectedEdges : (
+      connectedEdges.filter((edge) => !consumedEdgeIds.has(edge.id))
+    );
+  if (unconsumedEdges.length === 0) return NO_EDGES_REMOVED;
+  const removedEdgeIds = unconsumedEdges.map((edge) => edge.id);
 
   switch (behavior) {
     case "restrict": {
+      const restrictedEdges = unconsumedEdges.filter(
+        (edge) => !ctx.registry.isCompositionEdge(edge.kind),
+      );
+      if (restrictedEdges.length === 0) {
+        // Every unconsumed edge is a composition edge: none of them blocks
+        // the delete, but they are not this delete's `cascade`/`disconnect`
+        // arm's business either (that arm never runs for `restrict`), so
+        // nothing else removes their rows. Leaving them live would point a
+        // composition edge at the node this delete is about to tombstone —
+        // the exact state the comment above the cascade/disconnect arm says
+        // cannot exist. They are removed through the same owner that arm
+        // uses, so a restrict-behaved delete leaves no dangling composition
+        // edge on either the part or an intermediate whole's upward edge.
+        return { removedEdgeIds };
+      }
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
-        edgeCount: connectedEdges.length,
-        edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
+        edgeCount: restrictedEdges.length,
+        edgeKinds: [...new Set(restrictedEdges.map((edge) => edge.kind))],
       });
     }
 
@@ -149,96 +401,204 @@ async function enforceNodeDeleteBehavior(
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
-      // without both endpoints. One batched statement per bind-budget
-      // chunk instead of one statement per edge; the per-edge loop remains
-      // for backends without the batch members.
-      const batchDelete =
-        args.mode === "hard" ?
-          backend.hardDeleteEdgesBatch
-        : backend.deleteEdgesBatch;
-      if (batchDelete !== undefined) {
-        await batchDelete({
-          graphId: ctx.graphId,
-          ids: connectedEdges.map((edge) => edge.id),
-        });
-        break;
-      }
-      for (const edge of connectedEdges) {
-        await (args.mode === "hard" ?
-          backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
-        : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
-      }
-      break;
+      // without both endpoints.
+      return { removedEdgeIds };
     }
   }
 }
 
 /**
- * Applies the side effects that follow a node insert: uniqueness entries, then
- * embedding and fulltext sync. Uniqueness has already been *checked* during
- * create preparation; this writes the entries.
+ * Deletes a set of edges by id, in the given mode, through
+ * {@link softDeleteEdgeRows} / {@link hardDeleteEdgeRows} (one batched
+ * statement per bind-budget chunk, stating no kind), and releases the claims
+ * of the rows a hard delete removed.
+ *
+ * The one owner of "how does a node delete remove an edge" for both
+ * {@link enforceNodeDeleteBehavior}'s cascade/disconnect arm (unconsumed
+ * edges) and the composition cascade's explicit cleanup of the edges it
+ * consumed (`node-operations.ts`) — a composition edge is deliberately
+ * excluded from every member's OWN `unconsumedEdges` pass, so nothing else
+ * ever removes its row.
  */
-export async function applyNodeInsertSideEffects(
-  ctx: NodeWriteContext,
-  args: Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>,
+export async function deleteEdgesById(
+  ctx: Pick<NodeWriteContext, "graphId" | "claimsVerdict">,
   backend: Backend,
+  mode: NodeDeleteMode,
+  edgeIds: readonly string[],
 ): Promise<void> {
-  await insertUniquenessEntries(
-    uniquenessContext(ctx, backend),
-    args.kind,
-    args.id,
-    args.props,
-    args.uniqueConstraints,
-  );
-  await Promise.all([
-    syncEmbeddings(
-      nodeSyncContext(ctx, args.kind, args.id, backend),
-      args.schema,
-      args.props,
-    ),
-    syncFulltext(
-      nodeSyncContext(ctx, args.kind, args.id, backend),
-      args.schema,
-      args.props,
-    ),
-  ]);
+  // Soft-deleted edges retain their rows for resurrection and are not
+  // reaped here.
+  if (mode === "soft") {
+    await softDeleteEdgeRows(ctx.graphId, backend, edgeIds);
+    return;
+  }
+  const removedIds = await hardDeleteEdgeRows(ctx.graphId, backend, edgeIds);
+  // Hard-deleted holders are already takeable through the liveness probe;
+  // this is housekeeping so node cascades do not grow edgeClaims forever.
+  // Keyed by the rows the delete removed, as every edge hard delete is.
+  await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, removedIds);
 }
 
 /**
- * Batched {@link applyNodeInsertSideEffects}: one uniqueness batch across
- * every item, then one embedding batch per (kind, field) and one fulltext
- * batch per kind — instead of the per-row statement fan the single-op path
- * issues. Ordering matches the single-op path (uniqueness first, then the
- * sync fans).
+ * The live edges connected to each of a set of one kind's nodes, keyed by node
+ * id — what {@link judgeNodeDeleteBehavior} reads for one node, read for all of
+ * them with one `findEdgesConnectedToNodes` statement per bind-budget chunk,
+ * or one `findEdgesConnectedTo` per node on a backend without that member.
+ *
+ * Each node's list holds its source-side edges before its target-side ones and
+ * a self-loop once, as `findEdgesConnectedTo` returns them, so a
+ * {@link decideNodeDeleteBehavior} refusal names its edge kinds the same way
+ * on both paths.
  */
-export async function applyNodeInsertSideEffectsBatch(
+export async function readEdgesConnectedToNodes(
+  graphId: string,
+  backend: Pick<Backend, "findEdgesConnectedTo" | "findEdgesConnectedToNodes">,
+  kind: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, readonly EdgeRow[]>> {
+  const connected = new Map<string, EdgeRow[]>(ids.map((id) => [id, []]));
+  if (ids.length === 0) return connected;
+  const setRead = backend.findEdgesConnectedToNodes;
+  if (setRead === undefined) {
+    for (const id of ids) {
+      connected.set(id, [
+        ...(await backend.findEdgesConnectedTo({
+          graphId,
+          nodeKind: kind,
+          nodeId: id,
+        })),
+      ]);
+    }
+    return connected;
+  }
+  const rows = await setRead({ graphId, nodeKind: kind, nodeIds: ids });
+  for (const row of rows) {
+    if (row.from_kind === kind) connected.get(row.from_id)?.push(row);
+  }
+  for (const row of rows) {
+    const isSelfLoop = row.from_kind === kind && row.from_id === row.to_id;
+    if (row.to_kind === kind && !isSelfLoop) {
+      connected.get(row.to_id)?.push(row);
+    }
+  }
+  return connected;
+}
+
+/**
+ * The hard delete of a run of one kind's nodes that need no composition
+ * cascade and no identity detach, judged in deletion order before the frame's
+ * first statement (`node-operations.ts`'s batch hard delete).
+ */
+export type NodeHardDeleteBatchWork = Readonly<{
+  kind: string;
+  schema: z.ZodType;
+  /** The nodes, in deletion order. */
+  ids: readonly string[];
+  /** Every edge their delete-behavior verdicts remove, in deletion order. */
+  removedEdgeIds: readonly string[];
+}>;
+
+/**
+ * {@link applyNodeHardDelete} for a run of nodes, as set-wise statements: the
+ * verdicts' edges through {@link deleteEdgesById} (claims released for the
+ * rows removed), then the node rows with their uniqueness, fulltext and
+ * remaining incident edge rows through `hardDeleteNodesBatch`, then their
+ * embeddings. The state is the one applying {@link applyNodeHardDelete} to
+ * each node in turn leaves: every statement is a set delete, and no node of
+ * the run is an endpoint another node of the run still needs.
+ *
+ * A backend without `hardDeleteNodesBatch` gets one `hardDeleteNode` per node,
+ * in order, inside the same frame.
+ */
+export async function applyNodeHardDeleteBatch(
   ctx: NodeWriteContext,
-  items: readonly Readonly<{
-    kind: string;
-    id: string;
-    schema: z.ZodType;
-    props: Record<string, unknown>;
-    uniqueConstraints: readonly UniqueConstraint[];
-  }>[],
+  work: NodeHardDeleteBatchWork,
+  backend: Backend,
+): Promise<void> {
+  if (work.ids.length === 0) return;
+  if (work.removedEdgeIds.length > 0) {
+    await deleteEdgesById(ctx, backend, "hard", work.removedEdgeIds);
+  }
+  const removedNodeIds = await hardDeleteNodeRows(
+    ctx.graphId,
+    backend,
+    work.kind,
+    work.ids,
+  );
+  await deleteNodeEmbeddingsBatch(
+    { graphId: ctx.graphId, nodeKind: work.kind, backend },
+    work.schema,
+    removedNodeIds,
+  );
+}
+
+/**
+ * Removes a set of one kind's node rows with their uniqueness, fulltext and
+ * incident edge rows: `hardDeleteNodesBatch` when the backend has it, else one
+ * `hardDeleteNode` per id. Resolves the ids whose embeddings are owed — the
+ * rows the batch reports removed, or every id on the per-node path, which
+ * reports nothing (exactly as single `hardDelete` cleans embeddings by id).
+ */
+async function hardDeleteNodeRows(
+  graphId: string,
+  backend: Backend,
+  kind: string,
+  ids: readonly string[],
+): Promise<readonly string[]> {
+  const hardDeleteNodesBatch = backend.hardDeleteNodesBatch;
+  if (hardDeleteNodesBatch !== undefined) {
+    const removed = await hardDeleteNodesBatch({ graphId, kind, ids });
+    return removed.removedNodeIds;
+  }
+  for (const id of ids) {
+    await backend.hardDeleteNode({ graphId, kind, id });
+  }
+  return ids;
+}
+
+/** One inserted row, as the post-insert sync fans read it. */
+export type NodeInsertSyncItem = Readonly<{
+  kind: string;
+  id: string;
+  schema: z.ZodType;
+  props: Record<string, unknown>;
+  uniqueConstraints: readonly UniqueConstraint[];
+  /** True only when the fused node statement wrote every requested projection. */
+  projectionsFused?: boolean;
+}>;
+
+/**
+ * The sync fans that follow a node insert: embedding and fulltext.
+ *
+ * The claims this row owes are NOT here. They are issued by
+ * {@link withNodeCreateClaims}, on the two sides of the insert their placement
+ * names — a claim that is the only fence for its axis has to precede the row it
+ * gates, and a function that runs entirely after the insert cannot issue one.
+ * The fans have no such constraint: they are derived data, they fence nothing,
+ * and they stay where they have always been.
+ */
+export async function applyNodeInsertSyncFans(
+  ctx: NodeWriteContext,
+  args: NodeInsertSyncItem,
+  backend: Backend,
+): Promise<void> {
+  const syncContext = nodeSyncContext(ctx, args.kind, args.id, backend);
+  if (args.projectionsFused === true) return;
+  await syncEmbeddings(syncContext, args.schema, args.props);
+  await syncFulltext(syncContext, args.schema, args.props);
+}
+
+/**
+ * Batched {@link applyNodeInsertSyncFans}: one embedding batch per (kind,
+ * field) and one fulltext batch per kind, instead of the per-row statement fan
+ * the single-op path issues.
+ */
+export async function applyNodeInsertSyncFansBatch(
+  ctx: NodeWriteContext,
+  items: readonly NodeInsertSyncItem[],
   backend: Backend,
 ): Promise<void> {
   if (items.length === 0) return;
-
-  await insertUniquenessEntriesBatch(
-    uniquenessContext(ctx, backend),
-    items.map((item) => ({
-      kind: item.kind,
-      id: item.id,
-      props: item.props,
-      constraints: item.uniqueConstraints,
-    })),
-  );
 
   interface KindGroup {
     schema: z.ZodType;
@@ -251,15 +611,11 @@ export async function applyNodeInsertSideEffectsBatch(
     byKind.set(item.kind, group);
   }
 
-  await Promise.all(
-    [...byKind.entries()].flatMap(([kind, group]) => {
-      const syncArguments = { graphId: ctx.graphId, nodeKind: kind, backend };
-      return [
-        syncEmbeddingsBatchForKind(syncArguments, group.schema, group.rows),
-        syncFulltextBatchForKind(syncArguments, group.schema, group.rows),
-      ];
-    }),
-  );
+  for (const [kind, group] of byKind) {
+    const syncArguments = { graphId: ctx.graphId, nodeKind: kind, backend };
+    await syncEmbeddingsBatchForKind(syncArguments, group.schema, group.rows);
+    await syncFulltextBatchForKind(syncArguments, group.schema, group.rows);
+  }
 }
 
 function parseRowProps(row: NodeRow): Record<string, unknown> {
@@ -278,10 +634,69 @@ export type NodeUpdateTarget =
   | Readonly<{ existing: NodeRow; clearDeleted: true }>;
 
 /**
+ * Decides a node update's uniqueness transition, writing nothing: the row's
+ * own facts handed to {@link planNodeClaimTransition}, which owns the two
+ * shapes (a live row's diff, a restored tombstone's re-reservation).
+ */
+function planNodeUpdateUniqueness(
+  ctx: NodeWriteContext,
+  args: Readonly<{
+    existing: NodeRow;
+    validatedProps: Record<string, unknown>;
+    uniqueConstraints: readonly UniqueConstraint[];
+  }>,
+  backend: Backend,
+): Promise<UniquenessUpdatePlan> {
+  return planNodeClaimTransition(
+    uniquenessContext(ctx, backend),
+    nodeClaimTransition(
+      args.existing,
+      args.validatedProps,
+      args.uniqueConstraints,
+    ),
+  );
+}
+
+/**
+ * THE claim transition one existing row's update owes, read off the row: a
+ * tombstone holds no reservation, a live row holds its current props'.
+ * Shared by the update itself and by a batch that judges several updates
+ * before writing any of them, so the two cannot read a row differently.
+ */
+export function nodeClaimTransition(
+  existing: NodeRow,
+  props: Record<string, unknown>,
+  constraints: readonly UniqueConstraint[],
+): NodeClaimTransition {
+  return {
+    kind: existing.kind,
+    id: existing.id,
+    heldProps:
+      existing.deleted_at === undefined ? parseRowProps(existing) : undefined,
+    props,
+    constraints,
+  };
+}
+
+/**
  * Applies a node update: uniqueness maintenance (diff-based for a live row;
  * check-and-reinsert for a resurrecting update, whose entries the soft delete
  * removed), the core row update, then embedding and fulltext sync. Returns
  * the updated row.
+ *
+ * ## The row write and its uniqueness transition are ONE unit
+ *
+ * Both can fail — the row write matches nothing when `expectedValidFrom` or the
+ * `deleted_at` fence stopped holding, the uniqueness claim loses a race for a
+ * key — and a caller that catches either PER ROW and commits the rest of the
+ * transaction (interchange import) must never be left with half of the pair
+ * applied. {@link withNodeClaimTransition} owns that sequencing and documents
+ * why claim/gate/release is the only order that works; this function just hands
+ * it the plan and the write.
+ *
+ * The embedding and fulltext syncs stay AFTER the gate: they are derived data
+ * with no claim to make, so a row write that lands on nothing must not rewrite
+ * a fulltext row or re-embed props no row ever received.
  */
 export async function applyNodeUpdate(
   ctx: NodeWriteContext,
@@ -289,50 +704,36 @@ export async function applyNodeUpdate(
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
+    validFrom?: string | null;
     validTo?: string;
+    clearValidTo?: true;
+    /** See {@link UpdateNodeParams.expectedValidFrom}. */
+    expectedValidFrom?: string | null;
   }> &
     NodeUpdateTarget,
   backend: Backend,
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
-  if (args.existing.deleted_at === undefined) {
-    await updateUniquenessEntries(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      parseRowProps(args.existing),
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-  } else {
-    // Resurrecting update (clearDeleted on a tombstoned row): the soft delete
-    // already removed this node's uniqueness entries, so the diff-based path
-    // would skip an unchanged key entirely and the resurrected node would
-    // hold NO reservation — a later create could then silently duplicate the
-    // value. Re-check and re-insert for the new props instead, exactly as
-    // applyNodeResurrect does.
-    await checkUniquenessConstraints(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-    await insertUniquenessEntries(
-      uniquenessContext(ctx, backend),
-      kind,
-      id,
-      args.validatedProps,
-      args.uniqueConstraints,
-    );
-  }
+
+  // Read-only phase: decide the sidecar changes, refuse a conflict, write
+  // nothing.
+  const plan = await planNodeUpdateUniqueness(
+    ctx,
+    {
+      existing: args.existing,
+      validatedProps: args.validatedProps,
+      uniqueConstraints: args.uniqueConstraints,
+    },
+    backend,
+  );
 
   const updateParams: {
     graphId: string;
     kind: string;
     id: string;
     props: Record<string, unknown>;
-    validTo?: string;
+    validFrom?: string | null;
+    expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
   } = {
@@ -342,25 +743,144 @@ export async function applyNodeUpdate(
     props: args.validatedProps,
     incrementVersion: true,
   };
-  if (args.validTo !== undefined) updateParams.validTo = args.validTo;
+  if (args.validFrom !== undefined) updateParams.validFrom = args.validFrom;
+  // `assertsStoredLowerBound` owns "does this fence state anything?" — the same
+  // predicate the fence appliers consult, so the step that CARRIES the fence
+  // and the seam that VALIDATES it cannot disagree about what an empty fence is.
+  if (assertsStoredLowerBound(args)) {
+    updateParams.expectedValidFrom = args.expectedValidFrom;
+  }
   if (args.clearDeleted) updateParams.clearDeleted = true;
 
-  const row = await backend.updateNode(updateParams);
+  const row = await withNodeClaimTransition(
+    uniquenessContext(ctx, backend),
+    kind,
+    id,
+    plan,
+    () =>
+      backend.updateNode({
+        ...updateParams,
+        ...(args.clearValidTo === true ? { clearValidTo: true as const }
+        : args.validTo === undefined ? {}
+        : { validTo: args.validTo }),
+      }),
+  );
 
-  await Promise.all([
-    syncEmbeddings(
-      nodeSyncContext(ctx, kind, id, backend),
-      args.schema,
-      args.validatedProps,
-    ),
-    syncFulltext(
-      nodeSyncContext(ctx, kind, id, backend),
-      args.schema,
-      args.validatedProps,
-    ),
-  ]);
+  const syncContext = nodeSyncContext(ctx, kind, id, backend);
+  await syncEmbeddings(syncContext, args.schema, args.validatedProps);
+  await syncFulltext(syncContext, args.schema, args.validatedProps);
 
   return row;
+}
+
+/**
+ * Applies distinct, already-resolved live-node replacements as one row write,
+ * then rebuilds the same claim and projection fans as a set update. Returning
+ * `undefined` is the portable version-gate miss: callers re-read and recover
+ * through the established per-row race semantics rather than treating it as a
+ * partial success.
+ */
+export async function applyResolvedNodeUpdateBatch(
+  ctx: NodeWriteContext,
+  args: Readonly<{
+    schema: z.ZodType<Record<string, unknown>>;
+    uniqueConstraints: readonly UniqueConstraint[];
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+  }>,
+  backend: Backend,
+): Promise<readonly NodeRow[] | undefined> {
+  if (
+    args.uniqueConstraints.length > 0 &&
+    !resolvedNodeUniqueSidecarBatchIsReachable(uniquenessContext(ctx, backend))
+  ) {
+    throw new ConfigurationError(
+      "Resolved node writes require batched uniqueness operations",
+      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+    );
+  }
+  const updateResolvedNodesBatch = backend.updateResolvedNodesBatch;
+  if (updateResolvedNodesBatch === undefined) return;
+  const rows = await updateResolvedNodesBatch({ entries: args.entries });
+  if (rows.length === 0) return;
+  if (rows.length !== args.entries.length) {
+    throw new ConfigurationError(
+      "Resolved node update batch returned a partial result",
+      { operation: "updateResolvedNodesBatch" },
+    );
+  }
+  const entriesById = new Map(
+    args.entries.map((entry) => [entry.id, entry] as const),
+  );
+  const items = rows.map((row) => {
+    const entry = entriesById.get(row.id);
+    if (entry?.kind !== row.kind) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned an unexpected row",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
+      );
+    }
+    const props = rowPropsToObject(row.props);
+    if (!canonicalEqual(entry.props, props)) {
+      throw new ConfigurationError(
+        "Resolved node update batch returned props that differ from its input",
+        { operation: "updateResolvedNodesBatch", rowId: row.id },
+      );
+    }
+    return {
+      kind: row.kind,
+      id: row.id,
+      props,
+      constraints: args.uniqueConstraints,
+      uniqueConstraints: args.uniqueConstraints,
+      schema: args.schema,
+    };
+  });
+  if (args.uniqueConstraints.length > 0) {
+    await validateResolvedNodeClaims(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      items,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
+      uniquenessContext(ctx, backend),
+      items[0]?.kind ?? "",
+      items.map((item) => item.id),
+    );
+  }
+  await withNodeCreateClaimsBatch(ctx, items, backend, alreadyAppliedRowWrite);
+  await applyNodeInsertSyncFansBatch(ctx, items, backend);
+  return rows;
+}
+
+/**
+ * The props a soft delete releases uniqueness entries for: the ones the row
+ * holds once its tombstone is written, not the pre-image's.
+ *
+ * An ordinary property update takes no per-graph lock, so it can commit
+ * between the pre-image read and the tombstone. The tombstone statement is
+ * what locks the row: read after it, the stored props are final for this
+ * transaction, and a release computed from them cannot leave the key that
+ * update moved the node to claimed by a tombstone. A kind with no unique
+ * constraint keys nothing off its props and is not read again.
+ */
+async function readTombstonedNodeProps(
+  ctx: NodeWriteContext,
+  existing: LiveNodeRow,
+  uniqueConstraints: readonly UniqueConstraint[],
+  backend: Backend,
+): Promise<Record<string, unknown>> {
+  if (uniqueConstraints.length === 0) return parseRowProps(existing);
+  const tombstoned = await backend.getNode(
+    ctx.graphId,
+    existing.kind,
+    existing.id,
+  );
+  return parseRowProps(tombstoned ?? existing);
 }
 
 /**
@@ -368,6 +888,8 @@ export async function applyNodeUpdate(
  * write, then removal of uniqueness entries, embeddings, and fulltext.
  * Requires a {@link LiveNodeRow}: deleting an already-tombstoned row would
  * re-run sidecar cleanup against entries the first delete already removed.
+ * The uniqueness release reads the row again after the tombstone
+ * ({@link readTombstonedNodeProps}).
  */
 export async function applyNodeSoftDelete(
   ctx: NodeWriteContext,
@@ -395,7 +917,13 @@ export async function applyNodeSoftDelete(
   await deleteUniquenessEntries(
     uniquenessContext(ctx, backend),
     kind,
-    parseRowProps(args.existing),
+    id,
+    await readTombstonedNodeProps(
+      ctx,
+      args.existing,
+      args.uniqueConstraints,
+      backend,
+    ),
     args.uniqueConstraints,
   );
   await deleteNodeEmbeddings(
@@ -414,6 +942,11 @@ export async function applyNodeSoftDelete(
  * backend's `hardDeleteNode` cascade; embeddings live in strategy-owned
  * per-`(kind, field)` tables the graph-agnostic cascade cannot reach, so they
  * are cleaned here.
+ *
+ * Takes an optional {@link NodeDeletePolicy}, honored exactly as the soft
+ * delete path honors it (`enforceDeleteBehavior`, `consumedEdgeIds`): the
+ * composition cascade's hard-delete arm narrows a member's restrict count by
+ * the edges it is itself consuming, the same way the soft-delete arm does.
  */
 export async function applyNodeHardDelete(
   ctx: NodeWriteContext,
@@ -424,11 +957,13 @@ export async function applyNodeHardDelete(
     onDelete: DeleteBehavior | undefined;
   }>,
   backend: Backend,
+  policy?: NodeDeletePolicy,
 ): Promise<void> {
   await enforceNodeDeleteBehavior(
     ctx,
     { kind: args.kind, id: args.id, mode: "hard", onDelete: args.onDelete },
     backend,
+    policy,
   );
   await backend.hardDeleteNode({
     graphId: ctx.graphId,
@@ -462,31 +997,283 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
-  await checkUniquenessConstraints(
+  // One unit, exactly as `applyNodeUpdate`, and for the same reason: the
+  // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
+  // this tombstone first makes it match zero rows — and the reservations that
+  // revival is entitled to are the peer's, not this caller's.
+  // `withNodeClaimTransition` gives them back when the gate refuses.
+  const plan = await planNodeClaimReinsert(
     uniquenessContext(ctx, backend),
     kind,
     id,
     props,
     args.uniqueConstraints,
   );
-  await insertUniquenessEntries(
+  const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     kind,
     id,
-    props,
-    args.uniqueConstraints,
+    plan,
+    () =>
+      backend.updateNode({
+        graphId: ctx.graphId,
+        kind,
+        id,
+        props,
+        incrementVersion: true,
+        clearDeleted: true,
+      }),
   );
-  const row = await backend.updateNode({
+  const syncContext = nodeSyncContext(ctx, kind, id, backend);
+  await syncEmbeddings(syncContext, args.schema, props);
+  await syncFulltext(syncContext, args.schema, props);
+  return row;
+}
+
+/**
+ * The inputs of one set-based node update: the patch the statement applies and
+ * the candidate query that selects the rows it applies to.
+ *
+ * There is no fence field. `UpdateNodeSetParams` has no `expectedValidFrom`,
+ * so a validity lower bound cannot be carried here — it is refused by
+ * `NODE_SET_UPDATE_FENCE_APPLIERS` before this step is reached, rather than
+ * accepted into a record that would quietly drop it.
+ */
+type NodeSetUpdateCommonWork = Readonly<{
+  kind: string;
+  schema: z.ZodType<Record<string, unknown>>;
+  uniqueConstraints: readonly UniqueConstraint[];
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+}>;
+
+export type NodeSetUpdateWork = NodeSetUpdateCommonWork &
+  (
+    | Readonly<{ operation: "updateWhere" }>
+    | Readonly<{
+        operation: "compareAndSet";
+        expected: Readonly<Record<string, NodePropertyExpectation>>;
+      }>
+  );
+
+/** What a set update reports: how many live rows it rewrote. */
+export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
+
+/**
+ * Applies a set-based node update: one UPDATE over every candidate row, then a
+ * full rebuild of the sidecars those after-images oblige.
+ *
+ * ## Why the capability refusals are HERE and not at the entry point
+ *
+ * The caller probes the backend it was handed before opening the transaction;
+ * these four probe the transaction target, which is a different object — a
+ * backend may hand out a transaction handle that implements less than the
+ * top-level one. They keep the entry point's error codes, so a caller that
+ * refuses before the transaction and one that refuses inside it report the
+ * same class.
+ *
+ * ## Why the order is row -> probe -> drop -> re-claim
+ *
+ * Unlike every other node write, the uniqueness claim happens AFTER the row
+ * write: the statement rewrites whole rows without reading their before-images,
+ * so the keys to release are not knowable until the after-images come back.
+ * The cross-kind re-check below is what makes that safe — it re-probes every
+ * changed key across the constraint's scope and refuses the whole transaction
+ * before a single entry is dropped. The per-graph write fence (which a
+ * shared-scope constraint forces this write to take) is what keeps a concurrent
+ * claim from landing between the probe and the reinsert.
+ */
+export async function applyNodeSetUpdate(
+  ctx: NodeWriteContext,
+  args: NodeSetUpdateWork,
+  backend: Backend,
+): Promise<NodeSetUpdateResult> {
+  const { kind, schema, uniqueConstraints } = args;
+  const commonParams = {
     graphId: ctx.graphId,
     kind,
-    id,
-    props,
-    incrementVersion: true,
-    clearDeleted: true,
+    patch: args.patch,
+    unsetProperties: args.unsetProperties,
+    candidateIds: args.candidateIds,
+    candidateIdColumn: args.candidateIdColumn,
+  } as const;
+  let executeNodeSetUpdate: () => Promise<UpdateNodeSetResult>;
+  if (args.operation === "compareAndSet") {
+    const compareAndSetNode = backend.compareAndSetNode;
+    if (compareAndSetNode === undefined) {
+      throw new ConfigurationError(
+        "The transaction backend does not support node compare-and-set",
+        { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
+      );
+    }
+    executeNodeSetUpdate = () =>
+      compareAndSetNode({
+        ...commonParams,
+        operation: "compareAndSet",
+        expected: args.expected,
+      });
+  } else {
+    const updateNodeSet = backend.updateNodeSet;
+    if (updateNodeSet === undefined) {
+      throw new ConfigurationError(
+        "The transaction backend does not support set-based node updates",
+        { code: "SET_UPDATE_UNSUPPORTED", kind },
+      );
+    }
+    executeNodeSetUpdate = () =>
+      updateNodeSet({ ...commonParams, operation: "updateWhere" });
+  }
+  if (
+    uniqueConstraints.length > 0 &&
+    missingRequiredExtras(
+      UNIQUE_SIDECAR_BATCH,
+      ctx.uniqueSidecarBatch,
+      "set-based node update",
+    ).length > 0
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched uniqueness operations",
+      { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+    );
+  }
+  if (getSearchableFields(schema).length > 0) {
+    // A fulltext-off backend (`resolveBackendFulltext` returns `false`) gets
+    // the same typed capability refusal every other fulltext entry point
+    // raises, rather than the member-presence assertions below — those are
+    // for a backend that DOES have fulltext but lacks one of the four
+    // members the write plan calls, mirroring the batched-uniqueness and
+    // batched-vector checks around it.
+    if (resolveBackendFulltext(backend) === false) {
+      refuseFulltextUnavailable(backend, kind);
+    }
+    // Fulltext is available, so a missing batch member here is not an
+    // availability decision but a backend contract violation — the same
+    // invariant `syncFulltextBatchForKind` asserts on its own members.
+    assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+    assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
+    assertFulltextMember(
+      backend.upsertFulltextBatch,
+      "upsertFulltextBatch",
+      backend,
+    );
+    assertFulltextMember(
+      backend.deleteFulltextBatch,
+      "deleteFulltextBatch",
+      backend,
+    );
+  }
+  if (
+    getEmbeddingFields(schema).length > 0 &&
+    (backend.upsertEmbedding === undefined ||
+      backend.deleteEmbedding === undefined ||
+      backend.upsertEmbeddingBatch === undefined ||
+      backend.deleteEmbeddingBatch === undefined)
+  ) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched vector operations",
+      { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
+    );
+  }
+  const result = await executeNodeSetUpdate();
+  if (result.affectedCount === 0) return { affectedCount: 0 };
+
+  const sidecarItems = result.rows.map((row) => {
+    const props = rowPropsToObject(row.props);
+    const validatedProps = validateNodeProps(schema, props, {
+      kind,
+      operation: "update",
+      id: row.id,
+    });
+    if (!canonicalEqual(validatedProps, props)) {
+      throw new ValidationError(
+        `Set update would persist a non-canonical ${kind} row`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          id: row.id,
+          issues: [
+            {
+              path: "props",
+              message: "The complete row requires schema normalization",
+            },
+          ],
+        },
+      );
+    }
+    return {
+      kind,
+      id: row.id,
+      schema,
+      props: validatedProps,
+      uniqueConstraints,
+    };
   });
-  await Promise.all([
-    syncEmbeddings(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
-    syncFulltext(nodeSyncContext(ctx, kind, id, backend), args.schema, props),
-  ]);
-  return row;
+
+  const claimItems = sidecarItems.map((item) => ({
+    kind: item.kind,
+    id: item.id,
+    props: item.props,
+    constraints: item.uniqueConstraints,
+  }));
+  if (uniqueConstraints.length > 0) {
+    // The re-claim below (`withNodeCreateClaimsBatch`) reaches `insertUniqueBatch`
+    // only through the shared, fallback-dispositioned `issueClaimsBatched`
+    // (`../claims/node-claims.ts`), which silently degrades to per-row inserts
+    // when the PORT lacks the member — the right answer for a plain create,
+    // but not for this REFUSE operation. Re-checking the port here, before the
+    // destructive hard-delete below, closes that gap: the later call binds off
+    // the same `backend`/verdict pair checked here, so its internal fallback
+    // branch can never fire for this call.
+    if (
+      bindExtraIfReachable(
+        backend,
+        ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
+        UNIQUE_SIDECAR_BATCH.id,
+      ) === undefined
+    ) {
+      throw new ConfigurationError(
+        "The transaction backend lacks batched uniqueness operations",
+        { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+      );
+    }
+    // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrote
+    // every candidate at once, so a swap or a handoff of one key between two
+    // rows it touched is legal in the final state and refused by every
+    // intermediate one. One owner of that verdict, shared with the graph merge.
+    await validateResolvedNodeClaims(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      claimItems,
+      [],
+    );
+    await hardDeleteClaimsByNodeIds(
+      uniquenessContext(ctx, backend),
+      kind,
+      result.rows.map((row) => row.id),
+    );
+  }
+  // The same claim seam every create-shaped writer uses, with an ALREADY-APPLIED
+  // row write as its gate: the rows landed above and the old claims were
+  // hard-deleted, so what is left is a re-claim and there is no row write left
+  // for a claim to precede. Inverting it would mean reserving keys the update has
+  // not written. What covers this site on a backend that cannot fence is stated
+  // per kind shape: a kind whose scope spans siblings declares
+  // `fencesConstraintProbe` at the entry point and is refused before this body
+  // runs; a kind-scoped one is not refused, before or after — its
+  // delete-then-rebuild window is unchanged in shape and extent here.
+  await withNodeCreateClaimsBatch(
+    ctx,
+    claimItems,
+    backend,
+    alreadyAppliedRowWrite,
+  );
+  await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
+  return { affectedCount: result.affectedCount };
 }

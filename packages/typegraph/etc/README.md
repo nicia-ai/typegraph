@@ -24,6 +24,12 @@ structural types that are not independently importable. Their exact
 `ae-forgotten-export` symbol sets are fingerprinted in `scripts/api-report.ts`:
 adding, removing, or renaming one fails verification even if the warning count
 does not change. New entrypoints default to zero forgotten exports; `/backend`
-establishes that clean authoring contract. Missing release tags and unresolved
+establishes that clean authoring contract. The `/store`, `/query`, `/errors`,
+`/identity` and `/maintenance` entrypoints, which took the names the root no
+longer exports,
+are the exception: they re-export public types whose bodies name internals,
+so they are registered at their measured debt rather than publishing those
+internals. `root-export-moves.json` maps every name that left the root to its
+new entrypoint, or to `null` when it was removed. Missing release tags and unresolved
 links remain suppressed, while every other API Extractor diagnostic and the
 full declaration report stay checked.

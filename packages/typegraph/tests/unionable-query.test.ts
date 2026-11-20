@@ -7,12 +7,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import {
-  createQueryBuilder,
-  defineGraph,
-  defineNode,
-  param as parameter,
-} from "../src";
+import { defineGraph, defineNode, param as parameter } from "../src";
+import { createQueryBuilder } from "../src/query";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlString as sqlToString } from "./sql-test-utils";
 
@@ -27,7 +23,7 @@ const User = defineNode("User", {
 });
 
 const MOCK_BACKEND_CAPABILITIES = {
-  transactions: true,
+  execution: { interactiveTransactions: true, atomicBatch: "none" },
   windowFunctions: true,
 } as const;
 
@@ -662,7 +658,7 @@ describe("UnionableQuery complex scenarios", () => {
     const combined = q1.union(q2);
 
     await expect(combined.execute()).rejects.toThrow(
-      "Query contains param() references",
+      "Combined queries do not support param() references; bind concrete values before combining queries.",
     );
     expect(mockBackend.execute).not.toHaveBeenCalled();
   });

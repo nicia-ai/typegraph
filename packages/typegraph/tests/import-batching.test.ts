@@ -16,12 +16,17 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
   searchable,
 } from "../src";
+import {
+  deriveBackend,
+  type ExactBackendOverlay,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import {
@@ -42,6 +47,7 @@ const Note = defineNode("Note", {
 });
 
 const knows = defineEdge("knows");
+const exclusive = defineEdge("exclusive");
 
 function buildGraph() {
   return defineGraph({
@@ -60,7 +66,15 @@ function buildGraph() {
       },
       Note: { type: Note },
     },
-    edges: { knows: { type: knows, from: [Person], to: [Person] } },
+    edges: {
+      knows: { type: knows, from: [Person], to: [Person] },
+      exclusive: {
+        type: exclusive,
+        from: [Person],
+        to: [Person],
+        cardinality: "one",
+      },
+    },
   });
 }
 
@@ -123,6 +137,9 @@ const COUNTED_METHODS = [
   "insertUniqueBatch",
   "upsertFulltext",
   "upsertFulltextBatch",
+  "countEdgesFrom",
+  "edgeExistsBetween",
+  "findEdgesByHeterogeneousEndpointSet",
 ] as const;
 
 function withCallCounts(backend: GraphBackend): {
@@ -135,24 +152,29 @@ function withCallCounts(backend: GraphBackend): {
   function wrapMethods<T extends GraphBackend | TransactionBackend>(
     target: T,
   ): T {
-    const wrapped = { ...target } as Record<string, unknown>;
+    // Built from a name list rather than written as a literal, so the overlay
+    // carries an assertion: `ExactBackendOverlay<T, Partial<T>>` reduces to
+    // `Partial<T>` only once `T` is resolved, and the checker cannot verify
+    // that against an unresolved type parameter.
+    const overrides: Record<string, unknown> = {};
     for (const name of COUNTED_METHODS) {
       const original = (target as Record<string, unknown>)[name];
       if (typeof original !== "function") continue;
-      wrapped[name] = (...args: unknown[]) => {
+      overrides[name] = (...args: unknown[]) => {
         counts[name] = (counts[name] ?? 0) + 1;
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
-    return wrapped as T;
+    return deriveBackend<T, Partial<T>>(
+      target,
+      overrides as ExactBackendOverlay<T, Partial<T>>,
+    );
   }
 
-  const outer = wrapMethods(backend);
-  const counted: GraphBackend = {
-    ...outer,
+  const counted: GraphBackend = deriveBackend(wrapMethods(backend), {
     transaction: (fn, options) =>
       backend.transaction((target) => fn(wrapMethods(target)), options),
-  };
+  });
   return { backend: counted, counts };
 }
 
@@ -173,6 +195,35 @@ async function withCountedStore<T>(
   } finally {
     await raw.close();
   }
+}
+
+function withHeterogeneousReadRefusal(
+  backend: GraphBackend,
+  errorCode: string,
+): { backend: GraphBackend; calls: () => number } {
+  let calls = 0;
+  function refusal(): never {
+    calls += 1;
+    throw new ConfigurationError("synthetic heterogeneous read refusal", {
+      code: errorCode,
+    });
+  }
+  function wrapTransaction(target: TransactionBackend): TransactionBackend {
+    return deriveBackend(target, {
+      findEdgesByHeterogeneousEndpointSet: refusal,
+    } satisfies ExactBackendOverlay<
+      TransactionBackend,
+      Partial<TransactionBackend>
+    >);
+  }
+  return {
+    backend: deriveBackend(backend, {
+      findEdgesByHeterogeneousEndpointSet: refusal,
+      transaction: (run, options) =>
+        backend.transaction((target) => run(wrapTransaction(target)), options),
+    } satisfies ExactBackendOverlay<GraphBackend, Partial<GraphBackend>>),
+    calls: () => calls,
+  };
 }
 
 const NODE_COUNT = 50;
@@ -274,6 +325,102 @@ describe("importGraph batching", () => {
       expect(counts["insertEdge"]).toBe(0);
       expect(counts["insertEdgesBatch"]).toBe(1);
     });
+  });
+
+  it("prefetches cardinality axes with one set-oriented read", async () => {
+    await withCountedStore(async (store, counts) => {
+      const result = await importGraph(
+        store,
+        payload(
+          Array.from({ length: NODE_COUNT }, (_, index) => personNode(index)),
+          Array.from({ length: NODE_COUNT }, (_, index) => ({
+            kind: "exclusive",
+            id: `exclusive-${index}`,
+            from: { kind: "Person", id: "p-0" },
+            to: { kind: "Person", id: `p-${index + 1}` },
+            properties: {},
+          })),
+        ),
+        importOptions(),
+      );
+
+      expect(result.edges.created).toBe(1);
+      expect(result.edges.updated).toBe(0);
+      expect(result.errors).toHaveLength(NODE_COUNT - 1);
+      // The first row's axis is checked from the prefetched set. Later rows
+      // are rejected by the pending overlay, so no per-row count query runs.
+      expect(counts["findEdgesByHeterogeneousEndpointSet"]).toBe(1);
+      expect(counts["countEdgesFrom"]).toBe(0);
+    });
+  });
+
+  it("falls back to singleton cardinality probes on bind-budget refusal", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const refused = withHeterogeneousReadRefusal(
+        raw,
+        "EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED",
+      );
+      const [store] = await createStoreWithSchema(
+        buildGraph(),
+        refused.backend,
+      );
+      const result = await importGraph(
+        store,
+        payload(
+          [personNode(0), personNode(1)],
+          [
+            {
+              kind: "exclusive",
+              id: "exclusive-refusal-0",
+              from: { kind: "Person", id: "p-0" },
+              to: { kind: "Person", id: "p-1" },
+              properties: {},
+            },
+          ],
+        ),
+        importOptions(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.edges.created).toBe(1);
+      expect(refused.calls()).toBe(1);
+    } finally {
+      await raw.close();
+    }
+  });
+
+  it("does not hide unrelated heterogeneous read failures", async () => {
+    const { backend: raw } = createLocalSqliteBackend();
+    try {
+      const refused = withHeterogeneousReadRefusal(raw, "UNRELATED_FAILURE");
+      const [store] = await createStoreWithSchema(
+        buildGraph(),
+        refused.backend,
+      );
+
+      await expect(
+        importGraph(
+          store,
+          payload(
+            [personNode(0), personNode(1)],
+            [
+              {
+                kind: "exclusive",
+                id: "exclusive-unrelated-failure",
+                from: { kind: "Person", id: "p-0" },
+                to: { kind: "Person", id: "p-1" },
+                properties: {},
+              },
+            ],
+          ),
+          importOptions(),
+        ),
+      ).rejects.toThrow("synthetic heterogeneous read refusal");
+      expect(refused.calls()).toBe(1);
+    } finally {
+      await raw.close();
+    }
   });
 
   it("syncs searchable imports through the fulltext batch", async () => {
@@ -557,6 +704,75 @@ describe("importGraph batching semantics (must not drift)", () => {
       errors: [{ id: "p-c", matchesConstraint: true }],
       emailA: "target@example.com",
       personCExists: false,
+    });
+    expect(batched).toEqual(sequential);
+  });
+
+  it("in-slice create reserving a unique value makes a later update to it a per-row error, not an import abort", async () => {
+    // p-c (new) claims "target@example.com" earlier in the slice than
+    // p-a's (existing) update onto that same value. The sequential
+    // (one-record-per-slice) path commits p-c's reservation before p-a's
+    // update runs, so the update collides with an already-persisted row and
+    // reports a per-row uniqueness error. The batched slice must see that
+    // same in-slice reservation — an unflushed create has no row yet — or
+    // the update's uniqueness check reads the real backend, wrongly
+    // succeeds, and then the deferred create flush collides with it at
+    // `insertUniqueBatch`, throwing and rolling back the whole import.
+    const outcomes = new Map<number, unknown>();
+    for (const batchSize of [1, 100]) {
+      const outcome = await withCountedStore(async (store) => {
+        await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a", email: "a-orig@example.com" },
+            },
+          ]),
+          importOptions(),
+        );
+        const result = await importGraph(
+          store,
+          payload([
+            {
+              kind: "Person",
+              id: "p-c",
+              properties: { name: "c", email: "target@example.com" },
+            },
+            {
+              kind: "Person",
+              id: "p-a",
+              properties: { name: "a2", email: "target@example.com" },
+            },
+          ]),
+          importOptions({ onConflict: "update", batchSize }),
+        );
+        const personA = await store.nodes.Person.getById("p-a" as never);
+        const personC = await store.nodes.Person.getById("p-c" as never);
+        return {
+          created: result.nodes.created,
+          updated: result.nodes.updated,
+          errors: result.errors.map((entry) => ({
+            id: entry.id,
+            matchesConstraint: entry.error.includes("person_email"),
+          })),
+          emailA: personA?.email,
+          emailC: personC?.email,
+        };
+      });
+      outcomes.set(batchSize, outcome);
+    }
+
+    const sequential = outcomes.get(1);
+    const batched = outcomes.get(100);
+
+    expect(sequential).toEqual({
+      created: 1,
+      updated: 0,
+      errors: [{ id: "p-a", matchesConstraint: true }],
+      emailA: "a-orig@example.com",
+      emailC: "target@example.com",
     });
     expect(batched).toEqual(sequential);
   });

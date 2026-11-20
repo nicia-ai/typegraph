@@ -18,21 +18,34 @@ import {
   type SQLiteTableWithColumns,
 } from "drizzle-orm/sqlite-core";
 
+import { systemIndexName } from "../../indexes/system";
 import {
   fts5Strategy,
   type FulltextStrategy,
   tsvectorStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
+  graphRelationDeclaration,
+  type GraphRelationKey,
+  isGraphRelationKey,
+} from "../graph-relations";
+import {
+  RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT,
+  RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS,
+  RECORDED_ANCHOR_RETENTION_COLUMN,
+} from "../recorded-storage";
+import {
   BASE_CONTRIBUTION_OWNER,
   type StrategyTableContribution,
   type TableContribution,
 } from "../table-contribution";
+import { CURRENT_BASE_SCHEMA_VERSION } from "./base-schema";
 import {
   type PostgresTables,
   tables as postgresTables,
 } from "./schema/postgres";
 import { type SqliteTables, tables as sqliteTables } from "./schema/sqlite";
+import type { SqliteColumnAdoptionPlan } from "./sqlite-column-adoption";
 
 // Narrow interfaces for Drizzle column internals not exposed in public types.
 // These are accessed only in DDL generation for migration scripts.
@@ -42,6 +55,139 @@ type TimestampColumnConfig = Readonly<{
 type CustomColumnType = Readonly<{
   getSQLType?: () => string;
 }>;
+
+const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
+const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
+
+export function quoteDdlIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+type BaseSchemaVersionMarkerTable = Readonly<{
+  installation: Readonly<{ name: string }>;
+  updatedAt: Readonly<{ name: string }>;
+  version: Readonly<{ name: string }>;
+}>;
+
+/** Publishes the lifecycle version owned by a complete fresh installation. */
+function generateBaseSchemaVersionMarkerSQL(
+  tableName: string,
+  columns: BaseSchemaVersionMarkerTable,
+): string {
+  const table = quoteDdlIdentifier(tableName);
+  const installation = quoteDdlIdentifier(columns.installation.name);
+  const version = quoteDdlIdentifier(columns.version.name);
+  const updatedAt = quoteDdlIdentifier(columns.updatedAt.name);
+  // DO NOTHING is deliberate: this generator is a fresh-installation tool,
+  // not an upgrade planner. Replaying it must never advance a stale marker
+  // without running the numbered adoption steps that marker certifies.
+  return `INSERT INTO ${table} (${installation}, ${version}, ${updatedAt})
+VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION)}, CURRENT_TIMESTAMP)
+ON CONFLICT (${installation}) DO NOTHING;`;
+}
+
+/** Current marker statement shared by fresh installation and working copies. */
+export function generatePostgresBaseSchemaMarkerSQL(
+  tables: PostgresTables,
+): string {
+  return generateBaseSchemaVersionMarkerSQL(
+    getPgTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
+  );
+}
+
+/** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
+export function postgresIdentifierRegclassName(identifier: string): string {
+  return quoteDdlIdentifier(identifier);
+}
+
+/** Names shared by schema DDL and the additive bootstrap upgrade. */
+export function edgeMatchIdentityUniqueIndexName(tableName: string): string {
+  return systemIndexName(tableName, "match_identity_uq");
+}
+
+export function edgeMatchIdentityPairCheckName(tableName: string): string {
+  return systemIndexName(tableName, "match_identity_pair_check");
+}
+
+/** Generates idempotent PostgreSQL DDL for adopting an existing edge table. */
+export function generatePostgresEdgeMatchIdentityUpgradeDDL(
+  tableName: string,
+): readonly string[] {
+  const table = quoteDdlIdentifier(tableName);
+  const nameColumn = quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN);
+  const keyColumn = quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN);
+  const checkName = edgeMatchIdentityPairCheckName(tableName);
+  const indexName = edgeMatchIdentityUniqueIndexName(tableName);
+  const escapedTableName = postgresIdentifierRegclassName(tableName).replaceAll(
+    "'",
+    "''",
+  );
+  return [
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${nameColumn} TEXT;`,
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${keyColumn} TEXT;`,
+    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('${escapedTableName}') AND conname = '${checkName.replaceAll("'", "''")}') THEN ALTER TABLE ${table} ADD CONSTRAINT ${quoteDdlIdentifier(checkName)} CHECK ((${nameColumn} IS NULL) = (${keyColumn} IS NULL)); END IF; END $$;`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(indexName)} ON ${table} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${nameColumn}, ${keyColumn});`,
+  ];
+}
+
+/**
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`; the adapter checks PRAGMA
+ * table_info before running this statement. The pair check is placed on the
+ * second added column so old edge tables receive the invariant without a
+ * destructive table rebuild.
+ */
+function generateSqliteEdgeMatchIdentityColumnDDL(
+  tableName: string,
+  column: "match_identity_name" | "match_identity_key",
+  withPairCheck = false,
+): string {
+  const pairCheck =
+    withPairCheck ?
+      ` CHECK ((${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)} IS NULL) = (${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)} IS NULL))`
+    : "";
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
+}
+
+function generateSqliteEdgeMatchIdentityIndexDDL(tableName: string): string {
+  return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
+}
+
+/**
+ * Plans the focused SQLite v1 adoption from one authoritative column
+ * inventory. Factories and backend lifecycle hooks share this owner so a
+ * bootstrap retry cannot drift from privileged adoption.
+ */
+function planSqliteEdgeMatchIdentityAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  // A real SQLite table always has at least one column; an empty PRAGMA result
+  // means the edge table does not exist and current generated DDL will create it.
+  if (existingColumns.size === 0) return [];
+  const nameMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_NAME_COLUMN);
+  const keyMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_KEY_COLUMN);
+  const columnStatements = [
+    nameMissing ?
+      generateSqliteEdgeMatchIdentityColumnDDL(
+        tableName,
+        EDGE_MATCH_IDENTITY_NAME_COLUMN,
+        !keyMissing,
+      )
+    : undefined,
+    keyMissing ?
+      generateSqliteEdgeMatchIdentityColumnDDL(
+        tableName,
+        EDGE_MATCH_IDENTITY_KEY_COLUMN,
+        true,
+      )
+    : undefined,
+  ].filter((statement): statement is string => statement !== undefined);
+  return [
+    ...columnStatements,
+    generateSqliteEdgeMatchIdentityIndexDDL(tableName),
+  ];
+}
 
 // ============================================================
 // SQLite DDL Generation
@@ -117,7 +263,31 @@ export function generateSqliteCreateTableSQL(
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
 
+  columnDefs.push(...renderTableChecks(config.checks, config.name));
+
   return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
+}
+
+/**
+ * Renders a Drizzle table's CHECK constraints as CREATE TABLE clauses.
+ *
+ * A CHECK is a correctness barrier, not a hint: the identity separation
+ * relation relies on one to abort a contradictory transaction. Dropping it
+ * from the emitted DDL would leave the barrier declared in the Drizzle schema
+ * and absent from every runtime-provisioned database, so an unrenderable
+ * expression throws rather than degrading to a table without it.
+ */
+function renderTableChecks(
+  checks: readonly Readonly<{ name: string; value: unknown }>[],
+  tableName: string,
+): readonly string[] {
+  return checks.map(
+    (check) =>
+      `CONSTRAINT ${quoteDdlIdentifier(check.name)} CHECK (${inlineSqlOrThrow(
+        check.value,
+        `table "${tableName}" CHECK constraint "${check.name}"`,
+      )})`,
+  );
 }
 
 /**
@@ -125,7 +295,7 @@ export function generateSqliteCreateTableSQL(
  */
 function renderIndexColumn(col: unknown): string {
   if (col && typeof col === "object" && "name" in col) {
-    return `"${(col as { name: string }).name}"`;
+    return quoteDdlIdentifier((col as { name: string }).name);
   }
 
   const sql = tryInlineSql(col);
@@ -158,7 +328,7 @@ function flattenSqlChunk(chunk: unknown): string {
     // a column's `.getSQL()` wraps the column back inside a SQL object
     // that points to itself, which would recurse infinitely.
     if ("name" in chunk && typeof chunk.name === "string") {
-      return `"${(chunk as { name: string }).name}"`;
+      return quoteDdlIdentifier((chunk as { name: string }).name);
     }
 
     // Drizzle's StringChunk stores its literal as `.value`, usually as a
@@ -209,7 +379,7 @@ function inlineSqlOrThrow(value: unknown, context: string): string {
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle SQLite table definition.
  */
-function generateSqliteCreateIndexSQL(
+export function generateSqliteCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: SQLiteTableWithColumns<any>,
 ): string[] {
@@ -256,9 +426,10 @@ function isSqliteTable(
  * walking base tables.
  */
 export function runtimeStrategyContributions(
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | false,
   fulltextTableName: string,
 ): readonly StrategyTableContribution[] {
+  if (fulltextStrategy === false) return [];
   return fulltextStrategy
     .ownedTables(fulltextTableName)
     .filter((contribution) => contribution.runtimeEnsure);
@@ -272,7 +443,7 @@ export function runtimeStrategyContributions(
  */
 export function sqliteContributions(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): readonly TableContribution[] {
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
@@ -292,11 +463,14 @@ export function sqliteContributions(
     });
   }
   // Strategy declarations are already authoritative contributions;
-  // emitted last (after base tables).
-  for (const declared of fulltextStrategy.ownedTables(
-    tables.fulltextTableName,
-  )) {
-    contributions.push(declared);
+  // emitted last (after base tables). `false` (`fulltext: false`)
+  // contributes no fulltext table at all.
+  if (fulltextStrategy !== false) {
+    for (const declared of fulltextStrategy.ownedTables(
+      tables.fulltextTableName,
+    )) {
+      contributions.push(declared);
+    }
   }
   return contributions;
 }
@@ -307,11 +481,13 @@ export function sqliteContributions(
  * Iterates the unified contribution set (#129) — base tables first,
  * then strategy-owned tables. Per-contribution ordering is
  * table-then-its-own-indexes; safe because TypeGraph's tables carry no
- * cross-table foreign keys.
+ * cross-table foreign keys. This low-level array deliberately omits the
+ * deployment-wide version marker; use generateSqliteMigrationSQL for a
+ * complete fresh installation.
  */
 export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): string[] {
   return sqliteContributions(tables, fulltextStrategy).flatMap(
     (contribution) => [...contribution.createDdl],
@@ -319,14 +495,19 @@ export function generateSqliteDDL(
 }
 
 /**
- * Generates a single SQL string for SQLite migrations.
- * Convenience function that joins all DDL statements.
+ * Generates complete SQLite installation DDL for a fresh database.
+ * This is not an incremental upgrade planner.
  */
 export function generateSqliteMigrationSQL(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): string {
-  return generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
+  const ddlSql = generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
+  const markerSql = generateBaseSchemaVersionMarkerSQL(
+    getSqliteTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
+  );
+  return `${ddlSql}\n\n${markerSql}`;
 }
 
 // ============================================================
@@ -343,6 +524,10 @@ function getPgColumnType(column: PgColumn): string {
     }
     case "PgInteger": {
       return "INTEGER";
+    }
+    case "PgBigInt53":
+    case "PgBigInt64": {
+      return "BIGINT";
     }
     case "PgBoolean": {
       return "BOOLEAN";
@@ -395,7 +580,10 @@ export function generatePgCreateTableSQL(
 
   // Generate column definitions
   for (const column of config.columns) {
-    const parts: string[] = [`"${column.name}"`, getPgColumnType(column)];
+    const parts: string[] = [
+      quoteDdlIdentifier(column.name),
+      getPgColumnType(column),
+    ];
 
     if (column.notNull) {
       parts.push("NOT NULL");
@@ -411,17 +599,21 @@ export function generatePgCreateTableSQL(
   // Add primary key constraint
   const pk = config.primaryKeys[0];
   if (pk) {
-    const pkColumns = pk.columns.map((c) => `"${c.name}"`).join(", ");
+    const pkColumns = pk.columns
+      .map((column) => quoteDdlIdentifier(column.name))
+      .join(", ");
     columnDefs.push(`PRIMARY KEY (${pkColumns})`);
   }
 
-  return `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${columnDefs.join(",\n  ")}\n);`;
+  columnDefs.push(...renderTableChecks(config.checks, config.name));
+
+  return `CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(config.name)} (\n  ${columnDefs.join(",\n  ")}\n);`;
 }
 
 /**
  * Generates CREATE INDEX SQL statements from a Drizzle PostgreSQL table definition.
  */
-function generatePgCreateIndexSQL(
+export function generatePgCreateIndexSQL(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   table: PgTableWithColumns<any>,
 ): string[] {
@@ -430,6 +622,11 @@ function generatePgCreateIndexSQL(
 
   for (const index of config.indexes) {
     const indexConfig = index.config;
+    if (indexConfig.name === undefined) {
+      throw new Error(
+        `PostgreSQL index on ${quoteDdlIdentifier(config.name)} needs a name for generated DDL.`,
+      );
+    }
     const columns = indexConfig.columns
       .map((c) => renderIndexColumn(c))
       .join(", ");
@@ -444,7 +641,7 @@ function generatePgCreateIndexSQL(
       : "";
 
     statements.push(
-      `CREATE ${unique}INDEX IF NOT EXISTS "${indexConfig.name}" ON "${config.name}"${method} (${columns})${where};`,
+      `CREATE ${unique}INDEX IF NOT EXISTS ${quoteDdlIdentifier(indexConfig.name)} ON ${quoteDdlIdentifier(config.name)}${method} (${columns})${where};`,
     );
   }
 
@@ -460,6 +657,41 @@ function isPgTable(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): value is PgTableWithColumns<any> {
   return is(value, PgTable);
+}
+
+/**
+ * The clone decision for the deployment-shared relations that carry no
+ * `graph_id`. Every graph-scoped relation's decision is declared once, with
+ * the rest of what a graph-scoped relation means, in `../graph-relations`.
+ */
+const POSTGRES_DEPLOYMENT_CLONE_POLICIES = {
+  fences: { kind: "freshSeed" },
+  baseSchemaVersions: { kind: "freshSeed" },
+  graphTemplates: {
+    kind: "graphDocument",
+    documentColumn: "schema_doc",
+    graphIdKey: "graphId",
+  },
+} as const satisfies Record<
+  Exclude<keyof PostgresTables, GraphRelationKey | "fulltextTableName">,
+  NonNullable<TableContribution["workingCopyClonePolicy"]>
+>;
+
+function isPostgresDeploymentContributionName(
+  name: string,
+): name is keyof typeof POSTGRES_DEPLOYMENT_CLONE_POLICIES {
+  return Object.hasOwn(POSTGRES_DEPLOYMENT_CLONE_POLICIES, name);
+}
+
+function postgresBaseClonePolicy(
+  name: string,
+): NonNullable<TableContribution["workingCopyClonePolicy"]> | undefined {
+  if (isGraphRelationKey(name)) {
+    return graphRelationDeclaration(name).workingCopyClonePolicy;
+  }
+  return isPostgresDeploymentContributionName(name) ?
+      POSTGRES_DEPLOYMENT_CLONE_POLICIES[name]
+    : undefined;
 }
 
 /**
@@ -479,7 +711,7 @@ function isPgTable(
  */
 export function postgresContributions(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): readonly TableContribution[] {
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
@@ -488,6 +720,12 @@ export function postgresContributions(
     // can't reproduce its generated tsvector column); the strategy
     // declaration below is the authoritative fulltext contribution.
     if (table === tables.fulltext) continue;
+    const workingCopyClonePolicy = postgresBaseClonePolicy(key);
+    if (workingCopyClonePolicy === undefined) {
+      throw new Error(
+        `PostgreSQL table ${key} lacks a working-copy clone policy.`,
+      );
+    }
     // Stable factory key (`nodes`, `edges`, …) is the logicalName so
     // the #135 materialization identity survives custom table-name
     // overrides; the resolved SQL name is only the physical tableName.
@@ -500,12 +738,16 @@ export function postgresContributions(
         ...generatePgCreateIndexSQL(table),
       ],
       runtimeEnsure: false,
+      workingCopyClonePolicy,
     });
   }
-  for (const declared of fulltextStrategy.ownedTables(
-    tables.fulltextTableName,
-  )) {
-    contributions.push(declared);
+  // `false` (`fulltext: false`) contributes no fulltext table at all.
+  if (fulltextStrategy !== false) {
+    for (const declared of fulltextStrategy.ownedTables(
+      tables.fulltextTableName,
+    )) {
+      contributions.push(declared);
+    }
   }
   return contributions;
 }
@@ -516,11 +758,13 @@ export function postgresContributions(
  * Iterates the unified contribution set (#129) — base tables first,
  * then strategy-owned tables. Per-contribution ordering is
  * table-then-its-own-indexes; safe because TypeGraph's tables carry no
- * cross-table foreign keys.
+ * cross-table foreign keys. This low-level array deliberately omits the
+ * deployment-wide version marker; use generatePostgresMigrationSQL for a
+ * complete fresh installation.
  */
 export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string[] {
   return postgresContributions(tables, fulltextStrategy).flatMap(
     (contribution) => [...contribution.createDdl],
@@ -528,8 +772,50 @@ export function generatePostgresDDL(
 }
 
 /**
- * Generates a single SQL string for PostgreSQL migrations.
- * Convenience function that joins all DDL statements.
+ * Drops the same base and fulltext tables that {@link generatePostgresDDL}
+ * creates. PostgreSQL removes their indexes with the tables. The statement
+ * deliberately omits CASCADE so an application-owned dependent object cannot
+ * be removed silently. Runtime vector tables are graph-scoped contributions
+ * and are not part of a fresh-installation table set.
+ */
+export function generatePostgresDropSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
+): string {
+  const tableNames = [
+    ...new Set(
+      postgresContributions(tables, fulltextStrategy).map(
+        (contribution) => contribution.tableName,
+      ),
+    ),
+  ];
+  return `DROP TABLE IF EXISTS ${tableNames
+    .toReversed()
+    .map((tableName) => quoteDdlIdentifier(tableName))
+    .join(", ")};`;
+}
+
+/** Builds complete PostgreSQL installation SQL for a bundled factory profile. */
+function generatePostgresInstallationSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
+  includeVectorExtension: boolean,
+): string {
+  // pgvector extension is required for the per-field embedding tables
+  const extensionSql =
+    includeVectorExtension ?
+      "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;"
+    : undefined;
+  const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
+  const markerSql = generatePostgresBaseSchemaMarkerSQL(tables);
+  return [extensionSql, ddlSql, markerSql]
+    .filter((statement) => statement !== undefined)
+    .join("\n\n");
+}
+
+/**
+ * Generates complete PostgreSQL installation DDL for a fresh database.
+ * This is not an incremental upgrade planner.
  *
  * Includes CREATE EXTENSION for pgvector since the per-`(kind, field)`
  * embedding tables `pgvectorStrategy` materializes at runtime use the
@@ -537,11 +823,81 @@ export function generatePostgresDDL(
  */
 export function generatePostgresMigrationSQL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string {
-  // pgvector extension is required for the per-field embedding tables
-  const extensionSql =
-    "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
-  const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
-  return `${extensionSql}\n\n${ddlSql}`;
+  return generatePostgresInstallationSQL(tables, fulltextStrategy, true);
+}
+
+/** @internal Complete installation SQL for the vector-disabled PGlite factory. */
+export function generateVectorlessPostgresMigrationSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
+): string {
+  return generatePostgresInstallationSQL(tables, fulltextStrategy, false);
+}
+
+/** Version-9 nullable retention watermark on the existing owned clock row. */
+function recordedAnchorRetentionColumnDDL(
+  tableName: string,
+  ifNotExists = false,
+): string {
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${ifNotExists ? "IF NOT EXISTS " : ""}${quoteDdlIdentifier(RECORDED_ANCHOR_RETENTION_COLUMN)} TEXT;`;
+}
+
+/** Shared by synchronous managed SQLite bootstrap and asynchronous adoption. */
+function planRecordedAnchorRetentionAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  return (
+      existingColumns.size === 0 ||
+        existingColumns.has(RECORDED_ANCHOR_RETENTION_COLUMN)
+    ) ?
+      []
+    : [recordedAnchorRetentionColumnDDL(tableName)];
+}
+
+/** Queue the additive ALTER briefly, preserving any stricter caller timeout. */
+export function postgresRecordedAnchorRetentionAdoptionDDL(
+  tableName: string,
+): string {
+  const timeout = `${RECORDED_ANCHOR_ADOPTION_WAIT_BUDGET_MS}ms`;
+  const body = `DECLARE previous_timeout TEXT := current_setting('lock_timeout'); wait_budget_ms NUMERIC; BEGIN
+    IF previous_timeout::interval = INTERVAL '0' OR previous_timeout::interval > '${timeout}'::interval THEN
+      PERFORM set_config('lock_timeout', '${timeout}', true);
+    END IF;
+    wait_budget_ms := EXTRACT(EPOCH FROM current_setting('lock_timeout')::interval) * 1000;
+    BEGIN
+      ${recordedAnchorRetentionColumnDDL(tableName, true)}
+    EXCEPTION WHEN lock_not_available THEN
+      RAISE USING ERRCODE = SQLSTATE, MESSAGE = SQLERRM,
+        DETAIL = json_build_object('waitBudgetMs', wait_budget_ms)::TEXT,
+        HINT = '${RECORDED_ANCHOR_ADOPTION_TIMEOUT_HINT}';
+    END;
+    PERFORM set_config('lock_timeout', previous_timeout, true);
+  END`;
+  return `DO E'${body.replaceAll("\\", "\\\\").replaceAll("'", "''")}';`;
+}
+
+export function edgeMatchIdentityColumnAdoption(
+  tableName: string,
+): SqliteColumnAdoptionPlan {
+  return {
+    addedColumns: [
+      EDGE_MATCH_IDENTITY_NAME_COLUMN,
+      EDGE_MATCH_IDENTITY_KEY_COLUMN,
+    ],
+    statements: (columns) =>
+      planSqliteEdgeMatchIdentityAdoption(tableName, columns),
+  };
+}
+
+export function recordedAnchorRetentionColumnAdoption(
+  tableName: string,
+): SqliteColumnAdoptionPlan {
+  return {
+    addedColumns: [RECORDED_ANCHOR_RETENTION_COLUMN],
+    statements: (columns) =>
+      planRecordedAnchorRetentionAdoption(tableName, columns),
+  };
 }

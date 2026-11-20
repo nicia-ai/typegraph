@@ -8,6 +8,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   GraphAlgorithmConvergenceError,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import {
   compileKindFilter,
@@ -19,7 +20,11 @@ import {
 } from "../../query/compiler/temporal";
 import { type DialectAdapter } from "../../query/dialect/types";
 import { jsonPointer } from "../../query/json-pointer";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
+import {
+  countSqlParameters,
+  sql,
+  type SqlFragment,
+} from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledTemporaryStatementSql,
@@ -27,6 +32,12 @@ import {
 import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { generateId } from "../../utils/id";
 import { isPresent } from "../../utils/presence";
+import {
+  type PostgresReadWriteRefusedSqlState,
+  postgresReadWriteRefusedSqlState,
+  type PostgresTemporaryTableUnavailableSqlState,
+  postgresTemporaryTableUnavailableSqlState,
+} from "../../utils/sql-errors";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
 import type { PathNode, TraversalDirection } from "./types";
@@ -100,6 +111,11 @@ export function frontierIndexIdentifier(
 
 type WorkingTableCountRow = Readonly<{ count: number | string }>;
 
+type WorkingTableNodeSeedColumn = Readonly<{
+  name: string;
+  value: SqlFragment;
+}>;
+
 /** Counts this run's working-table rows; drivers may deliver bigint text. */
 export async function countWorkingTableRows(
   context: IterativeGraphRunContext,
@@ -114,27 +130,119 @@ export async function countWorkingTableRows(
   return Number(rows[0]?.count ?? 0);
 }
 
+/**
+ * Populates an iterative working table from the visible induced subgraph.
+ * Explicit node-kind scopes are deterministic and split against the exact
+ * statement budget; an omitted scope keeps the single full-graph statement.
+ */
+export async function seedWorkingTableFromNodes(
+  context: IterativeGraphRunContext,
+  nodeKinds: readonly string[] | undefined,
+  seedColumns: readonly WorkingTableNodeSeedColumn[],
+): Promise<void> {
+  if (nodeKinds?.length === 0) return;
+  const additionalColumns =
+    seedColumns.length === 0 ?
+      sql.empty()
+    : sql`, ${sql.join(
+        seedColumns.map((column) => sql.identifier(column.name)),
+        sql`, `,
+      )}`;
+  const additionalValues =
+    seedColumns.length === 0 ?
+      sql.empty()
+    : sql`, ${sql.join(
+        seedColumns.map((column) => column.value),
+        sql`, `,
+      )}`;
+  const compileSeedStatement = (nodeKindFilter: SqlFragment): SqlFragment => {
+    return sql`
+      INSERT INTO ${context.workingTable}
+        (graph_id, run_id, node_id, node_kind${additionalColumns})
+      SELECT ${context.graphId}, ${context.runId}, n.id, n.kind${additionalValues}
+      FROM ${context.operation.schema.nodesTable} n
+      WHERE n.graph_id = ${context.graphId}
+        AND ${nodeKindFilter}
+        AND ${context.operation.nodeTemporalFilter}
+    `;
+  };
+
+  const fixedStatement = compileSeedStatement(sql`TRUE`);
+  const parameterLimit =
+    context.operation.backend.capabilities.maxBindParameters ??
+    DEFAULT_MAX_BIND_PARAMETERS;
+  const fixedParameterCount = countSqlParameters(fixedStatement);
+  // The full-graph seed carries no kind binds and only has to fit; a scoped
+  // seed also needs room for at least one kind bind before it can be chunked.
+  const kindBindBudget = parameterLimit - fixedParameterCount;
+  if (kindBindBudget < (nodeKinds === undefined ? 0 : 1)) {
+    throw new ConfigurationError(
+      "An iterative graph operation cannot fit its node-kind initialization within the backend bind-parameter limit.",
+      { fixedParameterCount, parameterLimit },
+    );
+  }
+
+  if (nodeKinds === undefined) {
+    await context.executeTemporary(fixedStatement);
+    return;
+  }
+
+  const normalizedKinds = [...new Set(nodeKinds)].toSorted((left, right) =>
+    compareCodePoints(left, right),
+  );
+  for (const kindChunk of chunkValues(normalizedKinds, kindBindBudget)) {
+    await context.executeTemporary(
+      compileSeedStatement(compileKindFilter(sql.raw("n.kind"), kindChunk)),
+    );
+  }
+}
+
+/**
+ * How a plan builds its initial state. A plan whose initialization joins
+ * against the freshly populated working table splits it in two: `populate`
+ * fills the table and returns its row count, the runner then refreshes the
+ * table's statistics, and only then does `initialize` run the joining
+ * statements (PageRank's out-weights, label propagation's neighbor
+ * materialization). Without that boundary PostgreSQL plans those joins
+ * against its one-row guess for an un-analyzed temporary table. A plan whose
+ * initialization never joins the working table populates inside
+ * `initialize` and leaves the first refresh to the runner's post-initialize
+ * step.
+ */
+type IterativeGraphInitialization<State extends IterativeGraphState> =
+  | Readonly<{
+      populate: (context: IterativeGraphRunContext) => Promise<number>;
+      initialize: (
+        context: IterativeGraphRunContext,
+        populatedRowCount: number,
+      ) => Promise<State>;
+    }>
+  | Readonly<{
+      populate?: undefined;
+      initialize: (context: IterativeGraphRunContext) => Promise<State>;
+    }>;
+
 export type IterativeGraphPlan<
   State extends IterativeGraphState,
   Result,
-> = Readonly<{
-  algorithm: string;
-  maxIterations: number;
-  createWorkingTable: (context: IterativeGraphRunContext) => SqlFragment;
-  initialize: (context: IterativeGraphRunContext) => Promise<State>;
-  runRound: (
-    context: IterativeGraphRunContext,
-    state: State,
-    iteration: number,
-  ) => Promise<State>;
-  hasConverged: (state: State) => boolean;
-  extractResult: (
-    context: IterativeGraphRunContext,
-    state: State,
-  ) => Promise<Result>;
-  /** Drops any plan-owned temporary relations before the working table. */
-  cleanup?: (context: IterativeGraphRunContext) => Promise<void>;
-}>;
+> = IterativeGraphInitialization<State> &
+  Readonly<{
+    algorithm: string;
+    maxIterations: number;
+    createWorkingTable: (context: IterativeGraphRunContext) => SqlFragment;
+    runRound: (
+      context: IterativeGraphRunContext,
+      state: State,
+      iteration: number,
+    ) => Promise<State>;
+    hasConverged: (state: State) => boolean;
+    extractResult: (
+      context: IterativeGraphRunContext,
+      state: State,
+    ) => Promise<Result>;
+    /** Drops any plan-owned temporary relations before the working table. */
+    cleanup?: (context: IterativeGraphRunContext) => Promise<void>;
+  }>;
 
 type ExpansionRow = Readonly<{
   source_id: string;
@@ -235,7 +343,7 @@ export async function withInlineIterativeGraphOperation<T>(
   options: InternalTraversalOptions,
   run: (operation: IterativeGraphOperation) => Promise<T>,
 ): Promise<T> {
-  if (ctx.backend.capabilities.transactions) {
+  if (ctx.backend.capabilities.execution.interactiveTransactions) {
     return ctx.backend.transaction(
       async (backend) => run(createOperation(ctx, options, backend)),
       {
@@ -261,7 +369,7 @@ export async function runIterativeGraphOperation<
   options: InternalTraversalOptions,
   plan: IterativeGraphPlan<State, Result>,
 ): Promise<Result> {
-  if (!ctx.backend.capabilities.transactions) {
+  if (!ctx.backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "Temporary-table graph iteration requires a transactional backend.",
       { dialect: ctx.backend.dialect },
@@ -274,77 +382,171 @@ export async function runIterativeGraphOperation<
     temporaryWrites: INTERNAL_TEMPORARY_WRITES,
   } satisfies InternalTransactionOptions;
 
-  return ctx.backend.transaction(async (backend) => {
-    const temporaryBackend = requireTemporaryStatements(backend);
-    const runId = generateId();
-    const workingTable = sql.identifier(
-      `typegraph_iterative_${runId.replaceAll("-", "_")}`,
-    );
-    const context: IterativeGraphRunContext = {
-      operation: createOperation(ctx, options, temporaryBackend),
-      backend: temporaryBackend,
-      workingTable,
-      graphId: ctx.graphId,
-      runId,
-      executeTemporary: async (query) => {
-        await temporaryBackend.executeTemporaryStatement(
-          asCompiledTemporaryStatementSql(query),
-        );
-      },
-    };
+  // A standby refuses the read-write access mode in the `BEGIN` itself, so on
+  // a replica the working-table seam below never executes. A failure raised
+  // before the callback started is that refusal and nothing else.
+  const rounds = { started: false };
+  try {
+    return await ctx.backend.transaction(async (backend) => {
+      rounds.started = true;
+      return runWorkingTableRounds(ctx, options, plan, backend);
+    }, transactionOptions);
+  } catch (error) {
+    if (rounds.started || ctx.backend.dialect !== "postgres") throw error;
+    const sqlState = postgresReadWriteRefusedSqlState(error);
+    if (sqlState === undefined) throw error;
+    throw temporaryTableCapabilityError(ctx, plan.algorithm, sqlState, error);
+  }
+}
 
-    // Opt-in only: without an explicit workingMemory the rounds inherit
-    // the engine's configured setting. When requested, the override is
-    // transaction-scoped — `set_config(..., is_local => true)` reverts
-    // when this transaction ends, so the session/server setting is never
-    // touched. SQLite returns no statement here.
-    if (context.operation.workingMemory !== undefined) {
-      const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
-        context.operation.workingMemory,
+/**
+ * The typed failure for a PostgreSQL execution environment that refuses the
+ * transaction-local temporary tables its static `graphAnalytics` capability
+ * advertises — a replica, or a role without the database `TEMP` privilege.
+ */
+function temporaryTableCapabilityError(
+  ctx: AlgorithmContext,
+  algorithm: string,
+  sqlState:
+    | PostgresReadWriteRefusedSqlState
+    | PostgresTemporaryTableUnavailableSqlState,
+  cause: unknown,
+): UnsupportedBackendCapabilityError {
+  const error = new UnsupportedBackendCapabilityError(
+    algorithm,
+    "graphAnalytics",
+    {
+      dialect: ctx.backend.dialect,
+      supported: false,
+      requirement: "transaction-local temporary tables",
+      sqlState,
+    },
+    "Run graph analytics on a writable PostgreSQL primary with a role that has the TEMP privilege.",
+  );
+  // Match the non-enumerable Error.cause property created by the native
+  // Error constructor without widening the public capability-error API.
+  Object.defineProperty(error, "cause", {
+    configurable: true,
+    value: cause,
+    writable: true,
+  });
+  return error;
+}
+
+/** Runs the plan's rounds against a working table inside an open transaction. */
+async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
+  ctx: AlgorithmContext,
+  options: InternalTraversalOptions,
+  plan: IterativeGraphPlan<State, Result>,
+  backend: TransactionBackend,
+): Promise<Result> {
+  const temporaryBackend = requireTemporaryStatements(backend);
+  const runId = generateId();
+  const workingTable = sql.identifier(
+    `typegraph_iterative_${runId.replaceAll("-", "_")}`,
+  );
+  const context: IterativeGraphRunContext = {
+    operation: createOperation(ctx, options, temporaryBackend),
+    backend: temporaryBackend,
+    workingTable,
+    graphId: ctx.graphId,
+    runId,
+    executeTemporary: async (query) => {
+      await temporaryBackend.executeTemporaryStatement(
+        asCompiledTemporaryStatementSql(query),
       );
-      if (workingMemoryStatement !== undefined) {
-        await context.executeTemporary(workingMemoryStatement);
-      }
+    },
+  };
+
+  // Opt-in only: without an explicit workingMemory the rounds inherit
+  // the engine's configured setting. When requested, the override is
+  // transaction-scoped — `set_config(..., is_local => true)` reverts
+  // when this transaction ends, so the session/server setting is never
+  // touched. SQLite returns no statement here.
+  if (context.operation.workingMemory !== undefined) {
+    const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
+      context.operation.workingMemory,
+    );
+    if (workingMemoryStatement !== undefined) {
+      await context.executeTemporary(workingMemoryStatement);
     }
+  }
+  try {
     await context.executeTemporary(plan.createWorkingTable(context));
-    let operationFailure: CapturedFailure | undefined;
-    try {
-      let state = await plan.initialize(context);
-      let analyzedRowCount = await refreshWorkingTableStatistics(
-        context,
-        state.workingTableSize,
-      );
-      for (
-        let iteration = 1;
-        iteration <= plan.maxIterations && !plan.hasConverged(state);
-        iteration++
-      ) {
-        state = await plan.runRound(context, state, iteration);
-        // Statistics only pay off in a subsequent round: skip the refresh
-        // when the operation just converged or the iteration budget is
-        // spent — no further round will read the working table.
-        if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
-          analyzedRowCount = await refreshWorkingTableStatistics(
-            context,
-            state.workingTableSize,
-            analyzedRowCount,
-          );
-        }
-      }
-      if (!plan.hasConverged(state)) {
-        throw new GraphAlgorithmConvergenceError(
-          plan.algorithm,
-          plan.maxIterations,
+  } catch (error) {
+    const sqlState =
+      ctx.backend.dialect === "postgres" ?
+        postgresTemporaryTableUnavailableSqlState(error)
+      : undefined;
+    if (sqlState === undefined) throw error;
+    throw temporaryTableCapabilityError(ctx, plan.algorithm, sqlState, error);
+  }
+  let operationFailure: CapturedFailure | undefined;
+  try {
+    const initialized = await runInitialization(context, plan);
+    let state = initialized.state;
+    let analyzedRowCount = await refreshWorkingTableStatistics(
+      context,
+      state.workingTableSize,
+      initialized.analyzedRowCount,
+    );
+    for (
+      let iteration = 1;
+      iteration <= plan.maxIterations && !plan.hasConverged(state);
+      iteration++
+    ) {
+      state = await plan.runRound(context, state, iteration);
+      // Statistics only pay off in a subsequent round: skip the refresh
+      // when the operation just converged or the iteration budget is
+      // spent — no further round will read the working table.
+      if (iteration < plan.maxIterations && !plan.hasConverged(state)) {
+        analyzedRowCount = await refreshWorkingTableStatistics(
+          context,
+          state.workingTableSize,
+          analyzedRowCount,
         );
       }
-      return await plan.extractResult(context, state);
-    } catch (error) {
-      operationFailure = { error };
-      throw error;
-    } finally {
-      await cleanupWorkingTables(context, plan.cleanup, operationFailure);
     }
-  }, transactionOptions);
+    if (!plan.hasConverged(state)) {
+      throw new GraphAlgorithmConvergenceError(
+        plan.algorithm,
+        plan.maxIterations,
+      );
+    }
+    return await plan.extractResult(context, state);
+  } catch (error) {
+    operationFailure = { error };
+    throw error;
+  } finally {
+    await cleanupWorkingTables(context, plan.cleanup, operationFailure);
+  }
+}
+
+/**
+ * Runs the plan's initialization. A plan with a population phase gets its
+ * working table's statistics refreshed between `populate` and `initialize`,
+ * through the same gated refresh the rounds use, so no statement that joins
+ * the populated table is planned without them.
+ */
+async function runInitialization<State extends IterativeGraphState>(
+  context: IterativeGraphRunContext,
+  initialization: IterativeGraphInitialization<State>,
+): Promise<Readonly<{ state: State; analyzedRowCount: number | undefined }>> {
+  if (initialization.populate === undefined) {
+    return {
+      state: await initialization.initialize(context),
+      analyzedRowCount: undefined,
+    };
+  }
+  const populatedRowCount = await initialization.populate(context);
+  const analyzedRowCount = await refreshWorkingTableStatistics(
+    context,
+    populatedRowCount,
+  );
+  return {
+    state: await initialization.initialize(context, populatedRowCount),
+    analyzedRowCount,
+  };
 }
 
 export function shouldRefreshWorkingTableStatistics(
@@ -486,16 +688,31 @@ export function nodeIdentityKey(node: PathNode): NodeIdentityKey {
 }
 
 /**
+ * Builds a node identity from a working-table row's nullable predecessor
+ * columns. Drivers deliver SQL NULL in varying shapes, so only a string
+ * pair counts as a real predecessor — the one owner of that predicate;
+ * {@link nodeIdentityKeyFromRow} delegates to it rather than re-spelling the
+ * same check.
+ */
+export function nodeIdentityFromRow(
+  id: unknown,
+  kind: unknown,
+): PathNode | undefined {
+  if (typeof id !== "string" || typeof kind !== "string") return undefined;
+  return { id, kind };
+}
+
+/**
  * Builds a node-identity key from a working-table row's nullable
- * predecessor columns. Drivers deliver SQL NULL in varying shapes, so only
- * a string pair counts as a real predecessor.
+ * predecessor columns. See {@link nodeIdentityFromRow} for the underlying
+ * string-pair predicate.
  */
 export function nodeIdentityKeyFromRow(
   id: unknown,
   kind: unknown,
 ): NodeIdentityKey | undefined {
-  if (typeof id !== "string" || typeof kind !== "string") return undefined;
-  return nodeIdentityKey({ id, kind });
+  const node = nodeIdentityFromRow(id, kind);
+  return node === undefined ? undefined : nodeIdentityKey(node);
 }
 
 export function compareNodeIdentity(left: PathNode, right: PathNode): number {
@@ -702,6 +919,7 @@ function createOperation(
     : { recordedAsOf: temporal.recordedAsOf }),
     tableAlias: "n",
     currentTimestamp,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const edgeTemporalFilter = compileTemporalFilter({
     mode: temporal.temporalMode,
@@ -711,6 +929,7 @@ function createOperation(
     : { recordedAsOf: temporal.recordedAsOf }),
     tableAlias: "e",
     currentTimestamp,
+    recordedReadBinding: ctx.recordedReadBinding,
   });
   const weightExpression =
     options.weightProperty === undefined ?
@@ -807,7 +1026,7 @@ function compileWeightExpression(
  */
 export function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
   return (
-    ctx.backend.capabilities.transactions &&
+    ctx.backend.capabilities.execution.interactiveTransactions &&
     ctx.backend.capabilities.graphAnalytics?.supported !== false &&
     ctx.backend.capabilities.returning !== false &&
     ctx.backend.executeTemporaryStatement !== undefined

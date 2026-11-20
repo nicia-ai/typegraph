@@ -8,7 +8,9 @@
  * createQueryBuilder factory function.
  */
 import { type GraphDef } from "../core/define-graph";
+import { ConfigurationError } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
+import { resolveDefaultAliasExpansion } from "./builder/alias-expansion";
 import {
   type CreateQueryBuilderOptions,
   type EmptyAliasMap,
@@ -23,12 +25,13 @@ import {
   type QueryBuilderInternalContext,
   registerQueryBuilderInternalContext,
 } from "./builder/internal-context";
-import { createSchemaIntrospector } from "./schema-introspector";
+import { schemaIntrospectorFor } from "./schema-introspector";
 
 // Re-export all classes
 export {
   ExecutableAggregateQuery,
   ExecutableQuery,
+  executeOneStatementBatch,
   QueryBuilder,
 } from "./builder/index";
 
@@ -55,31 +58,59 @@ export {
 export type {
   AggregateResult,
   AliasMap,
+  AliasOrderField,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
+  CommonPropertyKeys,
+  CompiledOneStatementRead,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
   DynamicNodeAccessor,
+  DynamicNodeKind,
   DynamicNodeType,
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EdgeMetadataAccessor,
+  EdgeOrderField,
+  EmbeddableOneStatementRead,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
+  ExecutableOneStatementRead,
+  ExpansionAliasNodeType,
   FieldAccessor,
+  ForwardedExpansionAxes,
+  IdentityTraversalOption,
   NodeAccessor,
   NodeAlias,
+  NodeCandidateQuery,
+  NodeCandidateSelection,
+  NodeMetadataAccessor,
+  NodeOrderField,
+  NodePropsFor,
+  OneStatementBatchableQuery,
+  OneStatementBatchReads,
+  OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder/index";
 
@@ -157,10 +188,30 @@ function createQueryBuilderWithContext<
   registry: KindRegistry,
   options?: InternalCreateQueryBuilderOptions,
 ): InitialQueryBuilder<G, CoordinateState> {
-  const schemaIntrospector = createSchemaIntrospector(
-    registry.nodeKinds,
-    registry.edgeKinds,
-  );
+  const schemaIntrospector = schemaIntrospectorFor(registry);
+  if (options?.identityEnabled === true && registry.identity === undefined) {
+    throw new ConfigurationError(
+      "Identity-aware query compilation requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId },
+      {
+        suggestion:
+          "Build the registry from a graph whose defineGraph(...) config includes identity.",
+      },
+    );
+  }
+  if (
+    options?.identitySameIdAcrossKinds !== undefined &&
+    registry.identity === undefined
+  ) {
+    throw new ConfigurationError(
+      "identitySameIdAcrossKinds requires an identity-enabled graph registry.",
+      { code: "IDENTITY_NOT_ENABLED", graphId },
+      {
+        suggestion:
+          "Configure sameIdAcrossKinds on defineGraph(...).identity instead.",
+      },
+    );
+  }
 
   // Build config, only including optional properties if defined
   const config: QueryBuilderConfig = {
@@ -168,6 +219,16 @@ function createQueryBuilderWithContext<
     registry,
     schemaIntrospector,
     defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
+    defaultExpansion: resolveDefaultAliasExpansion(
+      options?.defaultExpansion,
+      "defaultExpansion",
+    ),
+    identityEnabled:
+      options?.identityEnabled ?? registry.identity !== undefined,
+    identitySameIdAcrossKinds:
+      options?.identitySameIdAcrossKinds ??
+      registry.identity?.sameIdAcrossKinds ??
+      "fold",
     ...(options?.backend !== undefined && { backend: options.backend }),
     ...(options?.dialect !== undefined && { dialect: options.dialect }),
     ...(options?.schema !== undefined && { schema: options.schema }),
@@ -178,6 +239,12 @@ function createQueryBuilderWithContext<
     }),
     ...(options?.sealedCoordinate !== undefined && {
       sealedCoordinate: options.sealedCoordinate,
+    }),
+    ...(options?.runtimeKindTokenResolver !== undefined && {
+      runtimeKindTokenResolver: options.runtimeKindTokenResolver,
+    }),
+    ...(options?.expectedSchemaVersion !== undefined && {
+      expectedSchemaVersion: options.expectedSchemaVersion,
     }),
   });
 
@@ -190,7 +257,8 @@ function createQueryBuilderWithContext<
     startAlias: "",
     currentAlias: "",
     startKinds: [],
-    includeSubClasses: false,
+    startRequestedKinds: [],
+    startExpansion: "exact",
     traversals: [],
     predicates: [],
     projection: [],

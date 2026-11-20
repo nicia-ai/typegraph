@@ -24,16 +24,38 @@
 import { createRequire } from "node:module";
 
 import Database from "better-sqlite3";
+import { getTableName } from "drizzle-orm";
 import {
   type BetterSQLite3Database,
   drizzle,
 } from "drizzle-orm/better-sqlite3";
 
-import { ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
-import { generateSqliteDDL } from "../drizzle/ddl";
+import {
+  isMissingTableError,
+  isSqliteMissingEdgeMatchIdentityColumnError,
+} from "../../utils/sql-errors";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
+import { wrapWithManagedClose } from "../derive-backend";
+import {
+  assertBaseSchemaVersionNotNewer,
+  CURRENT_BASE_SCHEMA_VERSION,
+} from "../drizzle/base-schema";
+import {
+  edgeMatchIdentityColumnAdoption,
+  generateSqliteMigrationSQL,
+  quoteDdlIdentifier,
+  recordedAnchorRetentionColumnAdoption,
+} from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
+import {
+  adoptSqliteColumnsSync,
+  type SqliteColumnRow,
+} from "../drizzle/sqlite-column-adoption";
 export type { AnySqliteDatabase } from "../drizzle/execution";
+import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
   createSqliteBackend,
   type SqliteTables,
@@ -54,11 +76,81 @@ export {
 } from "./local-options";
 import {
   type AdapterBackend,
-  type BackendCapabilities,
-  wrapWithManagedClose,
+  type BundledBackendCapabilityOverrides,
+  type SchemaProvisioning,
+} from "../types";
+export type { BundledBackendCapabilityOverrides } from "../types";
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
 } from "../types";
 
 const nodeRequire = createRequire(import.meta.url);
+
+function installLocalSqliteBaseSchema(
+  sqlite: Database.Database,
+  tables: SqliteTables,
+  fulltextStrategy: FulltextStrategy | false | undefined,
+): void {
+  // Versioned installations use privileged asynchronous adoption. Marker-less
+  // bootstrap must finish current storage before installation SQL stamps it:
+  // v9's clock column below; its transition-log relations are covered by the
+  // installation SQL's CREATE TABLE IF NOT EXISTS.
+  if (CURRENT_BASE_SCHEMA_VERSION !== 9) {
+    throw new CompilerInvariantError(
+      "The synchronous managed SQLite bootstrap plan must be reviewed when the current base-schema version changes.",
+      { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
+    );
+  }
+  const installedVersion = (() => {
+    try {
+      const marker = sqlite
+        .prepare(
+          `SELECT version FROM ${quoteDdlIdentifier(getTableName(tables.baseSchemaVersions))} WHERE installation=1`,
+        )
+        .get() as Readonly<{ version: number }> | undefined;
+      assertBaseSchemaVersionNotNewer(marker?.version);
+      return marker?.version;
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+      return;
+    }
+  })();
+  function columnDriver(tableName: string) {
+    return {
+      readColumns: () =>
+        sqlite
+          .prepare(`PRAGMA table_info(${quoteDdlIdentifier(tableName)})`)
+          .all() as readonly SqliteColumnRow[],
+      execute: (statement: string) => {
+        sqlite.exec(statement);
+      },
+    };
+  }
+  // Marker-less bootstrap publishes the current release, so finish its clock
+  // upgrade first. A versioned installation stays on asynchronous adoption.
+  if (installedVersion === undefined) {
+    const clockTable = getTableName(tables.recordedClock);
+    adoptSqliteColumnsSync(
+      recordedAnchorRetentionColumnAdoption(clockTable),
+      columnDriver(clockTable),
+    );
+  }
+  const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
+  try {
+    sqlite.exec(installationSql);
+  } catch (error) {
+    if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
+    const edgeTableName = getTableName(tables.edges);
+    adoptSqliteColumnsSync(
+      edgeMatchIdentityColumnAdoption(edgeTableName),
+      columnDriver(edgeTableName),
+    );
+    sqlite.exec(installationSql);
+  }
+}
 
 // ============================================================
 // Native Addon Helpers
@@ -234,6 +326,7 @@ function applyConnectionPragmas(
  * Options for creating a local SQLite backend.
  */
 export type LocalSqliteBackendOptions = Readonly<{
+  schemaProvisioning?: SchemaProvisioning;
   /**
    * Path to the SQLite database file.
    * Defaults to ":memory:" for an in-memory database.
@@ -264,11 +357,21 @@ export type LocalSqliteBackendOptions = Readonly<{
   tables?: SqliteTables;
 
   /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
+
+  /**
    * Override specific backend capabilities — e.g. to simulate an engine-level
    * gap like missing SQL window functions in tests. Forwarded to
    * createSqliteBackend.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
 }>;
 
 /**
@@ -318,6 +421,7 @@ export type LocalSqliteBackendResult = Readonly<{
 export function createLocalSqliteBackend(
   options: LocalSqliteBackendOptions = {},
 ): LocalSqliteBackendResult {
+  assertNoLegacyTransactionCapability(options.capabilities);
   const path = options.path ?? ":memory:";
   const tables = options.tables ?? defaultTables;
 
@@ -334,24 +438,27 @@ export function createLocalSqliteBackend(
 
     const db = drizzle(sqlite);
 
-    // Generate and execute DDL from schema
-    const ddlStatements = generateSqliteDDL(tables);
-    for (const statement of ddlStatements) {
-      sqlite.exec(statement);
-    }
+    // The managed factory owns a complete fresh installation, including the
+    // deployment-wide base-schema marker consumed by verified/runtime-only
+    // entrypoints. Raw generateSqliteDDL intentionally omits that marker.
+    installLocalSqliteBaseSchema(sqlite, tables, options.fulltext);
 
     const backend = createSqliteBackend(db, {
+      ...(options.schemaProvisioning === undefined ?
+        {}
+      : { schemaProvisioning: options.schemaProvisioning }),
       executionProfile: {
         isSync: true,
       },
       tables,
       ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
+      ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
       capabilities: {
         ...options.capabilities,
         graphAnalytics: {
           supported:
             options.capabilities?.graphAnalytics?.supported ??
-            options.capabilities?.transactions !== false,
+            options.capabilities?.execution?.interactiveTransactions !== false,
           mathFunctions:
             options.capabilities?.graphAnalytics?.mathFunctions ?? true,
         },
@@ -361,7 +468,7 @@ export function createLocalSqliteBackend(
       sqlite.close();
     });
 
-    return { backend: managedBackend, db };
+    return { backend: markBundledRootAutocommitEligible(managedBackend), db };
   } catch (error) {
     try {
       sqlite.close();
@@ -392,3 +499,4 @@ function tryLoadSqliteVec(sqlite: Database.Database): boolean {
     return false;
   }
 }
+export type { GraphIdentityConfig } from "../../core/define-graph";

@@ -84,7 +84,21 @@ export const GRAPH_EXTENSION_ISSUE_CODES = [
   "ONTOLOGY_CYCLE",
   "ONTOLOGY_SELF_LOOP",
   "ONTOLOGY_DISJOINT_CONFLICT",
+  "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
+  // NOTE: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS" is deliberately absent here.
+  // `validateGraphExtension`'s document-scoped `validateOntology` call has no
+  // kind classifier (an extension's ontology may reference base-graph kinds
+  // it cannot see on its own), so it can never emit that code — it only
+  // surfaces as a `ConfigurationError` when the MERGED graph's `KindRegistry`
+  // is built (see `detectInvalidEquivalenceClasses` in `ontology/validation.ts`).
+  // Listing an unreachable code here would force an exhaustive switch over
+  // `GraphExtensionIssueCode` to add a branch that validation can never
+  // produce.
   "DUPLICATE_ONTOLOGY_RELATION",
+  "ONTOLOGY_COMPOSITION_VIA_REQUIRED",
+  "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
+  "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
+  "ONTOLOGY_COMPOSITION_EXISTENCE_FORBIDDEN",
   "INVALID_DOCUMENT_SHAPE",
   "UNKNOWN_DOCUMENT_KEY",
   "UNSUPPORTED_STRING_FORMAT",
@@ -318,6 +332,33 @@ export class GraphExtensionUnresolvedEndpointError extends GraphExtensionError {
     });
     this.edgeKind = edgeKind;
     this.side = side;
+    this.endpoint = endpoint;
+  }
+}
+
+/**
+ * Thrown when `inverseOf` or `implies` uses an unresolved bare edge-kind
+ * name. Absolute HTTP(S) IRIs remain deliberate inert external references.
+ */
+export class GraphExtensionUnresolvedOntologyEndpointError extends GraphExtensionError {
+  override readonly code =
+    "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT" as const;
+  readonly metaEdge: "inverseOf" | "implies";
+  readonly endpoint: string;
+
+  constructor(
+    metaEdge: "inverseOf" | "implies",
+    endpoint: string,
+    graphId: string,
+  ) {
+    super({
+      message: `Graph-extension ${metaEdge} endpoint "${endpoint}" does not resolve to a registered edge kind on graph "${graphId}".`,
+      code: "GRAPH_EXTENSION_UNRESOLVED_ONTOLOGY_ENDPOINT",
+      details: { metaEdge, endpoint, graphId },
+      suggestion:
+        "Correct the local edge-kind name, register that edge, or use an absolute http:// or https:// IRI for a deliberate inert external reference.",
+    });
+    this.metaEdge = metaEdge;
     this.endpoint = endpoint;
   }
 }

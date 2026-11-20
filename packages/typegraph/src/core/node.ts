@@ -1,10 +1,13 @@
 import { type z } from "zod";
 
+import { assertClaimAxisSafe } from "../store/claims/axis";
 import {
   assertSchemaKeysAreFree,
   RESERVED_NODE_KEYS,
 } from "../store/reserved-keys";
+import { assertPathTokenSafeKind } from "../utils/path";
 import { assertJsonValue } from "./json-value";
+import { assertKindSchemaIsObject } from "./kind-schema";
 import { type KindAnnotations, NODE_TYPE_BRAND, type NodeType } from "./types";
 
 // ============================================================
@@ -37,12 +40,17 @@ function validateSchemaKeys(
   schema: z.ZodObject<z.ZodRawShape>,
   name: string,
 ): void {
-  assertSchemaKeysAreFree(
-    "Node",
-    name,
-    Object.keys(schema.shape),
-    RESERVED_NODE_KEYS,
-  );
+  assertSchemaKeysAreFree("Node", name, schema, RESERVED_NODE_KEYS);
+}
+
+/**
+ * Refuses a node kind name containing a code point TypeGraph reserves for
+ * strings it builds from kinds: U+001E for claim axes that are not kinds, and
+ * U+001F for the `kind || SEP || id` tokens on a recursive walk's path.
+ */
+export function assertNodeKindNameSafe(name: string): void {
+  assertClaimAxisSafe(name, "Node kind");
+  assertPathTokenSafeKind(name);
 }
 
 /**
@@ -63,6 +71,8 @@ export function defineNode<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
 >(name: K, options: DefineNodeOptions<S>): NodeType<K, S> {
+  assertNodeKindNameSafe(name);
+  assertKindSchemaIsObject("Node", name, options.schema);
   validateSchemaKeys(options.schema, name);
   if (options.annotations !== undefined) {
     assertJsonValue(options.annotations, "annotations", `Node "${name}"`);

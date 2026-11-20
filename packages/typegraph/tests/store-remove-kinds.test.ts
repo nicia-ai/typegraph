@@ -18,9 +18,16 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, KindNotFoundError } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  KindNotFoundError,
+  partOf,
+} from "../src";
 import type { GraphBackend } from "../src/backend/types";
-import { RECORDED_MAX } from "../src/core/temporal";
+import type { GraphDef } from "../src/core/define-graph";
+import { RECORDED_MAX_REVISION } from "../src/core/temporal";
 import {
   defineGraphExtension,
   KindHasReferentsError,
@@ -32,11 +39,37 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { migrateSchema } from "../src/schema/manager";
+import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 type CountRow = Readonly<{ count: unknown }>;
+
+/**
+ * Reproduce the `removeKinds()` crash window: the schema commit lands, the
+ * `typegraph_kind_removals` queue write does not.
+ *
+ * Goes through `backend.commitSchemaVersion` — the same primitive
+ * `removeKinds()` commits through — rather than `migrateSchema()`, which
+ * cannot express this state: it folds the persisted graph extension back
+ * into the supplied graph, so an extension kind can never be dropped through
+ * it, and refuses kind-dropping commits outright.
+ */
+async function commitCrashedRemoval<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  currentVersion: number,
+): Promise<void> {
+  const schema = serializeSchema(graph, currentVersion + 1);
+  await backend.commitSchemaVersion({
+    graphId: graph.id,
+    expected: { kind: "active", version: currentVersion },
+    version: currentVersion + 1,
+    schemaHash: await computeSchemaHash(schema),
+    schemaDoc: schema,
+  });
+}
 
 async function countOpenRecordedNodeRows(
   backend: GraphBackend,
@@ -50,7 +83,7 @@ async function countOpenRecordedNodeRows(
       FROM ${schema.recordedNodesTable}
       WHERE graph_id = ${graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `),
   );
   return Number(rows[0]?.count ?? 0);
@@ -80,6 +113,16 @@ const Person = defineNode("Person", {
 const baseGraph = defineGraph({
   id: "remove_kinds_test",
   nodes: { Person: { type: Person } },
+  edges: {},
+});
+
+const Section = defineNode("Section", {
+  schema: z.object({ title: z.string() }),
+});
+
+const sectionGraph = defineGraph({
+  id: "remove_kinds_composition_test",
+  nodes: { Section: { type: Section } },
   edges: {},
 });
 
@@ -213,6 +256,98 @@ describe("Store.removeKinds — schema commit", () => {
         (entry) => entry.from === "NamedTag" || entry.to === "NamedTag",
       ),
     ).toBeUndefined();
+  });
+
+  it("cascade-removes an ontology relation whose `via` edge is removed", async () => {
+    // Section is compile-time; parentSection and the partOf relation naming
+    // it as `via` are both added at runtime through evolve(). Removing the
+    // edge alone must not leave the relation behind with a dangling `via` —
+    // planRemovals only ever filtered ontology on from/to, so the relation
+    // survived unchanged and the next schema commit died in the registry
+    // layer with ONTOLOGY_COMPOSITION_VIA_UNKNOWN instead.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(sectionGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {},
+        edges: {
+          parentSection: {
+            from: ["Section"],
+            to: ["Section"],
+            cardinality: "one",
+            properties: {},
+          },
+        },
+        ontology: [
+          {
+            metaEdge: "partOf",
+            from: "Section",
+            to: "Section",
+            via: "parentSection",
+            partSide: "from",
+          },
+        ],
+      }),
+    );
+
+    const removed = await evolved.removeKinds(["parentSection"]);
+
+    expect(removed.registry.hasEdgeType("parentSection")).toBe(false);
+    const ontology = removed.introspect().ontology;
+    expect(
+      ontology.find((entry) => entry.via === "parentSection"),
+    ).toBeUndefined();
+  });
+
+  it("rejects removing a graph-extension edge referenced by a compile-time composition relation's `via`", () => {
+    // A compile-time `partOf` can name an edge kind as `via` before that
+    // edge kind is ever registered — the edge is only added later, as a
+    // graph-extension edge, by `store.evolve()`. `planRemovals` must treat
+    // that `via` reference exactly like a compile-time edge endpoint:
+    // removing the graph-extension edge out from under it would resurrect
+    // the orphaned reference on the next deploy.
+    const Section = defineNode("Section", {
+      schema: z.object({ title: z.string() }),
+    });
+    const parentSection = defineEdge("parentSection", {
+      schema: z.object({}),
+    });
+    const seedGraph = defineGraph({
+      id: "remove_kinds_via_referent_test",
+      nodes: { Section: { type: Section } },
+      edges: {},
+      ontology: [
+        partOf(Section, Section, { via: parentSection, partSide: "from" }),
+      ],
+    });
+
+    const syntheticGraph = {
+      ...seedGraph,
+      extension: {
+        version: 1,
+        edges: {
+          parentSection: {
+            from: ["Section"],
+            to: ["Section"],
+            cardinality: "one" as const,
+            properties: {},
+          },
+        },
+      },
+    } as unknown as typeof seedGraph;
+
+    let caught: unknown;
+    try {
+      planRemovals(syntheticGraph, ["parentSection"]);
+    } catch (error) {
+      caught = error;
+    }
+    if (!(caught instanceof KindHasReferentsError)) {
+      throw new Error("expected KindHasReferentsError");
+    }
+    expect(caught.referents).toEqual([
+      { type: "compile-time-ontology", name: "partOf(Section, Section)" },
+    ]);
   });
 
   it("rejects removing a graph-extension kind referenced by a compile-time edge", () => {
@@ -459,15 +594,15 @@ describe("Store.materializeRemovals", () => {
     ).toBe(2);
 
     // Simulate the crash window: commit the schema diff (Tag removed)
-    // through `migrateSchema` directly, bypassing `removeKinds` and
-    // its queue write. baseGraph's compile-time slice has Person only;
+    // through the backend primitive, bypassing `removeKinds` and its
+    // queue write. baseGraph's compile-time slice has Person only;
     // committing it as the new active schema is structurally
     // equivalent to a successful Tag removal that crashed before the
     // queue insert.
     const evolvedVersion = requireDefined(
       await backend.getActiveSchema(baseGraph.id),
     ).version;
-    await migrateSchema(backend, baseGraph, evolvedVersion);
+    await commitCrashedRemoval(backend, baseGraph, evolvedVersion);
 
     // The queue is empty (the crash window). Tag rows are orphaned
     // because the schema doesn't reference Tag any more.
@@ -531,7 +666,7 @@ describe("Store.materializeRemovals", () => {
     const versionBeforeRemoveCrash = requireDefined(
       await backend.getActiveSchema(baseGraph.id),
     ).version;
-    await migrateSchema(backend, baseGraph, versionBeforeRemoveCrash);
+    await commitCrashedRemoval(backend, baseGraph, versionBeforeRemoveCrash);
 
     const pendingAfterCrash = await requireDefined(
       backend.getPendingKindRemovals,

@@ -1,14 +1,33 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
-import { isSqlFragment } from "../../../query/sql-fragment";
-import { isPresent } from "../../../utils/presence";
+import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
+import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
+import { type EdgeCardinalityAxisRef } from "../../../store/claims/edge-claims";
+import { isPresent, requireDefined } from "../../../utils/presence";
+import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
+import type {
+  AtomicEdgeDeleteBatchInput,
+  AtomicEdgeResolvedUpdateEntry,
+  AtomicNodeBatchEntry,
+  AtomicNodeBatchResultMode,
+  AtomicNodeDeleteBatchInput,
+  AtomicNodePostimageEntry,
+  AtomicNodeProjectionFamily,
+  AtomicNodeReplacementEntry,
+  AtomicNodeResolvedUpdateEntry,
+} from "../../capabilities/atomic-mutation-program";
+import type { FenceSql } from "../../capabilities/write-fence";
 import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
+  CompareAndSetNodeParams,
+  CompositionClaimScope,
+  ContributionMaterializationIdentity,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -17,80 +36,221 @@ import type {
   DeleteNodeParams,
   DeleteUniqueParams,
   EdgeExistsBetweenParams,
+  FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesConnectedToNodesParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
   FulltextSearchParams,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteNodesBatchParams,
+  HardDeleteUniquesByConcreteKindParams,
+  HardDeleteUniquesByNodeIdsParams,
   HybridSearchParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  ManagedNodeCreatePlan,
+  PurgeEdgeClaimsParams,
+  RecordContributionMaterializationParams,
+  ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
+  SchemaWriteFenceParams,
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
   UpsertFulltextBatchParams,
   UpsertFulltextParams,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
+import { buildLockSchemaVersionAndGraphWrite } from "../postgres-schema-write-fence";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
+import {
+  type AtomicNodeClaimEntry,
+  buildAtomicDeletedNodeClaimReleaseWithSchemaFence,
+  buildAtomicNodeClaimCleanupWithSchemaFence,
+  buildAtomicNodeClaimGatePredicateWithSchemaFence,
+  buildAtomicNodeClaimUpsertWithSchemaFence,
+  buildAtomicNodeReplacementClaimReleaseWithSchemaFence,
+} from "./atomic-node-claims";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
   buildCountNodesByKind,
+  buildFindActiveEdgesBySourceV1,
+  buildFindEdgesAcrossKinds,
+  buildFindEdgesByEndpointSet,
+  buildFindEdgesByHeterogeneousEndpointSet,
   buildFindEdgesByKind,
+  buildFindEdgesByMatchIdentity,
+  buildFindNodesAcrossKinds,
   buildFindNodesByKind,
 } from "./collections";
 import {
-  buildCountEdgesFrom,
+  buildContendedCompositionEdgeRowAudit,
+  buildContendedEdgeRowAudit,
+  buildContendedUniqueRowAudit,
+  buildDisjointOverlapAudit,
+  buildMisassignedEdgeEndpointAudit,
+} from "./constraint-fence-audit";
+import type { AtomicContributionEvidence } from "./contribution-evidence";
+import {
+  buildAcquireAtomicEdgeClaims,
+  buildAssertAtomicEdgeClaimsOwned,
+  buildDeleteStaleAtomicEdgeClaims,
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
+  buildLockEdgeClaimGuarded,
+  buildLockEdgeClaims,
+  buildPurgeEdgeClaims,
+  buildReadEdgeClaimIncumbents,
+  buildTakeOverEdgeClaim,
+  buildTakeOverEdgeClaimGuarded,
+} from "./edge-claims";
+import type {
+  AtomicConvergeEdgesParams,
+  ConvergeEdgeCreateParams,
+} from "./edges";
+import {
+  buildAssertAtomicEdgeMutationPostimages,
+  buildAtomicConvergeEdges,
+  buildAtomicConvergeEdgesTombstoneRefusal,
+  buildAtomicEdgeDeleteBatchWithSchemaFence,
+  buildAtomicEdgeResolvedUpdateBatch,
+  buildConvergeEdgeCreate,
+  buildCountEdgesAtEndpoint,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
+  buildFindEdgesConnectedToNodes,
   buildGetEdge,
   buildGetEdges,
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
+  buildHardDeleteEdgesByNodes,
   buildInsertEdge,
+  buildInsertEdgeIfEndpointsLive,
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
+  buildInsertEdgesBatchReturningWithSchemaFence,
+  buildInsertEdgesBatchWithSchemaFence,
+  buildInsertEdgesDurableBatchReturning,
+  buildReadAtomicEdgeMutationPostimages,
   buildUpdateEdge,
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import {
+  buildAtomicNodeProjectionStatements,
+  buildInsertNodeWithProjections,
+} from "./node-projections";
+import {
+  buildAssertAtomicNodeMutationPostimages,
+  buildAssertAtomicNodeProjectionEvidence,
+  buildAtomicNodeBatchWithSchemaFence,
+  buildAtomicNodeDeleteBatchWithSchemaFence,
+  buildAtomicNodeReplacementBatchWithSchemaFence,
+  buildAtomicNodeResolvedUpdateBatch,
   buildDeleteNode,
   buildGetNode,
   buildGetNodes,
   buildHardDeleteNode,
+  buildHardDeleteNodesBatch,
   buildInsertNode,
+  buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodesBatchWithSchemaFence,
+  buildInsertNodeWithSchemaFence,
+  buildLockNodes,
+  buildLockNodesForAtomicDeleteWithSchemaFence,
+  buildReadAtomicNodeMutationPostimages,
+  buildResolvedNodeUpdateBatch,
   buildUpdateNode,
+  buildUpdateNodeSet,
 } from "./nodes";
 import {
   buildGetActiveSchema,
   buildGetSchemaVersion,
   buildInsertSchema,
+  buildSchemaFenceProbe,
   buildSetActiveSchema,
 } from "./schema";
-import { liveNodeIdsSubquery, type Tables } from "./shared";
+import {
+  edgePrimaryKeyConstraint,
+  liveNodeIdsSubquery,
+  nodePrimaryKeyConstraint,
+  type NodeRowLockClauses,
+  type RowLockClause,
+  type Tables,
+} from "./shared";
 import {
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildDeleteUnique,
+  buildHardDeleteUniquesByConcreteKind,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildInsertUnique,
   buildInsertUniqueBatch,
 } from "./uniques";
 
+/**
+ * Binds an absent value as a SQL `NULL` literal rather than as a bound
+ * parameter, so the column's own type drives the insert instead of the
+ * driver having to infer a type for a null placeholder.
+ */
+function nullableText(value: string | undefined): SQL {
+  return value === undefined ? sql`NULL` : sql`${value}`;
+}
+
 export type CommonOperationStrategy = Readonly<{
+  atomicNodeProjectionFamilies: readonly AtomicNodeProjectionFamily[];
+  /** Terminal NOT NULL sentinel shared by resolved mutation-set programs. */
+  /**
+   * The exact NOT NULL sentinels emitted by the closed edge-batch program.
+   * Derive them from the same table definitions as the SQL so error
+   * classification cannot drift when a physical column is renamed.
+   */
+  atomicEdgeRefusalConstraints: Readonly<{
+    cardinality: Readonly<{ table: string; column: string }>;
+    deleteIdentity: Readonly<{ table: string; column: string }>;
+    durableIdentity: Readonly<{ table: string; column: string }>;
+    endpoint: Readonly<{ table: string; column: string }>;
+    mutationPostimage: Readonly<{ table: string; column: string }>;
+    tombstoneConvergence: Readonly<{ table: string; column: string }>;
+  }>;
+  atomicNodeRefusalConstraints: Readonly<{
+    deleteRestricted: Readonly<{ table: string; column: string }>;
+    liveIdentity: Readonly<{ table: string; column: string }>;
+    mutationPostimage: Readonly<{ table: string; column: string }>;
+    projectionEvidence: Readonly<{ table: string; column: string }>;
+  }>;
+  /**
+   * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
+   * only scope in which a driver duplicate-key failure means "this identity is
+   * already taken" rather than "these values collide with another row's".
+   *
+   * Data rather than SQL, and a member of this interface rather than a lookup at
+   * the classification site, so it is derived once from the same `tables` the
+   * insert builders render and every dialect is forced by the type checker to
+   * supply it.
+   */
+  primaryKeyConstraints: Readonly<{
+    nodes: PrimaryKeyRelation;
+    edges: PrimaryKeyRelation;
+  }>;
   buildUpsertFulltext: (
     params: UpsertFulltextParams,
     timestamp: string,
@@ -121,6 +281,31 @@ export type CommonOperationStrategy = Readonly<{
     vectorScoreDescending: boolean,
   ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
+  buildInsertNodeIfAbsent: (params: InsertNodeParams, timestamp: string) => SQL;
+  buildInsertNodeIfAbsentWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithProjections?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+    timestamp: string,
+    schemaLockClause?: SQL,
+  ) => SQL | undefined;
+  buildAtomicNodeProjectionStatements: (
+    creates: readonly AtomicNodePostimageEntry[],
+    updates: readonly AtomicNodeResolvedUpdateEntry[],
+    timestamp: string,
+    chunkSize: number,
+  ) => readonly SQL[] | undefined;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -130,12 +315,182 @@ export type CommonOperationStrategy = Readonly<{
     params: readonly InsertNodeParams[],
     timestamp: string,
   ) => SQL;
+  buildInsertNodesBatchWithSchemaFence: (
+    params: readonly InsertNodeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeBatchWithSchemaFence: (
+    entries: readonly AtomicNodeBatchEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    resultMode: AtomicNodeBatchResultMode,
+    writeGate?: SQL,
+  ) => SQL;
+  buildAtomicNodeReplacementBatchWithSchemaFence: (
+    entries: readonly AtomicNodeReplacementEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    writeGate?: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimUpsertWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimGatePredicateWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimCleanupWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicDeletedNodeClaimReleaseWithSchemaFence: (
+    input: Readonly<{
+      graphId: string;
+      kind: string;
+      ids: readonly string[];
+      timestamp: string;
+    }>,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeReplacementClaimReleaseWithSchemaFence: (
+    input: Readonly<{
+      graphId: string;
+      kind: string;
+      ids: readonly string[];
+      timestamp: string;
+    }>,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
+  /**
+   * The dialect's own spelling of each node-row lock (see `NodeRowLock`). The
+   * operation backend passes these, or empty clauses, to the lock-bearing
+   * builders below according to its resolved `NodeRowLockPlan`.
+   */
+  nodeRowLockClauses: NodeRowLockClauses;
+  /** The `getNodes` read, ordered by id and locked by `rowLock`. */
+  buildLockNodes: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    rowLock: RowLockClause,
+  ) => SQL;
   buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
+  buildAtomicNodeResolvedUpdateBatch: (
+    entries: readonly AtomicNodeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAssertAtomicNodeMutationPostimages: (
+    creates: readonly AtomicNodePostimageEntry[],
+    updates: readonly AtomicNodeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildAssertAtomicNodeProjectionEvidence: (
+    timestamp: string,
+    evidence: readonly AtomicContributionEvidence[],
+  ) => SQL;
+  buildReadAtomicNodeMutationPostimages: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildUpdateNodeSet: (
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+    timestamp: string,
+  ) => SQL;
+  buildResolvedNodeUpdateBatch: (
+    params: ResolvedNodeUpdateBatchParams,
+    timestamp: string,
+  ) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
+  buildAtomicNodeDeleteBatchWithSchemaFence: (
+    input: AtomicNodeDeleteBatchInput,
+    timestamp: string,
+    schemaLockClause: SQL,
+  ) => SQL;
+  /** The closed node-delete program's leading delete-lock statement. */
+  buildLockNodesForAtomicDeleteWithSchemaFence: (
+    input: AtomicNodeDeleteBatchInput,
+    schemaLockClause: SQL,
+    rowLock: RowLockClause,
+  ) => SQL;
+  buildSchemaFenceProbe: (
+    params: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
+  /** Optional: a strategy without it gets no `hardDeleteNodesBatch` member. */
+  buildHardDeleteNodesBatch?: (params: HardDeleteNodesBatchParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
+  buildInsertEdgeIfEndpointsLive: (
+    params: InsertEdgeParams,
+    timestamp: string,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence: (
+    params: InsertEdgeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  /** Single-statement match-key convergence. */
+  buildConvergeEdgeCreate?: (
+    params: ConvergeEdgeCreateParams,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  /** Closed-program durable convergence and its tombstone revival leg. */
+  buildAtomicConvergeEdges?: (
+    params: AtomicConvergeEdgesParams,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  buildAtomicConvergeEdgesTombstoneRefusal?: (
+    params: Omit<AtomicConvergeEdgesParams, "timestamp">,
+  ) => SQL;
+  /** PostgreSQL transaction-only claim + endpoint + edge write. */
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
+    params: InsertEdgeParams,
+    claim: ClaimEdgeCardinalityParams,
+    timestamp: string,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  /**
+   * One statement per cardinality group in the chunk — see
+   * `buildDeleteStaleAtomicEdgeClaims`. A chunk of one edge kind, the ordinary
+   * case, renders exactly one.
+   */
+  buildDeleteStaleAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => readonly SQL[];
+  buildAcquireAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => readonly SQL[];
+  buildAssertAtomicEdgeClaimsOwned: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => readonly SQL[];
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
     params: readonly InsertEdgeParams[],
@@ -145,13 +500,53 @@ export type CommonOperationStrategy = Readonly<{
     params: readonly InsertEdgeParams[],
     timestamp: string,
   ) => SQL;
+  buildInsertEdgesBatchWithSchemaFence: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  buildInsertEdgesBatchReturningWithSchemaFence: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    endpointLock: RowLockClause,
+  ) => SQL;
+  buildInsertEdgesDurableBatchReturning: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+  ) => SQL;
   buildGetEdge: (graphId: string, id: string) => SQL;
   buildGetEdges: (graphId: string, ids: readonly string[]) => SQL;
   buildUpdateEdge: (params: UpdateEdgeParams, timestamp: string) => SQL;
+  buildAtomicEdgeResolvedUpdateBatch: (
+    entries: readonly AtomicEdgeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAssertAtomicEdgeMutationPostimages: (
+    creates: readonly InsertEdgeParams[],
+    updates: readonly AtomicEdgeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildReadAtomicEdgeMutationPostimages: (
+    graphId: string,
+    ids: readonly string[],
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
   buildDeleteEdge: (params: DeleteEdgeParams, timestamp: string) => SQL;
   buildDeleteEdgesBatch: (
     params: DeleteEdgesBatchParams,
     timestamp: string,
+  ) => SQL;
+  buildAtomicEdgeDeleteBatchWithSchemaFence: (
+    input: AtomicEdgeDeleteBatchInput,
+    timestamp: string,
+    schemaLockClause: SQL,
   ) => SQL;
   buildHardDeleteEdge: (params: HardDeleteEdgeParams) => SQL;
   buildHardDeleteEdgesBatch: (params: DeleteEdgesBatchParams) => SQL;
@@ -160,28 +555,185 @@ export type CommonOperationStrategy = Readonly<{
     nodeKind: string,
     nodeId: string,
   ) => SQL;
-  buildCountEdgesFrom: (params: CountEdgesFromParams) => SQL;
+  /** Optional, with {@link buildHardDeleteNodesBatch}. */
+  buildHardDeleteEdgesByNodes?: (
+    graphId: string,
+    nodeKind: string,
+    nodeIds: readonly string[],
+  ) => SQL;
+  buildCountEdgesAtEndpoint: (params: CountEdgesAtEndpointParams) => SQL;
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
+  /** Optional: a strategy without it gets no `findEdgesConnectedToNodes`. */
+  buildFindEdgesConnectedToNodes?: (
+    params: FindEdgesConnectedToNodesParams,
+    nodeIds: readonly string[],
+  ) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
+  buildFindNodesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
   buildCountNodesByKind: (params: CountNodesByKindParams) => SQL;
   buildFindEdgesByKind: (params: FindEdgesByKindParams) => SQL;
+  buildFindActiveEdgesBySourceV1?: (
+    params: Readonly<{
+      graphId: string;
+      edgeKind: string;
+      fromKind: string;
+      fromId: string;
+    }>,
+  ) => SQL;
+  buildFindEdgesByMatchIdentity?: (
+    params: Readonly<{
+      graphId: string;
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[];
+    }>,
+  ) => SQL;
+  buildFindEdgesAcrossKinds?: (params: FindRowsAcrossKindsParams) => SQL;
+  /**
+   * Interface member rather than an optional one: every dialect must supply
+   * an endpoint-set read, so the operation can never be silently skipped by a
+   * dialect that forgot it. Both bundled dialects get it from the shared
+   * builder.
+   */
+  buildFindEdgesByEndpointSet: (
+    params: FindEdgesByEndpointSetParams,
+    endpointIds: readonly string[],
+  ) => SQL;
+  buildFindEdgesByHeterogeneousEndpointSet: (
+    params: FindEdgesByHeterogeneousEndpointSetParams,
+    endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"],
+    edgeKinds: readonly string[],
+  ) => SQL;
   buildCountEdgesByKind: (params: CountEdgesByKindParams) => SQL;
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
-  buildHardDeleteUniquesByNode: (graphId: string, nodeId: string) => SQL;
+  buildHardDeleteUniquesByNode: (
+    graphId: string,
+    concreteKind: string,
+    nodeId: string,
+  ) => SQL;
+  buildHardDeleteUniquesByNodeIds: (
+    params: HardDeleteUniquesByNodeIdsParams,
+  ) => SQL;
+  /**
+   * Dialect-independent by construction — the fragment names only the
+   * relation and two columns, so the store-side kind-removal cleanup compiles
+   * the identical predicate through its own execution path.
+   */
+  buildHardDeleteUniquesByConcreteKind: (
+    params: HardDeleteUniquesByConcreteKindParams,
+  ) => SqlFragment;
   buildCheckUnique: (params: CheckUniqueParams) => SQL;
   buildCheckUniqueBatch: (params: CheckUniqueBatchParams) => SQL;
+  /**
+   * The edge-claim statements, in the order the driver issues them: the
+   * decision-free lock that reports the committed holder, the incumbent read
+   * for claims no read probe covers, then — only for a foreign holder — the
+   * conditional takeover. Members of this interface rather than dialect
+   * helpers, so the type checker forces both dialects to have them.
+   */
+  buildLockEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+  ) => SQL;
+  buildReadEdgeClaimIncumbents: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ) => readonly SQL[];
+  buildLockEdgeClaimGuarded: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildTakeOverEdgeClaim: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildTakeOverEdgeClaimGuarded: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
+  /**
+   * The three read-only fence-audit statements, one per constraint family.
+   * Members of this interface for the same reason the claim statements are:
+   * the type checker forces both dialects to have them, so a family cannot be
+   * audited on one backend and silently skipped on the other.
+   */
+  buildContendedUniqueRowAudit: (
+    graphId: string,
+    constraintNames: readonly string[],
+  ) => SQL;
+  buildContendedEdgeRowAudit: (
+    graphId: string,
+    ref: EdgeCardinalityAxisRef,
+    edgeKinds: readonly string[],
+  ) => SQL;
+  /**
+   * The composition variant of {@link buildContendedEdgeRowAudit}:
+   * the peer test is the oriented two-arm union
+   * {@link file://./edge-claims.ts claimHolderTerms} folds a write's
+   * liveness predicate over, not exact-kind equality — the composition axis is
+   * relation-wide, so two different realizing edge kinds must be found
+   * contending for one part.
+   */
+  buildContendedCompositionEdgeRowAudit: (
+    graphId: string,
+    ref: EdgeCardinalityAxisRef,
+    holders: CompositionClaimScope["holders"],
+    reportedEdgeKinds: readonly string[],
+  ) => SQL;
+  buildDisjointOverlapAudit: (
+    graphId: string,
+    kinds: readonly [string, string],
+  ) => SQL;
+  /**
+   * The fourth read-only fence-audit statement: live edges of one kind
+   * whose endpoints match no declared pair. A member for the same reason
+   * the other three are — the type checker forces both dialects to have it.
+   */
+  buildMisassignedEdgeEndpointAudit: (
+    graphId: string,
+    edgeKind: string,
+    allowedPairs: readonly (readonly [string, string])[],
+  ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
+  /**
+   * PostgreSQL-only dependent schema-row + graph-advisory fence. `fenceSql`
+   * is the resolved fence target's own spelling — never spelled by this
+   * builder itself — so the fused statement and the portable lock sites a
+   * derived profile's `FenceSql` override backs always exclude on the same
+   * key.
+   */
+  buildLockSchemaVersionAndGraphWrite?: (
+    params: SchemaGraphWriteFenceParams,
+    advisoryLockNamespace: string,
+    fenceSql: FenceSql,
+  ) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
   buildSetActiveSchema: (
     graphId: string,
     version: number,
   ) => Readonly<{ activateVersion: SQL; deactivateAll: SQL }>;
+  /**
+   * Write one contribution marker row outright (no conflict clause), for
+   * the transaction-scoped stamp a destructive rebuild commits alongside
+   * the DDL that produced it.
+   */
+  buildInsertContributionMaterialization: (
+    params: RecordContributionMaterializationParams,
+  ) => SQL;
+  buildDeleteContributionMaterialization: (
+    identity: ContributionMaterializationIdentity,
+  ) => SQL;
   buildTableExists: (tableName: string) => SQL;
-  buildClearGraph: (graphId: string) => readonly ClearGraphStatement[];
+  buildClearGraph: (
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ) => readonly ClearGraphStatement[];
 }>;
 
 /**
@@ -226,14 +778,26 @@ function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
 
 const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNode,
+  buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
+  buildInsertNodeWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodesBatchWithSchemaFence,
+  buildAtomicNodeBatchWithSchemaFence,
+  buildAtomicNodeReplacementBatchWithSchemaFence,
   buildGetNode,
   buildGetNodes,
   buildUpdateNode,
+  buildAtomicNodeResolvedUpdateBatch,
+  buildResolvedNodeUpdateBatch,
+  buildAssertAtomicNodeMutationPostimages,
+  buildAssertAtomicNodeProjectionEvidence,
+  buildReadAtomicNodeMutationPostimages,
   buildDeleteNode,
   buildHardDeleteNode,
+  buildHardDeleteNodesBatch,
   buildInsertEdge,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
@@ -241,81 +805,199 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetEdge,
   buildGetEdges,
   buildUpdateEdge,
+  buildAtomicEdgeResolvedUpdateBatch,
+  buildAssertAtomicEdgeMutationPostimages,
+  buildReadAtomicEdgeMutationPostimages,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
-  buildCountEdgesFrom,
+  buildHardDeleteEdgesByNodes,
+  buildCountEdgesAtEndpoint,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
+  buildFindEdgesConnectedToNodes,
   buildFindNodesByKind,
+  buildFindNodesAcrossKinds,
   buildCountNodesByKind,
   buildFindEdgesByKind,
+  buildFindActiveEdgesBySourceV1,
+  buildFindEdgesByMatchIdentity,
+  buildFindEdgesAcrossKinds,
+  buildFindEdgesByEndpointSet,
+  buildFindEdgesByHeterogeneousEndpointSet,
   buildCountEdgesByKind,
   buildDeleteUnique,
   buildHardDeleteUniquesByNode,
+  buildHardDeleteUniquesByNodeIds,
   buildCheckUnique,
   buildCheckUniqueBatch,
   buildGetSchemaVersion,
 } as const satisfies TableOperationBuilderMap;
 
+/**
+ * `CommonOperationStrategy.buildTableExists`'s per-dialect query, keyed by
+ * dialect rather than switched on it — the same shape
+ * `SCHEMA_DIALECT_STRATEGIES` (operations/schema.ts) and
+ * `EXISTING_COLUMN_QUALIFIERS` (operations/shared.ts) already use for a
+ * decision one shared function must make for both dialects.
+ */
+const TABLE_EXISTS_QUERIES = {
+  // `pg_table_is_visible` resolves visibility through the session
+  // `search_path` — exactly how the unqualified DELETE / ANALYZE this probe
+  // guards resolves `tableName`. Scoping to `current_schema()` instead would
+  // report the table missing whenever it lives in a search_path schema that
+  // is not the current one (a shared-schema / multi-tenant deployment),
+  // skipping a statement that would in fact have hit the table — a guard
+  // narrower than what it protects.
+  // The template's inner-line indentation (12/14/12 spaces) is pinned to
+  // match the exact text the prior `switch`-based implementation emitted —
+  // see tests/engine-profile-parity.test.ts's tableExists-probe pins — not
+  // this object literal's own 2-space nesting.
+  // eslint-disable-next-line unicorn/template-indent -- this SQL text is snapshot-asserted verbatim (tests/engine-profile-parity.test.ts); autofix would reindent it to this object literal's nesting depth and change the captured statement text.
+  postgres: (tableName: string): SQL => sql`
+            SELECT c.relname AS table_name
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relname = ${tableName}
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND pg_catalog.pg_table_is_visible(c.oid)
+            LIMIT 1
+          `,
+  sqlite: (tableName: string): SQL =>
+    sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`,
+} satisfies Record<SqlDialect, (tableName: string) => SQL>;
+
+/**
+ * PostgreSQL must lock the complete version-eligible set before the outer
+ * count gate can admit any update. SQLite owns its single writer before this
+ * statement runs, so its token is deliberately empty.
+ */
+const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
+  // `NO KEY UPDATE`, not `UPDATE`: the batch rewrites only props and the
+  // version, and the stronger lock would conflict with the `FOR KEY SHARE` an
+  // edge write holds on its endpoints, so a batch update and an edge write
+  // locking each other's rows in opposite orders deadlocked. It still
+  // conflicts with every other writer of the row, delete included.
+  postgres: sql`FOR NO KEY UPDATE`,
+  sqlite: sql.empty(),
+} satisfies Record<SqlDialect, SQL>;
+
+function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
+  return (of?: readonly string[]): SQL =>
+    of === undefined || of.length === 0 ?
+      sql.raw(strength)
+    : sql.raw(
+        `${strength} OF ${of.map((alias) => `"${alias.replaceAll('"', '""')}"`).join(", ")}`,
+      );
+}
+
+const EMPTY_ROW_LOCK: RowLockClause = () => sql.empty();
+
+/**
+ * Clauses that lock nothing: for an engine that admits one writer at a time,
+ * and for a backend whose node-row locks are fence rows taken before the
+ * statement (see `NodeRowLockPlan`).
+ */
+export const NO_NODE_ROW_LOCK_CLAUSES: NodeRowLockClauses = {
+  edgeEndpoint: EMPTY_ROW_LOCK,
+  delete: EMPTY_ROW_LOCK,
+};
+
+/**
+ * The node-row lock pairing that keeps a live edge from naming a deleted
+ * endpoint (see `NodeRowLock`). PostgreSQL takes the locks a foreign key's
+ * referential check pairs with a referenced-row delete: an edge write holds
+ * `FOR KEY SHARE` on both endpoints, which no ordinary node update conflicts
+ * with, and a delete takes `FOR UPDATE` before it reads connected edges.
+ * SQLite admits one writer before any statement runs, so both are empty.
+ */
+export const NODE_ROW_LOCK_CLAUSES = {
+  postgres: {
+    edgeEndpoint: postgresRowLock("FOR KEY SHARE"),
+    delete: postgresRowLock("FOR UPDATE"),
+  },
+  sqlite: NO_NODE_ROW_LOCK_CLAUSES,
+} satisfies Record<SqlDialect, NodeRowLockClauses>;
+
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
+  vectorStrategy: VectorStrategy | undefined,
 ): CommonOperationStrategy {
   const tableOperations = bindTableOperationBuilders(
     tables,
     COMMON_TABLE_OPERATION_BUILDERS,
   );
   const fulltextTable = tables.fulltextTableName;
+  const contributionMaterializations = tables.contributionMaterializations;
 
   // All fulltext write SQL is owned by the active strategy — so swapping
   // to pg_trgm / ParadeDB / pgroonga swaps the full CRUD pipeline, not
   // just the read-side fragments.
   const fulltextBuilders = {
+    buildAtomicNodeProjectionStatements: (
+      creates: readonly AtomicNodePostimageEntry[],
+      updates: readonly AtomicNodeResolvedUpdateEntry[],
+      timestamp: string,
+      chunkSize: number,
+    ): readonly SQL[] | undefined =>
+      buildAtomicNodeProjectionStatements(
+        creates,
+        updates,
+        timestamp,
+        dialect,
+        fulltextTable,
+        fulltextStrategy,
+        vectorStrategy,
+        chunkSize,
+      ),
     buildUpsertFulltext: (
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildUpsert(fulltextTable, params, timestamp)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (
+        fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
-      fulltextStrategy
-        .buildDelete(fulltextTable, params)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (fulltextStrategy?.buildDelete(fulltextTable, params) ?? []).map(
+        (statement) => toDrizzleSql(statement, dialect),
+      ),
     buildDeleteFulltextByNode: (
       graphId: string,
       nodeKind: string,
       nodeId: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildDelete(fulltextTable, {
+      (
+        fulltextStrategy?.buildDelete(fulltextTable, {
           graphId,
           nodeKind,
           nodeId,
-        })
-        .map((statement) => toDrizzleSql(statement, dialect)),
+        }) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildUpsertFulltextBatch: (
       params: UpsertFulltextBatchParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildBatchUpsert(fulltextTable, params, timestamp)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (
+        fulltextStrategy?.buildBatchUpsert(fulltextTable, params, timestamp) ??
+        []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltextBatch: (
       params: DeleteFulltextBatchParams,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildBatchDelete(fulltextTable, params)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (fulltextStrategy?.buildBatchDelete(fulltextTable, params) ?? []).map(
+        (statement) => toDrizzleSql(statement, dialect),
+      ),
     buildFulltextSearch: (params: FulltextSearchParams): SQL =>
       buildFulltextSearch(
         fulltextTable,
         params,
-        fulltextStrategy,
+        requireDefined(
+          fulltextStrategy,
+          "buildFulltextSearch requires an active fulltext strategy",
+        ),
         dialect,
         // Store-compiled candidates (predicates + subclass + currency)
         // take precedence; the live-node default covers direct backend use.
@@ -360,7 +1042,10 @@ function createCommonOperationStrategy(
             {}
           : { includeSnippets: params.fulltext.includeSnippets }),
         },
-        fulltextStrategy,
+        requireDefined(
+          fulltextStrategy,
+          "buildHybridSearch requires an active fulltext strategy",
+        ),
         dialect,
         // Reference, not copy: the statement evaluates the shared
         // tg_hybrid_cand CTE once for both legs.
@@ -387,14 +1072,448 @@ function createCommonOperationStrategy(
     },
   };
 
+  /**
+   * States one contribution marker row outright: every column takes the
+   * supplied value whether or not a row already exists.
+   *
+   * Deliberately not the top-level backend's upsert, which COALESCEs
+   * `materialized_at` so a *failed* re-attempt cannot erase an earlier
+   * success. That rule is right when the attempt may have failed and
+   * wrong for a completed destructive rebuild, whose whole point is that
+   * the storage is new — the recorded timestamp must be the rebuild's,
+   * not the shape it replaced.
+   *
+   * One statement rather than a delete/insert pair so the row is never
+   * momentarily absent inside the transaction, and so a concurrent
+   * `repairContributions()` racing the same identity resolves as a
+   * conflict rather than a primary-key violation that would roll the
+   * whole rebuild back.
+   *
+   * Dialect-shared: the composite primary key is the conflict target on
+   * both engines, and the ISO timestamps bind straight into SQLite's TEXT
+   * and Postgres' TIMESTAMPTZ columns, the same way every other write
+   * builder here passes `nowIso()` through.
+   */
+  function buildInsertContributionMaterialization(
+    params: RecordContributionMaterializationParams,
+  ): SQL {
+    return sql`
+      INSERT INTO ${contributionMaterializations}
+        (graph_id, logical_name, owner, table_name, signature,
+         materialized_at, last_attempted_at, last_error)
+      VALUES (
+        ${params.graphId}, ${params.logicalName}, ${params.owner},
+        ${params.tableName}, ${params.signature},
+        ${nullableText(params.materializedAt)}, ${params.attemptedAt},
+        ${nullableText(params.error)}
+      )
+      ON CONFLICT (graph_id, logical_name, owner, table_name) DO UPDATE SET
+        signature = excluded.signature,
+        materialized_at = excluded.materialized_at,
+        last_attempted_at = excluded.last_attempted_at,
+        last_error = excluded.last_error
+    `;
+  }
+
+  function buildDeleteContributionMaterialization(
+    identity: ContributionMaterializationIdentity,
+  ): SQL {
+    return sql`
+      DELETE FROM ${contributionMaterializations}
+      WHERE graph_id = ${identity.graphId}
+        AND logical_name = ${identity.logicalName}
+        AND owner = ${identity.owner}
+        AND table_name = ${identity.tableName}
+    `;
+  }
+
+  const nodePropsNotNullConstraint = {
+    table: getTableName(tables.nodes),
+    column: tables.nodes.props.name,
+  } as const;
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    atomicNodeProjectionFamilies: [
+      ...(vectorStrategy === undefined ? [] : (["embedding"] as const)),
+      ...(fulltextStrategy === undefined ? [] : (["fulltext"] as const)),
+    ],
+    nodeRowLockClauses: NODE_ROW_LOCK_CLAUSES[dialect],
+    buildConvergeEdgeCreate: (params, endpointLock) =>
+      buildConvergeEdgeCreate(tables, params, endpointLock),
+    buildAtomicConvergeEdges: (params, endpointLock) =>
+      buildAtomicConvergeEdges(tables, params, endpointLock),
+    buildInsertEdgeIfEndpointsLive: (params, timestamp, endpointLock) =>
+      buildInsertEdgeIfEndpointsLive(tables, params, timestamp, endpointLock),
+    buildInsertEdgeIfEndpointsLiveWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+      endpointLock,
+    ) =>
+      buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildInsertEdgesBatchWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+      endpointLock,
+    ) =>
+      buildInsertEdgesBatchWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildInsertEdgesBatchReturningWithSchemaFence: (
+      params,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+      endpointLock,
+    ) =>
+      buildInsertEdgesBatchReturningWithSchemaFence(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      ),
+    buildLockNodes: (graphId, kind, ids, rowLock) =>
+      buildLockNodes(tables, dialect, graphId, kind, ids, rowLock),
+    buildLockNodesForAtomicDeleteWithSchemaFence: (
+      input,
+      schemaLockClause,
+      rowLock,
+    ) =>
+      buildLockNodesForAtomicDeleteWithSchemaFence(
+        tables,
+        dialect,
+        input,
+        schemaLockClause,
+        rowLock,
+      ),
+    buildAtomicConvergeEdgesTombstoneRefusal: (params) =>
+      buildAtomicConvergeEdgesTombstoneRefusal(tables, params),
+    buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
+      buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
+    atomicEdgeRefusalConstraints: {
+      cardinality: {
+        table: getTableName(tables.edgeClaims),
+        column: tables.edgeClaims.axis.name,
+      },
+      deleteIdentity: {
+        table: getTableName(tables.edges),
+        column: tables.edges.kind.name,
+      },
+      durableIdentity: {
+        table: getTableName(tables.edges),
+        column: tables.edges.createdAt.name,
+      },
+      endpoint: {
+        table: getTableName(tables.edges),
+        column: tables.edges.id.name,
+      },
+      mutationPostimage: {
+        table: getTableName(tables.edges),
+        column: tables.edges.kind.name,
+      },
+      tombstoneConvergence: {
+        table: getTableName(tables.edges),
+        column: tables.edges.updatedAt.name,
+      },
+    },
+    buildAtomicEdgeDeleteBatchWithSchemaFence: (
+      input,
+      timestamp,
+      schemaLockClause,
+    ) =>
+      buildAtomicEdgeDeleteBatchWithSchemaFence(
+        tables,
+        input,
+        timestamp,
+        schemaLockClause,
+      ),
+    buildAtomicEdgeResolvedUpdateBatch: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAtomicEdgeResolvedUpdateBatch(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    atomicNodeRefusalConstraints: {
+      deleteRestricted: nodePropsNotNullConstraint,
+      liveIdentity: nodePropsNotNullConstraint,
+      mutationPostimage: {
+        table: getTableName(tables.nodes),
+        column: tables.nodes.createdAt.name,
+      },
+      projectionEvidence: {
+        table: getTableName(tables.contributionMaterializations),
+        column: tables.contributionMaterializations.signature.name,
+      },
+    },
+    buildAtomicNodeDeleteBatchWithSchemaFence: (
+      input,
+      timestamp,
+      schemaLockClause,
+    ) =>
+      buildAtomicNodeDeleteBatchWithSchemaFence(
+        tables,
+        input,
+        timestamp,
+        schemaLockClause,
+      ),
+    buildAtomicNodeResolvedUpdateBatch: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAtomicNodeResolvedUpdateBatch(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildSchemaFenceProbe: (params, schemaLockClause) =>
+      buildSchemaFenceProbe(tables, params, schemaLockClause),
+    buildDeleteStaleAtomicEdgeClaims: (
+      entries,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildDeleteStaleAtomicEdgeClaims(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAcquireAtomicEdgeClaims: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAcquireAtomicEdgeClaims(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAssertAtomicEdgeClaimsOwned: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAssertAtomicEdgeClaimsOwned(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    primaryKeyConstraints: {
+      nodes: nodePrimaryKeyConstraint(tables.nodes),
+      edges: edgePrimaryKeyConstraint(tables.edges),
+    },
+    buildUpdateNodeSet(
+      params: CompareAndSetNodeParams | UpdateNodeSetParams,
+      timestamp: string,
+    ): SQL {
+      return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    },
+    buildResolvedNodeUpdateBatch(params, timestamp): SQL {
+      return buildResolvedNodeUpdateBatch(
+        tables,
+        params,
+        timestamp,
+        RESOLVED_NODE_UPDATE_LOCK_CLAUSES[dialect],
+      );
+    },
+    buildDeleteContributionMaterialization,
+    buildInsertContributionMaterialization,
     buildInsertUnique(params: InsertUniqueParams): SQL {
       return buildInsertUnique(tables, dialect, params);
     },
     buildInsertUniqueBatch(entries: readonly InsertUniqueParams[]): SQL {
       return buildInsertUniqueBatch(tables, dialect, entries);
+    },
+    buildAtomicNodeClaimUpsertWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimUpsertWithSchemaFence(
+        tables,
+        dialect,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeClaimGatePredicateWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimGatePredicateWithSchemaFence(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeClaimCleanupWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimCleanupWithSchemaFence(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+      input: Readonly<{
+        graphId: string;
+        kind: string;
+        ids: readonly string[];
+        timestamp: string;
+      }>,
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+        tables,
+        input,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+      input: Readonly<{
+        graphId: string;
+        kind: string;
+        ids: readonly string[];
+        timestamp: string;
+      }>,
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+        tables,
+        input,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildHardDeleteUniquesByConcreteKind(
+      params: HardDeleteUniquesByConcreteKindParams,
+    ): SqlFragment {
+      return buildHardDeleteUniquesByConcreteKind(
+        getTableName(tables.uniques),
+        params,
+      );
+    },
+    buildLockEdgeClaims(
+      entries: readonly ClaimEdgeCardinalityParams[],
+      timestamp: string,
+    ): SQL {
+      return buildLockEdgeClaims(tables, entries, timestamp);
+    },
+    buildReadEdgeClaimIncumbents(
+      entries: readonly ClaimEdgeCardinalityParams[],
+    ): readonly SQL[] {
+      return buildReadEdgeClaimIncumbents(tables, dialect, entries);
+    },
+    buildLockEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildLockEdgeClaimGuarded(tables, dialect, params, timestamp);
+    },
+    buildTakeOverEdgeClaim(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildTakeOverEdgeClaim(tables, params, timestamp);
+    },
+    buildTakeOverEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildTakeOverEdgeClaimGuarded(tables, params, timestamp);
+    },
+    buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
+      return buildPurgeEdgeClaims(tables, params);
+    },
+    buildContendedUniqueRowAudit(
+      graphId: string,
+      constraintNames: readonly string[],
+    ): SQL {
+      return buildContendedUniqueRowAudit(tables, graphId, constraintNames);
+    },
+    buildContendedEdgeRowAudit(
+      graphId: string,
+      ref: EdgeCardinalityAxisRef,
+      edgeKinds: readonly string[],
+    ): SQL {
+      return buildContendedEdgeRowAudit(tables, graphId, ref, edgeKinds);
+    },
+    buildContendedCompositionEdgeRowAudit(
+      graphId: string,
+      ref: EdgeCardinalityAxisRef,
+      holders: CompositionClaimScope["holders"],
+      reportedEdgeKinds: readonly string[],
+    ): SQL {
+      return buildContendedCompositionEdgeRowAudit(
+        tables,
+        graphId,
+        ref,
+        holders,
+        reportedEdgeKinds,
+      );
+    },
+    buildDisjointOverlapAudit(
+      graphId: string,
+      kinds: readonly [string, string],
+    ): SQL {
+      return buildDisjointOverlapAudit(tables, graphId, kinds);
+    },
+    buildMisassignedEdgeEndpointAudit(
+      graphId: string,
+      edgeKind: string,
+      allowedPairs: readonly (readonly [string, string])[],
+    ): SQL {
+      return buildMisassignedEdgeEndpointAudit(
+        tables,
+        graphId,
+        edgeKind,
+        allowedPairs,
+      );
     },
     buildGetActiveSchema(graphId: string): SQL {
       return buildGetActiveSchema(tables, graphId, dialect);
@@ -409,34 +1528,13 @@ function createCommonOperationStrategy(
       return buildSetActiveSchema(tables, graphId, version, dialect);
     },
     buildTableExists(tableName: string): SQL {
-      switch (dialect) {
-        case "postgres": {
-          // `pg_table_is_visible` resolves visibility through the session
-          // `search_path` — exactly how the unqualified DELETE / ANALYZE this
-          // probe guards resolves `tableName`. Scoping to `current_schema()`
-          // instead would report the table missing whenever it lives in a
-          // search_path schema that is not the current one (a shared-schema /
-          // multi-tenant deployment), skipping a statement that would in fact
-          // have hit the table — a guard narrower than what it protects.
-          return sql`
-            SELECT c.relname AS table_name
-            FROM pg_catalog.pg_class AS c
-            WHERE c.relname = ${tableName}
-              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-              AND pg_catalog.pg_table_is_visible(c.oid)
-            LIMIT 1
-          `;
-        }
-        case "sqlite": {
-          return sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`;
-        }
-        default: {
-          return dialect satisfies never;
-        }
-      }
+      return TABLE_EXISTS_QUERIES[dialect](tableName);
     },
-    buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
-      return buildClearGraph(tables, graphId);
+    buildClearGraph(
+      graphId: string,
+      options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+    ): readonly ClearGraphStatement[] {
+      return buildClearGraph(tables, graphId, fulltextStrategy, options);
     },
   };
 }
@@ -498,14 +1596,82 @@ export function createCachedTableExistence(
 
 export function createSqliteOperationStrategy(
   tables: SqliteTables,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
+  vectorStrategy?: VectorStrategy,
 ): SqliteOperationStrategy {
-  return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
+  return createCommonOperationStrategy(
+    tables,
+    "sqlite",
+    fulltextStrategy,
+    vectorStrategy,
+  );
+}
+
+function createPostgresNodeProjectionBuilders(
+  tables: PostgresTables,
+  dialect: SqlDialect,
+  fulltextStrategy: FulltextStrategy | undefined,
+  vectorStrategy: VectorStrategy | undefined,
+): Pick<CommonOperationStrategy, "buildInsertNodeWithProjections"> {
+  const fulltextTable = tables.fulltextTableName;
+  return {
+    buildInsertNodeWithProjections(params, plan, timestamp, schemaLockClause) {
+      return buildInsertNodeWithProjections(
+        tables,
+        params,
+        plan,
+        timestamp,
+        dialect,
+        fulltextTable,
+        fulltextStrategy,
+        vectorStrategy,
+        schemaLockClause,
+      );
+    },
+  };
 }
 
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
+  vectorStrategy?: VectorStrategy,
 ): PostgresOperationStrategy {
-  return createCommonOperationStrategy(tables, "postgres", fulltextStrategy);
+  return {
+    ...createCommonOperationStrategy(
+      tables,
+      "postgres",
+      fulltextStrategy,
+      vectorStrategy,
+    ),
+    ...createPostgresNodeProjectionBuilders(
+      tables,
+      "postgres",
+      fulltextStrategy,
+      vectorStrategy,
+    ),
+    buildInsertEdgeIfEndpointsLiveWithCardinalityClaim: (
+      params,
+      claim,
+      timestamp,
+      endpointLock,
+    ) =>
+      buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+        tables,
+        params,
+        claim,
+        timestamp,
+        endpointLock,
+      ),
+    buildLockSchemaVersionAndGraphWrite: (
+      params,
+      advisoryLockNamespace,
+      fenceSql,
+    ) =>
+      buildLockSchemaVersionAndGraphWrite(
+        tables,
+        params,
+        advisoryLockNamespace,
+        fenceSql,
+      ),
+  };
 }

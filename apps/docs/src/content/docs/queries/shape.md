@@ -1,10 +1,11 @@
 ---
 title: Shape
-description: Transform output structure with select() and aggregate()
+description: Transform output with select(), project(), map(), and aggregate()
 ---
 
-Shape operations transform how results are returned. Use `select()` to define the output structure
-and `aggregate()` for grouped/aggregated results.
+Shape operations transform how results are returned. Use `select()` for the compatibility result
+mapper, `project()` for an explicit SQL projection, `map()` for a final JavaScript transformation,
+and `aggregate()` for grouped results.
 
 ## select()
 
@@ -32,6 +33,11 @@ const results = await store
 | `selectFunction` | `(ctx) => T` | Function that receives a context and returns the output shape |
 
 The context provides typed access to all nodes and edges in the query via their aliases.
+
+For new queries that need SQL composition, use `project()` and the typed `expr` helpers described in
+[Database Expressions](/queries/expressions). A projected query can become an
+[`asRelation()`](/queries/relations/) for derived filtering, aggregation, distinctness, and set
+operations. Use `select()` when you specifically need the compatibility JavaScript mapper.
 
 ## Selection Patterns
 
@@ -71,9 +77,9 @@ Include system metadata fields:
 .select((ctx) => ({
   id: ctx.p.id,
   kind: ctx.p.kind,           // "Person"
-  version: ctx.p.version,     // Optimistic concurrency version
-  createdAt: ctx.p.createdAt,
-  updatedAt: ctx.p.updatedAt,
+  version: ctx.p.meta.version,     // Optimistic concurrency version
+  createdAt: ctx.p.meta.createdAt,
+  updatedAt: ctx.p.meta.updatedAt,
 }))
 ```
 
@@ -216,15 +222,15 @@ const results = await store
 When using [temporal queries](/queries/temporal), access validity information:
 
 ```typescript
-const history = await store
+const articles = await store
   .query()
   .from("Article", "a")
   .temporal("includeEnded")
   .select((ctx) => ({
     title: ctx.a.title,
-    validFrom: ctx.a.validFrom,   // When this version became valid
-    validTo: ctx.a.validTo,       // When superseded (undefined if current)
-    version: ctx.a.version,       // Version number
+    validFrom: ctx.a.meta.validFrom,   // When the row's validity window starts
+    validTo: ctx.a.meta.validTo,       // When it ends (undefined if it has no end)
+    version: ctx.a.meta.version,       // Incremented by every update of the row
   }))
   .execute();
 ```
@@ -244,6 +250,8 @@ const history = await store
 
 ## Next Steps
 
+- [Expressions](/queries/expressions) - SQL projection and typed expression callbacks
+- [Relations](/queries/relations) - Compose explicit projected results
 - [Aggregate](/queries/aggregate) - Grouping and aggregate functions
 - [Order](/queries/order) - Ordering and limiting results
 - [Execute](/queries/execute) - Running queries and pagination

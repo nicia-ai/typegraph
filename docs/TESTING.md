@@ -72,12 +72,127 @@ Location: `packages/typegraph/tests/backends/`
 
 Tests that exercise complete workflows with real database backends.
 
+The identity-universe, incremental-merge, ingestion-branch, identity-merge,
+provenance-store, and identity-law property suites reuse idle
+PGlite engines through `tests/graph-merge/pglite-fixture-pool.ts`. Every live
+fixture still owns a separate engine, so base and branch transactions remain
+independent. Each lease creates a fresh backend and schema; cleanup drops the
+whole schema (including strategy-owned indexes) and resets session settings
+before returning the engine to the pool. The file's `afterAll` closes the pool.
+Keep this lifecycle when adding cases to these suites.
+
+The PGlite integration suite also uses this pool for physically isolated merge
+branches and review targets. Each of its slice files still shares one primary
+engine across its tests and resets data before each test; serialized-backend
+tests intentionally use that primary engine. Isolated fixtures are released by
+the shared integration suite's cleanup hook, and each slice file closes both its
+primary engine and its pool at completion.
+
+The libSQL adapter and integration suites use temporary database files. CI sets
+`TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
+disposable files on the Linux runner's RAM-backed filesystem. This preserves
+file-client behavior, close/reopen persistence, and default journal/synchronous
+settings while avoiding variable disk flush latency. Locally the suite defaults
+to the OS temporary directory; the override must name an existing directory.
+It affects only these suites' database files, not other tools' temporary files.
+
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
 ```typescript
 import { createAdapterTestSuite } from "./adapter-test-suite";
 
 createAdapterTestSuite("SQLite", () => createTestBackend());
+```
+
+The **shared integration suite** (`integration-test-suite.ts`) runs the
+cross-backend query, write, and merge cases registered under
+`tests/backends/integration/`. Vitest parallelizes and shards by file, so each
+backend lane registers the suite from several slice files rather than one:
+
+| Lane | Slice files | Shared setup |
+| --- | --- | --- |
+| better-sqlite3 | `sqlite/sqlite-integration-slice-{0,1}.test.ts` | `sqlite/sqlite-integration-lane.ts` |
+| libSQL | `sqlite/libsql-integration-slice-{0..3}.test.ts` | `sqlite/libsql-integration-lane.ts` |
+| PGlite | `postgres/pglite-integration-slice-{0..3}.test.ts` | `postgres/pglite-integration-lane.ts` |
+| node-postgres | `postgres/postgres-integration-slice-{0..3}.test.ts` | `postgres/postgres-integration-lane.ts` |
+| postgres-js | `postgres/postgres-js-integration-slice-{0..3}.test.ts` | `postgres/postgres-js-integration-lane.ts` |
+
+A slice file only states `slice: { index, count }`; the lane module owns the
+backend factories and lifecycle hooks, so every slice of a lane is set up
+identically. Each slice file is its own worker and therefore owns its own
+engine, pool, temporary files, or provisioned PostgreSQL database.
+
+`tests/backends/integration-registrations.ts` is the single list of what the
+suite contains. To add a sub-suite, export its `register…` function from
+`tests/backends/integration/index.ts` and add one `{ register }` entry to
+`INTEGRATION_REGISTRATIONS`. It is assigned to a slice automatically: the
+slicer packs registrations heaviest-first into the lightest slice, using each
+entry's optional `weight` (measured share of suite wall time) and a default for
+entries without one. Weights only affect balance, never coverage, so they need
+no upkeep; re-measure them only when one slice of a lane becomes a clear long
+pole. `tests/integration-suite-slices.test.ts` fails when a lane's slice files
+do not cover indexes `0..count-1` exactly once or when the slices of a lane do
+not add up to the full registration list.
+
+Because a registration can move to a different slice file when the list, a
+weight, or a slice count changes, shared suites must not call
+`toMatchSnapshot()`, which keys its snapshot to the running test file. Record a
+per-dialect expectation with `toMatchFileSnapshot()` and a path beside the
+suite instead (see `capability-bundle-no-throw.ts`); the same guard enforces
+this.
+
+To change a lane's slice count, add or remove slice files and state the new
+`count` in every slice file of that lane.
+
+### Oracle suites
+
+Some semantics have more than one implementation inside the library — the same
+question answered by the SQL compiler, by a collection predicate, and by an
+in-memory row filter. Checking those against each other proves nothing: any
+three of them agreeing is the failure mode, not the evidence. An **oracle
+suite** answers the question a fourth time, independently, and checks every path
+against that.
+
+Two exist today, both registered in the shared cross-backend suite so they run
+on every backend in the matrix:
+
+| Model | Suite | Question it re-derives |
+| --- | --- | --- |
+| `tests/backends/integration/identity-traversal-model.ts` | `identity-current-traversal.ts`, `identity-historical-traversal.ts` | Which rows an identity-expanded hop must return at an instant. |
+| `tests/backends/integration/temporal-oracle-model.ts` | `temporal-oracle.ts` | Which rows a bitemporal coordinate must return, and which validity windows a write may store. |
+
+A model earns the name by three properties, and all three are load-bearing:
+
+1. **It is a second implementation, not a restatement.** The temporal model
+   formulates visibility as interval membership over epoch milliseconds; the
+   library formulates it as a column predicate over `TEXT` or `timestamptz`.
+2. **It derives its expectations from the rows that were actually persisted**,
+   never from the write calls, so a write whose stored shape differs from the
+   requested one is checked against what it stored rather than flaking.
+3. **It passes unchanged on `main`.** A model that only passes after the fix it
+   accompanies is a restatement of the fix. Where the tree is knowingly wrong,
+   the model declares the cell in a gap table, withholds the op shape that
+   reaches it from the generator, and carries a still-reproduces test — and each
+   entry is deleted by the diff that measurably closes it, never later, with its
+   reproduction turned around into a gap-CLOSED test running the same script.
+   The temporal model carried three such entries and now carries none; its
+   `closed contract gaps` block is what that discipline leaves behind.
+
+`tests/temporal-oracle-imports.test.ts` ratchets the temporal model's
+independence: exact set equality over its import specifiers, a named-import
+check on `src/utils/date` so the window guards stay out, and an assertion that
+the barrel import is `import type`, so it cannot carry a value however the
+barrel grows. It also ratchets the op vocabulary by **sampling the history
+generator's own arbitrary**: a shape the script claims to cover is only covered
+if the generator can draw it, and comparing one spelling of the declared list
+against another cannot show that.
+
+The oracle properties run at a smoke-gate iteration count by default and take a
+run-count knob for deep runs:
+
+```bash
+# Deep run of the temporal oracle on every backend in the default lane
+TYPEGRAPH_ORACLE_RUNS=100 pnpm test
 ```
 
 ## Running Tests
@@ -112,6 +227,92 @@ pnpm test:coverage
 PostgreSQL example runner intentionally uses `POSTGRES_URL` so it can exercise
 the same caller-supplied connection configuration shown to users.
 
+### Per-suite PostgreSQL databases
+
+`pnpm test:postgres` selects the server-only graph-merge matrix with
+`TYPEGRAPH_TEST_BACKEND=postgres` and excludes the dedicated `pglite-*.test.ts`
+files. SQLite and PGlite still run in the normal unit/property/coverage lanes.
+Mixed-backend files remain loaded so their server-specific cases are retained.
+The lane coverage guard checks exclusions as well as file inclusion, and allows
+excluded files only when the default PGlite project collects them.
+
+Direct Vitest runs with `POSTGRES_URL` still include all three merge backends
+unless the selector is set. Selecting `postgres` without a URL, or supplying an
+unknown selector, fails immediately instead of silently dropping test coverage.
+
+Every server-PostgreSQL suite owns the graph tables it operates on: `beforeEach`
+hooks `TRUNCATE` them, `beforeAll` hooks re-run the migration SQL, and a few
+suites `DROP` them outright. To make that ownership true rather than assumed,
+each test *file* runs against its own database, named after the file and
+recreated on demand from the `POSTGRES_URL` database:
+
+```text
+POSTGRES_URL=…/typegraph_test  ->  typegraph_test__postgres_backend
+                                   typegraph_test__identity_enablement_lock
+                                   …
+```
+
+Suites opt in by resolving their connection URL through the shared helper
+instead of reading `POSTGRES_URL` directly:
+
+```typescript
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
+```
+
+Consequences worth knowing:
+
+- **A new PostgreSQL suite must bootstrap its own tables** (usually
+  `await pool.query(generatePostgresMigrationSQL())` in `beforeAll`). It cannot
+  inherit them from whichever suite happened to run first.
+- **A suite outside `tests/backends/postgres/` must be named in
+  `scripts/test-postgres.sh`.** The lane picks up that directory wholesale, but
+  mixed-backend suites — the SQLite family in the default lane plus a
+  PostgreSQL leg when `POSTGRES_URL` is set — live elsewhere and are listed
+  file by file. Forgetting one is invisible: the default lane skips the
+  PostgreSQL leg for want of `POSTGRES_URL` and the PostgreSQL lane never loads
+  the file, so the leg runs nowhere and the suite still reports green.
+  `tests/postgres-lane-coverage.test.ts` fails when a suite that imports
+  `provisionPostgresTestDatabase` is missing from the script.
+- **The `POSTGRES_URL` role needs `CREATEDB`.** Set
+  `TYPEGRAPH_TEST_SHARED_DATABASE=1` to opt out and run every suite against the
+  base database — the pre-isolation behaviour, including its cross-suite
+  `TRUNCATE`/`DROP` hazards.
+- **One vitest invocation at a time per `POSTGRES_URL`.** Two invocations
+  resolve the same suite to the same database name, and provisioning drops it
+  with `WITH (FORCE)`. Concurrent lanes (for example one per worktree) must use
+  separate base databases.
+- The per-suite databases are deliberately left behind so a failure stays
+  inspectable; the next run recreates them. The Docker container is also left
+  running between runs (`up -d --wait` reuses it idempotently), both to skip
+  the start/stop cycle and so one invocation's exit cannot tear the server out
+  from under a concurrent invocation. Set `TYPEGRAPH_POSTGRES_DOWN=1` to
+  restore teardown-on-exit, or stop it manually with
+  `docker compose -f packages/typegraph/docker-compose.yml down`. A warm
+  server carries no state a run depends on — the per-suite databases are
+  dropped and recreated — but leftovers from inspection do accumulate until
+  the container is recreated.
+
+The lane runs its suites **file-parallel**, and the worker count follows who
+provisioned the server. The bundled `docker-compose.yml` starts PostgreSQL
+with `max_connections=400`, which affords `min(6, cores)` workers (each worker
+holds at least one pool, and graph-merge property fixtures keep several
+backends alive at once). An externally supplied `POSTGRES_URL` has an unknown
+connection budget, so it defaults to **one** worker — the pre-parallel
+behaviour — until you state a cap explicitly with `TYPEGRAPH_PG_MAX_WORKERS`
+after budgeting your server the same way (CI does exactly this: it raises
+`max_connections` on its service container, then sets the cap beside that
+step). "sorry, too many clients already" mid-suite is the symptom of a cap
+your server cannot fund. The graph-merge and pglite vitest projects, which
+serialize their files in the default SQLite lane, opt back into parallelism
+only when the lane actually runs multi-worker. Reproducing a single failure
+with a parallel invocation of a few files remains safe at any worker count —
+isolation comes from the per-suite databases, never from serialization. The
+one-invocation-per-`POSTGRES_URL` restriction above still applies: worker
+parallelism is *within* an invocation, and concurrent invocations still race
+on database names.
+
 ## Coverage
 
 We use [@vitest/coverage-v8](https://vitest.dev/guide/coverage) for coverage reporting.
@@ -142,6 +343,12 @@ coverage: {
 
 The test command will fail if coverage drops below these thresholds.
 
+Per-test timeouts live in `vitest.config.ts`: the main project has 15 seconds,
+while PGlite and graph-merge projects have 60 seconds. Coverage uses these same
+budgets. Do not pass a global `--testTimeout` in the coverage workflow: it
+overrides project settings and can shorten the budget for in-process Postgres
+tests.
+
 ### Interpreting Coverage
 
 High coverage doesn't guarantee good tests. A file can have 100% line coverage but still
@@ -165,10 +372,20 @@ A surviving mutant indicates a gap in test coverage - code that can change witho
 # Full run (slow - 6000+ mutants)
 pnpm test:mutation
 
-# Targeted run (recommended)
+# Scoped runs (recommended) — one config per high-risk subsystem
+pnpm test:mutation:critical   # write pipeline, import, provenance, history
+pnpm test:mutation:claims     # constraint claim axes, specs and statements
+
+# Ad-hoc targeted run
 npx stryker run --mutate "src/utils/*.ts"
 npx stryker run --mutate "src/query/builder/*.ts"
 ```
+
+`test:mutation:claims` covers `src/store/claims/**` plus the claim-statement and
+fence-audit builders under `src/backend/drizzle/operations`. Run it without
+`POSTGRES_URL`: the two-connection concurrency suite is timing-bound and skips
+itself there, while the cross-backend integration suite — which is what kills
+most of these mutants — runs either way.
 
 ### Interpreting Results
 
@@ -315,20 +532,32 @@ it("closure is transitive", () => {
 
 ## CI Integration
 
-Every pull request to `main` must pass the full gate defined in
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). It is much broader
-than the local `pnpm test` default (which runs only SQLite unit/property
-tests). The jobs are:
+Every code-changing pull request to `main` must pass the full gate defined in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Release changes that
+only update changesets, changelogs, and the package version skip the heavy jobs;
+the parsed package manifest must otherwise be identical.
+The full gate is much broader than the local `pnpm test` default (which runs
+only SQLite unit/property tests). The jobs are:
 
 | Job | What it runs |
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
-| **Test (SQLite)** | `test:unit` + `test:property` on Node 22 and 24, plus a SQLite perf sanity check and an example smoke test |
-| **Test (Coverage)** | `test:coverage` — enforces the coverage thresholds |
-| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.2 |
+| **Test (SQLite)** | Five `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
+| **Test (Coverage)** | Five V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
+| **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3; packed-consumer checks against 7.0.2 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
-| **Build** | `turbo run build` — gated on every job above |
+| **Build artifacts** | `turbo run build` in parallel with the test jobs |
+| **Build** | Final required gate that succeeds only after the build and every test job above pass |
+
+A separate scheduled workflow,
+[`.github/workflows/property-deep.yml`](../.github/workflows/property-deep.yml),
+runs `test:property` nightly with `TYPEGRAPH_PROPERTY_RUNS_SCALE=10`, which
+multiplies every `propertyRuns` budget (`tests/property/run-budget.ts`). It is
+not a merge gate. Run it on demand from the Actions tab with a different
+multiplier, or locally with `TYPEGRAPH_PROPERTY_RUNS_SCALE=10 pnpm
+test:property`. A suite that passes a literal `numRuns` is not scaled; give it a
+`propertyRuns` budget to include it.
 
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
@@ -338,3 +567,58 @@ To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
+
+### Shard balance
+
+The sharded jobs split test files by recorded duration, not by Vitest's default
+path hash, which evens out file counts and leaves one shard several times
+slower than another. `vitest.shard-sequencer.ts` assigns each file to a shard
+from the durations in `vitest.shard-weights.json`, which holds one map per lane
+(`sqlite` for the default lanes, `postgres` when `POSTGRES_URL` is set, since a
+suite with a server leg costs far more there).
+
+The split depends only on the file list, the recorded weights, and the shard
+count, so the jobs of one commit agree on it; `tests/shard-sequencer.test.ts`
+checks that the shards add up to every test file exactly once. A file with no
+recorded duration is placed at the mean, so adding a test file needs no
+bookkeeping. Stale weights cost balance, never coverage.
+
+Durations are recorded from CI, since a runner's relative file costs differ
+from a workstation's (server-backed suites share the runner's cores with the
+PostgreSQL service). The coverage and PostgreSQL jobs upload a JSON report per
+shard as `shard-durations-*` artifacts. Refresh the weights from a green run
+when a shard drifts well above the others:
+
+```bash
+cd packages/typegraph
+
+gh run download <run-id> --pattern 'shard-durations-sqlite-*' --dir durations/sqlite
+node --import tsx scripts/update-shard-weights.ts sqlite durations/sqlite/*/*.json
+
+gh run download <run-id> --pattern 'shard-durations-postgres-*' --dir durations/postgres
+node --import tsx scripts/update-shard-weights.ts postgres durations/postgres/*/*.json
+```
+
+## Type-level consumer contracts
+
+Runtime and property tests execute transpiled JavaScript. They cannot establish
+that a generic TypeScript function is callable: generic relationships and
+conditional types have been erased before a generated property-test case runs.
+For public type changes, add compiler fixtures for both concrete and generic
+consumers, including generic graph/kind dispatch, generic node factories, mixed target
+declarations, explicit type annotations,
+independent endpoint unions, and required property inputs. Pair positive cases
+with negative cases so widening away the invariant fails the same fixture.
+
+`type-smoke/edge-endpoint-compat.ts` runs in the package source typecheck and the
+isolated packed-artifact consumer check. The latter uses the selected TypeScript
+compiler against published-style declarations. `tsd` uses its own bundled
+`@tsd/typescript`; installing a sibling `typescript` version does not select tsd's
+compiler. Its declaration assertions complement the compiler matrix rather than
+constituting that matrix. The TS 7 lane checks packed consumers because the
+repository source configuration still uses `baseUrl`, removed by TS 7.
+
+The API report and surface-diff checker detect structural member changes, not
+semantic call-signature compatibility or deferred generic conditionals. A clean
+report does not replace compile fixtures. See the
+[0.55 endpoint type regression analysis](TYPE_REGRESSION_055.md).

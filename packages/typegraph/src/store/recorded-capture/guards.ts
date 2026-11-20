@@ -1,4 +1,19 @@
 import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../../backend/capabilities/batch-write-verdict";
+import { resolveRecordedTimeOwnership } from "../../backend/capabilities/recorded-time-ownership";
+import {
+  recordedRevisionOriginsVerdict,
+  statementExecutionVerdict,
+} from "../../backend/capabilities/resolve";
+import {
+  refuseFenceSqlSessionFactUnavailable,
+  resolveFenceStatements,
+} from "../../backend/capabilities/write-fence";
+import { normalizeGraphCommandIsolation } from "../../backend/command-contract";
+import {
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
@@ -6,10 +21,11 @@ import {
 import {
   ConfigurationError,
   type RecordedCaptureGuardCode,
+  UnsupportedBackendCapabilityError,
 } from "../../errors";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -114,27 +130,32 @@ export function assertRequestedRecordedIsolation(
   throw unsupportedPostgresIsolationError(isolationLevel);
 }
 
-function normalizeIsolationLevel(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  return value.replaceAll(" ", "_").toLowerCase();
-}
-
 export async function assertRecordedCaptureTransactionIsolation(
-  target: Pick<TransactionBackend, "dialect" | "execute">,
+  target: Pick<TransactionBackend, "dialect" | "execute" | "fenceSql">,
   options?: TransactionOptions,
 ): Promise<void> {
   if (!RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK[target.dialect]) return;
   if (options?.accessMode === "read_only") return;
 
+  // This check is gated purely on `dialect`, not on a resolved write-fence
+  // plan (it runs whether or not history capture takes a lock at all), so it
+  // cannot resolve a `WriteFencePlan` to read the isolation fact through —
+  // it derives the standalone `isolationFact` statement from the target's
+  // OWN `fenceSql` directly instead, via `resolveFenceStatements`. A
+  // PostgreSQL target that declares no `fenceSql` gets a typed refusal
+  // naming the session-fact read it cannot spell, rather than having the
+  // bundled spelling substituted under it or being told to fix a lock
+  // declaration this path never consults.
+  if (target.fenceSql === undefined) {
+    refuseFenceSqlSessionFactUnavailable(target.dialect);
+  }
   const rows = await target.execute<IsolationRow>(
-    asCompiledRowsSql(sql`
-      SELECT current_setting('transaction_isolation') AS transaction_isolation
-    `),
+    asCompiledRowsSql(resolveFenceStatements(target.fenceSql).isolationFact()),
   );
-  const isolationLevel = normalizeIsolationLevel(
+  const isolationLevel = normalizeGraphCommandIsolation(
     rows[0]?.transaction_isolation,
   );
-  if (isSupportedRecordedIsolationLevel(isolationLevel)) return;
+  if (isolationLevel === "read_committed") return;
 
   throw unsupportedPostgresIsolationError(isolationLevel);
 }
@@ -237,18 +258,32 @@ export function rawWriteGuards(
   };
 }
 
+/**
+ * Defense-in-depth on the non-interactive branch: `Store`'s constructor
+ * already routes `history: true` through `#revisionTrackingEnabled` and
+ * calls {@link assertRevisionTrackableBackend} — which refuses a batch-tier
+ * backend first — before it ever reaches {@link createRecordedBackend} (and
+ * so this gate). It stays here, re-checked with the same verdict, for any
+ * caller of `createRecordedBackend` that does not go through that
+ * constructor path.
+ */
 export function assertCapturableBackend(backend: GraphBackend): void {
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "history" });
     throw new ConfigurationError(
-      "history: true requires a backend with transaction support.",
-      { dialect: backend.dialect },
+      "history: true requires a backend with transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        dialect: backend.dialect,
+        ...batchRefusalDetails(verdict),
+      },
       {
         suggestion:
           "Use a transactional SQLite/PostgreSQL backend or disable recorded-time capture for this store.",
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "history: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },
@@ -286,17 +321,22 @@ export function assertCapturableBackend(backend: GraphBackend): void {
  * and therefore does not require `UPDATE … RETURNING`.
  */
 export function assertRevisionTrackableBackend(backend: GraphBackend): void {
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "history" });
     throw new ConfigurationError(
-      "revisionTracking: true requires a backend with transaction support.",
-      { dialect: backend.dialect },
+      "revisionTracking: true requires a backend with transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        dialect: backend.dialect,
+        ...batchRefusalDetails(verdict),
+      },
       {
         suggestion:
           "Use a transactional SQLite/PostgreSQL backend or leave revision tracking disabled.",
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },
@@ -316,7 +356,7 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.ensureRevisionOriginsTable === undefined) {
+  if (!recordedRevisionOriginsVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that can bootstrap revision origins.",
       { dialect: backend.dialect },
@@ -326,4 +366,30 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
+}
+
+/** One capture, ownership, and backend gate for allocation-log entrypoints. */
+export function requireRecordedAnchorLog(
+  context: Readonly<{
+    backend: GraphBackend;
+    graphId: string;
+    captureEnabled: boolean;
+  }>,
+  surface: string,
+): void {
+  if (
+    !context.captureEnabled ||
+    resolveRecordedTimeOwnership(context.backend) !== "typegraph-relations" ||
+    context.backend.capabilities.recordedAnchorLookup !== true
+  )
+    throw new UnsupportedBackendCapabilityError(
+      surface,
+      "recordedAnchorLookup",
+      {
+        graphId: context.graphId,
+        dialect: context.backend.dialect,
+        captureEnabled: context.captureEnabled,
+      },
+    );
+  assertCapturableBackend(context.backend);
 }

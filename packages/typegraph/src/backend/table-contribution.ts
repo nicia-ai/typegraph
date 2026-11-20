@@ -50,10 +50,21 @@ export const FULLTEXT_CONTRIBUTION_NAME = "fulltext";
 /** `owner` of core/base schema tables (not strategy-owned). */
 export const BASE_CONTRIBUTION_OWNER = "base";
 
+/** Ownership scope for a strategy-owned physical contribution. */
+export type ContributionScope = "deployment" | "graph";
+
+/** Durable-marker key used for deployment-scoped physical contributions. */
+export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
+
 /**
  * A single table TypeGraph owns.
  */
 export type TableContribution = Readonly<{
+  /**
+   * Whether physical storage is shared by the deployment or owned by one
+   * graph. Omitted by older custom strategies, which retain graph scope.
+   */
+  scope?: ContributionScope;
   /**
    * Stable, graph- and deployment-independent identity for the logical
    * slot this contribution fills (e.g. `"fulltext"`). NOT the physical
@@ -88,6 +99,31 @@ export type TableContribution = Readonly<{
    */
   createDdl: readonly string[];
   /**
+   * Idempotent (`DROP ... IF EXISTS`) statements that tear this
+   * contribution's storage down, ordered so that running the list
+   * leaves nothing behind. Declaring it is what makes a contribution
+   * *rebuildable*: the destructive
+   * `store.rebuildContribution()` path drops through these statements
+   * before re-running {@link createDdl}, which is the only repair for a
+   * table provisioned at a shape the current `createDdl` no longer
+   * produces.
+   *
+   * Optional because it is a capability, not an invariant. A
+   * contribution whose content cannot be reconstructed from data
+   * TypeGraph already stores has no business advertising a rebuild —
+   * dropping it would destroy the only copy — and a third-party
+   * strategy that predates this field keeps compiling and is reported
+   * as not rebuildable rather than silently rebuilt through a
+   * synthesized `DROP`. Backends surface the resulting gap as
+   * `capabilities.contributions.rebuild`.
+   *
+   * The rebuild visits a strategy's `runtimeEnsure` contributions, the
+   * same set the boot ensure provisions — so a companion table a strategy
+   * declares outside that set is neither dropped nor recreated, and must
+   * not be something the recreated storage depends on.
+   */
+  dropDdl?: readonly string[];
+  /**
    * When `true`, the post-schema-load focused ensure
    * (`loadActiveSchemaWithBootstrap`) materializes this contribution
    * on every successful schema load.
@@ -100,6 +136,21 @@ export type TableContribution = Readonly<{
    * DDL for — every base table.
    */
   runtimeEnsure: boolean;
+  /**
+   * Explicit PostgreSQL working-copy behavior. A PostgreSQL contribution
+   * without this declaration is refused at clone time. Optional here because
+   * SQLite and older third-party strategies use the same neutral contract.
+   */
+  workingCopyClonePolicy?:
+    | Readonly<{ kind: "graphRows"; graphIdColumn: string }>
+    | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+      }>
+    | Readonly<{ kind: "freshSeed" }>
+    | Readonly<{ kind: "rebuildAfterClone" }>
+    | Readonly<{ kind: "unsupported"; reason: string }>;
 }>;
 
 /**

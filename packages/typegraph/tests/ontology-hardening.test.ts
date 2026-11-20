@@ -1,0 +1,995 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  disjointWith,
+  equivalentTo,
+  inverseOf,
+  partOf,
+  relatedTo,
+  subClassOf,
+} from "../src";
+import { defineGraphExtension } from "../src/graph-extension";
+import { GraphExtensionUnresolvedOntologyEndpointError } from "../src/graph-extension";
+import { mergeGraphExtension } from "../src/graph-extension/merge";
+import { validateOntologyRelations } from "../src/ontology/validation";
+import { buildKindRegistry } from "../src/registry";
+import { computeClosuresFromNamedOntology } from "../src/registry/kind-registry";
+import {
+  deserializeSchema,
+  type SerializedSchema,
+  serializeSchema,
+} from "../src/schema";
+import {
+  disjointnessClaimAxis,
+  uniquenessClaimTarget,
+} from "../src/store/claims/axis";
+import { createStoreWithSchema } from "../src/store/store";
+import { createTestBackend, matchingArray, matchingObject } from "./test-utils";
+
+const emptySchema = z.object({});
+const Person = defineNode("Person", { schema: emptySchema });
+const Organization = defineNode("Organization", { schema: emptySchema });
+const Company = defineNode("Company", { schema: emptySchema });
+
+type ComposableReadonlyStringSet = ReadonlySet<string> &
+  Readonly<{
+    union(other: ReadonlySet<string>): Set<string>;
+    intersection(other: ReadonlySet<string>): Set<string>;
+    difference(other: ReadonlySet<string>): Set<string>;
+    symmetricDifference(other: ReadonlySet<string>): Set<string>;
+    isSubsetOf(other: ReadonlySet<string>): boolean;
+    isSupersetOf(other: ReadonlySet<string>): boolean;
+    isDisjointFrom(other: ReadonlySet<string>): boolean;
+  }>;
+
+describe("ontology truth and hardening", () => {
+  it("propagates disjointness through the subClassOf closure", () => {
+    const graph = defineGraph({
+      id: "disjoint-subsumption",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [
+        disjointWith(Person, Organization),
+        subClassOf(Company, Organization),
+      ],
+    });
+
+    const registry = buildKindRegistry(graph);
+    expect(registry.areDisjoint("Person", "Company")).toBe(true);
+    expect(registry.getDisjointKinds("Company")).toContain("Person");
+  });
+
+  it("provides a symmetric direct relatedTo accessor", () => {
+    const graph = defineGraph({
+      id: "related-kinds",
+      nodes: { Person: { type: Person }, Company: { type: Company } },
+      edges: {},
+      ontology: [relatedTo(Person, Company)],
+    });
+    const registry = buildKindRegistry(graph);
+    expect(registry.getRelatedKinds("Person")).toEqual(["Company"]);
+    expect(registry.getRelatedKinds("Company")).toEqual(["Person"]);
+    expect(registry.getRelatedKinds("Missing")).toEqual([]);
+  });
+
+  it("rejects incoherent live-graph ontology with structured details", () => {
+    const graph = defineGraph({
+      id: "live-incoherent",
+      nodes: { Person: { type: Person }, Organization: { type: Organization } },
+      edges: {},
+      ontology: [
+        subClassOf(Person, Organization),
+        disjointWith(Person, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a disjointWith self-loop", () => {
+    const graph = defineGraph({
+      id: "disjoint-self-loop",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      ontology: [disjointWith(Person, Person)],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a common subclass of two disjoint parents", () => {
+    const graph = defineGraph({
+      id: "common-subclass-of-disjoint-parents",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [
+        disjointWith(Person, Organization),
+        subClassOf(Company, Person),
+        subClassOf(Company, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+          issues: matchingArray([
+            expect.objectContaining({
+              code: "ONTOLOGY_DISJOINT_CONFLICT",
+              details: matchingObject({ kind: "Company" }),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it("allows a kind to be part of a disjoint kind", () => {
+    const belongsToOrg = defineEdge("belongsToOrg", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "part-of-disjoint-kind",
+      nodes: { Person: { type: Person }, Organization: { type: Organization } },
+      edges: {
+        belongsToOrg: {
+          type: belongsToOrg,
+          from: [Person],
+          to: [Organization],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        disjointWith(Person, Organization),
+        partOf(Person, Organization, { via: belongsToOrg }),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).not.toThrow();
+  });
+
+  it("rejects disjoint overlap reached through equivalence and subclass", () => {
+    const graph = defineGraph({
+      id: "interleaved-disjoint-conflict",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [
+        disjointWith(Person, Organization),
+        equivalentTo(Person, Company),
+        subClassOf(Company, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a kind declared both equivalentTo and disjointWith another", () => {
+    const graph = defineGraph({
+      id: "equivalent-and-disjoint",
+      nodes: { Person: { type: Person }, Organization: { type: Organization } },
+      edges: {},
+      ontology: [
+        equivalentTo(Person, Organization),
+        disjointWith(Person, Organization),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects equivalentTo/disjointWith conflict via equivalence transitivity", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const Supplier = defineNode("Supplier", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "transitive-equivalent-and-disjoint",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Supplier: { type: Supplier },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        equivalentTo(Customer, Supplier),
+        disjointWith(Client, Supplier),
+      ],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+        }),
+      }),
+    );
+  });
+
+  it("rejects disjoint sides joined by an equivalence chain through an external IRI", () => {
+    const externalIri = "http://example.org/X";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "equivalentTo", from: externalIri, to: "Beta" },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
+    ];
+
+    // Equivalence classes are unioned through external IRIs, so the runtime
+    // holds Alpha ≡ Beta and Alpha | Beta at the same time unless validation
+    // rejects the declaration.
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect(closures.equivalenceSets.get("Alpha")?.has("Beta")).toBe(true);
+    expect(closures.disjointPairs.has("Alpha|Beta")).toBe(true);
+
+    expect(validateOntologyRelations(ontology)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "ONTOLOGY_DISJOINT_CONFLICT",
+          details: matchingObject({ from: "Alpha", to: "Beta" }),
+        }),
+      ]),
+    );
+  });
+
+  it("continues subclass descent through an external IRI that is also a subClassOf endpoint", () => {
+    // Regression for a defect found reviewing the equivalence fold: `subClassOf(Gamma, IRI)`
+    // reaches Alpha's representative through the IRI's equivalence class
+    // (`equivalentTo(Alpha, IRI)`) on the ANCESTOR side by construction —
+    // `isSubClassOf("Gamma", "Alpha")` was already true before this fix, via
+    // `expandCollapsedRelation`'s per-representative fellow walk. What was
+    // missing was the DESCENDANT side: `representativeOf` left the IRI
+    // unmapped, so `collapsedSubClass` kept it as a literal, disconnected
+    // node instead of resolving it to Alpha's representative, and Gamma
+    // silently dropped out of `subClassDescendants.get("Alpha")` — the two
+    // closures disagreed about the very same pair. An IRI is still never a
+    // KIND (it never appears as a member of either set), but it is no longer
+    // a dead end for a `subClassOf` edge that names it: the class it belongs
+    // to is exactly what a `subClassOf`-to-IRI edge subsumes.
+    const externalIri = "http://example.org/X";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "subClassOf", from: "Gamma", to: externalIri },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Beta" },
+    ];
+
+    expect(validateOntologyRelations(ontology)).toEqual([]);
+
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect(closures.subClassAncestors.get("Gamma")?.has("Alpha")).toBe(true);
+    expect(closures.subClassDescendants.get("Alpha")?.has("Gamma")).toBe(true);
+    expect([...closures.disjointPairs].toSorted()).toEqual([
+      "Alpha|Beta",
+      "Beta|Gamma",
+    ]);
+    // Gamma is a SUBCLASS of Alpha through the IRI bridge, not equivalentTo
+    // it — the equivalence set itself stays exactly what was declared.
+    expect(closures.equivalenceSets.get("Alpha")?.has("Gamma")).toBe(false);
+  });
+
+  it("propagates disjointness through an IRI-routed equivalence chain (fold parity)", () => {
+    // The fold of equivalentTo into mutual subsumption runs BEFORE the disjoint-side
+    // expansion runs, so `expandDisjointSide` no longer walks `equivalenceSets`
+    // separately — it reaches Beta through `subClassDescendants` alone,
+    // exactly as it reached a subclass before this change. This case is the
+    // one that would break if that fold were undone.
+    const externalIri = "http://example.org/equivalence-route";
+    const ontology = [
+      { metaEdge: "equivalentTo", from: "Alpha", to: externalIri },
+      { metaEdge: "equivalentTo", from: externalIri, to: "Beta" },
+      { metaEdge: "disjointWith", from: "Alpha", to: "Gamma" },
+    ];
+
+    expect(validateOntologyRelations(ontology)).toEqual([]);
+    const closures = computeClosuresFromNamedOntology(ontology);
+    expect(closures.disjointPairs.has("Beta|Gamma")).toBe(true);
+  });
+
+  it("keeps an external IRI out of subsumption itself, not only out of disjointness propagation", () => {
+    // The disjointness tests above only pin what gets THROUGH an IRI-routed
+    // equivalence chain, not whether the IRI itself became a subsumption
+    // member. An IRI is an inert reference (ontology.md): it must never
+    // appear as an ancestor/descendant, never satisfy isSubClassOf, and never
+    // enter a kind's subclass component or uniqueness claim axis.
+    const externalIri = "https://schema.org/Person";
+
+    // Single-kind case: Person ≡ IRI alone must not turn the mapping into a
+    // cross-kind uniqueness claim.
+    const soloGraph = defineGraph({
+      id: "iri-inert-solo",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      ontology: [equivalentTo(Person, externalIri)],
+    });
+    const soloRegistry = buildKindRegistry(soloGraph);
+    expect(soloRegistry.getSubClassComponent("Person")).toEqual(["Person"]);
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", soloRegistry),
+    ).toEqual({ axis: "Person", crossKind: false });
+
+    // Two-kind case: Person ≡ IRI ≡ Individual routes a real equivalence
+    // through the IRI, so Person and Individual must fold together — but the
+    // IRI itself must stay out of every subsumption-reading API.
+    const Individual = defineNode("Individual", { schema: emptySchema });
+    const routedGraph = defineGraph({
+      id: "iri-inert-routed",
+      nodes: { Person: { type: Person }, Individual: { type: Individual } },
+      edges: {},
+      ontology: [
+        equivalentTo(Person, externalIri),
+        equivalentTo(Individual, externalIri),
+      ],
+    });
+    const routedRegistry = buildKindRegistry(routedGraph);
+
+    expect([...routedRegistry.getAncestors("Person")]).not.toContain(
+      externalIri,
+    );
+    expect([...routedRegistry.getAncestors("Individual")]).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.expandSubClasses("Person")).not.toContain(
+      externalIri,
+    );
+    expect(routedRegistry.isSubClassOf("Person", externalIri)).toBe(false);
+    expect(routedRegistry.isAssignableTo("Person", externalIri)).toBe(false);
+    expect(routedRegistry.getSubClassComponent("Person")).toEqual([
+      "Individual",
+      "Person",
+    ]);
+    expect(routedRegistry.getSubClassComponent("Individual")).toBe(
+      routedRegistry.getSubClassComponent("Person"),
+    );
+    expect(
+      uniquenessClaimTarget("Person", "kindWithSubClasses", routedRegistry),
+    ).toEqual({ axis: "Individual", crossKind: true });
+  });
+
+  it("pins the literal disjointPairs set for the equivalentTo-is-subsumption probe graph", () => {
+    // The exact literal member list `computeDisjointPairs` produced before the
+    // fold of equivalence into subsumption. Company gains Corporation as a
+    // subclass descendant (mutual subsumption), so Corporation inherits
+    // Person's disjointness with Company byte-identically to how the
+    // pre-fold code reached it through a separate equivalence walk.
+    const Corporation = defineNode("Corporation", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "equivalence-subsumption-disjoint-pairs-pin",
+      nodes: {
+        Person: { type: Person },
+        Company: { type: Company },
+        Corporation: { type: Corporation },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Company, Corporation),
+        disjointWith(Person, Company),
+      ],
+    });
+    const registry = buildKindRegistry(graph);
+    expect([...registry.disjointPairs].toSorted()).toEqual([
+      "Company|Person",
+      "Corporation|Person",
+    ]);
+  });
+
+  it("keeps disjoint pairs injective when kind names contain pipes", () => {
+    const A = defineNode("A", { schema: emptySchema });
+    const BPipeC = defineNode("B|C", { schema: emptySchema });
+    const APipeB = defineNode("A|B", { schema: emptySchema });
+    const C = defineNode("C", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "injective-disjoint-pairs",
+      nodes: {
+        A: { type: A },
+        "B|C": { type: BPipeC },
+        "A|B": { type: APipeB },
+        C: { type: C },
+      },
+      edges: {},
+      ontology: [disjointWith(A, BPipeC), disjointWith(APipeB, C)],
+    });
+    const registry = buildKindRegistry(graph);
+
+    expect(registry.disjointKindPairs()).toEqual([
+      ["A", "B|C"],
+      ["A|B", "C"],
+    ]);
+    expect(disjointnessClaimAxis("A", "B|C", registry)).not.toBe(
+      disjointnessClaimAxis("A|B", "C", registry),
+    );
+    expect(registry.areDisjoint("A", "C")).toBe(false);
+  });
+
+  it("serializes lazy equivalence-set views as complete member lists", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "serialize-equivalence-views",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Person: { type: Person },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        equivalentTo(Customer, Person),
+      ],
+    });
+
+    const { equivalenceSets } = serializeSchema(graph, 1).ontology.closures;
+    expect(equivalenceSets["Client"]?.toSorted()).toEqual([
+      "Customer",
+      "Person",
+    ]);
+    expect(equivalenceSets["Customer"]?.toSorted()).toEqual([
+      "Client",
+      "Person",
+    ]);
+    expect(equivalenceSets["Person"]?.toSorted()).toEqual([
+      "Client",
+      "Customer",
+    ]);
+  });
+
+  it("validates a long equivalence chain without overflowing the stack", () => {
+    const chainLength = 20_000;
+    const ontology = Array.from({ length: chainLength }, (_, index) => ({
+      metaEdge: "equivalentTo",
+      from: `Kind${index}`,
+      to: `Kind${index + 1}`,
+    }));
+    ontology.push({
+      metaEdge: "disjointWith",
+      from: "Kind0",
+      to: `Kind${chainLength}`,
+    });
+
+    expect(validateOntologyRelations(ontology)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "ONTOLOGY_DISJOINT_CONFLICT" }),
+      ]),
+    );
+
+    const closures = computeClosuresFromNamedOntology(ontology.slice(0, -1));
+    expect(closures.equivalenceSets.get("Kind0")).toContain(
+      `Kind${chainLength}`,
+    );
+  });
+
+  it("exposes equivalence classes as complete readonly set views", () => {
+    const closures = computeClosuresFromNamedOntology([
+      { metaEdge: "equivalentTo", from: "Alpha", to: "Beta" },
+      { metaEdge: "equivalentTo", from: "Beta", to: "Gamma" },
+    ]);
+    const equivalents = closures.equivalenceSets.get("Alpha");
+    expect(equivalents).toBeDefined();
+    if (equivalents === undefined) throw new Error("Missing equivalence set");
+
+    expect(equivalents.size).toBe(2);
+    expect(equivalents.has("Alpha")).toBe(false);
+    expect(equivalents.has("Beta")).toBe(true);
+    expect([...equivalents]).toEqual(["Beta", "Gamma"]);
+    expect([...equivalents.keys()]).toEqual(["Beta", "Gamma"]);
+    expect([...equivalents.entries()]).toEqual([
+      ["Beta", "Beta"],
+      ["Gamma", "Gamma"],
+    ]);
+
+    const context = { visited: [] as string[] };
+    equivalents.forEach(function (this: typeof context, value, key, set) {
+      expect(this).toBe(context);
+      expect(key).toBe(value);
+      expect(set).toBe(equivalents);
+      this.visited.push(value);
+    }, context);
+    expect(context.visited).toEqual(["Beta", "Gamma"]);
+    expect(Object.keys(equivalents)).toEqual([]);
+    expect(Object.prototype.toString.call(equivalents)).toBe("[object Set]");
+
+    const composable = equivalents as ComposableReadonlyStringSet;
+    expect([...composable.union(new Set(["Delta"]))]).toEqual([
+      "Beta",
+      "Gamma",
+      "Delta",
+    ]);
+    expect([...composable.intersection(new Set(["Gamma", "Delta"]))]).toEqual([
+      "Gamma",
+    ]);
+    expect([...composable.difference(new Set(["Gamma"]))]).toEqual(["Beta"]);
+    expect([
+      ...composable.symmetricDifference(new Set(["Gamma", "Delta"])),
+    ]).toEqual(["Beta", "Delta"]);
+    expect(composable.isSubsetOf(new Set(["Beta", "Gamma", "Delta"]))).toBe(
+      true,
+    );
+    expect(composable.isSupersetOf(new Set(["Beta"]))).toBe(true);
+    expect(composable.isDisjointFrom(new Set(["Delta"]))).toBe(true);
+    expect(composable.isDisjointFrom(new Set(["Gamma"]))).toBe(false);
+    expect([...equivalents]).toEqual(["Beta", "Gamma"]);
+  });
+
+  it("lifts disjointness onto equivalence-set members", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const graph = defineGraph({
+      id: "disjoint-across-equivalence",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        Organization: { type: Organization },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        disjointWith(Client, Organization),
+      ],
+    });
+
+    const registry = buildKindRegistry(graph);
+    expect(registry.areDisjoint("Customer", "Organization")).toBe(true);
+    expect(registry.areDisjoint("Client", "Customer")).toBe(false);
+    expect(registry.areDisjoint("Customer", "Customer")).toBe(false);
+  });
+
+  it("closes disjointness across interleaved equivalence and subclass relations", () => {
+    const Client = defineNode("Client", { schema: emptySchema });
+    const Customer = defineNode("Customer", { schema: emptySchema });
+    const VipCustomer = defineNode("VipCustomer", { schema: emptySchema });
+    const PremiumCustomer = defineNode("PremiumCustomer", {
+      schema: emptySchema,
+    });
+    const graph = defineGraph({
+      id: "disjoint-across-equivalent-hierarchy",
+      nodes: {
+        Client: { type: Client },
+        Customer: { type: Customer },
+        VipCustomer: { type: VipCustomer },
+        PremiumCustomer: { type: PremiumCustomer },
+        Organization: { type: Organization },
+      },
+      edges: {},
+      ontology: [
+        equivalentTo(Client, Customer),
+        subClassOf(VipCustomer, Customer),
+        equivalentTo(VipCustomer, PremiumCustomer),
+        disjointWith(Client, Organization),
+      ],
+    });
+
+    const registry = buildKindRegistry(graph);
+    expect(registry.areDisjoint("VipCustomer", "Organization")).toBe(true);
+    expect(registry.areDisjoint("PremiumCustomer", "Organization")).toBe(true);
+  });
+
+  it("recomputes serialized closures instead of trusting stale persisted data", () => {
+    const graph = defineGraph({
+      id: "stale-closures",
+      nodes: {
+        Person: { type: Person },
+        Organization: { type: Organization },
+        Company: { type: Company },
+      },
+      edges: {},
+      ontology: [
+        disjointWith(Person, Organization),
+        subClassOf(Company, Organization),
+      ],
+    });
+    const serialized = serializeSchema(graph, 1);
+    const staleSchema = {
+      ...serialized,
+      ontology: {
+        ...serialized.ontology,
+        closures: {
+          ...serialized.ontology.closures,
+          subClassAncestors: {},
+          subClassDescendants: {},
+          disjointPairs: [],
+        },
+      },
+    } satisfies SerializedSchema;
+
+    const registry = deserializeSchema(staleSchema).buildRegistry();
+    expect(registry.isSubClassOf("Company", "Organization")).toBe(true);
+    expect(registry.areDisjoint("Person", "Company")).toBe(true);
+  });
+
+  it("validates serialized relations even when persisted closures look benign", () => {
+    const valid = serializeSchema(
+      defineGraph({
+        id: "serialized-incoherent",
+        nodes: {
+          Person: { type: Person },
+          Organization: { type: Organization },
+        },
+        edges: {},
+        ontology: [subClassOf(Person, Organization)],
+      }),
+      1,
+    );
+    const incoherent = {
+      ...valid,
+      ontology: {
+        ...valid.ontology,
+        relations: [
+          { metaEdge: "subClassOf", from: "Person", to: "Organization" },
+          { metaEdge: "subClassOf", from: "Organization", to: "Person" },
+        ],
+      },
+    } satisfies SerializedSchema;
+
+    expect(() => deserializeSchema(incoherent).buildRegistry()).toThrow(
+      expect.objectContaining({
+        details: matchingObject({ code: "ONTOLOGY_CYCLE" }),
+      }),
+    );
+  });
+
+  it("rejects endpoint-incompatible inverse edges", () => {
+    const Author = defineNode("Author", { schema: emptySchema });
+    const Paper = defineNode("Paper", { schema: emptySchema });
+    const Topic = defineNode("Topic", { schema: emptySchema });
+    const writes = defineEdge("writes");
+    const writtenBy = defineEdge("writtenBy");
+    const graph = defineGraph({
+      id: "inverse-endpoints",
+      nodes: {
+        Author: { type: Author },
+        Paper: { type: Paper },
+        Topic: { type: Topic },
+      },
+      edges: {
+        writes: { type: writes, from: [Author], to: [Paper] },
+        writtenBy: { type: writtenBy, from: [Topic], to: [Author] },
+      },
+      ontology: [inverseOf(writes, writtenBy)],
+    });
+
+    expect(() => buildKindRegistry(graph)).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        details: matchingObject({ metaEdge: "inverseOf" }),
+      }),
+    );
+  });
+
+  it("rejects multiple inverse partners but preserves legal self-inverse edges", () => {
+    const first = defineEdge("first");
+    const second = defineEdge("second");
+    const third = defineEdge("third");
+    const conflicting = defineGraph({
+      id: "inverse-unique",
+      nodes: { Person: { type: Person } },
+      edges: {
+        first: { type: first, from: [Person], to: [Person] },
+        second: { type: second, from: [Person], to: [Person] },
+        third: { type: third, from: [Person], to: [Person] },
+      },
+      ontology: [inverseOf(first, second), inverseOf(first, third)],
+    });
+    expect(() => buildKindRegistry(conflicting)).toThrow(
+      expect.objectContaining({
+        details: matchingObject({
+          code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
+        }),
+      }),
+    );
+
+    const symmetric = defineEdge("symmetric");
+    const legal = defineGraph({
+      id: "self-inverse",
+      nodes: { Person: { type: Person } },
+      edges: {
+        symmetric: { type: symmetric, from: [Person], to: [Person] },
+      },
+      ontology: [inverseOf(symmetric, symmetric)],
+    });
+    expect(buildKindRegistry(legal).getInverseEdge("symmetric")).toBe(
+      "symmetric",
+    );
+  });
+
+  it("uses the same inverse-partner validation for graph extensions", () => {
+    expect(() =>
+      defineGraphExtension({
+        ontology: [
+          { metaEdge: "inverseOf", from: "a", to: "b" },
+          { metaEdge: "inverseOf", from: "a", to: "c" },
+        ],
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
+            path: "/ontology/1",
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it("uses inverse endpoint validation on the deserializer registry path", () => {
+    const Author = defineNode("DeserializeAuthor", { schema: emptySchema });
+    const Paper = defineNode("DeserializePaper", { schema: emptySchema });
+    const Topic = defineNode("DeserializeTopic", { schema: emptySchema });
+    const writes = defineEdge("deserializeWrites");
+    const writtenBy = defineEdge("deserializeWrittenBy");
+    const schema = serializeSchema(
+      defineGraph({
+        id: "inverse-deserialized",
+        nodes: {
+          DeserializeAuthor: { type: Author },
+          DeserializePaper: { type: Paper },
+          DeserializeTopic: { type: Topic },
+        },
+        edges: {
+          deserializeWrites: {
+            type: writes,
+            from: [Author],
+            to: [Paper],
+          },
+          deserializeWrittenBy: {
+            type: writtenBy,
+            from: [Topic],
+            to: [Author],
+          },
+        },
+        ontology: [inverseOf(writes, writtenBy)],
+      }),
+      1,
+    );
+
+    expect(() => deserializeSchema(schema).buildRegistry()).toThrow(
+      expect.objectContaining({
+        details: matchingObject({ metaEdge: "inverseOf" }),
+      }),
+    );
+  });
+
+  it("rejects unresolved bare extension edge names but keeps external IRIs inert", () => {
+    const localEdge = defineEdge("localEdge");
+    const host = defineGraph({
+      id: "extension-ontology-endpoints",
+      nodes: { Person: { type: Person } },
+      edges: {
+        localEdge: { type: localEdge, from: [Person], to: [Person] },
+      },
+    });
+
+    const typo = defineGraphExtension({
+      ontology: [{ metaEdge: "inverseOf", from: "localEdge", to: "localEdg" }],
+    });
+    expect(() => mergeGraphExtension(host, typo)).toThrow(
+      GraphExtensionUnresolvedOntologyEndpointError,
+    );
+
+    const external = defineGraphExtension({
+      ontology: [
+        {
+          metaEdge: "inverseOf",
+          from: "https://example.com/edge/a",
+          to: "https://example.com/edge/b",
+        },
+      ],
+    });
+    expect(() => mergeGraphExtension(host, external)).not.toThrow();
+  });
+
+  describe("equivalence classes must be node-kind-only (ONTOLOGY_EQUIVALENCE_INVALID_CLASS)", () => {
+    it("rejects a class that mixes a node kind and an edge kind", () => {
+      const worksAt = defineEdge("worksAtMixed");
+      const graph = defineGraph({
+        id: "equivalence-invalid-mixed",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtMixed: { type: worksAt, from: [Person], to: [Person] },
+        },
+        // The widened `equivalentTo` signature accepts an edge kind on the
+        // left directly — no runtime-only spelling needed, and this is
+        // exactly what makes the runtime refusal load-bearing rather than a
+        // type error: the call compiles, and only the registry build catches
+        // that the two sides are a node kind and an edge kind.
+        ontology: [equivalentTo(worksAt, Person)],
+      });
+
+      expect(() => buildKindRegistry(graph)).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+            issues: matchingArray([
+              expect.objectContaining({
+                code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+                details: matchingObject({ reason: "mixed-node-and-edge" }),
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it("rejects two registered edge kinds folded into one class through a shared IRI", () => {
+      const worksAt = defineEdge("worksAtShared");
+      const employedBy = defineEdge("employedByShared");
+      const graph = defineGraph({
+        id: "equivalence-invalid-multiple-edges",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtShared: { type: worksAt, from: [Person], to: [Person] },
+          employedByShared: {
+            type: employedBy,
+            from: [Person],
+            to: [Person],
+          },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksFor"),
+          equivalentTo(employedBy, "https://schema.org/worksFor"),
+        ],
+      });
+
+      expect(() => buildKindRegistry(graph)).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+            issues: matchingArray([
+              expect.objectContaining({
+                code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+                details: matchingObject({ reason: "multiple-edge-kinds" }),
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it("allows one edge kind ≡ one IRI and one node kind ≡ another IRI", () => {
+      const worksAt = defineEdge("worksAtLegal");
+      const Company = defineNode("EquivalenceLegalCompany", {
+        schema: emptySchema,
+      });
+      const graph = defineGraph({
+        id: "equivalence-valid-edge-and-node-to-iri",
+        nodes: {
+          Person: { type: Person },
+          EquivalenceLegalCompany: { type: Company },
+        },
+        edges: {
+          worksAtLegal: { type: worksAt, from: [Person], to: [Company] },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksFor"),
+          equivalentTo(Company, "https://schema.org/Organization"),
+        ],
+      });
+
+      const registry = buildKindRegistry(graph);
+      expect(registry.resolveIri("https://schema.org/worksFor")).toBe(
+        "worksAtLegal",
+      );
+      expect(registry.resolveIri("https://schema.org/Organization")).toBe(
+        "EquivalenceLegalCompany",
+      );
+    });
+
+    it("rejects the same invalid class on the persisted-schema deserializer path", () => {
+      const worksAt = defineEdge("worksAtPersisted");
+      const employedBy = defineEdge("employedByPersisted");
+      const graph = defineGraph({
+        id: "equivalence-invalid-persisted",
+        nodes: { Person: { type: Person } },
+        edges: {
+          worksAtPersisted: { type: worksAt, from: [Person], to: [Person] },
+          employedByPersisted: {
+            type: employedBy,
+            from: [Person],
+            to: [Person],
+          },
+        },
+        ontology: [
+          equivalentTo(worksAt, "https://schema.org/worksForPersisted"),
+          equivalentTo(employedBy, "https://schema.org/worksForPersisted"),
+        ],
+      });
+      // The live registry build already refuses this graph, so persist the
+      // RELATIONS only (bypassing `buildKindRegistry`) to exercise the
+      // deserializer's own classifier, built from `schema.nodes`/`schema.edges`
+      // rather than delegated to a caller — the thing the schema threads.
+      const schema = serializeSchema(graph, 1);
+
+      expect(() => deserializeSchema(schema).buildRegistry()).toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+          }),
+        }),
+      );
+    });
+
+    it("rejects two edge kinds folded through a shared IRI only after evolve merges the registry", async () => {
+      const backend = createTestBackend();
+      const baseGraph = defineGraph({
+        id: "equivalence-invalid-evolve-base",
+        nodes: { Person: { type: Person } },
+        edges: {},
+      });
+      const [store] = await createStoreWithSchema(baseGraph, backend);
+
+      await expect(
+        store.evolve(
+          defineGraphExtension({
+            edges: {
+              worksAtEvolve: {
+                from: ["Person"],
+                to: ["Person"],
+                properties: {},
+              },
+              employedByEvolve: {
+                from: ["Person"],
+                to: ["Person"],
+                properties: {},
+              },
+            },
+            ontology: [
+              {
+                metaEdge: "equivalentTo",
+                from: "worksAtEvolve",
+                to: "https://schema.org/worksForEvolve",
+              },
+              {
+                metaEdge: "equivalentTo",
+                from: "employedByEvolve",
+                to: "https://schema.org/worksForEvolve",
+              },
+            ],
+          }),
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: matchingObject({
+            code: "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
+          }),
+        }),
+      );
+    });
+  });
+});

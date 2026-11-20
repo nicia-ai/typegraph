@@ -1,10 +1,13 @@
 import { type z } from "zod";
 
 import { getEmbeddingDimensions } from "../core/embedding";
+import { objectSchemaShape } from "../core/kind-schema";
 import {
   getSearchableMetadata,
   type SearchableMetadata,
 } from "../core/searchable";
+import { type KindRegistry } from "../registry/kind-registry";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { type ValueType } from "./ast";
 
@@ -39,6 +42,7 @@ function isSupportedSchemaType(type: string): type is SupportedSchemaType {
 
 export type FieldTypeInfo = Readonly<{
   valueType: ValueType;
+  nullable?: boolean;
   elementType?: ValueType | undefined;
   elementTypeInfo?: FieldTypeInfo | undefined;
   shape?: Readonly<Record<string, FieldTypeInfo>> | undefined;
@@ -49,11 +53,35 @@ export type FieldTypeInfo = Readonly<{
   searchable?: SearchableMetadata | undefined;
 }>;
 
+/**
+ * Answers whether every row of `childKind` satisfies `parentKind`'s schema —
+ * the ontology's assignability relation, which carries the structural
+ * contract.
+ */
+export type NodeKindAssignability = (
+  childKind: string,
+  parentKind: string,
+) => boolean;
+
 export type SchemaIntrospector = Readonly<{
   getFieldTypeInfo: (
     kindName: string,
     fieldName: string,
   ) => FieldTypeInfo | undefined;
+  /**
+   * The type of `fieldName` across every kind an alias resolves to.
+   *
+   * The kinds no other kind of `kindNames` subsumes — one for a kind
+   * expanded through its subclasses, one per listed kind for an expanded
+   * list source — decide: the answer is their agreeing declaration, and the
+   * structural contract makes every row beneath them satisfy it, so a
+   * subclass that omits a parent-optional property or narrows its type does
+   * not make the field unusable. When no kind subsumes another, that is the
+   * strict answer: `undefined` unless every kind declares the field with an
+   * agreeing type. A kind that redeclares an `embedding()` field untagged (or
+   * a `searchable()` field untagged) also returns the strict answer, since
+   * the parent's index would not reach it.
+   */
   getSharedFieldTypeInfo: (
     kindNames: readonly string[],
     fieldName: string,
@@ -67,12 +95,69 @@ export type SchemaIntrospector = Readonly<{
     fieldName: string,
   ) => FieldTypeInfo | undefined;
   /**
-   * True iff every kind in `kindNames` has at least one `searchable()`
-   * field. For polymorphic aliases, `$fulltext` is available only when
-   * every resolved kind has searchable content — otherwise `.matches()`
-   * would silently miss some kinds.
+   * True iff at least one kind in `kindNames` DECLARES `fieldName` as an own
+   * key of its schema shape.
+   *
+   * The single owner of "is this name a schema field?", asked by any layer that
+   * must tell a field access apart from something else the name could mean —
+   * today the select-tracking proxies, which would otherwise classify a
+   * DECLARED field named `toString` / `constructor` / `valueOf` as an inherited
+   * `Object.prototype` member and never track it.
+   *
+   * Deliberately ANY rather than every: a name one kind of a polymorphic alias
+   * declares is a field access, not a prototype access. Whether the field has a
+   * usable type across all of them is a separate question, answered by
+   * {@link SchemaIntrospector.getSharedFieldTypeInfo}.
    */
-  hasSearchableField: (kindNames: readonly string[]) => boolean;
+  hasDeclaredField: (
+    kindNames: readonly string[],
+    fieldName: string,
+  ) => boolean;
+  /** Edge counterpart of {@link SchemaIntrospector.hasDeclaredField}. */
+  hasDeclaredEdgeField: (
+    edgeKindNames: readonly string[],
+    fieldName: string,
+  ) => boolean;
+  /**
+   * True iff every kind in `kindNames` has a known, closed property set: its
+   * schema is an object whose shape is readable and whose unknown keys are
+   * stripped or refused (`z.object` / `z.strictObject`). An object that
+   * admits unknown keys (`z.looseObject`, `.passthrough()`, `.catchall()`),
+   * a schema without a readable object shape, or an unregistered kind is
+   * open: a stored row may hold a key no declaration names.
+   *
+   * The single owner of "can an undeclared name be a property here?". A
+   * layer that refuses an undeclared name asks this first and refuses only
+   * when the answer is `true`.
+   */
+  hasClosedPropertySet: (kindNames: readonly string[]) => boolean;
+  /** Edge counterpart of {@link SchemaIntrospector.hasClosedPropertySet}. */
+  hasClosedEdgePropertySet: (edgeKindNames: readonly string[]) => boolean;
+  /**
+   * The kinds that leave the alias `kindNames` resolves to without searchable
+   * content, empty when `$fulltext` is available: each kind no other kind
+   * subsumes that declares no `searchable()` field, or else any kind beneath
+   * one of those that redeclares one of its `searchable()` fields untagged —
+   * `.matches()` would otherwise silently miss some of them.
+   */
+  kindsWithoutSearchableField: (
+    kindNames: readonly string[],
+  ) => readonly string[];
+  /**
+   * The kinds of `kindNames` whose declaration of `fieldName` loses an
+   * indexing tag (`searchable()` / `embedding()`) the declaration of a kind
+   * subsuming it carries, or carries one it lacks. A subclass may legally
+   * redeclare such a field differently (the tags are annotations, not
+   * constraints), and its rows then reach no index the subsuming-kind accessor
+   * reads. This is the very decision the shared-field accessor makes before it
+   * trusts the subsuming declaration, so the query builder and `store.search()`
+   * refuse the same kinds. A kind that omits the field holds no value there
+   * and is not named.
+   */
+  kindsDivergingFromSubsumingDeclaration: (
+    kindNames: readonly string[],
+    fieldName: string,
+  ) => readonly string[];
 }>;
 
 function sharedCacheKey(
@@ -85,6 +170,7 @@ function sharedCacheKey(
 export function createSchemaIntrospector(
   nodeKinds: ReadonlyMap<string, { schema: z.ZodType }>,
   edgeKinds?: ReadonlyMap<string, { schema: z.ZodType }>,
+  isAssignableTo?: NodeKindAssignability,
 ): SchemaIntrospector {
   const nodeShapeCache = new Map<
     string,
@@ -103,14 +189,116 @@ export function createSchemaIntrospector(
     string,
     FieldTypeInfo | undefined
   >();
-  const searchableCache = new Map<string, boolean>();
+  const searchableGapCache = new Map<string, readonly string[]>();
+  const declaredFieldCache = new Map<string, boolean>();
+  const declaredEdgeFieldCache = new Map<string, boolean>();
 
   function getFieldTypeInfo(
     kindName: string,
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForKind(kindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
+  }
+
+  /**
+   * The kinds of `kindNames` no other kind of `kindNames` strictly subsumes.
+   * Every other kind sits beneath at least one of them. One root for a kind
+   * expanded through its subclasses, several for a list of unrelated kinds
+   * (each expanded or not), and several mutually equivalent ones, which are
+   * structurally interchangeable. Without an assignability relation every
+   * kind is a root.
+   */
+  function rootKinds(kindNames: readonly string[]): readonly string[] {
+    if (isAssignableTo === undefined) return kindNames;
+    return kindNames.filter(
+      (candidate) =>
+        !kindNames.some(
+          (other) =>
+            other !== candidate &&
+            isAssignableTo(candidate, other) &&
+            !isAssignableTo(other, candidate),
+        ),
+    );
+  }
+
+  /** The roots, other than `kindName` itself, that `kindName` is assignable to. */
+  function rootsAbove(
+    kindName: string,
+    roots: readonly string[],
+  ): readonly string[] {
+    if (isAssignableTo === undefined) return [];
+    return roots.filter(
+      (root) => root !== kindName && isAssignableTo(kindName, root),
+    );
+  }
+
+  function mergeDeclaredFieldTypeInfos(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): FieldTypeInfo | undefined {
+    const infos = kindNames
+      .map((kindName) => getFieldTypeInfo(kindName, fieldName))
+      .filter((info): info is FieldTypeInfo => info !== undefined);
+    return infos.length !== kindNames.length || infos.length === 0 ?
+        undefined
+      : mergeFieldTypeInfos(infos);
+  }
+
+  /**
+   * The roots' declaration of the field, and the kinds whose declaration
+   * differs in its indexing tags from that of a root above them. The
+   * structural contract does not see the tags (`searchable()` and
+   * `embedding()` are annotations, not constraints), so a subclass may legally
+   * redeclare a tagged field untagged (or tag an untagged one) — and its rows
+   * then never reach the fulltext or vector index the root-typed accessor
+   * reads.
+   */
+  function subsumingDeclaration(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): Readonly<{
+    resolved: FieldTypeInfo | undefined;
+    divergingKinds: readonly string[];
+  }> {
+    const roots = rootKinds(kindNames);
+    const divergingKinds = kindNames.filter((kindName) => {
+      const info = getFieldTypeInfo(kindName, fieldName);
+      if (info === undefined) return false;
+      return rootsAbove(kindName, roots).some((root) => {
+        const reference = getFieldTypeInfo(root, fieldName);
+        return reference !== undefined && !keepsIndexingTags(reference, info);
+      });
+    });
+    return {
+      resolved: mergeDeclaredFieldTypeInfos(roots, fieldName),
+      divergingKinds,
+    };
+  }
+
+  /**
+   * The field as the roots declare it, unless a kind diverges from a root's
+   * declaration's indexing tags. Those aliases fall back to the strict
+   * all-kinds merge rather than silently omit rows.
+   */
+  function resolveFromSubsumingKinds(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): FieldTypeInfo | undefined {
+    const { resolved, divergingKinds } = subsumingDeclaration(
+      kindNames,
+      fieldName,
+    );
+    return divergingKinds.length === 0 ? resolved : undefined;
+  }
+
+  function kindsDivergingFromSubsumingDeclaration(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): readonly string[] {
+    return subsumingDeclaration(kindNames, fieldName).divergingKinds;
   }
 
   function getSharedFieldTypeInfo(
@@ -122,16 +310,11 @@ export function createSchemaIntrospector(
       return sharedFieldTypeInfoCache.get(cacheKey);
     }
 
-    const infos = kindNames
-      .map((kindName) => getFieldTypeInfo(kindName, fieldName))
-      .filter((info): info is FieldTypeInfo => info !== undefined);
-
-    const merged =
-      infos.length !== kindNames.length || infos.length === 0 ?
-        undefined
-      : mergeFieldTypeInfos(infos);
-    sharedFieldTypeInfoCache.set(cacheKey, merged);
-    return merged;
+    const resolved =
+      resolveFromSubsumingKinds(kindNames, fieldName) ??
+      mergeDeclaredFieldTypeInfos(kindNames, fieldName);
+    sharedFieldTypeInfoCache.set(cacheKey, resolved);
+    return resolved;
   }
 
   function getEdgeFieldTypeInfo(
@@ -139,7 +322,9 @@ export function createSchemaIntrospector(
     fieldName: string,
   ): FieldTypeInfo | undefined {
     const shape = getShapeForEdgeKind(edgeKindName);
-    return shape?.[fieldName];
+    return shape !== undefined && hasOwnKey(shape, fieldName) ?
+        shape[fieldName]
+      : undefined;
   }
 
   function getSharedEdgeFieldTypeInfo(
@@ -177,12 +362,8 @@ export function createSchemaIntrospector(
     }
 
     const schema = kind.schema;
-    if (schema.type !== "object") {
-      return undefined;
-    }
-
-    const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-    if (!shape) {
+    const shape = objectSchemaShape(schema);
+    if (shape === undefined) {
       return undefined;
     }
 
@@ -212,12 +393,8 @@ export function createSchemaIntrospector(
     }
 
     const schema = kind.schema;
-    if (schema.type !== "object") {
-      return undefined;
-    }
-
-    const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-    if (!shape) {
+    const shape = objectSchemaShape(schema);
+    if (shape === undefined) {
       return undefined;
     }
 
@@ -229,22 +406,97 @@ export function createSchemaIntrospector(
     return resolved;
   }
 
-  function hasSearchableField(kindNames: readonly string[]): boolean {
-    const cacheKey = [...kindNames].toSorted().join("|");
-    const cached = searchableCache.get(cacheKey);
+  function hasDeclaredField(
+    kindNames: readonly string[],
+    fieldName: string,
+  ): boolean {
+    const cacheKey = sharedCacheKey(kindNames, fieldName);
+    const cached = declaredFieldCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    const result =
-      kindNames.length > 0 &&
-      kindNames.every((kindName) => {
-        const shape = getShapeForKind(kindName);
-        if (!shape) return false;
-        return Object.values(shape).some(
-          (info) => info.searchable !== undefined,
-        );
-      });
-    searchableCache.set(cacheKey, result);
+    const declared = kindNames.some((kindName) => {
+      const shape = getShapeForKind(kindName);
+      return shape !== undefined && hasOwnKey(shape, fieldName);
+    });
+    declaredFieldCache.set(cacheKey, declared);
+    return declared;
+  }
+
+  function hasDeclaredEdgeField(
+    edgeKindNames: readonly string[],
+    fieldName: string,
+  ): boolean {
+    const cacheKey = sharedCacheKey(edgeKindNames, fieldName);
+    const cached = declaredEdgeFieldCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const declared = edgeKindNames.some((edgeKindName) => {
+      const shape = getShapeForEdgeKind(edgeKindName);
+      return shape !== undefined && hasOwnKey(shape, fieldName);
+    });
+    declaredEdgeFieldCache.set(cacheKey, declared);
+    return declared;
+  }
+
+  function hasSearchableContent(kindName: string): boolean {
+    const shape = getShapeForKind(kindName);
+    return (
+      shape !== undefined &&
+      Object.values(shape).some((info) => info.searchable !== undefined)
+    );
+  }
+
+  /**
+   * Every root must declare searchable content, and its declaration decides
+   * for the kinds beneath it: a kind that redeclares one of a root's
+   * searchable fields untagged still holds that text, unindexed, so it is
+   * named too. A kind that omits the field holds no text there.
+   */
+  function computeKindsWithoutSearchableField(
+    kindNames: readonly string[],
+  ): readonly string[] {
+    const roots = rootKinds(kindNames);
+    const rootsWithoutContent = roots.filter(
+      (kindName) => !hasSearchableContent(kindName),
+    );
+    if (rootsWithoutContent.length > 0) return rootsWithoutContent;
+
+    return kindNames.filter(
+      (kindName) =>
+        !roots.includes(kindName) &&
+        rootsAbove(kindName, roots).some((root) =>
+          Object.entries(getShapeForKind(root) ?? {}).some(
+            ([fieldName, rootInfo]) => {
+              const info = getFieldTypeInfo(kindName, fieldName);
+              return info !== undefined && dropsSearchableTag(rootInfo, info);
+            },
+          ),
+        ),
+    );
+  }
+
+  function kindsWithoutSearchableField(
+    kindNames: readonly string[],
+  ): readonly string[] {
+    const cacheKey = [...kindNames].toSorted().join("|");
+    const cached = searchableGapCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const result = computeKindsWithoutSearchableField(kindNames);
+    searchableGapCache.set(cacheKey, result);
     return result;
+  }
+
+  function hasClosedPropertySet(kindNames: readonly string[]): boolean {
+    return kindNames.every((kindName) =>
+      isClosedObjectSchema(nodeKinds.get(kindName)?.schema),
+    );
+  }
+
+  function hasClosedEdgePropertySet(edgeKindNames: readonly string[]): boolean {
+    return edgeKindNames.every((edgeKindName) =>
+      isClosedObjectSchema(edgeKinds?.get(edgeKindName)?.schema),
+    );
   }
 
   return {
@@ -252,11 +504,101 @@ export function createSchemaIntrospector(
     getSharedFieldTypeInfo,
     getEdgeFieldTypeInfo,
     getSharedEdgeFieldTypeInfo,
-    hasSearchableField,
+    hasDeclaredField,
+    hasDeclaredEdgeField,
+    hasClosedPropertySet,
+    hasClosedEdgePropertySet,
+    kindsWithoutSearchableField,
+    kindsDivergingFromSubsumingDeclaration,
   };
 }
 
+/**
+ * Whether `schema` is an object with a readable shape that strips or refuses
+ * unknown keys. Zod records the unknown-key policy as `def.catchall`: absent
+ * for `z.object` (strip), `never` for `z.strictObject`, and the admitted value
+ * type for `z.looseObject`, `.passthrough()` and `.catchall()`.
+ */
+function isClosedObjectSchema(schema: z.ZodType | undefined): boolean {
+  if (schema === undefined || objectSchemaShape(schema) === undefined) {
+    return false;
+  }
+  const { catchall } = schema.def as Readonly<{ catchall?: z.ZodType }>;
+  return catchall === undefined || catchall.type === "never";
+}
+
+const registryIntrospectors = new WeakMap<KindRegistry, SchemaIntrospector>();
+
+/**
+ * The schema introspector over a registry's kinds and assignability relation,
+ * built once per registry. The query builder and the `store.search()` facade
+ * both ask it, so a decision about a kind set — which kinds a text or vector
+ * index would miss — has one owner and one answer.
+ */
+export function schemaIntrospectorFor(
+  registry: KindRegistry,
+): SchemaIntrospector {
+  const cached = registryIntrospectors.get(registry);
+  if (cached !== undefined) return cached;
+  const introspector = createSchemaIntrospector(
+    registry.nodeKinds,
+    registry.edgeKinds,
+    (childKind, parentKind) => registry.isAssignableTo(childKind, parentKind),
+  );
+  registryIntrospectors.set(registry, introspector);
+  return introspector;
+}
+
+function keepsIndexingTags(
+  resolved: FieldTypeInfo,
+  info: FieldTypeInfo,
+): boolean {
+  return (
+    (info.valueType === "embedding") === (resolved.valueType === "embedding") &&
+    !dropsSearchableTag(resolved, info)
+  );
+}
+
+function dropsSearchableTag(
+  resolved: FieldTypeInfo,
+  info: FieldTypeInfo,
+): boolean {
+  return resolved.searchable !== undefined && info.searchable === undefined;
+}
+
+function schemaAllowsAbsence(schema: z.ZodType): boolean {
+  if (
+    schema.type === "optional" ||
+    schema.type === "nullable" ||
+    schema.type === "null" ||
+    schema.type === "undefined"
+  )
+    return true;
+  const definition = schema.def as {
+    innerType?: z.ZodType;
+    out?: z.ZodType;
+    options?: readonly z.ZodType[];
+  };
+  if (schema.type === "union" && definition.options !== undefined)
+    return definition.options.some((option) => schemaAllowsAbsence(option));
+  if (schema.type === "pipe" && definition.out !== undefined)
+    return schemaAllowsAbsence(definition.out);
+  if (
+    definition.innerType !== undefined &&
+    schema.type !== "default" &&
+    schema.type !== "prefault" &&
+    schema.type !== "nonoptional"
+  )
+    return schemaAllowsAbsence(definition.innerType);
+  return false;
+}
+
 function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
+  const info = resolveFieldTypeInfoValue(schema);
+  return schemaAllowsAbsence(schema) ? { ...info, nullable: true } : info;
+}
+
+function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   // Check for embedding type before unwrapping
   // (embedding metadata is attached to the outer schema)
   const embeddingDimensions = getEmbeddingDimensions(schema);
@@ -339,9 +681,8 @@ function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
     };
   }
   if (schemaType === "object") {
-    const shape = (unwrapped.def as { shape?: Record<string, z.ZodType> })
-      .shape;
-    if (!shape) {
+    const shape = objectSchemaShape(unwrapped);
+    if (shape === undefined) {
       return { valueType: "object" };
     }
     const entries = Object.entries(shape).map(
@@ -421,6 +762,15 @@ function resolveEnumValueType(values: readonly unknown[]): ValueType {
 }
 
 function mergeFieldTypeInfos(
+  infos: readonly FieldTypeInfo[],
+): FieldTypeInfo | undefined {
+  const merged = mergeFieldTypeInfoValues(infos);
+  return merged !== undefined && infos.some((info) => info.nullable === true) ?
+      { ...merged, nullable: true }
+    : merged;
+}
+
+function mergeFieldTypeInfoValues(
   infos: readonly FieldTypeInfo[],
 ): FieldTypeInfo | undefined {
   const [first, ...rest] = infos;
@@ -511,7 +861,7 @@ function intersectShapes(
   }
 
   const keys = Object.keys(first).filter((key) =>
-    rest.every((shape) => key in shape),
+    rest.every((shape) => hasOwnKey(shape, key)),
   );
 
   const entries = keys

@@ -20,6 +20,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   primaryKey,
@@ -33,8 +34,12 @@ import {
   buildSqliteNodeIndexBuilders,
   buildSqliteSystemIndexBuilders,
 } from "../../../indexes/drizzle";
-import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
+import {
+  assertNoSystemIndexNameCollision,
+  systemIndexName,
+} from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../recorded-storage";
 
 /**
  * Table name configuration.
@@ -45,23 +50,35 @@ export type SqliteTableNames = Readonly<{
   recordedNodes: string;
   recordedEdges: string;
   recordedClock: string;
+  recordedAnchors: string;
+  storeOperations: string;
   revisionOrigins: string;
+  revisionChanges: string;
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   uniques: string;
+  edgeClaims: string;
+  baseSchemaVersions: string;
   schemaVersions: string;
+  graphTemplates: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
+  fences: string;
 }>;
 
-/**
- * Physical name of the legacy single shared embeddings table, dropped in
- * the cross-backend vector cutover (the clean cut of #157). Strategies now
- * own per-`(nodeKind, fieldPath)` typed storage. Retained only so the
- * one-time migration utility can address and drain the old table.
- */
-export const LEGACY_EMBEDDINGS_TABLE_NAME = "typegraph_node_embeddings";
+// Moved to `../../table-names` (the module that owns physical table-name
+// resolution for the backend layer). Re-exported here so this module's own
+// callers and any external importer of `./adapters/drizzle/sqlite` see no
+// change. Resolved only by `tests/migrate-vectors.test.ts` — that import is
+// what keeps knip from reporting this re-export as unused.
+export { LEGACY_EMBEDDINGS_TABLE_NAME } from "../../table-names";
 
 export type CreateSqliteTablesOptions = Readonly<{
   /**
@@ -79,14 +96,27 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   recordedNodes: "typegraph_recorded_nodes",
   recordedEdges: "typegraph_recorded_edges",
   recordedClock: "typegraph_recorded_clock",
+  recordedAnchors: "typegraph_recorded_anchors",
+  storeOperations: "typegraph_store_operations",
   revisionOrigins: "typegraph_revision_origins",
+  revisionChanges: "typegraph_revision_changes",
+  identityAssertions: "typegraph_identity_assertions",
+  recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
+  identityClosure: "typegraph_identity_closure",
+  identitySeparation: "typegraph_identity_separation",
+  identityTransitions: "typegraph_identity_transitions",
+  identityTransitionRetention: "typegraph_identity_transition_retention",
   uniques: "typegraph_node_uniques",
+  edgeClaims: "typegraph_edge_claims",
+  baseSchemaVersions: "typegraph_base_schema_versions",
   schemaVersions: "typegraph_schema_versions",
+  graphTemplates: "typegraph_graph_templates",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
+  fences: "typegraph_fences",
 };
 
 /**
@@ -135,6 +165,8 @@ export function createSqliteTables(
       toKind: text("to_kind").notNull(),
       toId: text("to_id").notNull(),
       props: text("props").notNull(),
+      matchIdentityName: text("match_identity_name"),
+      matchIdentityKey: text("match_identity_key"),
       validFrom: text("valid_from"),
       validTo: text("valid_to"),
       createdAt: text("created_at").notNull(),
@@ -143,6 +175,16 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
+      uniqueIndex(systemIndexName(n.edges, "match_identity_uq")).on(
+        t.graphId,
+        t.kind,
+        t.matchIdentityName,
+        t.matchIdentityKey,
+      ),
+      check(
+        systemIndexName(n.edges, "match_identity_pair_check"),
+        sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
+      ),
       ...buildSqliteSystemIndexBuilders("edges", n.edges, t),
       ...buildSqliteEdgeIndexBuilders(t, indexes),
     ],
@@ -162,8 +204,8 @@ export function createSqliteTables(
       createdAt: text("created_at").notNull(),
       updatedAt: text("updated_at").notNull(),
       deletedAt: text("deleted_at"),
-      recordedFrom: text("recorded_from").notNull(),
-      recordedTo: text("recorded_to").notNull(),
+      recordedFrom: integer("recorded_from").notNull(),
+      recordedTo: integer("recorded_to").notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -192,8 +234,8 @@ export function createSqliteTables(
       createdAt: text("created_at").notNull(),
       updatedAt: text("updated_at").notNull(),
       deletedAt: text("deleted_at"),
-      recordedFrom: text("recorded_from").notNull(),
-      recordedTo: text("recorded_to").notNull(),
+      recordedFrom: integer("recorded_from").notNull(),
+      recordedTo: integer("recorded_to").notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -209,9 +251,45 @@ export function createSqliteTables(
     n.recordedClock,
     {
       graphId: text("graph_id").notNull(),
+      revision: integer("revision").notNull(),
       recordedAt: text("recorded_at").notNull(),
+      anchorRetention: text(RECORDED_ANCHOR_RETENTION_COLUMN),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const recordedAnchors = sqliteTable(
+    n.recordedAnchors,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      revision: integer("revision").notNull(),
+      recordedAt: text("recorded_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
+    ],
+  );
+
+  const storeOperations = sqliteTable(
+    n.storeOperations,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      scope: text("scope").notNull(),
+      idempotencyKey: text("idempotency_key").notNull(),
+      operationDigest: text("operation_digest").notNull(),
+      evidence: text("evidence").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = sqliteTable(
@@ -219,6 +297,246 @@ export function createSqliteTables(
     {
       graphId: text("graph_id").notNull(),
       origin: text("origin").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const revisionChanges = sqliteTable(
+    n.revisionChanges,
+    {
+      entryId: text("entry_id").primaryKey(),
+      graphId: text("graph_id").notNull(),
+      revision: integer("revision").notNull(),
+      complete: integer("complete", { mode: "boolean" }).notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+    },
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
+  );
+
+  // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
+  // an assertion stopped being current: NULL for an explicit retraction,
+  // populated with the deleted endpoint's `(kind, id)` when a node soft-delete
+  // cascaded onto it. The CHECK holds the two invariants the writers rely on —
+  // the pair is set or unset together, and a cause only ever names an ENDED
+  // row's own endpoint.
+  const identityAssertions = sqliteTable(
+    n.identityAssertions,
+    {
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: text("valid_from").notNull(),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.id] }),
+      index(`${n.identityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.validTo,
+      ),
+      index(`${n.identityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.validTo,
+      ),
+      uniqueIndex(`${n.identityAssertions}_current_pair_idx`)
+        .on(t.graphId, t.relation, t.aKind, t.aId, t.bKind, t.bId)
+        .where(sql`${t.validTo} IS NULL`),
+      check(
+        `${n.identityAssertions}_ended_by_check`,
+        sql`(ended_by_kind IS NULL) = (ended_by_id IS NULL) AND (ended_by_kind IS NULL OR (valid_to IS NOT NULL AND ((ended_by_kind = a_kind AND ended_by_id = a_id) OR (ended_by_kind = b_kind AND ended_by_id = b_id))))`,
+      ),
+    ],
+  );
+
+  const recordedIdentityAssertions = sqliteTable(
+    n.recordedIdentityAssertions,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: text("valid_from").notNull(),
+      validTo: text("valid_to"),
+      createdAt: text("created_at").notNull(),
+      updatedAt: text("updated_at").notNull(),
+      deletedAt: text("deleted_at"),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
+      recordedFrom: integer("recorded_from").notNull(),
+      recordedTo: integer("recorded_to").notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: text("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedIdentityAssertions}_entity_idx`).on(
+        t.graphId,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      // `recorded_from`-led lookup, same rationale as the two recorded
+      // relations' `since_idx` (`../../../indexes/system.ts`): `entity_idx`/
+      // `a_idx`/`b_idx` all lead with an endpoint, not `recorded_from`
+      // alone, so none can serve `changesSince`'s per-revision completeness
+      // scan (`store/recorded-capture/lineage.ts`) without a full table scan.
+      index(systemIndexName(n.recordedIdentityAssertions, "since_idx")).on(
+        t.graphId,
+        t.recordedFrom,
+      ),
+    ],
+  );
+
+  const identityClosure = sqliteTable(
+    n.identityClosure,
+    {
+      graphId: text("graph_id").notNull(),
+      memberKind: text("member_kind").notNull(),
+      memberId: text("member_id").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.memberKind, t.memberId] }),
+      index(`${n.identityClosure}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+      ),
+    ],
+  );
+
+  // The identity separation relation: the `different` ledger lifted to whole
+  // identity classes, one row per separated class pair. `class_key_low` /
+  // `class_key_high` hold the persisted class-key encoding (see
+  // `identity/separation.ts`), ordered by code point so the CHECK below —
+  // SQLite compares TEXT with the BINARY collation, which is code-point order
+  // — rejects `low = high`. Fusing two separated classes relabels both sides
+  // of their shared row to one key, so the contradiction cannot commit.
+  const identitySeparation = sqliteTable(
+    n.identitySeparation,
+    {
+      graphId: text("graph_id").notNull(),
+      classKeyLow: text("class_key_low").notNull(),
+      classKeyHigh: text("class_key_high").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.classKeyLow, t.classKeyHigh] }),
+      index(`${n.identitySeparation}_high_idx`).on(t.graphId, t.classKeyHigh),
+      check(
+        `${n.identitySeparation}_ordered_pair_check`,
+        sql`class_key_low < class_key_high`,
+      ),
+    ],
+  );
+
+  // The identity transition log: an append-only annotation on the recorded
+  // axis. Carries no membership — `class_kind`/`class_id` name the class
+  // canonical AFTER the transition, `prior_class_kind`/`prior_class_id` the
+  // canonical BEFORE (NULL when that class did not exist as a real row).
+  // Every membership answer still comes from `historicalIdentityReconstructionCtes`.
+  const identityTransitions = sqliteTable(
+    n.identityTransitions,
+    {
+      graphId: text("graph_id").notNull(),
+      transitionId: text("transition_id").notNull(),
+      recordedRevision: integer("recorded_revision").notNull(),
+      recordedAt: text("recorded_at").notNull(),
+      validAt: text("valid_at").notNull(),
+      cause: text("cause").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+      priorClassKind: text("prior_class_kind"),
+      priorClassId: text("prior_class_id"),
+      assertionIds: text("assertion_ids").notNull(),
+      decision: text("decision"),
+      txId: text("tx_id"),
+      // NULL for a row this graph recorded itself through the live capture
+      // flush; set to the restore's own wall time for a row an archival
+      // restore inserted verbatim. `identityReplay` uses ONLY this marker —
+      // never a revision comparison — to decide whether a row may be paired
+      // with a reconstructed before/after snapshot, because a restored row's
+      // `recorded_revision` is the SOURCE graph's own number and interleaves
+      // arbitrarily with this graph's (see `isRestoredTransitionRow`).
+      restoredAt: text("restored_at"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.transitionId] }),
+      index(`${n.identityTransitions}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_revision_idx`).on(
+        t.graphId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_prior_class_idx`).on(
+        t.graphId,
+        t.priorClassKind,
+        t.priorClassId,
+        t.recordedRevision,
+      ),
+    ],
+  );
+
+  // One row per graph, holding two retention cuts on two axes: the
+  // watermark `pruneIdentityTransitions` advances on this graph's own
+  // recorded axis (`0` means nothing has been pruned), and the highest cut an
+  // archival restore carried in on the raw revisions restored rows keep
+  // (`NULL` means none). Each cut keeps the recorded time of the instant it
+  // was made at. An absent row means neither.
+  const identityTransitionRetention = sqliteTable(
+    n.identityTransitionRetention,
+    {
+      graphId: text("graph_id").notNull(),
+      prunedBeforeRevision: integer("pruned_before_revision").notNull(),
+      prunedBeforeRecordedAt: text("pruned_before_recorded_at"),
+      restoredPrunedBeforeRevision: integer("restored_pruned_before_revision"),
+      restoredPrunedBeforeRecordedAt: text(
+        "restored_pruned_before_recorded_at",
+      ),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
@@ -239,6 +557,57 @@ export function createSqliteTables(
         columns: [t.graphId, t.nodeKind, t.constraintName, t.key],
       }),
       index(`${n.uniques}_node_idx`).on(t.graphId, t.concreteKind, t.nodeId),
+    ],
+  );
+
+  // The edge cardinality claim relation — same shape and same role as the
+  // PostgreSQL table, with a text timestamp, mirroring `uniques`. See
+  // `store/claims/edge-claims.ts` for why it needs no release path.
+  const edgeClaims = sqliteTable(
+    n.edgeClaims,
+    {
+      graphId: text("graph_id").notNull(),
+      axis: text("axis").notNull(),
+      key: text("key").notNull(),
+      edgeId: text("edge_id").notNull(),
+      updatedAt: text("updated_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.axis, t.key] }),
+      index(`${n.edgeClaims}_edge_idx`).on(t.graphId, t.edgeId),
+    ],
+  );
+
+  // The write-fence rows relation: one row per keyed exclusion a `row`
+  // mechanism has ever acquired, keyed on `<namespace>:<key>` (the existing
+  // advisory namespaces, verbatim). Never dropped, never row-deleted, never
+  // touched by `clear()` — the same never-dropped posture as
+  // `schema_versions`, `recorded_clock`. `generation` is the acquire
+  // statement's own monotonically increasing counter (see
+  // `resolveFenceStatements`'s `row` derivation); it is not consumed here,
+  // only stored.
+  const fences = sqliteTable(
+    n.fences,
+    {
+      key: text("key").notNull(),
+      generation: integer("generation").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.key] })],
+  );
+
+  const baseSchemaVersions = sqliteTable(
+    n.baseSchemaVersions,
+    {
+      installation: integer("installation").notNull(),
+      version: integer("version").notNull(),
+      updatedAt: text("updated_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.installation] }),
+      check(
+        systemIndexName(n.baseSchemaVersions, "singleton_check"),
+        sql`${t.installation} = 1`,
+      ),
     ],
   );
 
@@ -266,6 +635,17 @@ export function createSqliteTables(
         .on(t.graphId)
         .where(sql`${t.isActive} = 1`),
     ],
+  );
+
+  const graphTemplates = sqliteTable(
+    n.graphTemplates,
+    {
+      templateId: text("template_id").notNull(),
+      schemaHash: text("schema_hash").notNull(),
+      schemaDoc: text("schema_doc").notNull(),
+      createdAt: text("created_at").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.templateId] })],
   );
 
   /**
@@ -340,14 +720,12 @@ export function createSqliteTables(
   );
 
   /**
-   * Per-deployment durable marker that a strategy-owned table
-   * contribution (#129 — the FTS5 virtual table today) has been
-   * materialized against this database (#135). Replaces the in-memory
-   * per-backend `fulltextEnsured` latch with a queryable database fact.
-   * Keyed on `(graph_id, logical_name, owner, table_name)`; `signature`
-   * stays out of the key so same-identity drift is a loud error, not a
-   * silent re-materialize. Same COALESCE-on-failure preservation rule
-   * as `indexMaterializations`.
+   * Durable markers for strategy-owned table contributions (#129). A
+   * deployment-scoped physical contribution uses the reserved deployment
+   * graph id, while a graph row records logical activation. Keyed on
+   * `(graph_id, logical_name, owner, table_name)`; `signature` stays out of
+   * the key so same-identity drift is a loud error, not a silent
+   * re-materialize.
    */
   const contributionMaterializations = sqliteTable(
     n.contributionMaterializations,
@@ -374,9 +752,22 @@ export function createSqliteTables(
     recordedNodes,
     recordedEdges,
     recordedClock,
+    recordedAnchors,
+    storeOperations,
     revisionOrigins,
+    revisionChanges,
+    identityAssertions,
+    recordedIdentityAssertions,
+    identityClosure,
+    identitySeparation,
+    identityTransitions,
+    identityTransitionRetention,
     uniques,
+    edgeClaims,
+    fences,
+    baseSchemaVersions,
     schemaVersions,
+    graphTemplates,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,
@@ -405,6 +796,7 @@ export const {
   recordedEdges,
   recordedClock,
   uniques,
+  edgeClaims,
   schemaVersions,
 } = tables;
 

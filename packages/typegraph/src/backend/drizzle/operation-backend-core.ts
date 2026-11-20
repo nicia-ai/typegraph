@@ -1,55 +1,641 @@
-import { is, type SQL } from "drizzle-orm";
+import { is, type SQL, sql as drizzleSql } from "drizzle-orm";
 
 import {
+  CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
+  DisjointError,
+  EdgeMatchIdentityConflictError,
   MigrationError,
   SchemaContentConflictError,
   StaleVersionError,
   UniquenessError,
 } from "../../errors";
 import type { SqlDialect } from "../../query/dialect/types";
+import type { VectorSlot } from "../../query/dialect/vector-strategy";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import type {
   CompiledStatementSql,
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
+import { asCompiledStatementSql } from "../../query/sql-intent";
+import {
+  type ClaimOwner,
+  compareClaimTargets,
+  isSameClaimOwner,
+} from "../../store/claims/axis";
+import {
+  type EdgeCardinalityAxisRef,
+  edgeCardinalityClaimTarget,
+  edgeClaimRelationMissing,
+} from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
+import { compareCodePoints } from "../../utils/compare";
+import { requireDefined } from "../../utils/presence";
+import {
+  isDuplicatePrimaryKeyError,
+  isDuplicateUniqueIndexError,
+  isEdgeMatchIdentityStorageUnavailableError,
+  isMissingTableError,
+  isNotNullColumnViolation,
+  type PrimaryKeyRelation,
+} from "../../utils/sql-errors";
+import { encodeTupleKey } from "../../utils/tuple-key";
+import {
+  type AtomicDeleteBatchResult,
+  AtomicEdgeBatchCardinalityRefusalError,
+  type AtomicEdgeBatchCountInput,
+  AtomicEdgeBatchEndpointRefusalError,
+  type AtomicEdgeBatchExecutor,
+  type AtomicEdgeBatchRowsInput,
+  type AtomicEdgeConvergenceInput,
+  type AtomicEdgeConvergenceResult,
+  AtomicEdgeConvergenceTombstoneRefusalError,
+  type AtomicEdgeDeleteBatchExecutor,
+  type AtomicEdgeDeleteBatchInput,
+  AtomicEdgeDeleteIdentityRefusalError,
+  type AtomicEdgeMutationProgramExecutor,
+  type AtomicEdgeResolvedMutationSetInput,
+  type AtomicEdgeResolvedMutationSetResult,
+  type AtomicEdgeResolvedUpdateBatchExecutor,
+  type AtomicEdgeResolvedUpdateEntry,
+  type AtomicNodeBatchEntry,
+  type AtomicNodeBatchExecutor,
+  type AtomicNodeBatchInput,
+  atomicNodeClaimInputCost,
+  type AtomicNodeClaimSupport,
+  type AtomicNodeDeleteBatchExecutor,
+  type AtomicNodeDeleteBatchInput,
+  AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodePostimageEntry,
+  type AtomicNodeProjectionSupport,
+  type AtomicNodeReplacementBatchExecutor,
+  type AtomicNodeReplacementEntry,
+  type AtomicNodeResolvedMutationSetExecutor,
+  type AtomicNodeResolvedUpdateBatchExecutor,
+  type AtomicNodeResolvedUpdateEntry,
+  supportsAtomicNodeClaims,
+} from "../capabilities/atomic-mutation-program";
+import type {
+  AtomicSqlProgram,
+  AtomicSqlProgramExecutor,
+  CompiledAtomicSqlStatement,
+} from "../capabilities/atomic-sql-program";
+import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
+import {
+  nodeRowFenceAcquisitions,
+  type NodeRowLockPlan,
+  type NodeRowLockTarget,
+} from "../capabilities/node-row-lock-plan";
+import type { FenceSql } from "../capabilities/write-fence";
+import {
+  assertGraphCommandConvergenceIsolation,
+  assertGraphCommandCoordination,
+  assertGraphCommandExecutionContext,
+  type GraphCommandExecutionContext,
+  readGraphWriteFenceAcquisition,
+} from "../command-contract";
+import {
+  resolveEdgeEndpointIds,
+  resolveHeterogeneousEdgeRead,
+} from "../edge-endpoint-sets";
+import { resolvedNodeUpdateBatchFitsBindBudget } from "../resolved-node-update-batch";
 import { nowIso as defaultNowIso } from "../row-mappers";
+import { countSchemaKindRows } from "../schema-kind-emptiness";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
+  ClaimEdgeCardinalityParams,
+  CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  CompareAndSetNodeParams,
+  CompositionClaimScope,
+  ConstraintFenceViolationRows,
+  ContendedEdgeRow,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
   DeleteNodeParams,
   DeleteUniqueParams,
+  DisjointOverlapRow,
+  DurableEdgeBatchMembers,
+  EdgeCardinalityDeclaration,
+  EdgeClaimOutcome,
+  EdgeConvergeCreateCommand,
+  EdgeConvergeCreateCommandResult,
+  EdgeCreateCommandResult,
+  EdgeEndpointAllowance,
   EdgeExistsBetweenParams,
   EdgeRow,
+  FindActiveEdgesBySourceV1Params,
+  FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesByMatchIdentityParams,
+  FindEdgesConnectedToNodesParams,
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
+  GraphBackend,
+  GraphCommand,
+  GraphCommandResult,
+  GraphCommandSession,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
+  HardDeleteNodesBatchParams,
+  HardDeleteNodesBatchResult,
+  HardDeleteUniquesByConcreteKindParams,
+  HardDeleteUniquesByNodeIdsParams,
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
+  ManagedEdgeCreatePlan,
+  ManagedNodeCreatePlan,
+  MisassignedEdgeEndpointRow,
+  NodeCreateCommandResult,
   NodeRow,
+  NodeRowLock,
+  PopulatedSchemaKind,
+  PurgeEdgeClaimsParams,
+  ReadConstraintFenceViolationsParams,
+  ResolvedNodeUpdateBatchParams,
+  SchemaGraphWriteFenceParams,
+  SchemaKindEmptinessProbe,
   SchemaVersionRow,
+  SchemaWriteFenceParams,
   SetActiveVersionParams,
   TransactionBackend,
   UniqueRow,
   UpdateEdgeParams,
   UpdateNodeParams,
+  UpdateNodeSetParams,
+  UpdateNodeSetResult,
 } from "../types";
-import { type ExecutableSql } from "./execution/types";
+import { edgeMatchIdentityUniqueIndexName } from "./ddl";
+import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
+import type {
+  AtomicNodeClaimEntry,
+  AtomicNodeClaimOwnerRow,
+} from "./operations/atomic-node-claims";
+import type { AtomicContributionEvidence } from "./operations/contribution-evidence";
+import {
+  ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT,
+  ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
+} from "./operations/contribution-evidence";
+import {
+  ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
+  claimPredicateShapeKey,
+} from "./operations/edge-claims";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
+  NO_NODE_ROW_LOCK_CLAUSES,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
+
+/**
+ * What a claim statement costs beyond its rows: the schema fence's graph id
+ * and expected version, and the claim timestamp.
+ *
+ * Every claim statement binds the same
+ * {@link ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT} values per proposed row —
+ * the relation they all drive from carries both endpoints regardless of which
+ * of them a cardinality's predicate reads — so one ceiling covers every
+ * cardinality and a mixed batch cannot cross the driver's per-statement bind
+ * budget.
+ */
+const ATOMIC_EDGE_CLAIM_FIXED_PARAM_COUNT = 3;
+const ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT = 14;
+const ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT = 2;
+const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
+const ATOMIC_NODE_INSERT_PARAM_COUNT = 9;
+const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
+// The bundled fulltext lowering is the widest projection statement today.
+// Compilation below independently refuses any strategy that exceeds the
+// resulting budget, so a future strategy cannot silently invalidate this cost.
+const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
+const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
+
+/**
+ * The binds a node-set edge statement spends besides its id list: the graph
+ * id, and the node kind once per endpoint arm (`edgeAtEitherEndpointOfNodes`).
+ */
+const NODE_SET_EDGE_FIXED_PARAM_COUNT = 3;
+
+/**
+ * Ids per chunk for the statements that bind a node id list twice — once per
+ * edge endpoint arm — which is the widest statement `hardDeleteNodesBatch` and
+ * `findEdgesConnectedToNodes` issue. Every other statement of a chunk (the
+ * node, uniqueness and fulltext deletes) binds the list once and fits within
+ * the same chunk.
+ */
+function nodeSetEdgeChunkSize(maxBindParameters: number): number {
+  return Math.max(
+    1,
+    Math.floor((maxBindParameters - NODE_SET_EDGE_FIXED_PARAM_COUNT) / 2),
+  );
+}
+
+function claimTargetKey(axis: string, key: string): string {
+  return encodeTupleKey([axis, key]);
+}
+
+function chunkAtomicNodeEntriesByIdSource(
+  entries: readonly AtomicNodeBatchEntry[],
+  chunkSize: number,
+): readonly (readonly AtomicNodeBatchEntry[])[] {
+  return (["generated", "caller"] as const).flatMap((idSource) =>
+    chunkArray(
+      entries.filter((entry) => entry.idSource === idSource),
+      chunkSize,
+    ),
+  );
+}
+
+function chunkByWeight<T>(
+  items: readonly T[],
+  maxWeight: number,
+  weightOf: (item: T) => number,
+): readonly (readonly T[])[] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let currentWeight = 0;
+  for (const item of items) {
+    const weight = weightOf(item);
+    if (weight > maxWeight) {
+      throw new CompilerInvariantError(
+        "An atomic program member exceeded its declared bind budget.",
+        { weight, maxWeight },
+      );
+    }
+    if (current.length > 0 && currentWeight + weight > maxWeight) {
+      chunks.push(current);
+      current = [];
+      currentWeight = 0;
+    }
+    current.push(item);
+    currentWeight += weight;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function chunkAtomicNodeEntriesByClaimWork(
+  entries: readonly AtomicNodeBatchEntry[],
+  maxBindParameters: number,
+): readonly (readonly AtomicNodeBatchEntry[])[] {
+  const available = maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT;
+  return (["generated", "caller"] as const).flatMap((idSource) =>
+    chunkByWeight(
+      entries.filter((entry) => entry.idSource === idSource),
+      available,
+      (entry) =>
+        ATOMIC_NODE_INSERT_PARAM_COUNT +
+        atomicNodeClaimInputCost(entry.claims ?? []),
+    ),
+  );
+}
+
+function chunkAtomicNodeReplacementEntriesByClaimWork(
+  entries: readonly AtomicNodeReplacementEntry[],
+  maxBindParameters: number,
+): readonly (readonly AtomicNodeReplacementEntry[])[] {
+  const available = maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT;
+  return chunkByWeight(
+    entries,
+    available,
+    (entry) =>
+      ATOMIC_NODE_INSERT_PARAM_COUNT +
+      atomicNodeClaimInputCost(entry.claims ?? []),
+  );
+}
+
+/** Maximum plain replacement members whose chunks fit one atomic submission. */
+export function atomicNodeReplacementSubmissionMaxEntries(
+  maxBindParameters: number,
+): number {
+  const entriesPerStatement = Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT) /
+        ATOMIC_NODE_INSERT_PARAM_COUNT,
+    ),
+  );
+  return Math.min(
+    ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+    atomicResolvedMutationSubmissionMaxEntries(entriesPerStatement),
+  );
+}
+
+/**
+ * The belt behind the composition-eligibility gates (`resolveAtomicEdgeBatchExecutor`
+ * et al., `src/store/operations/atomic-mutation-program.ts`): a fused command
+ * is an optimization attempt, not evidence that its dimensions ran, and a
+ * composition claim (`scope.kind === "composition"`) must NEVER
+ * reach a fused write — the fused single-claim path (`createEdgeWithPlan`)
+ * carries exactly one claim by construction, and even the batch path's
+ * generic multi-claim support is a policy choice this assertion enforces
+ * rather than a capability this library exercises. A composition edge
+ * always owes at least two claims (its own declared axis, plus this one),
+ * so every gate that reaches this function should already have routed such
+ * an edge kind through the portable path; this throws if one ever does not.
+ */
+function assertMatchingFusedEdgeClaim(
+  params: InsertEdgeParams,
+  claim: ClaimEdgeCardinalityParams,
+): void {
+  if (claim.scope?.kind === "composition") {
+    throw new CompilerInvariantError(
+      "A fused edge write can never apply a composition claim: a composition " +
+        "edge kind always owes at least two claims, which every static " +
+        "eligibility gate must route through the portable write path instead.",
+      {
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+      },
+    );
+  }
+  const matchesEdge =
+    claim.graphId === params.graphId &&
+    claim.edgeId === params.id &&
+    claim.edgeKind === params.kind &&
+    claim.fromKind === params.fromKind &&
+    claim.fromId === params.fromId &&
+    claim.toKind === params.toKind &&
+    claim.toId === params.toId;
+  if (matchesEdge) return;
+
+  throw new CompilerInvariantError(
+    "A fused edge cardinality claim must describe the edge being inserted.",
+    {
+      edge: {
+        graphId: params.graphId,
+        id: params.id,
+        kind: params.kind,
+        fromKind: params.fromKind,
+        fromId: params.fromId,
+        toKind: params.toKind,
+        toId: params.toId,
+      },
+      claim: {
+        graphId: claim.graphId,
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+        fromKind: claim.fromKind,
+        fromId: claim.fromId,
+        toKind: claim.toKind,
+        toId: claim.toId,
+      },
+    },
+  );
+}
+
+function assertMatchingNodeSchemaFence(
+  params: InsertNodeParams,
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (schemaFence.graphId === params.graphId) return;
+
+  throw new CompilerInvariantError(
+    "A node schema fence must match its node graph.",
+    {
+      nodeGraphId: params.graphId,
+      fenceGraphId: schemaFence.graphId,
+      id: params.id,
+    },
+  );
+}
+
+function assertMatchingNodeSchemaFences(
+  params: readonly InsertNodeParams[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  for (const nodeParams of params) {
+    assertMatchingNodeSchemaFence(nodeParams, schemaFence);
+  }
+}
+
+function assertMatchingEdgeSchemaFence(
+  params: InsertEdgeParams,
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (schemaFence.graphId === params.graphId) return;
+
+  throw new CompilerInvariantError(
+    "An edge schema fence must match its edge graph.",
+    {
+      edgeGraphId: params.graphId,
+      fenceGraphId: schemaFence.graphId,
+      id: params.id,
+    },
+  );
+}
+
+function assertMatchingEdgeSchemaFences(
+  params: readonly InsertEdgeParams[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  for (const edgeParams of params) {
+    assertMatchingEdgeSchemaFence(edgeParams, schemaFence);
+  }
+}
+
+function assertResolvedNodeUpdateBatchInput(
+  entries: readonly AtomicNodeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  const first = entries[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (
+      entry.graphId !== first.graphId ||
+      entry.kind !== first.kind ||
+      entry.graphId !== schemaFence.graphId ||
+      ids.has(entry.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved node update requires distinct ids from one fenced graph and kind.",
+        {
+          expected: {
+            graphId: first.graphId,
+            kind: first.kind,
+            fenceGraphId: schemaFence.graphId,
+          },
+          actual: { graphId: entry.graphId, kind: entry.kind, id: entry.id },
+        },
+      );
+    }
+    ids.add(entry.id);
+  }
+}
+
+function assertResolvedEdgeUpdateBatchInput(
+  entries: readonly AtomicEdgeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  const first = entries[0];
+  if (first === undefined) return;
+  const graphId = first.existing.graph_id;
+  const kind = first.existing.kind;
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    const existing = entry.existing;
+    if (
+      existing.graph_id !== graphId ||
+      existing.graph_id !== schemaFence.graphId ||
+      existing.kind !== kind ||
+      ids.has(existing.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved edge update requires distinct ids from one fenced graph and kind.",
+        {
+          expected: { graphId, kind, fenceGraphId: schemaFence.graphId },
+          actual: {
+            graphId: existing.graph_id,
+            kind: existing.kind,
+            id: existing.id,
+          },
+        },
+      );
+    }
+    ids.add(existing.id);
+  }
+}
+
+function assertResolvedNodeMutationSetInput(
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (creates.length === 0 || updates.length === 0) {
+    throw new CompilerInvariantError(
+      "An atomic resolved node mutation set requires both creates and updates.",
+    );
+  }
+  assertMatchingNodeSchemaFences(
+    creates.map((entry) => entry.params),
+    schemaFence,
+  );
+  assertResolvedNodeUpdateBatchInput(updates, schemaFence);
+  const identities = [
+    ...creates.map((entry) => ({
+      graphId: entry.params.graphId,
+      kind: entry.params.kind,
+      id: entry.params.id,
+    })),
+    ...updates,
+  ];
+  const first = identities[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const identity of identities) {
+    if (
+      identity.graphId !== first.graphId ||
+      identity.kind !== first.kind ||
+      identity.graphId !== schemaFence.graphId ||
+      ids.has(identity.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved node mutation set requires distinct ids from one fenced graph and kind.",
+      );
+    }
+    ids.add(identity.id);
+  }
+  if (
+    creates.some(
+      (entry) => entry.idSource !== "caller" || (entry.claims?.length ?? 0) > 0,
+    )
+  ) {
+    throw new CompilerInvariantError(
+      "An atomic resolved node mutation set accepts only unclaimed caller-id creates.",
+    );
+  }
+}
+
+function assertResolvedEdgeMutationSetInput(
+  creates: readonly InsertEdgeParams[],
+  updates: readonly AtomicEdgeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (creates.length === 0 || updates.length === 0) {
+    throw new CompilerInvariantError(
+      "An atomic resolved edge mutation set requires both creates and updates.",
+    );
+  }
+  assertMatchingEdgeSchemaFences(creates, schemaFence);
+  assertResolvedEdgeUpdateBatchInput(updates, schemaFence);
+  const identities = [
+    ...creates.map((entry) => ({
+      graphId: entry.graphId,
+      kind: entry.kind,
+      id: entry.id,
+    })),
+    ...updates.map((entry) => ({
+      graphId: entry.existing.graph_id,
+      kind: entry.existing.kind,
+      id: entry.existing.id,
+    })),
+  ];
+  const first = identities[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const identity of identities) {
+    if (
+      identity.graphId !== first.graphId ||
+      identity.kind !== first.kind ||
+      identity.graphId !== schemaFence.graphId ||
+      ids.has(identity.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved edge mutation set requires distinct ids from one fenced graph and kind.",
+      );
+    }
+    ids.add(identity.id);
+  }
+  if (creates.some((entry) => entry.matchIdentity !== undefined)) {
+    throw new CompilerInvariantError(
+      "An atomic resolved edge mutation set cannot carry durable match identity.",
+    );
+  }
+}
+
+/**
+ * The owner a claim write proposes. Reading it off the params in one place is
+ * what keeps the accept/refuse test comparing the same pair the SQL arms do.
+ */
+function claimOwnerOf(params: InsertUniqueParams): ClaimOwner {
+  return { concreteKind: params.concreteKind, nodeId: params.nodeId };
+}
+
+/**
+ * Narrows a fence-audit declaration to the axis ref alone, dropping
+ * `edgeKind`.
+ *
+ * A switch on the discriminant, the same shape {@link edgeCardinalityAxisName}
+ * uses and for the same stated reason: reading `declaration.cardinality`
+ * outside a narrowed branch widens to the union of both directions'
+ * cardinality types (`unique` included), so building the object field-by-field
+ * would need an `as EdgeCardinalityAxisRef` assertion — defeating the very
+ * pairing {@link EdgeCardinalityAxisRef} exists to make unspellable. The
+ * switch keeps the compiler correlating `direction` and `cardinality` instead
+ * of trusting an assertion that a wrongly-paired future declaration would
+ * silently pass.
+ */
+function axisRefFromDeclaration(
+  declaration: EdgeCardinalityDeclaration,
+): EdgeCardinalityAxisRef {
+  switch (declaration.direction) {
+    case "source": {
+      return { direction: "source", cardinality: declaration.cardinality };
+    }
+    case "target": {
+      return { direction: "target", cardinality: declaration.cardinality };
+    }
+  }
+}
 
 /**
  * The internal operation backend — what `createCommonOperationBackend`
@@ -64,47 +650,91 @@ export type CommonOperationBackend = Pick<
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
+  | "clearGraphPreservingContributionMaterializations"
+  | "compareAndSetNode"
   | "countEdgesByKind"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "countNodesByKind"
   | "deleteEdge"
   | "deleteEdgesBatch"
   | "deleteNode"
   | "deleteUnique"
   | "edgeExistsBetween"
-  | "executeStatement"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
+  | "findActiveEdgesBySourceV1"
+  | "findEdgesByMatchIdentity"
+  | "findEdgesAcrossKinds"
+  | "findEdgesByEndpointSet"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
+  | "findEdgesConnectedToNodes"
   | "findNodesByKind"
+  | "findNodesAcrossKinds"
   | "getActiveSchema"
   | "getEdge"
   | "getEdges"
   | "getNode"
   | "getNodes"
+  | "lockNodes"
   | "getSchemaVersion"
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
+  | "hardDeleteNodesBatch"
+  | "claimEdgeCardinality"
+  | "claimEdgeCardinalityGuarded"
+  | "claimEdgeCardinalityBatch"
+  | "hardDeleteUniquesByConcreteKind"
+  | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
+  | "commands"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
   | "insertNode"
+  | "insertNodeIfAbsent"
+  | "insertNodeIfAbsentWithSchemaFence"
+  | "insertNodeWithSchemaFence"
+  | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "insertUnique"
   | "insertUniqueBatch"
+  | "purgeEdgeClaims"
   | "updateEdge"
   | "updateNode"
+  | "updateResolvedNodesBatch"
+  | "updateNodeSet"
 > &
   Readonly<{
+    executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
+    executeAtomicNodeReplacementBatch?: AtomicNodeReplacementBatchExecutor;
+    executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
+    executeAtomicNodeResolvedUpdateBatch?: AtomicNodeResolvedUpdateBatchExecutor;
+    executeAtomicNodeResolvedMutationSet?: AtomicNodeResolvedMutationSetExecutor;
+    executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
+    executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
+    executeAtomicEdgeResolvedUpdateBatch?: AtomicEdgeResolvedUpdateBatchExecutor;
+    executeAtomicEdgeMutationProgram?: AtomicEdgeMutationProgramExecutor;
+    /**
+     * The read-only fence audit. Not a `TransactionBackend` member — it is a
+     * diagnostic the store runs at the top-level backend, and nothing inside a
+     * write transaction reads it — so it is declared here rather than picked.
+     */
+    readConstraintFenceViolations: NonNullable<
+      GraphBackend["readConstraintFenceViolations"]
+    >;
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
     commitSchemaVersion: (
       params: CommitSchemaVersionParams,
     ) => Promise<SchemaVersionRow>;
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
-  }>;
+    executeSchemaDdl: (ddl: string) => Promise<void>;
+    tableExists: (tableName: string) => Promise<boolean>;
+  }> &
+  DurableEdgeBatchMembers;
 
 /**
  * The full internal shape the dialect operation-backend factories
@@ -116,7 +746,10 @@ export type CommonOperationBackend = Pick<
  * `commitSchemaVersion` / `setActiveVersion` and bypass the lock.
  */
 export type InternalOperationBackend = TransactionBackend &
-  CommonOperationBackend;
+  CommonOperationBackend &
+  Readonly<{
+    deleteSchemaVectorSlotContribution: (slot: VectorSlot) => Promise<void>;
+  }>;
 
 const DRIZZLE_DIALECT_LABELS = {
   postgres: "Postgres",
@@ -145,21 +778,26 @@ export function assertAdoptedDialect<T>(
 }
 
 type OperationBackendExecution = Readonly<{
+  compile: (query: ExecutableSql) => CompiledSqlQuery;
   execAll: <TRow>(query: ExecutableSql) => Promise<readonly TRow[]>;
   execGet: <TRow>(query: ExecutableSql) => Promise<TRow | undefined>;
   execRun: (query: ExecutableSql) => Promise<void>;
 }>;
 
-type OperationBackendBatchConfig = Readonly<{
+export type OperationBackendBatchConfig = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  edgeSchemaFencedInsertBatchSize: number;
+  findEdgesEndpointChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  nodeSchemaFencedInsertBatchSize: number;
+  uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
 
-type OperationBackendRowMappers = Readonly<{
+export type OperationBackendRowMappers = Readonly<{
   toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
   toNodeRow: (row: Record<string, unknown>) => NodeRow;
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
@@ -167,13 +805,939 @@ type OperationBackendRowMappers = Readonly<{
 }>;
 
 type CreateCommonOperationBackendOptions = Readonly<{
+  atomicSqlProgramExecutor?: AtomicSqlProgramExecutor;
   batchConfig: OperationBackendBatchConfig;
+  commandSession: GraphCommandSession;
   execution: OperationBackendExecution;
+  maxBindParameters: number;
   nowIso?: (() => string) | undefined;
   operationStrategy: CommonOperationStrategy;
   rowMappers: OperationBackendRowMappers;
+  /** Present only on bundled dialect backends that own the fused SQL contract. */
+  schemaFenceLockClause?: SQL | undefined;
+  /**
+   * How node-row locks are taken, resolved from the backend's write fence by
+   * `resolveNodeRowLockPlan`: the dialect's row-lock clauses inside each
+   * endpoint-guarded or delete-lock statement, fence rows acquired before it,
+   * or nothing when writers serialize.
+   */
+  nodeRowLocks: NodeRowLockPlan;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  schemaGraphWriteLockNamespace?: string | undefined;
+  /**
+   * The resolved fence target's own lock-statement spelling — present
+   * whenever the profile declares one, root or transaction-scoped alike.
+   * `lockSchemaVersionAndGraphWrite` builds only when this,
+   * `schemaGraphWriteLockNamespace`, and `operationStrategy
+   * .buildLockSchemaVersionAndGraphWrite` are ALL present, and passes this
+   * spelling through to the strategy hook rather than letting it default to
+   * the bundled one: a derived profile's fused write must lock the same key
+   * its portable lock sites do.
+   */
+  fenceSql?: FenceSql | undefined;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  edgeCardinalityInsertFusion?: boolean | undefined;
+  /**
+   * Whether a convergent edge create's dynamic (non-durable) match may
+   * inspect JSON match fields. Present only for a bundled PostgreSQL
+   * backend; absent (falsy) leaves dynamic convergence unsupported so the
+   * caller falls back to the portable check-then-write path.
+   */
+  dynamicEdgeConvergence?: boolean | undefined;
+  /** Present only for bundled projection-aware operation backends. */
+  nodeProjectionInsertFusion?: boolean | undefined;
+  /** Claim plans require a caller-owned transaction to roll back refusals. */
+  nodeClaimInsertFusion?: boolean | undefined;
+  /** Read-only prerequisite gate run before a fused projection statement. */
+  beforeNodeProjectionInsert?:
+    | ((params: InsertNodeParams, plan: ManagedNodeCreatePlan) => Promise<void>)
+    | undefined;
+  /** Error-path projection storage classifier; must rethrow or return never. */
+  refuseNodeProjectionError?:
+    | ((
+        params: InsertNodeParams,
+        plan: ManagedNodeCreatePlan,
+        error: unknown,
+      ) => Promise<never>)
+    | undefined;
+  /** Local signature evidence compiled into an atomic projection program. */
+  resolveAtomicNodeProjectionEvidence?:
+    | ((
+        creates: readonly AtomicNodePostimageEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<readonly AtomicContributionEvidence[]>)
+    | undefined;
+  /** Failure-only durable marker diagnosis after an atomic refusal rolls back. */
+  diagnoseAtomicNodeProjectionEvidence?:
+    | ((
+        creates: readonly AtomicNodePostimageEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<void>)
+    | undefined;
+  /** Maps physical projection failures without weakening row classifications. */
+  refuseAtomicNodeProjectionError?:
+    | ((
+        creates: readonly AtomicNodePostimageEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+        error: unknown,
+      ) => Promise<never>)
+    | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
+
+/**
+ * The entity refs a duplicate-key classification reports back. Nodes carry a
+ * kind of their own; an edge's `kind` is its edge kind, which the insert params
+ * also carry.
+ */
+type AttemptedInsert = Readonly<{ kind: string; id: string }>;
+type AttemptedEdgeMatchIdentity = Readonly<{
+  id: string;
+  identityName: string;
+  kind: string;
+}>;
+
+type AtomicEdgeConvergenceLowerer = Readonly<{
+  maxEntries: number;
+}> &
+  ((
+    input: Omit<AtomicEdgeConvergenceInput, "kind">,
+  ) => Promise<readonly AtomicEdgeConvergenceResult[]>);
+
+type AtomicEdgeResolvedMutationSetLowerer = Readonly<{
+  maxEntries: number;
+}> &
+  ((
+    input: Omit<AtomicEdgeResolvedMutationSetInput, "kind">,
+  ) => Promise<AtomicEdgeResolvedMutationSetResult>);
+
+function duplicateKeyOperationError(
+  entity: "node" | "edge",
+  attempted: readonly AttemptedInsert[],
+  cause: unknown,
+): DatabaseOperationError {
+  return new DatabaseOperationError(
+    `Insert ${entity} failed: a row with this identity already exists`,
+    {
+      operation: "insert",
+      entity,
+      reason: "duplicate_key",
+      attempted,
+    },
+    { cause },
+  );
+}
+
+/**
+ * Runs an insert and converts a PRIMARY KEY duplicate-key refusal into a
+ * classified {@link DatabaseOperationError} carrying the rows it attempted.
+ *
+ * The translation stops here rather than reaching for the store's "already
+ * exists" error because that is a store-level judgement: the backend's job is to
+ * say *what the engine refused and why* in terms callers can branch on, instead
+ * of letting a `DrizzleQueryError` whose `.message` is the raw INSERT text
+ * escape as the operation's outcome (issue #410). The create paths translate it
+ * onward; every other caller sees a system error, exactly as before.
+ *
+ * Any other failure — including a 23505 from a declared `unique: true` index on
+ * the same relation — propagates untouched.
+ */
+async function withDuplicateKeyClassification<T>(
+  run: () => Promise<T>,
+  context: Readonly<{
+    entity: "node" | "edge";
+    relation: PrimaryKeyRelation;
+    attempted: readonly AttemptedInsert[];
+    matchIdentities?: readonly AttemptedEdgeMatchIdentity[] | undefined;
+  }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isDuplicatePrimaryKeyError(error, context.relation)) {
+      throw duplicateKeyOperationError(
+        context.entity,
+        context.attempted,
+        error,
+      );
+    }
+    if (
+      context.matchIdentities !== undefined &&
+      isDuplicateUniqueIndexError(error, {
+        table: context.relation.table,
+        indexName: edgeMatchIdentityUniqueIndexName(context.relation.table),
+        sqliteColumns: [
+          "graph_id",
+          "kind",
+          "match_identity_name",
+          "match_identity_key",
+        ],
+      })
+    ) {
+      throw new EdgeMatchIdentityConflictError(
+        { attempted: context.matchIdentities },
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+async function withAtomicEdgeEndpointRefusalClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicEdgeBatchEndpointRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+async function withAtomicEdgeCardinalityRefusalClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicEdgeBatchCardinalityRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+async function withAtomicEdgeDeleteIdentityRefusalClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicEdgeDeleteIdentityRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+async function withAtomicNodeDeleteRestrictionClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicNodeDeleteRestrictedRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+type AtomicDeleteSlotResult =
+  | Readonly<{ kind: "lock" }>
+  | Readonly<{ kind: "affected"; count: number }>
+  | Readonly<{ kind: "claim-release" }>
+  | Readonly<{ kind: "fence"; matched: boolean }>;
+
+function assembleAtomicDeleteBatchResult(
+  results: readonly AtomicDeleteSlotResult[],
+): AtomicDeleteBatchResult {
+  let fenceResult: Readonly<{ kind: "fence"; matched: boolean }> | undefined;
+  let affectedCount = 0;
+  for (const result of results) {
+    if (result.kind === "affected") {
+      affectedCount += result.count;
+      continue;
+    }
+    if (result.kind === "lock" || result.kind === "claim-release") continue;
+    if (fenceResult !== undefined) {
+      throw new CompilerInvariantError(
+        "Atomic delete program returned more than one schema-fence result.",
+      );
+    }
+    fenceResult = result;
+  }
+  if (fenceResult === undefined) {
+    throw new CompilerInvariantError(
+      "Atomic delete program omitted its schema-fence result.",
+    );
+  }
+  return {
+    affectedCount,
+    schemaFenceMatched: fenceResult.matched,
+  };
+}
+
+type AtomicResolvedMutationSlot<TRow> =
+  | Readonly<{ kind: "created"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "updated"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "postimages"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "lock" }>
+  | Readonly<{ kind: "projection" }>
+  | Readonly<{ kind: "assertion" }>;
+
+// A native submission is one transport request and one rollback boundary, so
+// per-statement bind safety is necessary but not sufficient. Bound the number
+// of mutation statements as well: a mixed set can spend one partial chunk on
+// each side, hence K - 1 full chunks plus one member is the largest total that
+// can never exceed K mutation statements. The absolute member ceiling keeps a
+// high-bind PostgreSQL backend from turning the same contract into an enormous
+// HTTP request merely because one SQL statement can carry many parameters.
+const ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS = 32;
+const ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS = 512;
+const ATOMIC_RESOLVED_MUTATION_FIXED_PARAM_COUNT = 12;
+const ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY = 5;
+const ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY = 14;
+
+function atomicResolvedMutationStatementChunkSize(
+  maxBindParameters: number,
+  parametersPerEntry: number,
+): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_RESOLVED_MUTATION_FIXED_PARAM_COUNT) /
+        parametersPerEntry,
+    ),
+  );
+}
+
+function atomicResolvedMutationSubmissionMaxEntries(
+  statementChunkSize: number,
+): number {
+  return Math.min(
+    ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+    statementChunkSize * (ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS - 1) + 1,
+  );
+}
+
+function pairAtomicMutationChunksWithIds<T>(
+  chunks: readonly (readonly T[])[],
+  ids: readonly string[],
+): readonly Readonly<{ entries: readonly T[]; ids: readonly string[] }>[] {
+  let offset = 0;
+  return chunks.map((entries) => {
+    const chunkIds = ids.slice(offset, offset + entries.length);
+    offset += entries.length;
+    return { entries, ids: chunkIds };
+  });
+}
+
+// `graphId` and `edgeKind` are fixed per statement; each admitted pair costs
+// two more (`fromKind`, `toKind`).
+const MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT = 2;
+const MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT = 2;
+
+/**
+ * How many admitted pairs one `buildMisassignedEdgeEndpointAudit` statement
+ * may render, sized to the connection's bound-parameter budget. Unlike the
+ * disjunction this statement used to render, a `VALUES` derived table does
+ * not grow SQLite's expression-tree depth with the pair count, so the bound
+ * budget is the only ceiling left to respect.
+ */
+function misassignedEdgeEndpointPairChunkSize(
+  maxBindParameters: number,
+): number {
+  return Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - MISASSIGNED_EDGE_ENDPOINT_FIXED_PARAM_COUNT) /
+        MISASSIGNED_EDGE_ENDPOINT_PAIR_PARAM_COUNT,
+    ),
+  );
+}
+
+/**
+ * The projection every edge-family fence-audit statement returns
+ * (`src/backend/drizzle/operations/constraint-fence-audit.ts`
+ * `edgeAuditProjection`). One declaration, so an added audit column is a type
+ * error at every reader rather than an `undefined` field on a reported row.
+ */
+type EdgeAuditRow = Readonly<{
+  edge_id: string;
+  edge_kind: string;
+  from_kind: string;
+  from_id: string;
+  to_kind: string;
+  to_id: string;
+}>;
+
+/** The audit row's snake_case columns as the reported row names them. */
+function edgeAuditRowFields(row: EdgeAuditRow): MisassignedEdgeEndpointRow {
+  return {
+    edgeKind: row.edge_kind,
+    edgeId: row.edge_id,
+    fromKind: row.from_kind,
+    fromId: row.from_id,
+    toKind: row.to_kind,
+    toId: row.to_id,
+  };
+}
+
+/**
+ * The live edges of one edge kind whose endpoints match none of its
+ * allowance's admitted pairs, chunking the pairs across several statements
+ * when the allowance exceeds `pairChunkSize`.
+ *
+ * A row is truly misassigned only when it fails EVERY chunk's admitted-pairs
+ * predicate — failing one chunk means only that the row is not admitted by
+ * that chunk's pairs, not that no pair anywhere admits it. So the final
+ * answer is the INTERSECTION, by edge id, of what each chunk's statement
+ * reports; a chunk that already leaves no candidates ends the loop early,
+ * since intersecting with the empty set can only stay empty.
+ */
+async function readMisassignedEdgeEndpointRows(
+  execution: OperationBackendExecution,
+  operationStrategy: CommonOperationStrategy,
+  graphId: string,
+  allowance: EdgeEndpointAllowance,
+  pairChunkSize: number,
+): Promise<readonly MisassignedEdgeEndpointRow[]> {
+  const pairChunks =
+    allowance.allowedPairs.length === 0 ?
+      [[]]
+    : chunkArray(allowance.allowedPairs, pairChunkSize);
+  let candidates: Map<string, EdgeAuditRow> | undefined;
+  for (const pairChunk of pairChunks) {
+    const rows = await execution.execAll<EdgeAuditRow>(
+      operationStrategy.buildMisassignedEdgeEndpointAudit(
+        graphId,
+        allowance.edgeKind,
+        pairChunk,
+      ),
+    );
+    const rowsByEdgeId = new Map(rows.map((row) => [row.edge_id, row]));
+    candidates =
+      candidates === undefined ? rowsByEdgeId : (
+        new Map([...candidates].filter(([edgeId]) => rowsByEdgeId.has(edgeId)))
+      );
+    if (candidates.size === 0) break;
+  }
+  return [...(candidates?.values() ?? [])].map((row) =>
+    edgeAuditRowFields(row),
+  );
+}
+
+function assembleAtomicResolvedMutationSet<TRow>(
+  entity: "node" | "edge",
+  results: readonly AtomicResolvedMutationSlot<TRow>[],
+  createIds: readonly string[],
+  updateIds: readonly string[],
+  rowId: (row: TRow) => string,
+  terminalCount: number,
+): Readonly<{ created: readonly TRow[]; updated: readonly TRow[] }> {
+  const assertionCount = results.filter(
+    (result) => result.kind === "assertion",
+  ).length;
+  const postimageSlots = results.filter(
+    (result) => result.kind === "postimages",
+  );
+  if (
+    assertionCount !== terminalCount ||
+    postimageSlots.length !== terminalCount
+  ) {
+    throw new CompilerInvariantError(
+      `Atomic ${entity} mutation set returned an invalid terminal result.`,
+      { assertions: assertionCount, postimages: postimageSlots.length },
+    );
+  }
+
+  const postimages = postimageSlots.flatMap((slot) => slot.rows);
+  if (postimages.length !== createIds.length + updateIds.length) {
+    const mutationRows = results.flatMap((result) =>
+      result.kind === "created" || result.kind === "updated" ? result.rows : [],
+    );
+    if (mutationRows.length > 0) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation assertion allowed an incomplete postimage set.`,
+      );
+    }
+    return { created: [], updated: [] };
+  }
+
+  const expectedIds = new Set([...createIds, ...updateIds]);
+  const byId = new Map<string, TRow>();
+  for (const row of postimages) {
+    const id = rowId(row);
+    if (!expectedIds.has(id)) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation set returned a postimage outside its input set.`,
+        { id },
+      );
+    }
+    if (byId.has(id)) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation set returned a duplicate postimage.`,
+        { id },
+      );
+    }
+    byId.set(id, row);
+  }
+  return {
+    created: createIds.map((id) => requireDefined(byId.get(id))),
+    updated: updateIds.map((id) => requireDefined(byId.get(id))),
+  };
+}
+
+function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
+  input: Readonly<{
+    entity: "node" | "edge";
+    createChunks: readonly (readonly TCreate[])[];
+    updateChunks: readonly (readonly TUpdate[])[];
+    createIds: readonly string[];
+    updateIds: readonly string[];
+    compileCreate: (chunk: readonly TCreate[]) => CompiledAtomicSqlStatement;
+    compileUpdate: (updates: readonly TUpdate[]) => CompiledAtomicSqlStatement;
+    /** Lock acquisitions that lead the program, before any row is written. */
+    compiledLocks?: readonly CompiledAtomicSqlStatement[];
+    compiledSidecars?: readonly CompiledAtomicSqlStatement[];
+    compileAssertion: (
+      creates: readonly TCreate[],
+      updates: readonly TUpdate[],
+    ) => CompiledAtomicSqlStatement;
+    compilePostimages: (ids: readonly string[]) => CompiledAtomicSqlStatement;
+    decodeRow: (row: Readonly<Record<string, unknown>>) => TRow;
+    rowId: (row: TRow) => string;
+  }>,
+): AtomicSqlProgram<
+  AtomicResolvedMutationSlot<TRow>,
+  Readonly<{ created: readonly TRow[]; updated: readonly TRow[] }>
+> {
+  const createSlots = input.createChunks.map((chunk) => ({
+    statement: input.compileCreate(chunk),
+    cardinality: "many" as const,
+    decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+      kind: "created" as const,
+      rows: rows.map((row) => input.decodeRow(row)),
+    }),
+  }));
+  const updateSlots = input.updateChunks.map((updates) => ({
+    statement: input.compileUpdate(updates),
+    cardinality: "many" as const,
+    decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+      kind: "updated" as const,
+      rows: rows.map((row) => input.decodeRow(row)),
+    }),
+  }));
+  const terminals = [
+    ...pairAtomicMutationChunksWithIds(input.createChunks, input.createIds).map(
+      (chunk) => ({
+        creates: chunk.entries,
+        updates: [] as readonly TUpdate[],
+        ids: chunk.ids,
+      }),
+    ),
+    ...pairAtomicMutationChunksWithIds(input.updateChunks, input.updateIds).map(
+      (chunk) => ({
+        creates: [] as readonly TCreate[],
+        updates: chunk.entries,
+        ids: chunk.ids,
+      }),
+    ),
+  ];
+  return {
+    slots: [
+      ...(input.compiledLocks ?? []).map((statement) => ({
+        statement,
+        cardinality: "one" as const,
+        decode: () => ({ kind: "lock" as const }),
+      })),
+      ...createSlots,
+      ...updateSlots,
+      ...(input.compiledSidecars ?? []).map((statement) => ({
+        statement,
+        cardinality: "none" as const,
+        decode: () => ({ kind: "projection" as const }),
+      })),
+      ...terminals.map((terminal) => ({
+        statement: input.compileAssertion(terminal.creates, terminal.updates),
+        cardinality: "none" as const,
+        decode: () => ({ kind: "assertion" as const }),
+      })),
+      ...terminals.map((terminal) => ({
+        statement: input.compilePostimages(terminal.ids),
+        cardinality: "many" as const,
+        decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+          kind: "postimages" as const,
+          rows: rows.map((row) => input.decodeRow(row)),
+        }),
+      })),
+    ],
+    assemble: (results) =>
+      assembleAtomicResolvedMutationSet(
+        input.entity,
+        results,
+        input.createIds,
+        input.updateIds,
+        input.rowId,
+        terminals.length,
+      ),
+  };
+}
+
+type AtomicNodeProjectionSlot = Readonly<{ kind: "projection" }>;
+
+function compileAtomicNodeProjectionSlots(
+  operationStrategy: CommonOperationStrategy,
+  execution: OperationBackendExecution,
+  creates: readonly AtomicNodePostimageEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  maxBindParameters: number,
+): readonly Readonly<{
+  statement: CompiledAtomicSqlStatement;
+  cardinality: "none";
+  decode: () => AtomicNodeProjectionSlot;
+}>[] {
+  if (
+    !creates.some((entry) => (entry.projections?.length ?? 0) > 0) &&
+    !updates.some((entry) => (entry.projections?.length ?? 0) > 0)
+  ) {
+    return [];
+  }
+  const chunkSize = Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT) /
+        ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY,
+    ),
+  );
+  const statements = operationStrategy.buildAtomicNodeProjectionStatements(
+    creates,
+    updates,
+    timestamp,
+    chunkSize,
+  );
+  if (statements === undefined) {
+    throw new CompilerInvariantError(
+      "An eligible atomic node projection family has no dialect lowering.",
+    );
+  }
+  return statements.map((statement) => {
+    const compiled = execution.compile(statement);
+    if (compiled.params.length > maxBindParameters) {
+      throw new CompilerInvariantError(
+        "An atomic node projection statement exceeded the backend bind budget.",
+        {
+          actual: compiled.params.length,
+          maximum: maxBindParameters,
+        },
+      );
+    }
+    return {
+      statement: compiled,
+      cardinality: "none" as const,
+      decode: () => ({ kind: "projection" as const }),
+    };
+  });
+}
+
+async function compileAtomicNodeProjectionEvidenceSlots(
+  operationStrategy: CommonOperationStrategy,
+  execution: OperationBackendExecution,
+  creates: readonly AtomicNodePostimageEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  maxBindParameters: number,
+  resolveEvidence:
+    | ((
+        creates: readonly AtomicNodePostimageEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<readonly AtomicContributionEvidence[]>)
+    | undefined,
+): Promise<
+  readonly Readonly<{
+    statement: CompiledAtomicSqlStatement;
+    cardinality: "none";
+    decode: () => AtomicNodeProjectionSlot;
+  }>[]
+> {
+  if (resolveEvidence === undefined) return [];
+  const evidence = await resolveEvidence(creates, updates);
+  if (evidence.length === 0) return [];
+  const availableBinds =
+    maxBindParameters - ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT;
+  const chunkSize = Math.floor(
+    availableBinds / ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
+  );
+  if (chunkSize < 1) {
+    throw new CompilerInvariantError(
+      "Atomic contribution evidence cannot fit the backend bind budget.",
+      { maximum: maxBindParameters },
+    );
+  }
+  return chunkArray(evidence, chunkSize).map((evidenceChunk) => {
+    const compiled = execution.compile(
+      operationStrategy.buildAssertAtomicNodeProjectionEvidence(
+        timestamp,
+        evidenceChunk,
+      ),
+    );
+    if (compiled.params.length > maxBindParameters) {
+      throw new CompilerInvariantError(
+        "Atomic contribution evidence exceeded the backend bind budget.",
+        { actual: compiled.params.length, maximum: maxBindParameters },
+      );
+    }
+    return {
+      statement: compiled,
+      cardinality: "none" as const,
+      decode: () => ({ kind: "projection" as const }),
+    };
+  });
+}
+
+function isAtomicMutationPostimageRefusal(
+  error: unknown,
+  operationStrategy: CommonOperationStrategy,
+  entity: "node" | "edge",
+  hasPostimageAssertion: boolean,
+): boolean {
+  const notNullConstraint =
+    entity === "node" ?
+      operationStrategy.atomicNodeRefusalConstraints.mutationPostimage
+    : operationStrategy.atomicEdgeRefusalConstraints.mutationPostimage;
+  const primaryKeyConstraint =
+    entity === "node" ?
+      operationStrategy.primaryKeyConstraints.nodes
+    : operationStrategy.primaryKeyConstraints.edges;
+  return (
+    isNotNullColumnViolation(error, notNullConstraint) ||
+    (hasPostimageAssertion &&
+      isDuplicatePrimaryKeyError(error, primaryKeyConstraint)) ||
+    (hasPostimageAssertion &&
+      error instanceof DatabaseOperationError &&
+      error.details.reason === "duplicate_key" &&
+      isDuplicatePrimaryKeyError(error.cause, primaryKeyConstraint))
+  );
+}
+
+async function withAtomicEdgeDurableRefusalClassification<T>(
+  run: () => Promise<T>,
+  relation: PrimaryKeyRelation,
+  constraint: Readonly<{ table: string; column: string }>,
+  attempted: readonly AttemptedEdgeMatchIdentity[] | undefined,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (
+      attempted !== undefined &&
+      isNotNullColumnViolation(error, constraint)
+    ) {
+      throw new EdgeMatchIdentityConflictError({ attempted }, { cause: error });
+    }
+    throw error;
+  }
+}
+
+/**
+ * Translate a missing edge match-identity column or arbiter for every edge
+ * insert route. A plain edge write still targets these columns because the
+ * physical edge row has a stable shape; it therefore needs the same typed
+ * migration guidance as a durable write when an older database is used.
+ */
+async function withEdgeInsertClassification<T>(
+  run: () => Promise<T>,
+  params: readonly InsertEdgeParams[],
+  durableIdentityName?: string,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throwEdgeInsertStorageUnavailable(error, params, durableIdentityName);
+  }
+}
+
+function assertCompleteAtomicChunks(
+  actualCounts: readonly number[],
+  expectedChunks: readonly (readonly unknown[])[],
+  entity: "node" | "edge",
+): void {
+  const mismatchedChunk = expectedChunks.findIndex(
+    (expectedChunk, index) => actualCounts[index] !== expectedChunk.length,
+  );
+  if (mismatchedChunk === -1 && actualCounts.length === expectedChunks.length) {
+    return;
+  }
+  const slot = mismatchedChunk === -1 ? expectedChunks.length : mismatchedChunk;
+  throw new CompilerInvariantError(
+    `Atomic ${entity} batch returned a partial chunk result.`,
+    {
+      slot,
+      expected: expectedChunks[slot]?.length,
+      actual: actualCounts[slot],
+    },
+  );
+}
+
+function decodeNoEdgeRows(): readonly EdgeRow[] {
+  return [];
+}
+
+async function withAtomicNodeBatchClassifications<T>(
+  run: () => Promise<T>,
+  entries: readonly AtomicNodeBatchEntry[],
+  operationStrategy: CommonOperationStrategy,
+): Promise<T> {
+  const attempted = attemptedInserts(entries.map((entry) => entry.params));
+  try {
+    return await withDuplicateKeyClassification(run, {
+      entity: "node",
+      relation: operationStrategy.primaryKeyConstraints.nodes,
+      attempted,
+    });
+  } catch (error) {
+    if (
+      entries.some((entry) => entry.idSource === "caller") &&
+      isNotNullColumnViolation(
+        error,
+        operationStrategy.atomicNodeRefusalConstraints.liveIdentity,
+      )
+    ) {
+      throw duplicateKeyOperationError("node", attempted, error);
+    }
+    throw error;
+  }
+}
+
+async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
+  atomicExecutor: AtomicSqlProgramExecutor,
+  program: AtomicSqlProgram<TSlot, TResult>,
+  relation: PrimaryKeyRelation,
+  refusalConstraints: CommonOperationStrategy["atomicEdgeRefusalConstraints"],
+  params: readonly InsertEdgeParams[],
+  claims: readonly ClaimEdgeCardinalityParams[],
+): Promise<TResult> {
+  const matchIdentities = attemptedEdgeMatchIdentities(params);
+  try {
+    // Classifiers are intentionally nested from the broad edge-insert wrapper
+    // to the narrow sentinel refusals. Each inner layer recognizes only its
+    // own storage signal; the outer layers preserve the public error contract.
+    return await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () =>
+            withAtomicEdgeEndpointRefusalClassification(
+              () =>
+                withAtomicEdgeCardinalityRefusalClassification(
+                  () =>
+                    withAtomicEdgeDurableRefusalClassification(
+                      () => atomicExecutor.execute(program),
+                      relation,
+                      refusalConstraints.durableIdentity,
+                      matchIdentities,
+                    ),
+                  refusalConstraints.cardinality,
+                ),
+              refusalConstraints.endpoint,
+            ),
+          {
+            entity: "edge",
+            relation,
+            attempted: attemptedInserts(params),
+            matchIdentities,
+          },
+        ),
+      params,
+    );
+  } catch (error) {
+    if (claims.length > 0 && isMissingTableError(error)) {
+      throw edgeClaimRelationMissing(requireDefined(params[0]).graphId, error);
+    }
+    throw error;
+  }
+}
+
+function attemptedEdgeMatchIdentities(
+  params: readonly InsertEdgeParams[],
+): readonly AttemptedEdgeMatchIdentity[] | undefined {
+  const attempted = params.flatMap((item) =>
+    item.matchIdentity === undefined ?
+      []
+    : [
+        {
+          id: item.id,
+          identityName: item.matchIdentity.name,
+          kind: item.kind,
+        },
+      ],
+  );
+  return attempted.length === 0 ? undefined : attempted;
+}
+
+function throwDurableIdentityStorageUnavailable(
+  error: unknown,
+  params: InsertEdgeParams,
+  identityName: string,
+): never {
+  if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+  throw new ConfigurationError(
+    "Backend declares durable edge match identity support, but its storage has not been provisioned.",
+    {
+      code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE",
+      capability: "durableEdgeMatchIdentity",
+      graphId: params.graphId,
+      edgeKind: params.kind,
+      identityName,
+    },
+    {
+      suggestion:
+        "Initialize or migrate the graph through the schema manager before using a durable identity store.",
+      cause: error,
+    },
+  );
+}
+
+function throwEdgeInsertStorageUnavailable(
+  error: unknown,
+  params: readonly InsertEdgeParams[],
+  durableIdentityName?: string,
+): never {
+  if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+
+  const firstParams = requireDefined(params[0]);
+  const durableParams = params.find((item) => item.matchIdentity !== undefined);
+  const identityName =
+    durableIdentityName ?? durableParams?.matchIdentity?.name;
+  if (identityName !== undefined) {
+    throwDurableIdentityStorageUnavailable(
+      error,
+      durableParams ?? firstParams,
+      identityName,
+    );
+  }
+
+  throw new ConfigurationError(
+    "Edge match identity storage is not provisioned for this backend.",
+    {
+      code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE",
+      graphId: firstParams.graphId,
+      edgeKind: firstParams.kind,
+    },
+    {
+      suggestion:
+        "Initialize or migrate the graph through the schema manager before inserting edges.",
+      cause: error,
+    },
+  );
+}
+
+/**
+ * The entity refs of an insert's rows, copied out of the insert params so the
+ * error carries identity alone and never the props alongside it.
+ */
+function attemptedInserts(
+  params: readonly AttemptedInsert[],
+): readonly AttemptedInsert[] {
+  return params.map((item) => ({ kind: item.kind, id: item.id }));
+}
 
 function verifyExpectedActiveVersion(
   graphId: string,
@@ -181,6 +1745,14 @@ function verifyExpectedActiveVersion(
   actualActiveVersion: number,
 ): void {
   const expectedVersion = expected.kind === "active" ? expected.version : 0;
+  assertActiveSchemaVersion(graphId, expectedVersion, actualActiveVersion);
+}
+
+export function assertActiveSchemaVersion(
+  graphId: string,
+  expectedVersion: number,
+  actualActiveVersion: number,
+): void {
   if (actualActiveVersion !== expectedVersion) {
     throw new StaleVersionError({
       graphId,
@@ -190,18 +1762,149 @@ function verifyExpectedActiveVersion(
   }
 }
 
+/**
+ * Runs the populated-kind guard and schema commit on one transaction-scoped
+ * backend. The dialect wrapper is responsible for fencing ordinary entity
+ * writes before calling this helper.
+ */
+export async function commitSchemaVersionIfKindsEmpty(
+  backend: CommonOperationBackend,
+  params: CommitSchemaVersionParams,
+  probes: readonly SchemaKindEmptinessProbe[],
+): Promise<CommitSchemaVersionIfKindsEmptyResult> {
+  const [existing, active] = await Promise.all([
+    backend.getSchemaVersion(params.graphId, params.version),
+    backend.getActiveSchema(params.graphId),
+  ]);
+
+  // Preserve commitSchemaVersion's conflict and idempotency precedence. A
+  // retry of an already-active identical version is success regardless of
+  // current row counts; a conflicting same-version document remains a
+  // content conflict rather than being masked as a populated-kind refusal.
+  if (
+    existing !== undefined &&
+    (existing.is_active || existing.schema_hash !== params.schemaHash)
+  ) {
+    return {
+      status: "committed",
+      row: await backend.commitSchemaVersion(params),
+    };
+  }
+
+  verifyExpectedActiveVersion(
+    params.graphId,
+    params.expected,
+    active?.version ?? 0,
+  );
+
+  const populated: PopulatedSchemaKind[] = [];
+  for (const probe of probes) {
+    const count = await countSchemaKindRows(backend, params.graphId, probe);
+    if (count > 0) populated.push({ ...probe, count });
+  }
+
+  if (populated.length > 0) {
+    return { status: "populated", kinds: populated };
+  }
+
+  return {
+    status: "committed",
+    row: await backend.commitSchemaVersion(params),
+  };
+}
+
+function hasAcrossKindsPage(params: FindRowsAcrossKindsParams): boolean {
+  if (!Number.isSafeInteger(params.limit) || params.limit <= 0) {
+    throw new ConfigurationError(
+      "Cross-kind page limit must be a positive integer.",
+      { code: "INVALID_GRAPH_ENUMERATION_LIMIT", limit: params.limit },
+    );
+  }
+  return params.kinds.length > 0;
+}
+
 export function createCommonOperationBackend(
   options: CreateCommonOperationBackendOptions,
 ): CommonOperationBackend {
-  const { batchConfig, execution, operationStrategy, rowMappers } = options;
+  const {
+    batchConfig,
+    commandSession,
+    execution,
+    maxBindParameters,
+    operationStrategy,
+    rowMappers,
+  } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
-  // The clear() existence pre-check is the only thing that probes these tables.
+  async function runAtomicNodeSidecarProgram<TResult>(
+    input: Readonly<{
+      creates: readonly AtomicNodePostimageEntry[];
+      updates: readonly AtomicNodeResolvedUpdateEntry[];
+      operation: "insert" | "update" | "upsert";
+      hasProjections: boolean;
+      hasPostimageAssertion: boolean;
+      run: () => Promise<TResult>;
+      postimageRefusal?: () => TResult;
+    }>,
+  ): Promise<TResult> {
+    if (!input.hasProjections && input.postimageRefusal === undefined) {
+      return input.run();
+    }
+    try {
+      return await input.run();
+    } catch (error) {
+      const projectionEvidenceRefusal =
+        input.hasProjections &&
+        isNotNullColumnViolation(
+          error,
+          operationStrategy.atomicNodeRefusalConstraints.projectionEvidence,
+        );
+      if (
+        input.hasProjections &&
+        (projectionEvidenceRefusal || isMissingTableError(error))
+      ) {
+        await options.diagnoseAtomicNodeProjectionEvidence?.(
+          input.creates,
+          input.updates,
+        );
+        if (projectionEvidenceRefusal) {
+          throw new DatabaseOperationError(
+            "Atomic node projection evidence changed before its refusal could be diagnosed.",
+            { operation: input.operation, entity: "node" },
+            { cause: error },
+          );
+        }
+      }
+      if (
+        input.postimageRefusal !== undefined &&
+        isAtomicMutationPostimageRefusal(
+          error,
+          operationStrategy,
+          "node",
+          input.hasPostimageAssertion,
+        )
+      ) {
+        return input.postimageRefusal();
+      }
+      if (
+        input.hasProjections &&
+        options.refuseAtomicNodeProjectionError !== undefined
+      ) {
+        return options.refuseAtomicNodeProjectionError(
+          input.creates,
+          input.updates,
+          error,
+        );
+      }
+      throw error;
+    }
+  }
+
   // Positive results are cached by default because on standard schemas the
   // recorded DDL is stable; Postgres disables that cache because visibility is
   // search_path-sensitive. Missing tables stay re-probable unless a caller opts
   // into negative caching.
-  const requiredClearTableExists = createCachedTableExistence(
+  const tableExists = createCachedTableExistence(
     (tableName) =>
       execution.execGet<Record<string, unknown>>(
         operationStrategy.buildTableExists(tableName),
@@ -211,7 +1914,7 @@ export function createCommonOperationBackend(
 
   async function runIgnorableClearStatement(
     statement: Readonly<{
-      query: SQL;
+      query: ExecutableSql;
       ignoreMissingTable?: boolean;
       requiredTableName?: string;
     }>,
@@ -223,11 +1926,170 @@ export function createCommonOperationBackend(
     if (
       statement.ignoreMissingTable === true &&
       statement.requiredTableName !== undefined &&
-      !(await requiredClearTableExists(statement.requiredTableName))
+      !(await tableExists(statement.requiredTableName))
     ) {
       return;
     }
     await execution.execRun(statement.query);
+  }
+
+  /**
+   * THE edge-claim driver, shared by the single and batch members: lock every
+   * entry's row in one statement, then run the conditional takeover for the
+   * entries a DIFFERENT edge holds.
+   *
+   * The two statements exist because one cannot do the job: deciding inside the
+   * upsert reads the pre-lock snapshot of the edges relation under READ
+   * COMMITTED, so two concurrent writers would both see "the incumbent is not
+   * live yet" and both commit. Statement 1 is therefore decision-free — it only
+   * makes the row exist, takes its lock and reports the COMMITTED holder — and
+   * statement 2 re-evaluates liveness after that lock is held. Between them,
+   * {@link readClaimlessIncumbents} refuses a composition claim whose axis a
+   * claimless live edge already occupies.
+   *
+   * Duplicate conflict targets are refused rather than collapsed: a multi-row
+   * upsert cannot affect one row twice, so two entries claiming one axis would
+   * silently leave one of them unfenced. The application layer's pending
+   * cardinality state refuses in-batch collisions first, which makes this a
+   * defensive invariant rather than a semantic path.
+   */
+  async function claimEdgeCardinalityEntries(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<readonly EdgeClaimOutcome[]> {
+    if (entries.length === 0) return [];
+
+    const targetKey = (entry: ClaimEdgeCardinalityParams): string => {
+      const target = edgeCardinalityClaimTarget(entry);
+      return claimTargetKey(target.axis, target.key);
+    };
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const key = targetKey(entry);
+      if (seen.has(key)) {
+        throw new DatabaseOperationError(
+          "Two edge claims in one batch name the same cardinality axis and key; " +
+            "a multi-row upsert cannot affect one row twice.",
+          { operation: "insert", entity: "edge" },
+        );
+      }
+      seen.add(key);
+    }
+
+    const outcomes = new Map<string, EdgeClaimOutcome>();
+    // Chunked by CLAIM entries, not edges — a two-axis edge kind emits two
+    // claims per inserted edge. The edge-insert budget is still a safe
+    // ceiling here: a claim row binds fewer parameters than an edge row, so
+    // chunking claims at the same size never exceeds the bind budget an edge
+    // insert of that size already clears.
+    for (const chunk of chunkArray(entries, batchConfig.edgeInsertBatchSize)) {
+      const lockQuery = operationStrategy.buildLockEdgeClaims(chunk, nowIso());
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        holder_edge_id: string;
+      }>(lockQuery);
+      const holderByTarget = new Map(
+        rows.map((row) => [
+          claimTargetKey(row.axis, row.key),
+          row.holder_edge_id,
+        ]),
+      );
+      const incumbentByTarget = await readClaimlessIncumbents(chunk);
+      for (const entry of chunk) {
+        const key = targetKey(entry);
+        const incumbent = incumbentByTarget.get(key);
+        if (incumbent !== undefined) {
+          outcomes.set(key, { status: "refused", holderEdgeId: incumbent });
+          continue;
+        }
+        const holder = holderByTarget.get(key);
+        if (holder === undefined || holder === entry.edgeId) {
+          outcomes.set(key, { status: "claimed" });
+          continue;
+        }
+        const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+          operationStrategy.buildTakeOverEdgeClaim(entry, nowIso()),
+        );
+        outcomes.set(
+          key,
+          takeOver.length > 0 ?
+            { status: "claimed" }
+          : { status: "refused", holderEdgeId: holder },
+        );
+      }
+    }
+    return entries.map(
+      (entry) => outcomes.get(targetKey(entry)) ?? { status: "claimed" },
+    );
+  }
+
+  /**
+   * The live edges already occupying a composition claim's axis, keyed like
+   * the lock's holders. An ordinary axis is read-probed by the store before
+   * it is claimed; a composition axis is relation-wide and has no read probe,
+   * so a live attachment that predates its `partOf` declaration holds no claim
+   * row and only this read can see it — the batch counterpart of the
+   * single-row guard's `incumbent_edge_id`.
+   */
+  async function readClaimlessIncumbents(
+    entries: readonly ClaimEdgeCardinalityParams[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const compositionEntries = entries.filter(
+      (entry) => entry.scope !== undefined,
+    );
+    const incumbents = new Map<string, string>();
+    if (compositionEntries.length === 0) return incumbents;
+    for (const query of operationStrategy.buildReadEdgeClaimIncumbents(
+      compositionEntries,
+    )) {
+      const rows = await execution.execAll<{
+        axis: string;
+        key: string;
+        incumbent_edge_id: string;
+      }>(query);
+      for (const row of rows) {
+        const key = claimTargetKey(row.axis, row.key);
+        if (!incumbents.has(key)) incumbents.set(key, row.incumbent_edge_id);
+      }
+    }
+    return incumbents;
+  }
+
+  /**
+   * Single-claim fast path. The lock statement reports both the committed
+   * claim holder and the live edge, claimed or not, already occupying the
+   * axis.
+   * A stale foreign holder is taken over only through a second guarded
+   * statement whose fresh snapshot rechecks the entire axis.
+   */
+  async function claimEdgeCardinalityGuarded(
+    params: ClaimEdgeCardinalityParams,
+  ): Promise<EdgeClaimOutcome> {
+    const rows = await execution.execAll<{
+      holder_edge_id: string;
+      incumbent_edge_id: string | null;
+    }>(operationStrategy.buildLockEdgeClaimGuarded(params, nowIso()));
+    const locked = rows[0];
+    if (locked === undefined) {
+      throw new DatabaseOperationError(
+        "Guarded edge claim did not return its locked claim row.",
+        { operation: "insert", entity: "edge" },
+      );
+    }
+    const incumbent = locked.incumbent_edge_id ?? undefined;
+    if (incumbent !== undefined) {
+      return { status: "refused", holderEdgeId: incumbent };
+    }
+    if (locked.holder_edge_id === params.edgeId) {
+      return { status: "claimed" };
+    }
+
+    const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+      operationStrategy.buildTakeOverEdgeClaimGuarded(params, nowIso()),
+    );
+    return takeOver.length > 0 ?
+        { status: "claimed" }
+      : { status: "refused", holderEdgeId: locked.holder_edge_id };
   }
 
   // Returns 0 when no row is currently active — that's the sentinel
@@ -239,7 +2101,2911 @@ export function createCommonOperationBackend(
     return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
   }
 
+  const schemaFenceLockClause = options.schemaFenceLockClause;
+  const schemaFenceMembers =
+    schemaFenceLockClause === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
+          const query =
+            operationStrategy.buildInsertNodeIfAbsentWithSchemaFence(
+              params,
+              nowIso(),
+              schemaFence,
+              schemaFenceLockClause,
+            );
+          const row = await execution.execGet<Record<string, unknown>>(query);
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
+          const query = operationStrategy.buildInsertNodeWithSchemaFence(
+            params,
+            nowIso(),
+            schemaFence,
+            schemaFenceLockClause,
+          );
+          const row = await withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "node",
+              relation: operationStrategy.primaryKeyConstraints.nodes,
+              attempted: attemptedInserts([params]),
+            },
+          );
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+      };
+
+  const atomicSqlProgramExecutor = options.atomicSqlProgramExecutor;
+
+  const { nodeRowLocks } = options;
+  const nodeRowLockClauses =
+    nodeRowLocks.kind === "row-lock" ?
+      operationStrategy.nodeRowLockClauses
+    : NO_NODE_ROW_LOCK_CLAUSES;
+  const endpointLock = nodeRowLockClauses.edgeEndpoint;
+
+  /** The fence rows a `fence-row` plan takes on `nodes`; none otherwise. */
+  function nodeRowFences(
+    graphId: string,
+    nodes: readonly NodeRowLockTarget[],
+  ): readonly SqlFragment[] {
+    return nodeRowLocks.kind === "fence-row" ?
+        nodeRowFenceAcquisitions(nodeRowLocks.sql, graphId, nodes)
+      : [];
+  }
+
+  /** {@link nodeRowFences} for both endpoints of every edge in `edges`. */
+  function edgeEndpointFences(
+    graphId: string,
+    edges: readonly Pick<
+      InsertEdgeParams,
+      "fromKind" | "fromId" | "toKind" | "toId"
+    >[],
+  ): readonly SqlFragment[] {
+    return nodeRowFences(
+      graphId,
+      edges.flatMap((edge) => [
+        { kind: edge.fromKind, id: edge.fromId },
+        { kind: edge.toKind, id: edge.toId },
+      ]),
+    );
+  }
+
+  /** Atomic program slots that acquire `fences`, each decoding to `result`. */
+  function fenceSlots<TResult>(
+    fences: readonly SqlFragment[],
+    result: TResult,
+  ): readonly AtomicSqlProgram<TResult, unknown>["slots"][number][] {
+    return fences.map((fence) => ({
+      statement: execution.compile(fence),
+      cardinality: "one" as const,
+      decode: () => result,
+    }));
+  }
+
+  /**
+   * A root session commits each statement on its own, so a `fence-row`
+   * plan's endpoint fences can share an endpoint-guarded statement's
+   * transaction only through an atomic program. Without one, the fused
+   * command reports `endpointPredicate` unsupported and the store's portable
+   * path, which locks through `lockNodes` inside its own transaction, runs
+   * instead.
+   */
+  const endpointFencesNeedUnavailableProgram =
+    nodeRowLocks.kind === "fence-row" &&
+    commandSession === "root" &&
+    atomicSqlProgramExecutor === undefined;
+
+  /**
+   * Runs one endpoint-guarded statement for `params`, after the endpoint
+   * fences a `fence-row` plan takes, in the same transaction: the session's
+   * own on a transaction session, an atomic program on a root session.
+   */
+  async function execEndpointGuardedGet(
+    params: InsertEdgeParams,
+    query: SQL,
+  ): Promise<Record<string, unknown> | undefined> {
+    const fences = edgeEndpointFences(params.graphId, [params]);
+    if (fences.length === 0) {
+      return execution.execGet<Record<string, unknown>>(query);
+    }
+    if (commandSession === "transaction") {
+      for (const fence of fences) await execution.execRun(fence);
+      return execution.execGet<Record<string, unknown>>(query);
+    }
+    const executor = requireDefined(
+      atomicSqlProgramExecutor,
+      "An endpoint-guarded root statement under fence-row locks was admitted without an atomic program.",
+    );
+    const program = {
+      slots: [
+        ...fenceSlots<Readonly<Record<string, unknown>> | undefined>(
+          fences,
+          undefined,
+        ),
+        {
+          statement: execution.compile(query),
+          cardinality: "many" as const,
+          decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+            rows[0],
+        },
+      ],
+      assemble: (
+        results: readonly (Readonly<Record<string, unknown>> | undefined)[],
+      ) => results.at(-1),
+    } satisfies AtomicSqlProgram<
+      Readonly<Record<string, unknown>> | undefined,
+      Readonly<Record<string, unknown>> | undefined
+    >;
+    return executor.execute(program);
+  }
+  const atomicNodeBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const maxClaimInputCostPerEntry = Math.max(
+          0,
+          options.maxBindParameters -
+            ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
+            ATOMIC_NODE_INSERT_PARAM_COUNT,
+        );
+        const claimSupport = Object.freeze({
+          families: Object.freeze(["disjointness", "uniqueness"] as const),
+          maxInputCostPerEntry: maxClaimInputCostPerEntry,
+        } satisfies AtomicNodeClaimSupport);
+        const projectionSupport = Object.freeze({
+          families: operationStrategy.atomicNodeProjectionFamilies,
+        } satisfies AtomicNodeProjectionSupport);
+
+        function orderedAtomicNodeClaims<
+          TEntry extends AtomicNodePostimageEntry,
+        >(entries: readonly TEntry[]): readonly AtomicNodeClaimEntry<TEntry>[] {
+          return entries
+            .flatMap((entry, memberOrdinal) =>
+              (entry.claims ?? []).map((claim, claimOrdinal) => ({
+                memberOrdinal,
+                claimOrdinal,
+                entry,
+                claim,
+              })),
+            )
+            .toSorted((left, right) => {
+              return compareClaimTargets(
+                {
+                  relation: "uniques",
+                  graphId: left.entry.params.graphId,
+                  axis: left.claim.axis,
+                  constraintName: left.claim.constraintName,
+                  key: left.claim.key,
+                },
+                {
+                  relation: "uniques",
+                  graphId: right.entry.params.graphId,
+                  axis: right.claim.axis,
+                  constraintName: right.claim.constraintName,
+                  key: right.claim.key,
+                },
+              );
+            });
+        }
+
+        function atomicNodeClaimTargetKey(
+          entry: AtomicNodeClaimEntry<AtomicNodePostimageEntry>,
+        ): string {
+          return encodeTupleKey([
+            entry.claim.axis,
+            entry.claim.constraintName,
+            entry.claim.key,
+          ]);
+        }
+
+        function atomicNodeClaimOwnerKey(row: AtomicNodeClaimOwnerRow): string {
+          return encodeTupleKey([row.node_kind, row.constraint_name, row.key]);
+        }
+
+        type AtomicNodeProgramSlot =
+          | Readonly<{
+              kind: "claims";
+              entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[];
+              rows: readonly AtomicNodeClaimOwnerRow[];
+            }>
+          | Readonly<{ kind: "cleanup" }>
+          | AtomicNodeProjectionSlot
+          | Readonly<{ kind: "assertion" }>
+          | Readonly<{
+              kind: "counts";
+              chunk: readonly AtomicNodePostimageEntry[];
+              count: number;
+            }>
+          | Readonly<{
+              kind: "rows";
+              chunk: readonly AtomicNodePostimageEntry[];
+              rows: readonly NodeRow[];
+            }>;
+
+        function classifyAtomicNodeClaimResults(
+          claimEntries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+          results: readonly AtomicNodeProgramSlot[],
+        ): "stale" | "owned" | DisjointError | UniquenessError {
+          const ownerByTarget = new Map<string, ClaimOwner>();
+          let returnedClaims = 0;
+          for (const result of results) {
+            if (result.kind !== "claims") continue;
+            returnedClaims += result.rows.length;
+            for (const row of result.rows) {
+              ownerByTarget.set(atomicNodeClaimOwnerKey(row), {
+                concreteKind: row.concrete_kind,
+                nodeId: row.node_id,
+              });
+            }
+          }
+          if (returnedClaims === 0) return "stale";
+          if (returnedClaims !== claimEntries.length) {
+            throw new CompilerInvariantError(
+              "Atomic node claim program returned a partial claim result.",
+              { expected: claimEntries.length, actual: returnedClaims },
+            );
+          }
+
+          for (const item of claimEntries.toSorted(
+            (left, right) =>
+              left.memberOrdinal - right.memberOrdinal ||
+              left.claimOrdinal - right.claimOrdinal,
+          )) {
+            const claim = item.claim;
+            const owner = ownerByTarget.get(atomicNodeClaimTargetKey(item));
+            if (owner === undefined) {
+              throw new CompilerInvariantError(
+                "Atomic node claim program omitted a claim target.",
+                {
+                  memberOrdinal: item.memberOrdinal,
+                  claimOrdinal: item.claimOrdinal,
+                },
+              );
+            }
+            const proposedOwner = {
+              concreteKind: item.entry.params.kind,
+              nodeId: item.entry.params.id,
+            };
+            if (!isSameClaimOwner(owner, proposedOwner)) {
+              if (claim.verdict.kind === "disjointness") {
+                return new DisjointError({
+                  nodeId: item.entry.params.id,
+                  attemptedKind: item.entry.params.kind,
+                  conflictingKind: owner.concreteKind,
+                });
+              }
+              return new UniquenessError({
+                constraintName: claim.constraintName,
+                kind: owner.concreteKind,
+                existingId: owner.nodeId,
+                newId: item.entry.params.id,
+                fields: claim.verdict.fields,
+                axis: claim.axis,
+              });
+            }
+          }
+          return "owned";
+        }
+
+        function requireAtomicNodeClaimWrite(
+          claimEntries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
+          results: readonly AtomicNodeProgramSlot[],
+          insertedCount: number,
+        ): "stale" | "owned" {
+          const verdict = classifyAtomicNodeClaimResults(claimEntries, results);
+          if (verdict === "owned") return verdict;
+          if (insertedCount !== 0) {
+            throw new CompilerInvariantError(
+              verdict === "stale" ?
+                "A stale atomic node claim fence still inserted nodes."
+              : "A refused atomic node claim program still inserted nodes.",
+            );
+          }
+          if (
+            verdict instanceof UniquenessError ||
+            verdict instanceof DisjointError
+          ) {
+            throw verdict;
+          }
+          return verdict;
+        }
+
+        function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
+        ): Promise<number>;
+        function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput & Readonly<{ resultMode: "rows" }>,
+        ): Promise<readonly NodeRow[]>;
+        async function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput,
+        ): Promise<number | readonly NodeRow[]> {
+          if (input.entries.length === 0) {
+            return input.resultMode === "count" ? 0 : [];
+          }
+          assertMatchingNodeSchemaFences(
+            input.entries.map((entry) => entry.params),
+            input.schemaFence,
+          );
+
+          const timestamp = nowIso();
+          const chunks = chunkAtomicNodeEntriesByIdSource(
+            input.entries,
+            batchConfig.nodeSchemaFencedInsertBatchSize,
+          );
+          const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+          const atomicSchemaFenceLockClause = requireDefined(
+            schemaFenceLockClause,
+          );
+          const claimEntries = orderedAtomicNodeClaims(input.entries);
+          if (claimEntries.length > 0) {
+            if (
+              input.entries.some(
+                (entry) =>
+                  !supportsAtomicNodeClaims(claimSupport, entry.claims ?? []),
+              )
+            ) {
+              throw new CompilerInvariantError(
+                "Atomic node claim program exceeded its declared per-member budget.",
+                {
+                  claimSupport,
+                },
+              );
+            }
+            const claimChunkSize = Math.max(
+              1,
+              Math.floor(
+                (options.maxBindParameters - 2) /
+                  ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
+              ),
+            );
+            const nodeChunks = chunkAtomicNodeEntriesByClaimWork(
+              input.entries,
+              options.maxBindParameters,
+            );
+            function claimGateForChunk(chunk: readonly AtomicNodeBatchEntry[]) {
+              const members = new Set<AtomicNodePostimageEntry>(chunk);
+              const chunkClaims = claimEntries.filter((item) =>
+                members.has(item.entry),
+              );
+              return chunkClaims.length === 0 ?
+                  undefined
+                : operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
+                    chunkClaims,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  );
+            }
+            const claimChunks = chunkArray(claimEntries, claimChunkSize);
+            const claimSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = claimChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeClaimUpsertWithSchemaFence(
+                  chunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+                kind: "claims" as const,
+                entries: chunk,
+                rows: rows.map((row) => ({
+                  node_kind: String(row["node_kind"]),
+                  constraint_name: String(row["constraint_name"]),
+                  key: String(row["key"]),
+                  node_id: String(row["node_id"]),
+                  concrete_kind: String(row["concrete_kind"]),
+                })),
+              }),
+            }));
+            const cleanupSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = claimChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeClaimCleanupWithSchemaFence(
+                  chunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "cleanup" as const }),
+            }));
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+            );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.entries,
+                [],
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
+            // A per-chunk gate can refuse one member while a different chunk
+            // remains eligible. Assert every postimage inside the atomic
+            // transport so no successful sibling can commit before the Store
+            // diagnoses the refused claim from the rolled-back state.
+            const assertionSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = nodeChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                  chunk,
+                  [],
+                  timestamp,
+                  input.schemaFence,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "assertion" as const }),
+            }));
+
+            if (input.resultMode === "count") {
+              const nodeSlots: AtomicSqlProgram<
+                AtomicNodeProgramSlot,
+                unknown
+              >["slots"] = nodeChunks.map((chunk) => {
+                return {
+                  statement: execution.compile(
+                    operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                      chunk,
+                      timestamp,
+                      input.schemaFence,
+                      atomicSchemaFenceLockClause,
+                      "count",
+                      claimGateForChunk(chunk),
+                    ),
+                  ),
+                  cardinality: "many" as const,
+                  decode: (rows) => ({
+                    kind: "counts" as const,
+                    chunk,
+                    count: rows.length,
+                  }),
+                };
+              });
+              const program = {
+                slots: [
+                  ...claimSlots,
+                  ...nodeSlots,
+                  ...cleanupSlots,
+                  ...projectionSlots,
+                  ...projectionEvidenceSlots,
+                  ...assertionSlots,
+                ],
+                assemble(results: readonly AtomicNodeProgramSlot[]): number {
+                  const counts = results.flatMap((result) =>
+                    result.kind === "counts" ? [result.count] : [],
+                  );
+                  const insertedCount = counts.reduce(
+                    (total, count) => total + count,
+                    0,
+                  );
+                  const claimVerdict = requireAtomicNodeClaimWrite(
+                    claimEntries,
+                    results,
+                    insertedCount,
+                  );
+                  if (claimVerdict === "stale") return 0;
+                  assertCompleteAtomicChunks(counts, nodeChunks, "node");
+                  return input.entries.length;
+                },
+              } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
+              return runAtomicNodeSidecarProgram({
+                creates: input.entries,
+                updates: [],
+                operation: "insert",
+                hasProjections: projectionSlots.length > 0,
+                hasPostimageAssertion: assertionSlots.length > 0,
+                run: () =>
+                  withAtomicNodeBatchClassifications(
+                    () => atomicExecutor.execute(program),
+                    input.entries,
+                    operationStrategy,
+                  ),
+                postimageRefusal: () => 0,
+              });
+            }
+
+            const nodeSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = nodeChunks.map((chunk) => {
+              return {
+                statement: execution.compile(
+                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    "rows",
+                    claimGateForChunk(chunk),
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows) => ({
+                  kind: "rows" as const,
+                  chunk,
+                  rows: rows.map((row) => rowMappers.toNodeRow(row)),
+                }),
+              };
+            });
+            const program = {
+              slots: [
+                ...claimSlots,
+                ...nodeSlots,
+                ...cleanupSlots,
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+                ...assertionSlots,
+              ],
+              assemble(
+                results: readonly AtomicNodeProgramSlot[],
+              ): readonly NodeRow[] {
+                const rows = results.flatMap((result) =>
+                  result.kind === "rows" ? result.rows : [],
+                );
+                const claimVerdict = requireAtomicNodeClaimWrite(
+                  claimEntries,
+                  results,
+                  rows.length,
+                );
+                if (claimVerdict === "stale") return [];
+                if (rows.length !== input.entries.length) {
+                  throw new CompilerInvariantError(
+                    "Atomic node claim program returned a partial node result.",
+                    { expected: input.entries.length, actual: rows.length },
+                  );
+                }
+                return rows;
+              },
+            } satisfies AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              readonly NodeRow[]
+            >;
+            return runAtomicNodeSidecarProgram({
+              creates: input.entries,
+              updates: [],
+              operation: "insert",
+              hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: assertionSlots.length > 0,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.entries,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => [],
+            });
+          }
+
+          if (input.resultMode === "count") {
+            const nodeSlots = chunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                  chunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                  "count",
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+                kind: "counts" as const,
+                chunk,
+                count: rows.length,
+              }),
+            }));
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+            );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.entries,
+                [],
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
+            const assertionSlots =
+              projectionSlots.length === 0 ?
+                []
+              : chunks.map((chunk) => ({
+                  statement: execution.compile(
+                    operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                      chunk,
+                      [],
+                      timestamp,
+                      input.schemaFence,
+                    ),
+                  ),
+                  cardinality: "none" as const,
+                  decode: () => ({ kind: "assertion" as const }),
+                }));
+            const program = {
+              slots: [
+                ...nodeSlots,
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+                ...assertionSlots,
+              ],
+              assemble(results: readonly AtomicNodeProgramSlot[]): number {
+                const counts = results.flatMap((result) =>
+                  result.kind === "counts" ? [result.count] : [],
+                );
+                if (counts.every((count) => count === 0)) return 0;
+                assertCompleteAtomicChunks(counts, chunks, "node");
+                return input.entries.length;
+              },
+            } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
+            return runAtomicNodeSidecarProgram({
+              creates: input.entries,
+              updates: [],
+              operation: "insert",
+              hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: assertionSlots.length > 0,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.entries,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => 0,
+            });
+          }
+
+          const nodeSlots = chunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                chunk,
+                timestamp,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+                "rows",
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "rows" as const,
+              chunk,
+              rows: rows.map((row) => rowMappers.toNodeRow(row)),
+            }),
+          }));
+          const projectionSlots = compileAtomicNodeProjectionSlots(
+            operationStrategy,
+            execution,
+            input.entries,
+            [],
+            timestamp,
+            options.maxBindParameters,
+          );
+          const projectionEvidenceSlots =
+            await compileAtomicNodeProjectionEvidenceSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+              options.resolveAtomicNodeProjectionEvidence,
+            );
+          const assertionSlots =
+            projectionSlots.length === 0 ?
+              []
+            : chunks.map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                    chunk,
+                    [],
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+                cardinality: "none" as const,
+                decode: () => ({ kind: "assertion" as const }),
+              }));
+          const program = {
+            slots: [
+              ...nodeSlots,
+              ...projectionSlots,
+              ...projectionEvidenceSlots,
+              ...assertionSlots,
+            ],
+            assemble(
+              results: readonly AtomicNodeProgramSlot[],
+            ): readonly NodeRow[] {
+              const rowChunks = results.flatMap((result) =>
+                result.kind === "rows" ? [result.rows] : [],
+              );
+              if (rowChunks.every((rows) => rows.length === 0)) return [];
+              const rows = rowChunks.flat();
+              if (rows.length !== input.entries.length) {
+                throw new CompilerInvariantError(
+                  "Atomic node batch returned a partial row result.",
+                  { expected: input.entries.length, actual: rows.length },
+                );
+              }
+              const byIdentity = new Map<string, NodeRow>();
+              for (const row of rows) {
+                const key = encodeTupleKey([row.graph_id, row.kind, row.id]);
+                if (byIdentity.has(key)) {
+                  throw new CompilerInvariantError(
+                    "Atomic node batch returned a duplicate result row.",
+                    { graphId: row.graph_id, kind: row.kind, id: row.id },
+                  );
+                }
+                byIdentity.set(key, row);
+              }
+              return input.entries.map((entry) => {
+                const key = encodeTupleKey([
+                  entry.params.graphId,
+                  entry.params.kind,
+                  entry.params.id,
+                ]);
+                const row = byIdentity.get(key);
+                if (row === undefined) {
+                  throw new CompilerInvariantError(
+                    "Atomic node batch returned a row outside its input set.",
+                    {
+                      graphId: entry.params.graphId,
+                      kind: entry.params.kind,
+                      id: entry.params.id,
+                    },
+                  );
+                }
+                return row;
+              });
+            },
+          } satisfies AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            readonly NodeRow[]
+          >;
+          return runAtomicNodeSidecarProgram({
+            creates: input.entries,
+            updates: [],
+            operation: "insert",
+            hasProjections: projectionSlots.length > 0,
+            hasPostimageAssertion: assertionSlots.length > 0,
+            run: () =>
+              withAtomicNodeBatchClassifications(
+                () => atomicExecutor.execute(program),
+                input.entries,
+                operationStrategy,
+              ),
+            postimageRefusal: () => [],
+          });
+        }
+
+        function acceptsAtomicNodeReplacementEntries(
+          entries: readonly AtomicNodeReplacementEntry[],
+        ): boolean {
+          return (
+            chunkAtomicNodeReplacementEntriesByClaimWork(
+              entries,
+              options.maxBindParameters,
+            ).length <= ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS
+          );
+        }
+
+        async function executeAtomicNodeReplacementBatch(
+          input: Parameters<AtomicNodeReplacementBatchExecutor>[0],
+        ): Promise<readonly NodeRow[]> {
+          if (input.entries.length === 0) return [];
+          assertMatchingNodeSchemaFences(
+            input.entries.map((entry) => entry.params),
+            input.schemaFence,
+          );
+          const firstEntry = requireDefined(input.entries[0]);
+          const identities = new Set<string>();
+          for (const entry of input.entries) {
+            if (
+              entry.params.graphId !== firstEntry.params.graphId ||
+              entry.params.kind !== firstEntry.params.kind
+            ) {
+              throw new CompilerInvariantError(
+                "An atomic node replacement requires one graph and node kind.",
+                {
+                  expectedGraphId: firstEntry.params.graphId,
+                  expectedKind: firstEntry.params.kind,
+                  actualGraphId: entry.params.graphId,
+                  actualKind: entry.params.kind,
+                },
+              );
+            }
+            const identity = encodeTupleKey([
+              entry.params.graphId,
+              entry.params.kind,
+              entry.params.id,
+            ]);
+            if (identities.has(identity)) {
+              throw new CompilerInvariantError(
+                "An atomic node replacement requires distinct identities.",
+              );
+            }
+            identities.add(identity);
+            if (!supportsAtomicNodeClaims(claimSupport, entry.claims ?? [])) {
+              throw new CompilerInvariantError(
+                "Atomic node replacement exceeded its declared per-member claim budget.",
+                { claimSupport },
+              );
+            }
+          }
+
+          const timestamp = nowIso();
+          const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+          const atomicSchemaFenceLockClause = requireDefined(
+            schemaFenceLockClause,
+          );
+          const claimEntries = orderedAtomicNodeClaims(input.entries);
+          const nodeChunks = chunkAtomicNodeReplacementEntriesByClaimWork(
+            input.entries,
+            options.maxBindParameters,
+          );
+          if (!acceptsAtomicNodeReplacementEntries(input.entries)) {
+            throw new CompilerInvariantError(
+              "Atomic node replacement exceeded its declared submission statement budget.",
+              {
+                actual: nodeChunks.length,
+                maximum: ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS,
+              },
+            );
+          }
+
+          const claimChunkSize = Math.max(
+            1,
+            Math.floor(
+              (options.maxBindParameters - 2) /
+                ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
+            ),
+          );
+          const claimChunks = chunkArray(claimEntries, claimChunkSize);
+          const claimSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = claimChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeClaimUpsertWithSchemaFence(
+                chunk,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "claims" as const,
+              entries: chunk,
+              rows: rows.map((row) => ({
+                node_kind: String(row["node_kind"]),
+                constraint_name: String(row["constraint_name"]),
+                key: String(row["key"]),
+                node_id: String(row["node_id"]),
+                concrete_kind: String(row["concrete_kind"]),
+              })),
+            }),
+          }));
+          const releaseChunkSize = Math.max(1, options.maxBindParameters - 5);
+          const releaseSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] =
+            input.releaseClaims ?
+              chunkArray(input.entries, releaseChunkSize).map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+                    {
+                      graphId: requireDefined(chunk[0]).params.graphId,
+                      kind: requireDefined(chunk[0]).params.kind,
+                      ids: chunk.map((entry) => entry.params.id),
+                      timestamp,
+                    },
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "none" as const,
+                decode: () => ({ kind: "cleanup" as const }),
+              }))
+            : [];
+          function claimGateForChunk(
+            chunk: readonly AtomicNodeReplacementEntry[],
+          ): SQL | undefined {
+            const members = new Set<AtomicNodePostimageEntry>(chunk);
+            const chunkClaims = claimEntries.filter((item) =>
+              members.has(item.entry),
+            );
+            return chunkClaims.length === 0 ?
+                undefined
+              : operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
+                  chunkClaims,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                );
+          }
+          const nodeSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = nodeChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeReplacementBatchWithSchemaFence(
+                chunk,
+                timestamp,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+                claimGateForChunk(chunk),
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "rows" as const,
+              chunk,
+              rows: rows.map((row) => rowMappers.toNodeRow(row)),
+            }),
+          }));
+          const projectionSlots = compileAtomicNodeProjectionSlots(
+            operationStrategy,
+            execution,
+            input.entries,
+            [],
+            timestamp,
+            options.maxBindParameters,
+          );
+          const projectionEvidenceSlots =
+            await compileAtomicNodeProjectionEvidenceSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+              options.resolveAtomicNodeProjectionEvidence,
+            );
+          const assertionSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = nodeChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                chunk,
+                [],
+                timestamp,
+                input.schemaFence,
+              ),
+            ),
+            cardinality: "none" as const,
+            decode: () => ({ kind: "assertion" as const }),
+          }));
+          const program = {
+            slots: [
+              ...releaseSlots,
+              ...claimSlots,
+              ...nodeSlots,
+              ...projectionSlots,
+              ...projectionEvidenceSlots,
+              ...assertionSlots,
+            ],
+            assemble(
+              results: readonly AtomicNodeProgramSlot[],
+            ): readonly NodeRow[] {
+              const rows = results.flatMap((result) =>
+                result.kind === "rows" ? result.rows : [],
+              );
+              if (claimEntries.length > 0) {
+                const claimVerdict = requireAtomicNodeClaimWrite(
+                  claimEntries,
+                  results,
+                  rows.length,
+                );
+                if (claimVerdict === "stale") return [];
+              }
+              if (rows.length !== input.entries.length) {
+                throw new CompilerInvariantError(
+                  "Atomic node replacement returned a partial result.",
+                  { expected: input.entries.length, actual: rows.length },
+                );
+              }
+              const byIdentity = new Map(
+                rows.map((row) => [
+                  encodeTupleKey([row.graph_id, row.kind, row.id]),
+                  row,
+                ]),
+              );
+              if (byIdentity.size !== rows.length) {
+                throw new CompilerInvariantError(
+                  "Atomic node replacement returned duplicate result rows.",
+                );
+              }
+              return input.entries.map((entry) =>
+                requireDefined(
+                  byIdentity.get(
+                    encodeTupleKey([
+                      entry.params.graphId,
+                      entry.params.kind,
+                      entry.params.id,
+                    ]),
+                  ),
+                  "Atomic node replacement omitted an input row.",
+                ),
+              );
+            },
+          } satisfies AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            readonly NodeRow[]
+          >;
+          return runAtomicNodeSidecarProgram({
+            creates: input.entries,
+            updates: [],
+            operation: "upsert",
+            hasProjections: projectionSlots.length > 0,
+            hasPostimageAssertion: true,
+            run: () => atomicExecutor.execute(program),
+            postimageRefusal: () => [],
+          });
+        }
+
+        const boundedExecuteAtomicNodeBatch = Object.assign(
+          executeAtomicNodeBatch,
+          { claimSupport, projectionSupport },
+        );
+        const executeAtomicNodeReplacement = Object.assign(
+          executeAtomicNodeReplacementBatch,
+          {
+            accepts: acceptsAtomicNodeReplacementEntries,
+            claimSupport,
+            maxEntries: Object.freeze({
+              plain: atomicNodeReplacementSubmissionMaxEntries(
+                options.maxBindParameters,
+              ),
+              claimed: ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+            }),
+            projectionSupport,
+            releasedClaimFamilies: claimSupport.families,
+          },
+        );
+        return {
+          executeAtomicNodeBatch: boundedExecuteAtomicNodeBatch,
+          executeAtomicNodeReplacementBatch: executeAtomicNodeReplacement,
+        } satisfies Readonly<{
+          executeAtomicNodeBatch: AtomicNodeBatchExecutor;
+          executeAtomicNodeReplacementBatch: AtomicNodeReplacementBatchExecutor;
+        }>;
+      })();
+
+  const atomicEdgeBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchCountInput,
+        ): Promise<number>;
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchRowsInput,
+        ): Promise<readonly EdgeRow[]>;
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchCountInput | AtomicEdgeBatchRowsInput,
+        ): Promise<number | readonly EdgeRow[]> {
+          if (input.params.length === 0) {
+            return input.resultMode === "count" ? 0 : [];
+          }
+          assertMatchingEdgeSchemaFences(input.params, input.schemaFence);
+          const paramsByGraphAndId = new Map(
+            input.params.map((params) => [
+              encodeTupleKey([params.graphId, params.id]),
+              params,
+            ]),
+          );
+          for (const claim of input.claims) {
+            const params = paramsByGraphAndId.get(
+              encodeTupleKey([claim.graphId, claim.edgeId]),
+            );
+            if (params === undefined) {
+              throw new CompilerInvariantError(
+                "An atomic edge batch claim has no matching input row.",
+                { graphId: claim.graphId, edgeId: claim.edgeId },
+              );
+            }
+            assertMatchingFusedEdgeClaim(params, claim);
+          }
+
+          const timestamp = nowIso();
+          const chunks = chunkArray(
+            input.params,
+            batchConfig.edgeSchemaFencedInsertBatchSize,
+          );
+          const atomicEdgeClaimBatchSize = Math.max(
+            1,
+            Math.floor(
+              (maxBindParameters - ATOMIC_EDGE_CLAIM_FIXED_PARAM_COUNT) /
+                ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
+            ),
+          );
+          function appendClaimSlots<TResult>(
+            slots: AtomicSqlProgram<TResult, unknown>["slots"][number][],
+            claims: readonly ClaimEdgeCardinalityParams[],
+            decode: AtomicSqlProgram<
+              TResult,
+              unknown
+            >["slots"][number]["decode"],
+          ): void {
+            for (const claimChunk of chunkArray(
+              claims,
+              atomicEdgeClaimBatchSize,
+            )) {
+              // Each builder renders one statement per cardinality group in
+              // the chunk. The three phases stay globally ordered — every
+              // stale release, then every acquisition, then every ownership
+              // assertion — because a chunk's groups are disjoint by axis and
+              // phase order is what the claim contract is stated in.
+              const phases = [
+                operationStrategy.buildDeleteStaleAtomicEdgeClaims(
+                  claimChunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+                operationStrategy.buildAcquireAtomicEdgeClaims(
+                  claimChunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+                operationStrategy.buildAssertAtomicEdgeClaimsOwned(
+                  claimChunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ];
+              for (const phase of phases) {
+                for (const statement of phase) {
+                  slots.push({
+                    statement: execution.compile(statement),
+                    cardinality: "none",
+                    decode,
+                  });
+                }
+              }
+            }
+          }
+          const endpointFences = edgeEndpointFences(
+            input.schemaFence.graphId,
+            input.params,
+          );
+          if (input.resultMode === "count") {
+            const edgeSlotIndexes: number[] = [];
+            const slots: AtomicSqlProgram<number, number>["slots"][number][] = [
+              ...fenceSlots(endpointFences, 0),
+            ];
+            appendClaimSlots(slots, input.claims, (rows) => rows.length);
+            for (const chunk of chunks) {
+              edgeSlotIndexes.push(slots.length);
+              slots.push({
+                statement: execution.compile(
+                  operationStrategy.buildInsertEdgesBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    endpointLock,
+                  ),
+                ),
+                cardinality: "many",
+                decode: (rows) => rows.length,
+              });
+            }
+            const program = {
+              slots,
+              assemble(slotCounts: readonly number[]): number {
+                const counts = edgeSlotIndexes.map((index) =>
+                  requireDefined(slotCounts[index]),
+                );
+                if (counts.every((count) => count === 0)) return 0;
+                assertCompleteAtomicChunks(counts, chunks, "edge");
+                return counts.reduce((total, count) => total + count, 0);
+              },
+            } satisfies AtomicSqlProgram<number, number>;
+            return executeClassifiedAtomicEdgeBatch(
+              atomicExecutor,
+              program,
+              operationStrategy.primaryKeyConstraints.edges,
+              operationStrategy.atomicEdgeRefusalConstraints,
+              input.params,
+              input.claims,
+            );
+          }
+
+          const edgeSlotIndexes: number[] = [];
+          const slots: AtomicSqlProgram<
+            readonly EdgeRow[],
+            readonly EdgeRow[]
+          >["slots"][number][] = [
+            ...fenceSlots<readonly EdgeRow[]>(endpointFences, []),
+          ];
+          appendClaimSlots(slots, input.claims, decodeNoEdgeRows);
+          for (const chunk of chunks) {
+            edgeSlotIndexes.push(slots.length);
+            slots.push({
+              statement: execution.compile(
+                operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
+                  chunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                  endpointLock,
+                ),
+              ),
+              cardinality: "many",
+              decode: (rows) => rows.map((row) => rowMappers.toEdgeRow(row)),
+            });
+          }
+          const program = {
+            slots,
+            assemble(
+              slotRows: readonly (readonly EdgeRow[])[],
+            ): readonly EdgeRow[] {
+              const rowChunks = edgeSlotIndexes.map((index) =>
+                requireDefined(slotRows[index]),
+              );
+              if (rowChunks.every((rows) => rows.length === 0)) return [];
+              assertCompleteAtomicChunks(
+                rowChunks.map((rows) => rows.length),
+                chunks,
+                "edge",
+              );
+              const inputOrder = new Map(
+                input.params.map((params, index) => [params.id, index]),
+              );
+              const rows = rowChunks.flat();
+              const seenIds = new Set<string>();
+              for (const row of rows) {
+                if (!inputOrder.has(row.id)) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge batch returned a row outside its input set.",
+                    { id: row.id },
+                  );
+                }
+                if (seenIds.has(row.id)) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge batch returned a duplicate result row.",
+                    { id: row.id },
+                  );
+                }
+                seenIds.add(row.id);
+              }
+              return rows.toSorted(
+                (left, right) =>
+                  (inputOrder.get(left.id) ?? 0) -
+                  (inputOrder.get(right.id) ?? 0),
+              );
+            },
+          } satisfies AtomicSqlProgram<readonly EdgeRow[], readonly EdgeRow[]>;
+          return executeClassifiedAtomicEdgeBatch(
+            atomicExecutor,
+            program,
+            operationStrategy.primaryKeyConstraints.edges,
+            operationStrategy.atomicEdgeRefusalConstraints,
+            input.params,
+            input.claims,
+          );
+        }
+
+        return { executeAtomicEdgeBatch } satisfies Readonly<{
+          executeAtomicEdgeBatch: AtomicEdgeBatchExecutor;
+        }>;
+      })();
+
+  const atomicEdgeConvergenceMembers: Readonly<{
+    executeAtomicEdgeConvergence?: AtomicEdgeConvergenceLowerer;
+  }> =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined ||
+      operationStrategy.buildAtomicConvergeEdges === undefined ||
+      operationStrategy.buildAtomicConvergeEdgesTombstoneRefusal === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        const buildCreate = requireDefined(
+          operationStrategy.buildAtomicConvergeEdges,
+        );
+        const buildTombstoneRefusal = requireDefined(
+          operationStrategy.buildAtomicConvergeEdgesTombstoneRefusal,
+        );
+        // The INSERT is the widest constant-size slot. Derive the public
+        // ceiling from that exact row shape so eligibility cannot outrun the
+        // transport's bind budget.
+        const maxEntries = Math.max(
+          0,
+          Math.floor(
+            (maxBindParameters - ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT) /
+              ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT,
+          ),
+        );
+
+        const executeAtomicEdgeConvergence = Object.assign(
+          async (
+            input: Omit<AtomicEdgeConvergenceInput, "kind">,
+          ): Promise<readonly AtomicEdgeConvergenceResult[]> => {
+            if (input.entries.length === 0) return [];
+            if (input.entries.length > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic edge convergence exceeded its declared program budget.",
+                { entries: input.entries.length, maxEntries },
+              );
+            }
+            const inputIdentityKeys = new Set<string>();
+            for (const entry of input.entries) {
+              if (
+                entry.params.graphId !== input.schemaFence.graphId ||
+                entry.match.kind !== "durable" ||
+                entry.params.matchIdentity?.name !==
+                  entry.match.identity.name ||
+                entry.params.matchIdentity.key !== entry.match.identity.key
+              ) {
+                throw new CompilerInvariantError(
+                  "Atomic edge convergence input crossed its durable identity or schema fence.",
+                  { graphId: entry.params.graphId, id: entry.params.id },
+                );
+              }
+              const identityKey = encodeTupleKey([
+                entry.params.graphId,
+                entry.params.kind,
+                entry.match.identity.name,
+                entry.match.identity.key,
+              ]);
+              if (inputIdentityKeys.has(identityKey)) {
+                throw new CompilerInvariantError(
+                  "Atomic edge convergence received a duplicate durable identity.",
+                  { graphId: entry.params.graphId, id: entry.params.id },
+                );
+              }
+              inputIdentityKeys.add(identityKey);
+            }
+
+            const timestamp = nowIso();
+            const builderInput = {
+              entries: input.entries,
+              timestamp,
+              schemaFence: input.schemaFence,
+              schemaLockClause: atomicSchemaFenceLockClause,
+            };
+            const endpointFenceSlots = fenceSlots<readonly EdgeRow[]>(
+              edgeEndpointFences(
+                input.schemaFence.graphId,
+                input.entries.map((entry) => entry.params),
+              ),
+              [],
+            );
+            const program = {
+              slots: [
+                ...endpointFenceSlots,
+                {
+                  statement: execution.compile(
+                    buildCreate(builderInput, endpointLock),
+                  ),
+                  cardinality: "many" as const,
+                  decode: (
+                    rows: readonly Readonly<Record<string, unknown>>[],
+                  ) => rows.map((row) => rowMappers.toEdgeRow(row)),
+                },
+                {
+                  statement: execution.compile(
+                    buildTombstoneRefusal({
+                      entries: builderInput.entries,
+                      schemaFence: builderInput.schemaFence,
+                      schemaLockClause: builderInput.schemaLockClause,
+                    }),
+                  ),
+                  cardinality: "none" as const,
+                  decode: decodeNoEdgeRows,
+                },
+              ],
+              assemble(
+                results: readonly (readonly EdgeRow[])[],
+              ): readonly AtomicEdgeConvergenceResult[] {
+                const rows = requireDefined(results[endpointFenceSlots.length]);
+                if (rows.length === 0) return [];
+                if (rows.length !== input.entries.length) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge convergence returned a partial result set.",
+                    { expected: input.entries.length, actual: rows.length },
+                  );
+                }
+                const rowsByIdentity = new Map<string, EdgeRow>();
+                for (const row of rows) {
+                  if (
+                    row.match_identity_name === undefined ||
+                    row.match_identity_key === undefined ||
+                    row.deleted_at !== undefined
+                  ) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence returned an invalid live identity.",
+                      { id: row.id, kind: row.kind },
+                    );
+                  }
+                  const key = encodeTupleKey([
+                    row.graph_id,
+                    row.kind,
+                    row.match_identity_name,
+                    row.match_identity_key,
+                  ]);
+                  if (rowsByIdentity.has(key)) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence returned a duplicate identity.",
+                      { id: row.id, kind: row.kind },
+                    );
+                  }
+                  rowsByIdentity.set(key, row);
+                }
+                return input.entries.map((entry) => {
+                  if (entry.match.kind !== "durable") {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence result mapping received a dynamic identity.",
+                    );
+                  }
+                  const key = encodeTupleKey([
+                    entry.params.graphId,
+                    entry.params.kind,
+                    entry.match.identity.name,
+                    entry.match.identity.key,
+                  ]);
+                  const row = rowsByIdentity.get(key);
+                  if (row === undefined) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence omitted a durable identity.",
+                      { id: entry.params.id, kind: entry.params.kind },
+                    );
+                  }
+                  return {
+                    row,
+                    outcome: row.id === entry.params.id ? "created" : "found",
+                  };
+                });
+              },
+            } satisfies AtomicSqlProgram<
+              readonly EdgeRow[],
+              readonly AtomicEdgeConvergenceResult[]
+            >;
+
+            try {
+              return await executeClassifiedAtomicEdgeBatch(
+                atomicExecutor,
+                program,
+                operationStrategy.primaryKeyConstraints.edges,
+                operationStrategy.atomicEdgeRefusalConstraints,
+                input.entries.map((entry) => entry.params),
+                [],
+              );
+            } catch (error) {
+              if (
+                isNotNullColumnViolation(
+                  error,
+                  operationStrategy.atomicEdgeRefusalConstraints
+                    .tombstoneConvergence,
+                )
+              ) {
+                throw new AtomicEdgeConvergenceTombstoneRefusalError(error);
+              }
+              throw error;
+            }
+          },
+          { maxEntries },
+        );
+
+        return { executeAtomicEdgeConvergence } satisfies Readonly<{
+          executeAtomicEdgeConvergence: AtomicEdgeConvergenceLowerer;
+        }>;
+      })();
+
+  const atomicNodeDeleteBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Claim release is widest: fence graph/version, graph, kind, and the
+        // timestamp in both SET and owner-postimage predicates beside each id.
+        const chunkSize = Math.max(1, maxBindParameters - 6);
+
+        async function executeAtomicNodeDeleteBatch(
+          input: AtomicNodeDeleteBatchInput,
+        ): Promise<AtomicDeleteBatchResult> {
+          if (input.ids.length === 0) {
+            return { affectedCount: 0, schemaFenceMatched: true };
+          }
+          if (input.graphId !== input.schemaFence.graphId) {
+            throw new CompilerInvariantError(
+              "Atomic node delete batch crossed its schema fence graph.",
+              {
+                graphId: input.graphId,
+                fenceGraphId: input.schemaFence.graphId,
+              },
+            );
+          }
+          const timestamp = nowIso();
+          // The delete lock leads the program: each delete slot's
+          // connected-edge check is a later statement, so its snapshot sees
+          // every edge an endpoint-locked writer committed while this waited.
+          const orderedIds = [...new Set(input.ids)].toSorted((left, right) =>
+            compareCodePoints(left, right),
+          );
+          const lockResult = { kind: "lock" } as const;
+          const lockSlots =
+            nodeRowLocks.kind === "row-lock" ?
+              chunkArray(orderedIds, chunkSize).map((ids) => ({
+                statement: execution.compile(
+                  operationStrategy.buildLockNodesForAtomicDeleteWithSchemaFence(
+                    { ...input, ids },
+                    atomicSchemaFenceLockClause,
+                    nodeRowLockClauses.delete,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: () => lockResult,
+              }))
+            : fenceSlots(
+                nodeRowFences(
+                  input.graphId,
+                  orderedIds.map((id) => ({ kind: input.kind, id })),
+                ),
+                lockResult,
+              );
+          const deleteSlots = chunkArray(input.ids, chunkSize).map((ids) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeDeleteBatchWithSchemaFence(
+                { ...input, ids },
+                timestamp,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              ({ kind: "affected", count: rows.length }) as const,
+          }));
+          const claimReleaseSlots = chunkArray(input.ids, chunkSize).map(
+            (ids) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+                  {
+                    graphId: input.graphId,
+                    kind: input.kind,
+                    ids,
+                    timestamp,
+                  },
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "claim-release" as const }),
+            }),
+          );
+          const program = {
+            slots: [
+              ...lockSlots,
+              ...deleteSlots,
+              ...claimReleaseSlots,
+              {
+                statement: execution.compile(
+                  operationStrategy.buildSchemaFenceProbe(
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                  ({ kind: "fence", matched: rows.length === 1 }) as const,
+              },
+            ],
+            assemble: (results: readonly AtomicDeleteSlotResult[]) =>
+              assembleAtomicDeleteBatchResult(results),
+          } satisfies AtomicSqlProgram<
+            AtomicDeleteSlotResult,
+            AtomicDeleteBatchResult
+          >;
+
+          return withAtomicNodeDeleteRestrictionClassification(
+            () => atomicExecutor.execute(program),
+            operationStrategy.atomicNodeRefusalConstraints.deleteRestricted,
+          );
+        }
+
+        const executeAtomicNodeDeleteBatchWithClaimCleanup = Object.assign(
+          executeAtomicNodeDeleteBatch,
+          {
+            releasedClaimFamilies: ["disjointness", "uniqueness"] as const,
+          },
+        );
+        return {
+          executeAtomicNodeDeleteBatch:
+            executeAtomicNodeDeleteBatchWithClaimCleanup,
+        } satisfies Readonly<{
+          executeAtomicNodeDeleteBatch: AtomicNodeDeleteBatchExecutor;
+        }>;
+      })();
+
+  const atomicNodeResolvedUpdateBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Each member binds its id in CASE, membership and preimage predicates,
+        // plus props and version. Leave a conservative fixed allowance for the
+        // graph/kind/fence/timestamp/count binds.
+        const statementChunkSize = atomicResolvedMutationStatementChunkSize(
+          maxBindParameters,
+          ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
+
+        const executeAtomicNodeResolvedUpdateBatch = Object.assign(
+          async (
+            input: Parameters<AtomicNodeResolvedUpdateBatchExecutor>[0],
+          ) => {
+            if (input.entries.length === 0) return [];
+            assertResolvedNodeUpdateBatchInput(
+              input.entries,
+              input.schemaFence,
+            );
+            const timestamp = nowIso();
+            const updateChunks = chunkArray(input.entries, statementChunkSize);
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              [],
+              input.entries,
+              timestamp,
+              options.maxBindParameters,
+            );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                [],
+                input.entries,
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
+            const first = requireDefined(input.entries[0]);
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "node",
+              createChunks: [],
+              updateChunks,
+              createIds: [],
+              updateIds: input.entries.map((entry) => entry.id),
+              compileCreate: () => {
+                throw new CompilerInvariantError(
+                  "An update-only node program compiled a create chunk.",
+                );
+              },
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicNodeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compiledSidecars: [
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+              ].map((slot) => slot.statement),
+              compileAssertion: (_creates, updates) =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                    [],
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: (ids) =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicNodeMutationPostimages(
+                    input.schemaFence.graphId,
+                    first.kind,
+                    ids,
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toNodeRow(row),
+              rowId: (row) => row.id,
+            });
+            return runAtomicNodeSidecarProgram({
+              creates: [],
+              updates: input.entries,
+              operation: "update",
+              hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: true,
+              run: async () => {
+                const result = await atomicExecutor.execute(program);
+                return result.updated;
+              },
+              postimageRefusal: () => [],
+            });
+          },
+          {
+            maxEntries,
+            projectionSupport: Object.freeze({
+              families: operationStrategy.atomicNodeProjectionFamilies,
+            } satisfies AtomicNodeProjectionSupport),
+          },
+        ) satisfies AtomicNodeResolvedUpdateBatchExecutor;
+
+        return { executeAtomicNodeResolvedUpdateBatch };
+      })();
+
+  const atomicNodeResolvedMutationSetMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // The guarded update is the widest per-member statement. Assertions,
+        // postimage reads, creates, and projection sidecars are independently
+        // chunked and compile-count ratchets keep every slot within this budget.
+        const statementChunkSize = atomicResolvedMutationStatementChunkSize(
+          maxBindParameters,
+          ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
+
+        const executeAtomicNodeResolvedMutationSet = Object.assign(
+          async (
+            input: Parameters<AtomicNodeResolvedMutationSetExecutor>[0],
+          ) => {
+            const entryCount = input.creates.length + input.updates.length;
+            if (entryCount === 0) return { created: [], updated: [] };
+            assertResolvedNodeMutationSetInput(
+              input.creates,
+              input.updates,
+              input.schemaFence,
+            );
+            const timestamp = nowIso();
+            const firstIdentity = input.creates[0]?.params ?? input.updates[0];
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.creates,
+              input.updates,
+              timestamp,
+              options.maxBindParameters,
+            );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.creates,
+                input.updates,
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "node",
+              createChunks: chunkArray(
+                input.creates,
+                Math.min(
+                  batchConfig.nodeSchemaFencedInsertBatchSize,
+                  statementChunkSize,
+                ),
+              ),
+              updateChunks: chunkArray(input.updates, statementChunkSize),
+              createIds: input.creates.map((entry) => entry.params.id),
+              updateIds: input.updates.map((entry) => entry.id),
+              compileCreate: (chunk) =>
+                execution.compile(
+                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    "rows",
+                  ),
+                ),
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicNodeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compiledSidecars: [
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+              ].map((slot) => slot.statement),
+              compileAssertion: (creates, updates) =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                    creates,
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: (ids) =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicNodeMutationPostimages(
+                    input.schemaFence.graphId,
+                    requireDefined(firstIdentity).kind,
+                    ids,
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toNodeRow(row),
+              rowId: (row) => row.id,
+            });
+
+            return runAtomicNodeSidecarProgram({
+              creates: input.creates,
+              updates: input.updates,
+              operation: "upsert",
+              hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: true,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.creates,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => ({ created: [], updated: [] }),
+            });
+          },
+          {
+            maxEntries,
+            projectionSupport: Object.freeze({
+              families: operationStrategy.atomicNodeProjectionFamilies,
+            } satisfies AtomicNodeProjectionSupport),
+          },
+        ) satisfies AtomicNodeResolvedMutationSetExecutor;
+
+        return { executeAtomicNodeResolvedMutationSet };
+      })();
+
+  const atomicEdgeDeleteBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Per chunk: fence graph/version (2), timestamp (1), expected kind
+        // in both SET arms and the live-row predicate (3), graph id (1), ids.
+        const chunkSize = Math.max(1, maxBindParameters - 7);
+
+        async function executeAtomicEdgeDeleteBatch(
+          input: AtomicEdgeDeleteBatchInput,
+        ): Promise<AtomicDeleteBatchResult> {
+          if (input.ids.length === 0) {
+            return { affectedCount: 0, schemaFenceMatched: true };
+          }
+          if (input.graphId !== input.schemaFence.graphId) {
+            throw new CompilerInvariantError(
+              "Atomic edge delete batch crossed its schema fence graph.",
+              {
+                graphId: input.graphId,
+                fenceGraphId: input.schemaFence.graphId,
+              },
+            );
+          }
+          const timestamp = nowIso();
+          const chunks = chunkArray(input.ids, chunkSize);
+          const deleteSlots = chunks.map((ids) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicEdgeDeleteBatchWithSchemaFence(
+                { ...input, ids },
+                timestamp,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              ({ kind: "affected", count: rows.length }) as const,
+          }));
+          const program = {
+            slots: [
+              ...deleteSlots,
+              {
+                statement: execution.compile(
+                  operationStrategy.buildSchemaFenceProbe(
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                  ({ kind: "fence", matched: rows.length === 1 }) as const,
+              },
+            ],
+            assemble: (results: readonly AtomicDeleteSlotResult[]) =>
+              assembleAtomicDeleteBatchResult(results),
+          } satisfies AtomicSqlProgram<
+            AtomicDeleteSlotResult,
+            AtomicDeleteBatchResult
+          >;
+
+          return withAtomicEdgeDeleteIdentityRefusalClassification(
+            () => atomicExecutor.execute(program),
+            operationStrategy.atomicEdgeRefusalConstraints.deleteIdentity,
+          );
+        }
+
+        return { executeAtomicEdgeDeleteBatch } satisfies Readonly<{
+          executeAtomicEdgeDeleteBatch: AtomicEdgeDeleteBatchExecutor;
+        }>;
+      })();
+
+  const atomicEdgeResolvedUpdateBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+
+        const statementChunkSize = atomicResolvedMutationStatementChunkSize(
+          maxBindParameters,
+          ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
+        const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
+          async (
+            input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
+          ) => {
+            if (input.entries.length === 0) return [];
+            assertResolvedEdgeUpdateBatchInput(
+              input.entries,
+              input.schemaFence,
+            );
+            let timestamp = nowIso();
+            while (
+              input.entries.some(
+                (entry) => entry.existing.updated_at === timestamp,
+              )
+            ) {
+              timestamp = new Date(Date.parse(timestamp) + 1).toISOString();
+            }
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "edge",
+              createChunks: [],
+              updateChunks: chunkArray(input.entries, statementChunkSize),
+              createIds: [],
+              updateIds: input.entries.map((entry) => entry.existing.id),
+              compileCreate: () => {
+                throw new CompilerInvariantError(
+                  "An update-only edge program compiled a create chunk.",
+                );
+              },
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicEdgeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compileAssertion: (_creates, updates) =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicEdgeMutationPostimages(
+                    [],
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: (ids) =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicEdgeMutationPostimages(
+                    input.schemaFence.graphId,
+                    ids,
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toEdgeRow(row),
+              rowId: (row) => row.id,
+            });
+            try {
+              const result = await atomicExecutor.execute(program);
+              return result.updated;
+            } catch (error) {
+              if (
+                isAtomicMutationPostimageRefusal(
+                  error,
+                  operationStrategy,
+                  "edge",
+                  true,
+                )
+              ) {
+                return [];
+              }
+              throw error;
+            }
+          },
+          { maxEntries },
+        ) satisfies AtomicEdgeResolvedUpdateBatchExecutor;
+
+        return { executeAtomicEdgeResolvedUpdateBatch };
+      })();
+
+  const atomicEdgeResolvedMutationSetMembers: Readonly<{
+    executeAtomicEdgeResolvedMutationSet?: AtomicEdgeResolvedMutationSetLowerer;
+  }> =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // As for nodes, the guarded update is the widest per-member statement;
+        // every other slot is independently chunked under the same budget.
+        const statementChunkSize = atomicResolvedMutationStatementChunkSize(
+          maxBindParameters,
+          ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
+
+        const executeAtomicEdgeResolvedMutationSet = Object.assign(
+          async (
+            input: Omit<AtomicEdgeResolvedMutationSetInput, "kind">,
+          ): Promise<AtomicEdgeResolvedMutationSetResult> => {
+            const entryCount = input.creates.length + input.updates.length;
+            if (entryCount === 0) return { created: [], updated: [] };
+            assertResolvedEdgeMutationSetInput(
+              input.creates,
+              input.updates,
+              input.schemaFence,
+            );
+            let timestamp = nowIso();
+            while (
+              input.updates.some(
+                (entry) => entry.existing.updated_at === timestamp,
+              )
+            ) {
+              timestamp = new Date(Date.parse(timestamp) + 1).toISOString();
+            }
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "edge",
+              createChunks: chunkArray(
+                input.creates,
+                Math.min(
+                  batchConfig.edgeSchemaFencedInsertBatchSize,
+                  statementChunkSize,
+                ),
+              ),
+              updateChunks: chunkArray(input.updates, statementChunkSize),
+              createIds: input.creates.map((entry) => entry.id),
+              updateIds: input.updates.map((entry) => entry.existing.id),
+              compiledLocks: edgeEndpointFences(
+                input.schemaFence.graphId,
+                input.creates,
+              ).map((fence) => execution.compile(fence)),
+              compileCreate: (chunk) =>
+                execution.compile(
+                  operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    endpointLock,
+                  ),
+                ),
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicEdgeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compileAssertion: (creates, updates) =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicEdgeMutationPostimages(
+                    creates,
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: (ids) =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicEdgeMutationPostimages(
+                    input.schemaFence.graphId,
+                    ids,
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toEdgeRow(row),
+              rowId: (row) => row.id,
+            });
+
+            try {
+              return await executeClassifiedAtomicEdgeBatch(
+                atomicExecutor,
+                program,
+                operationStrategy.primaryKeyConstraints.edges,
+                operationStrategy.atomicEdgeRefusalConstraints,
+                input.creates,
+                [],
+              );
+            } catch (error) {
+              if (
+                isAtomicMutationPostimageRefusal(
+                  error,
+                  operationStrategy,
+                  "edge",
+                  true,
+                )
+              ) {
+                return { created: [], updated: [] };
+              }
+              throw error;
+            }
+          },
+          {
+            maxEntries,
+          },
+        );
+
+        return { executeAtomicEdgeResolvedMutationSet } satisfies Readonly<{
+          executeAtomicEdgeResolvedMutationSet: AtomicEdgeResolvedMutationSetLowerer;
+        }>;
+      })();
+
+  const atomicEdgeMutationProgramMembers =
+    (
+      atomicEdgeConvergenceMembers.executeAtomicEdgeConvergence === undefined ||
+      atomicEdgeResolvedMutationSetMembers.executeAtomicEdgeResolvedMutationSet ===
+        undefined
+    ) ?
+      {}
+    : (() => {
+        const convergence = requireDefined(
+          atomicEdgeConvergenceMembers.executeAtomicEdgeConvergence,
+        );
+        const resolvedSet = requireDefined(
+          atomicEdgeResolvedMutationSetMembers.executeAtomicEdgeResolvedMutationSet,
+        );
+        async function executeAtomicEdgeMutation(
+          input: AtomicEdgeResolvedMutationSetInput,
+        ): Promise<AtomicEdgeResolvedMutationSetResult>;
+        async function executeAtomicEdgeMutation(
+          input: AtomicEdgeConvergenceInput,
+        ): Promise<readonly AtomicEdgeConvergenceResult[]>;
+        async function executeAtomicEdgeMutation(
+          input:
+            AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+        ): Promise<
+          | AtomicEdgeResolvedMutationSetResult
+          | readonly AtomicEdgeConvergenceResult[]
+        > {
+          switch (input.kind) {
+            case "resolved-set": {
+              return resolvedSet({
+                creates: input.creates,
+                updates: input.updates,
+                schemaFence: input.schemaFence,
+              });
+            }
+            case "durable-convergence": {
+              return convergence({
+                entries: input.entries,
+                schemaFence: input.schemaFence,
+              });
+            }
+            default: {
+              input satisfies never;
+              throw new CompilerInvariantError(
+                "Atomic edge mutation program received an unknown variant.",
+              );
+            }
+          }
+        }
+        const executeAtomicEdgeMutationProgram = Object.assign(
+          executeAtomicEdgeMutation,
+          {
+            maxEntries: {
+              resolvedSet: resolvedSet.maxEntries,
+              durableConvergence: convergence.maxEntries,
+            },
+          },
+        ) satisfies AtomicEdgeMutationProgramExecutor;
+        return { executeAtomicEdgeMutationProgram };
+      })();
+
+  const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
+  const buildLockSchemaVersionAndGraphWrite =
+    operationStrategy.buildLockSchemaVersionAndGraphWrite;
+  const schemaGraphWriteFenceSql = options.fenceSql;
+  const schemaGraphWriteFenceMembers =
+    (
+      schemaGraphWriteLockNamespace === undefined ||
+      buildLockSchemaVersionAndGraphWrite === undefined ||
+      schemaGraphWriteFenceSql === undefined
+    ) ?
+      {}
+    : {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaGraphWriteFenceParams,
+        ) {
+          const row = await execution.execGet<Record<string, unknown>>(
+            buildLockSchemaVersionAndGraphWrite(
+              params,
+              schemaGraphWriteLockNamespace,
+              schemaGraphWriteFenceSql,
+            ),
+          );
+          if (row !== undefined) return readGraphWriteFenceAcquisition(row);
+
+          // A blocked `FOR SHARE` can recheck the old active row out of its
+          // statement snapshot without substituting the winner's new row. As
+          // in the ordinary fence, diagnose with a fresh, non-locking read.
+          const settledRow = await execution.execGet<Record<string, unknown>>(
+            operationStrategy.buildGetActiveSchema(params.graphId),
+          );
+          const settled =
+            settledRow === undefined ? undefined : (
+              rowMappers.toSchemaVersionRow(settledRow)
+            );
+          throw new StaleVersionError({
+            graphId: params.graphId,
+            expected: params.expectedVersion,
+            actual: settled?.version ?? 0,
+          });
+        },
+      };
+
+  const buildEdgeCardinalityInsert =
+    operationStrategy.buildInsertEdgeIfEndpointsLiveWithCardinalityClaim;
+  const executeEdgeCardinalityInsert =
+    (
+      options.edgeCardinalityInsertFusion === true &&
+      buildEdgeCardinalityInsert !== undefined
+    ) ?
+      async function executeEdgeCardinalityInsert(
+        params: InsertEdgeParams,
+        claim: ClaimEdgeCardinalityParams,
+      ): Promise<EdgeRow | undefined> {
+        assertMatchingFusedEdgeClaim(params, claim);
+        const query = buildEdgeCardinalityInsert(
+          params,
+          claim,
+          nowIso(),
+          endpointLock,
+        );
+        const row = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execEndpointGuardedGet(params, query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts([params]),
+                matchIdentities: attemptedEdgeMatchIdentities([params]),
+              },
+            ),
+          [params],
+        );
+        return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+      }
+    : undefined;
+
+  const buildInsertNodeWithProjections =
+    operationStrategy.buildInsertNodeWithProjections;
+
+  async function executeNodeManagedCreate(
+    plan: ManagedNodeCreatePlan,
+  ): Promise<NodeCreateCommandResult> {
+    if (plan.mode.kind === "schema-fenced") {
+      assertMatchingNodeSchemaFence(plan.params, plan.mode.schemaFence);
+    }
+    if (plan.claims.length > 0 && plan.mode.kind === "schema-fenced") {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["schemaFence", "claims"],
+      };
+    }
+    const rephasedPlan =
+      options.nodeClaimInsertFusion === true ?
+        undefined
+      : rephaseNonTransactionalNodeClaimPlan(plan);
+    if (
+      plan.claims.length > 0 &&
+      options.nodeClaimInsertFusion !== true &&
+      rephasedPlan === undefined
+    ) {
+      return { outcome: "unsupported", entity: "node", dimensions: ["claims"] };
+    }
+    const executablePlan = rephasedPlan ?? plan;
+    const { params } = executablePlan;
+    const plannedClaims = executablePlan.claims;
+    if (
+      executablePlan.mode.kind === "schema-fenced" &&
+      options.schemaFenceLockClause === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["schemaFence"],
+      };
+    }
+    if (
+      executablePlan.projections.length > 0 &&
+      (options.nodeProjectionInsertFusion !== true ||
+        buildInsertNodeWithProjections === undefined)
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["projections"],
+      };
+    }
+
+    if (
+      (plannedClaims.length > 0 || executablePlan.projections.length > 0) &&
+      buildInsertNodeWithProjections === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions:
+          plannedClaims.length === 0 ? ["projections"]
+          : executablePlan.projections.length === 0 ? ["claims"]
+          : ["claims", "projections"],
+      };
+    }
+
+    if (plannedClaims.length === 0 && executablePlan.projections.length === 0) {
+      const query =
+        executablePlan.mode.kind === "schema-fenced" ?
+          operationStrategy.buildInsertNodeWithSchemaFence(
+            params,
+            nowIso(),
+            executablePlan.mode.schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          )
+        : operationStrategy.buildInsertNode(params, nowIso());
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts([params]),
+        },
+      );
+      return row === undefined ?
+          { outcome: "rejected", entity: "node", reason: "unknown" }
+        : {
+            outcome: "created",
+            entity: "node",
+            row: rowMappers.toNodeRow(row),
+          };
+    }
+
+    if (buildInsertNodeWithProjections === undefined) {
+      throw new CompilerInvariantError(
+        "The backend accepted a managed node plan it cannot compile.",
+        { graphId: params.graphId, kind: params.kind, id: params.id },
+      );
+    }
+    const query = buildInsertNodeWithProjections(
+      params,
+      executablePlan,
+      nowIso(),
+      options.schemaFenceLockClause,
+    );
+    if (query === undefined) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["projections"],
+      };
+    }
+    await options.beforeNodeProjectionInsert?.(params, executablePlan);
+    const row = await (async () => {
+      try {
+        return await withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "node",
+            relation: operationStrategy.primaryKeyConstraints.nodes,
+            attempted: attemptedInserts([params]),
+          },
+        );
+      } catch (error) {
+        if (options.refuseNodeProjectionError !== undefined) {
+          return options.refuseNodeProjectionError(
+            params,
+            executablePlan,
+            error,
+          );
+        }
+        throw error;
+      }
+    })();
+    if (row?.["write_discriminator"] === "claim_conflict") {
+      const constraintName = row["claim_constraint_name"];
+      const holderKind = row["claim_holder_kind"];
+      const holderId = row["claim_holder_id"];
+      const axis = row["claim_axis"];
+      if (
+        typeof constraintName !== "string" ||
+        typeof holderKind !== "string" ||
+        typeof holderId !== "string" ||
+        typeof axis !== "string"
+      ) {
+        throw new CompilerInvariantError(
+          "A planned node claim refusal returned incomplete conflict metadata.",
+          { graphId: params.graphId, kind: params.kind, id: params.id },
+        );
+      }
+      const conflictingClaim = plannedClaims.find((claim) => {
+        if (
+          claim.constraintName !== constraintName ||
+          claim.key !== row["claim_key"]
+        ) {
+          return false;
+        }
+        if (claim.verdict.kind === "disjointness") {
+          return claim.axis === axis;
+        }
+        return claim.verdict.probeAxes.includes(axis);
+      });
+      const fields =
+        conflictingClaim?.verdict.kind === "uniqueness" ?
+          conflictingClaim.verdict.fields
+        : [];
+      throw new UniquenessError({
+        constraintName,
+        kind: holderKind,
+        existingId: holderId,
+        newId: params.id,
+        fields,
+        axis,
+      });
+    }
+    if (row === undefined && executablePlan.mode.kind === "ordinary") {
+      throw new DatabaseOperationError(
+        "Fused node projection insert failed: no row returned",
+        { operation: "insert", entity: "node", reason: "no_row_returned" },
+      );
+    }
+    return row === undefined ?
+        { outcome: "rejected", entity: "node", reason: "unknown" }
+      : { outcome: "created", entity: "node", row: rowMappers.toNodeRow(row) };
+  }
+
+  async function executeEdgeEndpointInsert(
+    params: InsertEdgeParams,
+  ): Promise<EdgeRow | undefined> {
+    const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
+      params,
+      nowIso(),
+      endpointLock,
+    );
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execEndpointGuardedGet(params, query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeSchemaFencedInsert(
+    params: InsertEdgeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ): Promise<EdgeRow | undefined> {
+    const schemaLockClause = options.schemaFenceLockClause;
+    if (schemaLockClause === undefined) {
+      throw new ConfigurationError(
+        "This backend cannot execute a managed edge create with a schema fence.",
+        {
+          capability: "commands",
+          command: "edge.create",
+          dimension: "schemaFence",
+        },
+      );
+    }
+    const query =
+      operationStrategy.buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+        params,
+        nowIso(),
+        schemaFence,
+        schemaLockClause,
+        endpointLock,
+      );
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execEndpointGuardedGet(params, query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeManagedCreate(
+    plan: ManagedEdgeCreatePlan,
+  ): Promise<EdgeCreateCommandResult> {
+    const { params } = plan;
+    const claims = plan.cardinalityClaims ?? [];
+    if (
+      plan.schemaFence !== undefined &&
+      plan.schemaFence.graphId !== params.graphId
+    ) {
+      throw new CompilerInvariantError(
+        "A managed edge create's schema fence must match its edge graph.",
+        {
+          edgeGraphId: params.graphId,
+          fenceGraphId: plan.schemaFence.graphId,
+          id: params.id,
+        },
+      );
+    }
+    if (plan.schemaFence !== undefined && claims.length > 0) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["schemaFence", "cardinalityClaim"],
+      };
+    }
+    if (endpointFencesNeedUnavailableProgram) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["endpointPredicate"],
+      };
+    }
+    if (
+      plan.schemaFence !== undefined &&
+      options.schemaFenceLockClause === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["schemaFence"],
+      };
+    }
+    // v1 fuses at most one claim: the fused CTE
+    // (`buildInsertEdgeIfEndpointsLiveWithCardinalityClaim`) reserves exactly
+    // one axis row. A two-axis plan takes the portable claim-then-insert
+    // path on every engine — refused here, before any SQL runs, never a
+    // silently-dropped second axis.
+    if (
+      claims.length > 1 ||
+      (claims.length === 1 && executeEdgeCardinalityInsert === undefined)
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["cardinalityClaim"],
+      };
+    }
+
+    let row: EdgeRow | undefined;
+    if (plan.schemaFence !== undefined) {
+      row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
+    } else if (claims.length === 0) {
+      row = await executeEdgeEndpointInsert(params);
+    } else {
+      // The unsupported case is returned above before any SQL executes.
+      if (executeEdgeCardinalityInsert === undefined) {
+        throw new CompilerInvariantError(
+          "Edge create plan support changed between preflight and execution.",
+          {
+            capability: "commands",
+            command: "edge.create",
+            dimension: "cardinalityClaim",
+          },
+        );
+      }
+      const claim = requireDefined(claims[0]);
+      row = await executeEdgeCardinalityInsert(params, claim);
+    }
+
+    return row === undefined ?
+        { outcome: "rejected", entity: "edge", reason: "unknown" }
+      : { outcome: "created", entity: "edge", row };
+  }
+
+  async function executeEdgeConvergeCreate(
+    command: EdgeConvergeCreateCommand,
+    context: GraphCommandExecutionContext,
+  ): Promise<EdgeConvergeCreateCommandResult> {
+    const { plan } = command;
+    const { params } = plan;
+    if (
+      plan.schemaFence !== undefined &&
+      plan.schemaFence.graphId !== params.graphId
+    ) {
+      throw new CompilerInvariantError(
+        "A convergent edge create's schema fence must match its edge graph.",
+        {
+          edgeGraphId: params.graphId,
+          fenceGraphId: plan.schemaFence.graphId,
+          id: params.id,
+        },
+      );
+    }
+    const durable = command.match.kind === "durable";
+    // Dynamic convergence still requires the caller's coordinated snapshot.
+    // Durable convergence delegates that decision to the row-level unique
+    // arbiter and may therefore execute directly on a root session.
+    if (
+      (plan.cardinalityClaims ?? []).length > 0 ||
+      operationStrategy.buildConvergeEdgeCreate === undefined ||
+      (!durable && !options.dynamicEdgeConvergence) ||
+      (!durable && context.coordination === "none") ||
+      (plan.schemaFence !== undefined &&
+        options.schemaFenceLockClause === undefined)
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["convergence"],
+      };
+    }
+    if (endpointFencesNeedUnavailableProgram) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["convergence", "endpointPredicate"],
+      };
+    }
+
+    const query = operationStrategy.buildConvergeEdgeCreate(
+      {
+        params,
+        match: command.match,
+        timestamp: nowIso(),
+        ...(plan.schemaFence === undefined ?
+          {}
+        : {
+            schemaFence: plan.schemaFence,
+            schemaLockClause: requireDefined(options.schemaFenceLockClause),
+          }),
+      },
+      endpointLock,
+    );
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execEndpointGuardedGet(params, query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
+      command.match.kind === "durable" ?
+        command.match.identity.name
+      : undefined,
+    );
+    if (row === undefined) {
+      return { outcome: "rejected", entity: "edge", reason: "unknown" };
+    }
+    switch (row["write_discriminator"]) {
+      case 0:
+      case "0": {
+        return {
+          outcome: "found",
+          entity: "edge",
+          row: rowMappers.toEdgeRow(row),
+        };
+      }
+      case 1:
+      case "1": {
+        return {
+          outcome: "created",
+          entity: "edge",
+          row: rowMappers.toEdgeRow(row),
+        };
+      }
+      default: {
+        throw new CompilerInvariantError(
+          "A convergent edge create returned an unknown write discriminator.",
+          { graphId: params.graphId, kind: params.kind, id: params.id },
+        );
+      }
+    }
+  }
+
+  async function executeCommand(
+    command: GraphCommand,
+    context: GraphCommandExecutionContext,
+  ): Promise<GraphCommandResult> {
+    assertGraphCommandExecutionContext(context);
+    if (context.session !== commandSession) {
+      throw new CompilerInvariantError(
+        "An authoritative graph command context does not match its bound command port.",
+        { boundSession: commandSession, contextSession: context.session },
+      );
+    }
+    if (context.coordination !== "none") {
+      assertGraphCommandCoordination(
+        commandsPort,
+        command,
+        context.coordination,
+      );
+    }
+    switch (command.kind) {
+      case "node.create": {
+        return executeNodeManagedCreate(command.plan);
+      }
+      case "edge.create": {
+        return executeEdgeManagedCreate(command.plan);
+      }
+      case "edge.converge-create": {
+        if (context.coordination !== "none") {
+          // Keep the built-in port safe for direct callers that bypass the
+          // public authoritative-command helper.
+          assertGraphCommandConvergenceIsolation(
+            commandsPort,
+            command.plan.params.graphId,
+            context.coordination,
+          );
+        }
+        return executeEdgeConvergeCreate(command, context);
+      }
+      default: {
+        command satisfies never;
+        throw new CompilerInvariantError(
+          "The command port received an unknown command.",
+          { capability: "commands" },
+        );
+      }
+    }
+  }
+
+  const commandsPort = { session: commandSession, execute: executeCommand };
+
+  async function executeNodeSetUpdate(
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+  ): Promise<UpdateNodeSetResult> {
+    const timestamp = nowIso();
+    const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
+    const rows = await execution.execAll<Record<string, unknown>>(query);
+    const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+    return { affectedCount: updatedRows.length, rows: updatedRows };
+  }
+
+  async function clearGraphWithOptions(
+    graphId: string,
+    options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
+  ): Promise<void> {
+    const statements = operationStrategy.buildClearGraph(graphId, options);
+    for (const statement of statements) {
+      await runIgnorableClearStatement(statement);
+    }
+  }
+
+  const buildFindNodesAcrossKinds = operationStrategy.buildFindNodesAcrossKinds;
+  const buildFindEdgesAcrossKinds = operationStrategy.buildFindEdgesAcrossKinds;
+  const buildHardDeleteNodesBatch = operationStrategy.buildHardDeleteNodesBatch;
+  const buildHardDeleteEdgesByNodes =
+    operationStrategy.buildHardDeleteEdgesByNodes;
+  const buildFindEdgesConnectedToNodes =
+    operationStrategy.buildFindEdgesConnectedToNodes;
+  const buildFindActiveEdgesBySourceV1 =
+    operationStrategy.buildFindActiveEdgesBySourceV1;
+
   return {
+    tableExists,
+
+    ...schemaFenceMembers,
+    ...atomicNodeBatchMembers,
+    ...atomicEdgeBatchMembers,
+    ...atomicNodeDeleteBatchMembers,
+    ...atomicNodeResolvedUpdateBatchMembers,
+    ...atomicNodeResolvedMutationSetMembers,
+    ...atomicEdgeDeleteBatchMembers,
+    ...atomicEdgeResolvedUpdateBatchMembers,
+    ...atomicEdgeMutationProgramMembers,
+    ...schemaGraphWriteFenceMembers,
+    commands: commandsPort,
+
+    async executeSchemaDdl(ddl: string): Promise<void> {
+      await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));
+    },
+
     async executeStatement(query: CompiledStatementSql): Promise<void> {
       await execution.execRun(query);
     },
@@ -253,13 +5019,32 @@ export function createCommonOperationBackend(
     async insertNode(params: InsertNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertNode(params, timestamp);
-      const row = await execution.execGet<Record<string, unknown>>(query);
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts([params]),
+        },
+      );
       if (!row)
         throw new DatabaseOperationError(
           "Insert node failed: no row returned",
-          { operation: "insert", entity: "node" },
+          {
+            operation: "insert",
+            entity: "node",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async insertNodeIfAbsent(
+      params: InsertNodeParams,
+    ): Promise<NodeRow | undefined> {
+      const query = operationStrategy.buildInsertNodeIfAbsent(params, nowIso());
+      const row = await execution.execGet<Record<string, unknown>>(query);
+      return row === undefined ? undefined : rowMappers.toNodeRow(row);
     },
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
@@ -268,7 +5053,11 @@ export function createCommonOperationBackend(
         params,
         timestamp,
       );
-      await execution.execRun(query);
+      await withDuplicateKeyClassification(() => execution.execRun(query), {
+        entity: "node",
+        relation: operationStrategy.primaryKeyConstraints.nodes,
+        attempted: attemptedInserts([params]),
+      });
     },
 
     async insertNodesBatch(params: readonly InsertNodeParams[]): Promise<void> {
@@ -278,7 +5067,11 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, batchConfig.nodeInsertBatchSize)) {
         const query = operationStrategy.buildInsertNodesBatch(chunk, timestamp);
-        await execution.execRun(query);
+        await withDuplicateKeyClassification(() => execution.execRun(query), {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts(chunk),
+        });
       }
     },
 
@@ -295,7 +5088,14 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        const rows = await execution.execAll<Record<string, unknown>>(query);
+        const rows = await withDuplicateKeyClassification(
+          () => execution.execAll<Record<string, unknown>>(query),
+          {
+            entity: "node",
+            relation: operationStrategy.primaryKeyConstraints.nodes,
+            attempted: attemptedInserts(chunk),
+          },
+        );
         allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
       }
       return allRows;
@@ -326,6 +5126,42 @@ export function createCommonOperationBackend(
       return allRows;
     },
 
+    async lockNodes(
+      graphId: string,
+      kind: string,
+      ids: readonly string[],
+      lock: NodeRowLock,
+    ): Promise<readonly NodeRow[]> {
+      if (ids.length === 0) return [];
+      // Code-point order before chunking, the order each statement's
+      // `ORDER BY` also uses, so every chunk and every row inside it locks in
+      // one order across concurrent lockers of overlapping sets.
+      const orderedIds = [...new Set(ids)].toSorted((left, right) =>
+        compareCodePoints(left, right),
+      );
+      for (const fence of nodeRowFences(
+        graphId,
+        orderedIds.map((id) => ({ kind, id })),
+      )) {
+        await execution.execRun(fence);
+      }
+      const allRows: NodeRow[] = [];
+      for (const chunk of chunkArray(
+        orderedIds,
+        batchConfig.getNodesChunkSize,
+      )) {
+        const query = operationStrategy.buildLockNodes(
+          graphId,
+          kind,
+          chunk,
+          nodeRowLockClauses[lock],
+        );
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        allRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
+      }
+      return allRows;
+    },
+
     async updateNode(params: UpdateNodeParams): Promise<NodeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildUpdateNode(params, timestamp);
@@ -333,9 +5169,96 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Update node failed: no row returned",
-          { operation: "update", entity: "node" },
+          {
+            operation: "update",
+            entity: "node",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async updateResolvedNodesBatch(
+      params: ResolvedNodeUpdateBatchParams,
+    ): Promise<readonly NodeRow[]> {
+      if (params.entries.length === 0) return [];
+      const first = requireDefined(params.entries[0]);
+      if (
+        !resolvedNodeUpdateBatchFitsBindBudget(
+          params.entries.length,
+          maxBindParameters,
+        )
+      ) {
+        throw new ConfigurationError(
+          "Resolved node update batch exceeds the backend bind-parameter budget",
+          {
+            operation: "updateResolvedNodesBatch",
+            capability: "maxBindParameters",
+            maxBindParameters,
+          },
+        );
+      }
+      if (
+        params.entries.some(
+          (entry) =>
+            entry.graphId !== first.graphId || entry.kind !== first.kind,
+        ) ||
+        new Set(params.entries.map((entry) => entry.id)).size !==
+          params.entries.length
+      ) {
+        throw new ConfigurationError(
+          "Resolved node update batches require distinct ids from one graph and kind",
+          { operation: "updateResolvedNodesBatch", kind: first.kind },
+        );
+      }
+      const query = operationStrategy.buildResolvedNodeUpdateBatch(
+        params,
+        nowIso(),
+      );
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return rows.map((row) => rowMappers.toNodeRow(row));
+    },
+
+    async updateNodeSet(
+      params: UpdateNodeSetParams,
+    ): Promise<UpdateNodeSetResult> {
+      if (
+        Object.keys(params.patch).length === 0 &&
+        (params.unsetProperties?.length ?? 0) === 0
+      ) {
+        throw new ConfigurationError(
+          "Set-based node update requires at least one property",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      if (params.candidateIdColumn.length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires a candidate id column",
+          { operation: "updateNodeSet", kind: params.kind },
+        );
+      }
+      return executeNodeSetUpdate(params);
+    },
+
+    async compareAndSetNode(
+      params: CompareAndSetNodeParams,
+    ): Promise<UpdateNodeSetResult> {
+      if (
+        Object.keys(params.patch).length === 0 &&
+        (params.unsetProperties?.length ?? 0) === 0
+      ) {
+        throw new ConfigurationError(
+          "Node compare-and-set requires at least one property patch",
+          { operation: "compareAndSetNode", kind: params.kind },
+        );
+      }
+      if (Object.keys(params.expected).length === 0) {
+        throw new ConfigurationError(
+          "Node compare-and-set requires at least one expected property",
+          { operation: "compareAndSetNode", kind: params.kind },
+        );
+      }
+      return executeNodeSetUpdate(params);
     },
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {
@@ -356,6 +5279,7 @@ export function createCommonOperationBackend(
     async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
       const deleteUniquesQuery = operationStrategy.buildHardDeleteUniquesByNode(
         params.graphId,
+        params.kind,
         params.id,
       );
       await execution.execRun(deleteUniquesQuery);
@@ -381,14 +5305,84 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
+    // Not atomic either: the store runs it inside its write frame. Each chunk
+    // deletes in `hardDeleteNode`'s order — uniqueness, fulltext, incident
+    // edges, then the node row last — all scoped to the requested ids, so a
+    // failure part-way (on a backend without interactive transactions, say)
+    // leaves the node row in place and a retry clears whatever it owns, never
+    // a claim behind an already-removed row. The edge and node DELETEs RETURN
+    // what they removed, which is all the call reports.
+    // Present only when the strategy supplies both of its builders.
+    ...((
+      buildHardDeleteNodesBatch === undefined ||
+      buildHardDeleteEdgesByNodes === undefined
+    ) ?
+      {}
+    : {
+        async hardDeleteNodesBatch(
+          params: HardDeleteNodesBatchParams,
+        ): Promise<HardDeleteNodesBatchResult> {
+          const removedNodeIds: string[] = [];
+          const removedEdgeIds: string[] = [];
+          for (const chunk of chunkArray(
+            [...new Set(params.ids)],
+            nodeSetEdgeChunkSize(maxBindParameters),
+          )) {
+            await execution.execRun(
+              operationStrategy.buildHardDeleteUniquesByNodeIds({
+                graphId: params.graphId,
+                concreteKind: params.kind,
+                nodeIds: chunk,
+              }),
+            );
+            for (const statement of operationStrategy.buildDeleteFulltextBatch({
+              graphId: params.graphId,
+              nodeKind: params.kind,
+              nodeIds: chunk,
+            })) {
+              await execution.execRun(statement);
+            }
+            const removedEdges = await execution.execAll<{ id: string }>(
+              buildHardDeleteEdgesByNodes(params.graphId, params.kind, chunk),
+            );
+            for (const row of removedEdges) removedEdgeIds.push(row.id);
+            const removedNodes = await execution.execAll<{ id: string }>(
+              buildHardDeleteNodesBatch({
+                graphId: params.graphId,
+                kind: params.kind,
+                ids: chunk,
+              }),
+            );
+            for (const row of removedNodes) removedNodeIds.push(row.id);
+          }
+          return { removedNodeIds, removedEdgeIds };
+        },
+      }),
+
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertEdge(params, timestamp);
-      const row = await execution.execGet<Record<string, unknown>>(query);
+      const row = await withEdgeInsertClassification(
+        () =>
+          withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts([params]),
+              matchIdentities: attemptedEdgeMatchIdentities([params]),
+            },
+          ),
+        [params],
+      );
       if (!row)
         throw new DatabaseOperationError(
           "Insert edge failed: no row returned",
-          { operation: "insert", entity: "edge" },
+          {
+            operation: "insert",
+            entity: "edge",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toEdgeRow(row);
     },
@@ -399,7 +5393,16 @@ export function createCommonOperationBackend(
         params,
         timestamp,
       );
-      await execution.execRun(query);
+      await withEdgeInsertClassification(
+        () =>
+          withDuplicateKeyClassification(() => execution.execRun(query), {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          }),
+        [params],
+      );
     },
 
     async insertEdgesBatch(params: readonly InsertEdgeParams[]): Promise<void> {
@@ -409,7 +5412,16 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, batchConfig.edgeInsertBatchSize)) {
         const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
-        await execution.execRun(query);
+        await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(() => execution.execRun(query), {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts(chunk),
+              matchIdentities: attemptedEdgeMatchIdentities(chunk),
+            }),
+          chunk,
+        );
       }
     },
 
@@ -426,7 +5438,57 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        const rows = await execution.execAll<Record<string, unknown>>(query);
+        const rows = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execution.execAll<Record<string, unknown>>(query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts(chunk),
+                matchIdentities: attemptedEdgeMatchIdentities(chunk),
+              },
+            ),
+          chunk,
+        );
+        allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
+      }
+      return allRows;
+    },
+
+    async insertEdgesDurableBatchReturning(
+      params: readonly InsertEdgeParams[],
+    ): Promise<readonly EdgeRow[]> {
+      if (params.length === 0) return [];
+      const missingIdentityIds = params
+        .filter((item) => item.matchIdentity === undefined)
+        .map((item) => item.id);
+      if (missingIdentityIds.length > 0) {
+        throw new CompilerInvariantError(
+          "A durable edge batch requires match identity storage on every row.",
+          { missingIds: missingIdentityIds },
+        );
+      }
+      const timestamp = nowIso();
+      const allRows: EdgeRow[] = [];
+      for (const chunk of chunkArray(params, batchConfig.edgeInsertBatchSize)) {
+        const query = operationStrategy.buildInsertEdgesDurableBatchReturning(
+          chunk,
+          timestamp,
+        );
+        const rows = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execution.execAll<Record<string, unknown>>(query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts(chunk),
+                matchIdentities: attemptedEdgeMatchIdentities(chunk),
+              },
+            ),
+          chunk,
+        );
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
       }
       return allRows;
@@ -459,7 +5521,11 @@ export function createCommonOperationBackend(
       if (!row)
         throw new DatabaseOperationError(
           "Update edge failed: no row returned",
-          { operation: "update", entity: "edge" },
+          {
+            operation: "update",
+            entity: "edge",
+            reason: "no_row_returned",
+          },
         );
       return rowMappers.toEdgeRow(row);
     },
@@ -470,48 +5536,59 @@ export function createCommonOperationBackend(
       await execution.execRun(query);
     },
 
-    async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<void> {
+    async hardDeleteEdge(params: HardDeleteEdgeParams): Promise<boolean> {
       const query = operationStrategy.buildHardDeleteEdge(params);
-      await execution.execRun(query);
+      const removed = await execution.execAll<{ id: string }>(query);
+      return removed.length > 0;
     },
 
     async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
       if (params.ids.length === 0) return;
       const timestamp = nowIso();
-      // The soft-delete UPDATE binds one extra parameter (the `deleted_at`
-      // timestamp) on top of the graphId + id-list that `getEdgesChunkSize`
-      // is budgeted for, so a full chunk would overflow the bind limit by 1.
-      // Reserve a slot for the timestamp. The hard-delete batch below has no
-      // such extra bind and keeps the full chunk size.
+      // `getEdgesChunkSize` budgets graphId + ids. Soft delete additionally
+      // binds the tombstone timestamp and, when stated, the asserted kind.
       const softDeleteChunkSize = Math.max(
         1,
-        batchConfig.getEdgesChunkSize - 1,
+        batchConfig.getEdgesChunkSize - 1 - (params.kind === undefined ? 0 : 1),
       );
       for (const chunk of chunkArray(params.ids, softDeleteChunkSize)) {
         const query = operationStrategy.buildDeleteEdgesBatch(
-          { graphId: params.graphId, ids: chunk },
+          {
+            graphId: params.graphId,
+            ids: chunk,
+            ...(params.kind === undefined ? {} : { kind: params.kind }),
+          },
           timestamp,
         );
         await execution.execRun(query);
       }
     },
 
-    async hardDeleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
-      if (params.ids.length === 0) return;
-      for (const chunk of chunkArray(
-        params.ids,
-        batchConfig.getEdgesChunkSize,
-      )) {
+    async hardDeleteEdgesBatch(
+      params: DeleteEdgesBatchParams,
+    ): Promise<readonly string[]> {
+      if (params.ids.length === 0) return [];
+      const removedIds: string[] = [];
+      const hardDeleteChunkSize = Math.max(
+        1,
+        batchConfig.getEdgesChunkSize - (params.kind === undefined ? 0 : 1),
+      );
+      for (const chunk of chunkArray(params.ids, hardDeleteChunkSize)) {
         const query = operationStrategy.buildHardDeleteEdgesBatch({
           graphId: params.graphId,
           ids: chunk,
+          ...(params.kind === undefined ? {} : { kind: params.kind }),
         });
-        await execution.execRun(query);
+        const removed = await execution.execAll<{ id: string }>(query);
+        for (const row of removed) removedIds.push(row.id);
       }
+      return removedIds;
     },
 
-    async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = operationStrategy.buildCountEdgesFrom(params);
+    async countEdgesAtEndpoint(
+      params: CountEdgesAtEndpointParams,
+    ): Promise<number> {
+      const query = operationStrategy.buildCountEdgesAtEndpoint(params);
       const row = await execution.execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -530,6 +5607,31 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
 
+    ...(buildFindEdgesConnectedToNodes === undefined ?
+      {}
+    : {
+        async findEdgesConnectedToNodes(
+          params: FindEdgesConnectedToNodesParams,
+        ): Promise<readonly EdgeRow[]> {
+          // An edge between two nodes in different chunks is read by both
+          // chunks; keyed by id, it is reported once.
+          const edgesById = new Map<string, EdgeRow>();
+          for (const chunk of chunkArray(
+            [...new Set(params.nodeIds)],
+            nodeSetEdgeChunkSize(maxBindParameters),
+          )) {
+            const rows = await execution.execAll<Record<string, unknown>>(
+              buildFindEdgesConnectedToNodes(params, chunk),
+            );
+            for (const row of rows) {
+              const edge = rowMappers.toEdgeRow(row);
+              if (!edgesById.has(edge.id)) edgesById.set(edge.id, edge);
+            }
+          }
+          return [...edgesById.values()];
+        },
+      }),
+
     async findNodesByKind(
       params: FindNodesByKindParams,
     ): Promise<readonly NodeRow[]> {
@@ -537,6 +5639,19 @@ export function createCommonOperationBackend(
       const rows = await execution.execAll<Record<string, unknown>>(query);
       return rows.map((row) => rowMappers.toNodeRow(row));
     },
+
+    ...(buildFindNodesAcrossKinds === undefined ?
+      {}
+    : {
+        async findNodesAcrossKinds(
+          params: FindRowsAcrossKindsParams,
+        ): Promise<readonly NodeRow[]> {
+          if (!hasAcrossKindsPage(params)) return [];
+          const query = buildFindNodesAcrossKinds(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toNodeRow(row));
+        },
+      }),
 
     async countNodesByKind(params: CountNodesByKindParams): Promise<number> {
       const query = operationStrategy.buildCountNodesByKind(params);
@@ -552,6 +5667,103 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toEdgeRow(row));
     },
 
+    ...(buildFindActiveEdgesBySourceV1 === undefined ?
+      {}
+    : {
+        async findActiveEdgesBySourceV1(
+          params: FindActiveEdgesBySourceV1Params,
+        ): Promise<readonly EdgeRow[]> {
+          const query = buildFindActiveEdgesBySourceV1(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toEdgeRow(row));
+        },
+      }),
+    ...(operationStrategy.buildFindEdgesByMatchIdentity === undefined ?
+      {}
+    : {
+        async findEdgesByMatchIdentity(
+          params: FindEdgesByMatchIdentityParams,
+        ): Promise<readonly EdgeRow[]> {
+          const edgeRows: EdgeRow[] = [];
+          for (const identityChunk of chunkArray(
+            params.identities,
+            Math.max(1, Math.floor((maxBindParameters - 1) / 3)),
+          )) {
+            const query = operationStrategy.buildFindEdgesByMatchIdentity?.({
+              ...params,
+              identities: identityChunk,
+            });
+            if (query === undefined) {
+              throw new CompilerInvariantError(
+                "The backend operation strategy omitted its durable edge identity owner query.",
+              );
+            }
+            const rows =
+              await execution.execAll<Record<string, unknown>>(query);
+            edgeRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
+          }
+          return edgeRows;
+        },
+      }),
+
+    ...(buildFindEdgesAcrossKinds === undefined ?
+      {}
+    : {
+        async findEdgesAcrossKinds(
+          params: FindRowsAcrossKindsParams,
+        ): Promise<readonly EdgeRow[]> {
+          if (!hasAcrossKindsPage(params)) return [];
+          const query = buildFindEdgesAcrossKinds(params);
+          const rows = await execution.execAll<Record<string, unknown>>(query);
+          return rows.map((row) => rowMappers.toEdgeRow(row));
+        },
+      }),
+
+    async findEdgesByEndpointSet(
+      params: FindEdgesByEndpointSetParams,
+    ): Promise<readonly EdgeRow[]> {
+      const ids = resolveEdgeEndpointIds(params);
+      // Each endpoint id lands in exactly one chunk (the set is deduped), so
+      // every endpoint's rows come back from a single statement in that
+      // statement's order — the per-endpoint ordering and `limitPerEndpoint`
+      // cap therefore hold across the whole read even though the concatenated
+      // result is only globally ordered when one chunk covers the set.
+      const edgeRows: EdgeRow[] = [];
+      for (const idChunk of chunkArray(
+        ids,
+        batchConfig.findEdgesEndpointChunkSize,
+      )) {
+        const query = operationStrategy.buildFindEdgesByEndpointSet(
+          params,
+          idChunk,
+        );
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));
+      }
+      return edgeRows;
+    },
+
+    async findEdgesByHeterogeneousEndpointSet(
+      params: FindEdgesByHeterogeneousEndpointSetParams,
+    ): Promise<readonly EdgeRow[]> {
+      const { edgeKinds, endpoints, endpointChunkSize } =
+        resolveHeterogeneousEdgeRead(params, maxBindParameters);
+      if (edgeKinds.length === 0 || endpoints.length === 0) return [];
+
+      const edgeRows: EdgeRow[] = [];
+      for (const endpointChunk of chunkArray(endpoints, endpointChunkSize)) {
+        const query =
+          operationStrategy.buildFindEdgesByHeterogeneousEndpointSet(
+            params,
+            endpointChunk,
+            edgeKinds,
+          );
+        const rows = await execution.execAll<Record<string, unknown>>(query);
+        for (const row of rows) edgeRows.push(rowMappers.toEdgeRow(row));
+      }
+      return edgeRows;
+    },
+
     async countEdgesByKind(params: CountEdgesByKindParams): Promise<number> {
       const query = operationStrategy.buildCountEdgesByKind(params);
       const row = await execution.execGet<{ count: string | number }>(query);
@@ -560,15 +5772,31 @@ export function createCommonOperationBackend(
 
     async insertUnique(params: InsertUniqueParams): Promise<void> {
       const query = operationStrategy.buildInsertUnique(params);
-      const result = await execution.execGet<{ node_id: string }>(query);
+      const result = await execution.execGet<{
+        node_id: string;
+        concrete_kind: string;
+      }>(query);
 
-      if (result && result.node_id !== params.nodeId) {
+      if (
+        result &&
+        !isSameClaimOwner(
+          { concreteKind: result.concrete_kind, nodeId: result.node_id },
+          claimOwnerOf(params),
+        )
+      ) {
         throw new UniquenessError({
           constraintName: params.constraintName,
-          kind: params.nodeKind,
+          // The holder's own kind, never `nodeKind`: that column carries the
+          // claim AXIS, which a shared scope folds across kinds, so it need not
+          // be the holder's kind and usually is not.
+          kind: result.concrete_kind,
           existingId: result.node_id,
           newId: params.nodeId,
           fields: [],
+          // The axis THIS statement attempted — `mapClaimRefusal`'s only way to
+          // tell two disjoint pairs (or two scoped constraints) sharing a key
+          // apart, since `constraintName` alone does not.
+          axis: params.nodeKind,
         });
       }
     },
@@ -580,8 +5808,11 @@ export function createCommonOperationBackend(
 
       // A multi-row upsert cannot affect one row twice, so collapse exact
       // duplicates and reject two entries claiming the same conflict target
-      // for different nodes up front. Batch validation pre-rejects real
-      // conflicts, so this is a defensive invariant, not a semantic path.
+      // for different OWNERS up front. Comparing ids alone would dedupe a
+      // namesake under another kind into the first entry's claim and accept
+      // both — the in-statement twin of the conflict the row-level arms refuse.
+      // Batch validation pre-rejects real conflicts, so this is a defensive
+      // invariant, not a semantic path.
       const targetKey = (entry: InsertUniqueParams): string =>
         `${entry.nodeKind}\u0000${entry.constraintName}\u0000${entry.key}`;
       const byTarget = new Map<string, InsertUniqueParams>();
@@ -591,13 +5822,14 @@ export function createCommonOperationBackend(
           byTarget.set(targetKey(entry), entry);
           continue;
         }
-        if (existing.nodeId !== entry.nodeId) {
+        if (!isSameClaimOwner(claimOwnerOf(existing), claimOwnerOf(entry))) {
           throw new UniquenessError({
             constraintName: entry.constraintName,
-            kind: entry.nodeKind,
+            kind: existing.concreteKind,
             existingId: existing.nodeId,
             newId: entry.nodeId,
             fields: [],
+            axis: entry.nodeKind,
           });
         }
       }
@@ -613,22 +5845,27 @@ export function createCommonOperationBackend(
           constraint_name: string;
           key: string;
           node_id: string;
+          concrete_kind: string;
         }>(query);
-        const ownerByTarget = new Map(
+        const ownerByTarget = new Map<string, ClaimOwner>(
           rows.map((row) => [
             `${row.node_kind}\u0000${row.constraint_name}\u0000${row.key}`,
-            row.node_id,
+            { concreteKind: row.concrete_kind, nodeId: row.node_id },
           ]),
         );
         for (const entry of chunk) {
           const owner = ownerByTarget.get(targetKey(entry));
-          if (owner !== undefined && owner !== entry.nodeId) {
+          if (
+            owner !== undefined &&
+            !isSameClaimOwner(owner, claimOwnerOf(entry))
+          ) {
             throw new UniquenessError({
               constraintName: entry.constraintName,
-              kind: entry.nodeKind,
-              existingId: owner,
+              kind: owner.concreteKind,
+              existingId: owner.nodeId,
               newId: entry.nodeId,
               fields: [],
+              axis: entry.nodeKind,
             });
           }
         }
@@ -639,6 +5876,177 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execution.execRun(query);
+    },
+
+    async hardDeleteUniquesByNodeIds(
+      params: HardDeleteUniquesByNodeIdsParams,
+    ): Promise<void> {
+      const nodeIds = [...new Set(params.nodeIds)];
+      for (const chunk of chunkArray(
+        nodeIds,
+        batchConfig.uniqueDeleteChunkSize,
+      )) {
+        const query = operationStrategy.buildHardDeleteUniquesByNodeIds({
+          ...params,
+          nodeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
+    },
+
+    async hardDeleteUniquesByConcreteKind(
+      params: HardDeleteUniquesByConcreteKindParams,
+    ): Promise<void> {
+      const query =
+        operationStrategy.buildHardDeleteUniquesByConcreteKind(params);
+      await execution.execRun(query);
+    },
+
+    async claimEdgeCardinality(
+      params: ClaimEdgeCardinalityParams,
+    ): Promise<EdgeClaimOutcome> {
+      const [outcome] = await claimEdgeCardinalityEntries([params]);
+      return outcome ?? { status: "claimed" };
+    },
+
+    claimEdgeCardinalityGuarded,
+
+    claimEdgeCardinalityBatch(
+      entries: readonly ClaimEdgeCardinalityParams[],
+    ): Promise<readonly EdgeClaimOutcome[]> {
+      return claimEdgeCardinalityEntries(entries);
+    },
+
+    async purgeEdgeClaims(params: PurgeEdgeClaimsParams): Promise<void> {
+      const edgeIds = [...new Set(params.edgeIds)];
+      // One claim row per edge at most, so the edge-read chunk budget is the
+      // right ceiling for a list of edge ids.
+      for (const chunk of chunkArray(edgeIds, batchConfig.getEdgesChunkSize)) {
+        const query = operationStrategy.buildPurgeEdgeClaims({
+          ...params,
+          edgeIds: chunk,
+        });
+        await execution.execRun(query);
+      }
+    },
+
+    async readConstraintFenceViolations(
+      params: ReadConstraintFenceViolationsParams,
+    ): Promise<ConstraintFenceViolationRows> {
+      const uniqueRows =
+        params.uniqueConstraintNames.length === 0 ?
+          []
+        : await execution.execAll<{
+            node_kind: string;
+            constraint_name: string;
+            key: string;
+            concrete_kind: string;
+            node_id: string;
+          }>(
+            operationStrategy.buildContendedUniqueRowAudit(
+              params.graphId,
+              params.uniqueConstraintNames,
+            ),
+          );
+      const contendedUniqueRows = uniqueRows.map((row) => ({
+        nodeKind: row.node_kind,
+        constraintName: row.constraint_name,
+        key: row.key,
+        concreteKind: row.concrete_kind,
+        nodeId: row.node_id,
+      }));
+
+      // One statement per declared axis, because that is the granularity at
+      // which the population's key and liveness differ — and a composition
+      // declaration (`declaration.scope !== undefined`) is its own axis even
+      // under the same axis name, because its population is relation-wide:
+      // the peer test is the oriented two-arm union, not exact-kind equality
+      // (see `buildContendedCompositionEdgeRowAudit`).
+      const edgeAxes = new Map<
+        string,
+        Readonly<{
+          ref: EdgeCardinalityAxisRef;
+          edgeKinds: string[];
+          scope: CompositionClaimScope | undefined;
+        }>
+      >();
+      for (const declaration of params.edgeCardinalities) {
+        const axisKey = claimPredicateShapeKey(declaration);
+        const entry = edgeAxes.get(axisKey) ?? {
+          // Narrowed to the axis ref alone: `declaration` also carries
+          // `edgeKind`, and keeping that field on `ref` would let a later
+          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+          // spread ORDER to discard it instead of the type excluding it.
+          ref: axisRefFromDeclaration(declaration),
+          edgeKinds: [],
+          scope: declaration.scope,
+        };
+        entry.edgeKinds.push(declaration.edgeKind);
+        edgeAxes.set(axisKey, entry);
+      }
+      const contendedEdgeRows: ContendedEdgeRow[] = [];
+      for (const { ref, edgeKinds, scope } of edgeAxes.values()) {
+        const rows = await execution.execAll<EdgeAuditRow>(
+          scope === undefined ?
+            operationStrategy.buildContendedEdgeRowAudit(
+              params.graphId,
+              ref,
+              edgeKinds,
+            )
+          : operationStrategy.buildContendedCompositionEdgeRowAudit(
+              params.graphId,
+              ref,
+              scope.holders,
+              edgeKinds,
+            ),
+        );
+        for (const row of rows) {
+          contendedEdgeRows.push({
+            ...ref,
+            ...edgeAuditRowFields(row),
+            scope,
+          });
+        }
+      }
+
+      const disjointOverlaps: DisjointOverlapRow[] = [];
+      for (const kinds of params.disjointKindPairs) {
+        const rows = await execution.execAll<{ node_id: string }>(
+          operationStrategy.buildDisjointOverlapAudit(params.graphId, kinds),
+        );
+        for (const row of rows)
+          disjointOverlaps.push({ kinds, nodeId: row.node_id });
+      }
+
+      // Present whenever the caller asked for the family (the key is
+      // defined, even if empty) — never present otherwise, so
+      // `auditConstraintFences`'s "asked and got nothing" refusal stays
+      // meaningful.
+      const misassignedEdgeEndpointRows: MisassignedEdgeEndpointRow[] = [];
+      if (params.edgeEndpointAllowances !== undefined) {
+        const pairChunkSize =
+          misassignedEdgeEndpointPairChunkSize(maxBindParameters);
+        for (const allowance of params.edgeEndpointAllowances) {
+          for (const row of await readMisassignedEdgeEndpointRows(
+            execution,
+            operationStrategy,
+            params.graphId,
+            allowance,
+            pairChunkSize,
+          )) {
+            misassignedEdgeEndpointRows.push(row);
+          }
+        }
+      }
+
+      return {
+        contendedUniqueRows,
+        contendedEdgeRows,
+        disjointOverlaps,
+        ...(params.edgeEndpointAllowances === undefined ?
+          {}
+        : { misassignedEdgeEndpointRows }),
+      };
     },
 
     async checkUnique(
@@ -747,6 +6155,10 @@ export function createCommonOperationBackend(
       // the prior active row first so the partial unique index (one
       // active per graph) is satisfied at every statement boundary.
       // The "initial" case has no prior active, so skip.
+      //
+      // `tests/backends/postgres/schema-write-fence-race.test.ts` reproduces
+      // this ordering by hand to hold a flip uncommitted; changing it there
+      // too keeps the Postgres write fence's race coverage honest.
       if (params.expected.kind === "active") {
         const flip = operationStrategy.buildSetActiveSchema(
           params.graphId,
@@ -795,6 +6207,7 @@ export function createCommonOperationBackend(
             graphId: params.graphId,
             fromVersion: actualActiveVersion,
             toVersion: params.version,
+            reason: "version-not-found",
           },
         );
       }
@@ -808,10 +6221,15 @@ export function createCommonOperationBackend(
     },
 
     async clearGraph(graphId: string): Promise<void> {
-      const statements = operationStrategy.buildClearGraph(graphId);
-      for (const statement of statements) {
-        await runIgnorableClearStatement(statement);
-      }
+      await clearGraphWithOptions(graphId);
+    },
+
+    async clearGraphPreservingContributionMaterializations(
+      graphId: string,
+    ): Promise<void> {
+      await clearGraphWithOptions(graphId, {
+        preserveContributionMaterializations: true,
+      });
     },
   };
 }

@@ -80,8 +80,13 @@ Use `createStore()` when you manage schema versions yourself:
 import { createStore } from "@nicia-ai/typegraph";
 
 const store = createStore(graph, backend);
-// No schema versioning - you handle migrations manually
+// No schema versioning or write fence - you handle migrations manually
 ```
+
+Because a basic Store has no committed schema-version metadata, its writes do
+not participate in the schema-version fence. Direct backend writes have the
+same raw semantics. Use this mode only when the application accepts
+responsibility for quiescing writers around schema changes.
 
 :::caution[Fulltext requires the managed store]
 `createStore()` is attach-only. If the graph has `searchable()` fields,
@@ -119,7 +124,7 @@ no DDL** and fails fast if the database is not at the same schema
 version as the code graph.
 
 ```typescript
-import { createVerifiedStore } from "@nicia-ai/typegraph";
+import { createVerifiedStore } from "@nicia-ai/typegraph/schema";
 
 // Runtime — least-privilege, DML-only role. Zero DDL.
 const [store, result] = await createVerifiedStore(graph, backend);
@@ -128,6 +133,9 @@ const [store, result] = await createVerifiedStore(graph, backend);
 
 It throws:
 
+- `BaseSchemaMigrationError` if deployment-wide base storage is missing,
+  stale, or newer than the running library. Its details report
+  `installedVersion`, `requiredVersion`, and `reason`.
 - `ConfigurationError` if no schema has been initialized (run the
   privileged migration step first).
 - `MigrationError` if the persisted schema is behind the code graph by
@@ -136,6 +144,18 @@ It throws:
 - `StoreNotInitializedError` if the schema is current but the
   runtime-contribution markers (e.g. fulltext) are missing/stale.
 
+The attach itself can succeed on a non-transactional or custom backend. On a
+backend whose `capabilities.execution.unitOfWork` is `"batch"` (Cloudflare
+D1, Neon HTTP), a fused write commonly succeeds — see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for which writes fuse — and a write that cannot fuse throws
+`ConfigurationError` with `details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"`,
+or, for a proven need such as an interactive callback or a schema commit, a
+typed error naming `BATCH_WRITE_UNSUPPORTED` under `details.batchRefusal`.
+On any other backend that provides neither an interactive transaction nor
+the schema-write fence, every managed write throws `ConfigurationError` with
+`details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"`. Reads remain available.
+
 If you only need the check without building a Store (e.g. a readiness
 probe), call `assertSchemaCurrent(backend, graph)` directly — it returns
 the same `SchemaValidationResult` or throws the same errors.
@@ -143,14 +163,78 @@ the same `SchemaValidationResult` or throws the same errors.
 :::note[Database privileges]
 Only `createStoreWithSchema()` runs DDL. `createStore()` is a
 synchronous zero-I/O attach; `createVerifiedStore()` is a SELECT-only
-attach (zero DDL — reads the active schema row and contribution
-markers, nothing else). To run the application under a least-privilege,
-DML-only role, do the privileged migration step once with
-`createStoreWithSchema(graph, adminBackend)` and use
-`createVerifiedStore()` at runtime. See
+attach (zero DDL — reads the base-schema marker, active graph schema, and
+contribution markers, nothing else). Graph-template registration and
+instantiation are also DML-only; instantiation copies the source graph's
+graph-local activation markers while deployment-scoped physical attestations
+remain shared by the database. A target can therefore be reopened by
+`createVerifiedStore()` from a later serverless isolate. To run the application
+under a least-privilege, DML-only role, do the
+privileged migration step once with `createStoreWithSchema(graph, adminBackend)`
+to adopt and stamp the current base schema before using the template APIs at
+runtime. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege)
 for the canonical breakdown.
 :::
+
+### Which Stores are schema-managed?
+
+A Store is schema-managed when it carries committed schema metadata:
+`store.introspect().schemaVersion !== undefined`. The following paths create or
+preserve that state:
+
+- `createStoreWithSchema()` and `createAdapterStoreWithSchema()`
+- `createVerifiedStore()` and `createVerifiedAdapterStore()`
+- `createAdapterStore(..., { reconciled })` with a cached reconciled snapshot
+- Stores returned by `evolve()` and Stores rebound from an already-managed Store
+
+Managed writes acquire a transaction-scoped fence and revalidate that version
+before changing graph data. On the official SQLite and PostgreSQL backends this
+prevents a stale Store write from landing across a schema commit. A custom or
+non-transactional backend fails closed on the first managed write that cannot
+fuse the fence into its own statement — see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for which writes fuse and which refuse.
+
+`createStore()` and `createAdapterStore()` without `{ reconciled }` are raw,
+unversioned attaches. Their writes—and calls made directly through a backend—do
+not participate in the fence. `store.clear()` deletes the graph's schema rows
+and resets that Store to the same raw state; reopen it through a managed factory
+before resuming writes when the versioned guarantee is required.
+
+### Store lifetime after a schema commit
+
+Managed Stores are immutable schema snapshots. A schema-changing operation such
+as `evolve()` returns the Store for the resulting schema; it does not update the
+instance on which it was called. Switch immediately to the returned Store for
+all subsequent work in the same request:
+
+```typescript
+const evolved = await store.evolve(extension);
+await evolved.getNodeCollectionOrThrow("Paper").create({ title: "..." });
+```
+
+For a long-lived local handle, pass a `StoreRef` and use either the return value
+or the updated `ref.current` after the call:
+
+```typescript
+import type { StoreRef } from "@nicia-ai/typegraph/store";
+
+const ref: StoreRef<typeof store> = { current: store };
+const evolved = await ref.current.evolve(extension, { ref });
+
+// `ref.current === evolved`; do not resume through the pre-evolve Store.
+await ref.current.getNodeCollectionOrThrow("Paper").create({ title: "..." });
+```
+
+Capturing `ref.current` once at request entry is safe only for requests that do
+not change the schema. The ref also cannot observe commits made by another
+process or isolate. Before reusing a cross-request cache, compare the cached
+Store's `introspect().schemaVersion` (or its reconciled snapshot version) with
+`getCommittedSchemaVersion()`, then run `createVerifiedStore()` or
+`createVerifiedAdapterStore()` when the version changes. The
+[per-request connection recipe](/integration#per-request-connections-cache-the-verified-store)
+shows the complete single-flight cache pattern.
 
 ## Schema Validation Results
 
@@ -179,7 +263,25 @@ These changes are backwards compatible and can be auto-migrated:
 - Adding new node types
 - Adding new edge types
 - Adding optional properties with defaults
-- Adding new ontology relations
+- Adding `broader`, `narrower`, or `relatedTo` ontology relations
+- Removing `disjointWith` ontology relations
+
+Adding `disjointWith`, `subClassOf`, `equivalentTo`, `partOf`, or `hasPart` —
+and removing `subClassOf` or `equivalentTo` — also auto-migrate, but
+only after a data check inside the commit transaction. A `partOf` or `hasPart`
+addition is checked against the live parts of its realizing edge kind (one whole
+per part, no cycles, and a required whole when `existence: "required"`), and a
+tightened `cardinality` or `targetCardinality` is checked against live edges.
+Both refuse the commit when the data does not satisfy them. See
+[Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
+and
+[Edge cardinality tightenings are checked against your data](/schema-evolution#edge-cardinality-tightenings-are-checked-against-your-data)
+for what each one checks and how a refusal is reported.
+
+Enabling `identity` on an existing graph does not backfill identity
+transitions for events that happened before enablement — replay begins at
+the coordinate identity was turned on, not at the graph's own origin. See
+[Replay and identity history](/identity/#replay-and-identity-history).
 
 ### Breaking Changes (Require Manual Action)
 
@@ -189,7 +291,28 @@ These changes require manual migration:
 - Renaming node or edge types
 - Changing property types
 - Removing properties
-- Changing cardinality constraints to be more restrictive
+- Removing allowed endpoint pairs from a source-dependent edge
+- Adding or removing an `inverseOf` or `implies` ontology relation
+- Removing a `partOf` or `hasPart` ontology relation
+
+### Endpoint Pair Changes
+
+[Source-dependent targets](/core-concepts#source-dependent-targets) are part of
+the serialized schema. The `targetKindsBySource` field preserves the allowed
+pairs alongside the source and target kind lists, so export/import and schema
+round trips retain the restriction. For compile-time declarations, reordering
+map entries or target arrays does not change the schema hash. Persisted runtime
+extension documents also contribute to the hash and retain their array order.
+
+Narrowing a target map is breaking even when the overall source and target kind
+sets remain unchanged. For example, changing an edge from allowing every
+`Employee`/`Student` to `Department`/`Course` combination to allowing only
+`Employee → Department` and `Student → Course` removes two pairs. Existing rows
+using those pairs need migration before adopting the narrower schema.
+
+Adding allowed pairs, or changing the representation without removing any pairs,
+is nonbreaking. Runtime extension changes have an additional empty-kind check
+when tightening endpoints; see [extension edges](/graph-extensions#edges).
 
 ## Handling Breaking Changes
 
@@ -216,26 +339,98 @@ if (result.status === "breaking") {
 }
 ```
 
-## Schema Introspection
+### Pre-flighting before you commit
 
-Query the stored schema at runtime:
+Both checks below are **SELECT-only** — no DDL, no writes — so a least-privilege
+runtime can decide what to do *before* it hits the privileged migration wall:
 
 ```typescript
-import { getActiveSchema, isSchemaInitialized, getSchemaChanges } from "@nicia-ai/typegraph/schema";
+import { classifySchemaChanges } from "@nicia-ai/typegraph/schema";
 
-// Check if schema exists
-const initialized = await isSchemaInitialized(backend, "my_graph");
-
-// Get the current schema
-const schema = await getActiveSchema(backend, "my_graph");
-if (schema) {
-  console.log("Graph ID:", schema.graphId);
-  console.log("Version:", schema.version);
-  console.log("Nodes:", Object.keys(schema.nodes));
-  console.log("Edges:", Object.keys(schema.edges));
+// Cheapest: does this need the privileged path at all?
+// (true when the schema is behind, and when nothing is committed yet)
+if (await store.requiresMigration()) {
+  // Route to the privileged bootstrap instead of failing mid-request.
 }
 
-// Preview changes without applying
+// Or get the three-way decision:
+const diff = await store.schemaChanges();
+const classification =
+  diff === undefined ? "uninitialized" : classifySchemaChanges(diff);
+// "identical" | "additive" | "incompatible"
+```
+
+### Classifying a failure
+
+If a commit does fail, branch on the structured outcome rather than the message
+text, which is free to be reworded in any release:
+
+```typescript
+import { MigrationError } from "@nicia-ai/typegraph";
+
+try {
+  await commitSomething();
+} catch (error) {
+  if (error instanceof MigrationError) {
+    switch (error.details.reason) {
+      case "schema-behind": {
+        // The runtime can't migrate. `diff` says whether it's safe to proceed.
+        const additive = error.details.diff?.hasBreakingChanges === false;
+        break;
+      }
+      case "breaking-change": {
+        break;
+      }
+      case "kind-removal": {
+        // The commit would drop a kind that still holds rows. Narrowing on
+        // `reason` makes `droppedKinds` non-optional — the details type is a
+        // discriminated union, so each reason carries exactly its own payload.
+        const { nodes, edges } = error.details.droppedKinds;
+        console.error("still populated:", [...nodes, ...edges]);
+        break;
+      }
+      // "no-active-version" | "version-not-found"
+    }
+  }
+}
+```
+
+`details.reason` is a stable discriminant (the `MIGRATION_FAILURE_REASONS`
+union), and `details.diff` carries the same structured diff — with per-change
+`severity` — that `getSchemaChanges` returns, so you never need a second query
+to decide.
+
+## Schema Introspection
+
+### What Does This Database Already Have?
+
+`getActiveSchema` returns the committed schema document — the same JSON stored
+in `typegraph_schema_versions.schema_doc`, parsed into a `SerializedSchema`.
+Read it instead of querying that table by hand:
+
+```typescript
+import { getActiveSchema, isSchemaInitialized, type SerializedSchema } from "@nicia-ai/typegraph/schema";
+
+// Check whether this graph has been committed at all
+const initialized = await isSchemaInitialized(backend, "my_graph");
+
+const schema: SerializedSchema | undefined = await getActiveSchema(backend, "my_graph");
+if (schema) {
+  console.log("Version:", schema.version);
+  console.log("Nodes:", Object.keys(schema.nodes)); // ["Person", "Company"]
+  console.log("Edges:", Object.keys(schema.edges)); // ["worksAt"]
+}
+```
+
+These are exported from `@nicia-ai/typegraph/schema`. Reach for `getCommittedSchemaVersion`
+instead when you only need the version number — for example, to invalidate a
+cached schema across isolates.
+
+### Previewing Pending Changes
+
+```typescript
+import { getSchemaChanges } from "@nicia-ai/typegraph/schema";
+
 const diff = await getSchemaChanges(backend, graph);
 if (diff?.hasChanges) {
   console.log("Pending changes:", diff.summary);
@@ -254,7 +449,9 @@ import { initializeSchema, migrateSchema, rollbackSchema, ensureSchema } from "@
 const row = await initializeSchema(backend, graph);
 console.log("Created version:", row.version);
 
-// Migrate to new version
+// Migrate to new version. Folds the persisted graph extension into `graph`
+// first, and refuses (MigrationError, reason "kind-removal") if the commit
+// would drop a kind that still holds rows.
 const newVersion = await migrateSchema(backend, graph, currentVersion);
 console.log("Migrated to version:", newVersion);
 
@@ -279,10 +476,11 @@ tables are materialized by `createStoreWithSchema`, which the legacy migration
 below also relies on having run.
 
 Deployments that already hold rows in the legacy table run a one-time, idempotent
-cutover with `migrateLegacyEmbeddings()`, exported from the package root:
+cutover with `migrateLegacyEmbeddings()`, exported from
+`@nicia-ai/typegraph/maintenance`:
 
 ```typescript
-import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph";
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/maintenance";
 
 // `backend` is the post-cutover backend, wired with its VectorStrategy.
 const result = await migrateLegacyEmbeddings({ backend });
@@ -302,6 +500,192 @@ and need a deliberate re-embed at a single dimension — see
 The vector and hybrid query API (`.similarTo()`, `store.search.vector`,
 `store.search.hybrid`) is storage-transparent and unchanged by this cutover.
 
+## Migrating Preview Recorded Time
+
+The initial recorded-time preview stored timestamps directly in
+`recorded_from`, `recorded_to`, and the graph clock. Versioned anchors now keep
+the durable string API while recorded relations compare numeric revisions.
+
+**Stop writers and run the one-time migration before enabling `history: true`
+with the new library version.** `createStoreWithSchema` and
+`createVerifiedStore` validate the recorded table shapes during an async open
+and reject an unmigrated preview schema before returning a store:
+
+```typescript
+import {
+  deleteLegacyRecordedAnchorMap,
+  migrateLegacyRecordedTime,
+  migrateRecordedAnchor,
+} from "@nicia-ai/typegraph/maintenance";
+
+const result = await migrateLegacyRecordedTime({ backend });
+console.log(result.graphs, result.anchors);
+
+// Translate anchors stored in an application-owned checkpoint table.
+const upgraded = await migrateRecordedAnchor({
+  backend,
+  graphId: "event-materializer",
+  anchor: oldTimestampOnlyAnchor,
+  origin: independentlyAttestedOrigin,
+});
+await checkpoints.replaceAnchor(oldTimestampOnlyAnchor, upgraded);
+
+// Do this only after every external checkpoint for the graph is upgraded.
+await deleteLegacyRecordedAnchorMap({
+  backend,
+  graphId: "event-materializer",
+  dropWhenEmpty: true,
+});
+```
+
+The bundled SQLite and PostgreSQL backends provide the recorded-relation DDL needed by this
+rewrite. A custom backend that created the preview schema must implement
+`backend.recordedTableDdl(tableNames)` before running `migrateLegacyRecordedTime`; otherwise the
+migration throws `UnsupportedBackendCapabilityError` with
+`details.capability: "recordedTableDdl"`. The callback is invoked for the temporary and final name
+sets so the backend, rather than TypeGraph's portable entrypoint, remains the owner of
+dialect-specific table and index DDL.
+
+When the engine names primary-key constraints, each callback result must name the constraint for
+both name sets or for neither. A one-sided declaration throws `ConfigurationError` with
+`details.code: "RECORDED_DDL_CONSTRAINT_NAME_MISMATCH"` before the replacement tables are
+published. See
+[`recordedTableDdl` in the backend contract](/backend-setup#recorded-table-migration-ddl-recordedtableddl)
+when adapting this migration to a custom backend.
+
+The migration dense-ranks distinct legacy commit timestamps independently per
+graph, preserving their exact total order. It rewrites the recorded relations
+and clock atomically and retains a durable old-anchor mapping so downstream
+stores can migrate separately. Re-running it after the cutover is a no-op.
+`migrateRecordedAnchor` also upgrades an `r1:` anchor when supplied with
+independently retained `origin` evidence, and passes through already-bound `r2:`
+and engine-native `e1:` anchors. For the offline timestamp-only cutover, attest
+which converted graph owns the checkpoints before resuming writers and retain its
+origin with the migration record. Never infer a checkpoint's origin from a graph
+that may have been cleared or recreated. If ownership evidence is unavailable,
+discard the checkpoint and resynchronize instead of rebinding it to current data.
+
+Regenerate persisted merge plans and re-baseline branches whose revision fences
+contain the old anchor format before resuming application. The checkpoint helper
+does not migrate embedded merge fences, artifact digests, or branch metadata; do
+not rewrite those strings in place.
+
+The synchronous `createStore` factory is an attach-only, zero-I/O path, so it
+cannot inspect table shapes during construction. If used with `history: true`,
+an unmigrated schema still fails loudly on the first recorded operation. Prefer
+one of the async factories above at application startup when early schema
+verification matters.
+
+The old allocator may have pushed a hot graph's physical timestamp ahead of
+real wall time. Migration preserves that value because lowering it would put
+the clock behind recorded relation boundaries. New commits advance the logical
+revision normally, while the physical component remains pinned until wall time
+catches up. During that window, diagonal reads use the inherited future valid
+time; recorded-only ordering and replay remain exact.
+
+The mapping is graph-scoped: the same timestamp can correspond to different
+revisions in different graphs. Keep writers stopped for the schema rewrite, and
+delete mapping rows only after every external checkpoint for that graph has
+been translated. `dropWhenEmpty: true` atomically drops the mapping table when
+the deleted graph was the final one. Without that option, the empty table is
+retained intentionally and can be dropped by your normal migration tooling.
+
+## Repairing Inverted Validity Windows
+
+Older library versions could store a row whose validity window runs backwards
+(`valid_from > valid_to`). Such a row is readable at **no** coordinate at all:
+`asOf(t)` needs `valid_from <= t < valid_to`, and backwards bounds admit no `t`.
+The write paths no longer produce one — a write that stamps a lower bound the
+caller did not state now stores no bound rather than an inverting one, see
+[Open-left rows](/queries/temporal#open-left-rows-validfrom-is-undefined) — but
+**upgrading rewrites nothing**. Rows already stored that way keep their window
+and stay invisible until an operator repairs them, which is deliberate: an
+upgrade that silently made previously-invisible rows appear in historical
+queries would be the worse surprise.
+
+`repairInvertedValidityWindows` is that explicit action. It has two modes:
+`report` counts and writes nothing, `apply` normalizes the rows it counted to
+`valid_from = NULL` ("ended at T, start unknown").
+
+```typescript
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph/maintenance";
+
+// Diagnose. `report` reads through `execute`, a required backend member, so it
+// runs against ANY backend — including a history-capturing one and one with no
+// statement-execution support.
+const report = await repairInvertedValidityWindows({
+  backend: anyBackend,
+  relations: "live-and-recorded",
+  mode: "report",
+});
+// report.counts.recordedNodes === undefined means NOT SCANNED, never "clean".
+// report.atomic === false means the counts came from per-relation snapshots.
+
+// Repair, with writers stopped. On a history-enabled store pass the RAW backend
+// you constructed it from: the repair mints no revision by design, and the
+// capture wrapper refuses raw statements.
+await repairInvertedValidityWindows({
+  backend: rawBackend,
+  relations: "live-and-recorded",
+  mode: "apply",
+});
+```
+
+If `tableNames` is supplied, it patches `backend.tableNames`; unstated relation
+names keep the backend's configured values. A partial override never sends the
+other relations back to TypeGraph's built-in defaults.
+
+`relations` is **required**, and `"live-and-recorded"` is the recommended scope.
+Repairing only the live axis leaves the recorded twin carrying the inverted
+window, which re-materializes the invisible row at any `asOfRecorded`
+coordinate — the same defect one axis over. `"live"` is right in exactly two
+cases: the store captures no history and the `recorded_*` tables do not exist
+(scanning them is then an error, not a no-op), or you are deliberately keeping
+the recorded axis as an audit record of the pre-repair state and accept that
+historical `asOfRecorded` reads keep returning the invisible shape.
+
+What an operator must know before running it:
+
+1. **Run `apply` with writers stopped**, the same guidance
+   `migrateLegacyRecordedTime()` carries. A concurrent window-bearing update
+   may fence its write on the validity lower bound it read, so a repair landing
+   in between can make the peer's first `UPDATE` match no row. Store node and
+   edge updates re-read and re-judge against the repaired bound; interchange
+   records a per-row target-changed error instead of claiming the row was
+   written. `report` needs no quiescing: it scans in a read-only transaction
+   (`BEGIN` rather than SQLite's writer-reserving `BEGIN IMMEDIATE`, and
+   `BEGIN … READ ONLY` on PostgreSQL), so it cannot write itself.
+2. **Repaired rows become visible** at `asOf` coordinates before their end. That
+   is the point, and it is a read-visibility change to historical queries.
+3. **Outstanding `base@V` merge tokens are invalidated** for repaired rows —
+   `valid_from` is part of the base content fingerprint, so a merge whose base
+   token predates the repair fails its precondition afterwards. Quiesce merges,
+   repair, then re-baseline branches.
+4. **The repair mints no revision and bumps no `version`**, and does not move
+   `updated_at`. It normalizes a storage convention for rows that were never
+   observable at any coordinate; it is not a logical write. That is why `apply`
+   is run against the raw backend, and why bypassing recorded-time capture here
+   is intended rather than a workaround.
+5. **`apply` refuses when a scanned relation stores non-canonical bounds**
+   (SQLite only — PostgreSQL stores `timestamptz`, so a scanned relation always
+   reports `nonCanonical: 0`). SQLite compares the bounds as text, so a
+   non-canonical value cannot be classified without a timestamp semantics this
+   repair does not own. The refusal is total: the whole call is rejected before
+   any row is updated, so `apply` never repairs the rows it understood and skips
+   the rest. `report` still counts them, in `nonCanonical` — normalize those
+   bounds, or narrow the call with `graphId`, and re-run.
+6. **On a backend without transactions the call still runs**, per relation, and
+   says so with `report.atomic === false`: the counts may span snapshots, and a
+   crash mid-`apply` can leave the live axis repaired and the recorded axis not.
+   Re-run — each statement is idempotent and convergent, and a later `report`
+   proves it converged.
+7. **Repair before exporting a legacy graph.** An exported inverted row is
+   refused per row on re-import, so an unrepaired graph does not round-trip.
+
+The statement touches only rows the library mis-stored, so it is empty on a
+healthy graph and needs no batching. If a report returns a count large enough to
+worry about, narrow the call with `graphId` and run it per graph.
+
 ## Schema Serialization
 
 Schemas are stored as JSON documents with computed hashes for fast comparison:
@@ -313,7 +697,7 @@ import { serializeSchema, computeSchemaHash } from "@nicia-ai/typegraph/schema";
 const serialized = serializeSchema(graph, 1);
 
 // Compute hash for comparison
-const hash = computeSchemaHash(serialized);
+const hash = await computeSchemaHash(serialized);
 ```
 
 The serialized schema includes:

@@ -5,11 +5,16 @@
  * Note: Zod schemas cannot be fully reconstructed from JSON Schema,
  * so this provides access to the serialized data for introspection.
  */
-import { KindRegistry } from "../registry/kind-registry";
+import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type NamedOntologyRelation } from "../ontology/validation";
 import {
-  type EdgeEndpointKinds,
-  validateImpliesEndpointCompatibility,
-} from "../registry/validate-implies";
+  buildValidatedKindRegistry,
+  type StructuralSubsumptionMode,
+} from "../registry/build-validated";
+import { compositionRelationFields } from "../registry/composition-relation";
+import { buildSerializedEdgeKindFacts } from "../registry/edge-kind-facts";
+import type { KindRegistry } from "../registry/kind-registry";
+import { hasOwnKey } from "../utils/object";
 import {
   type SerializedClosures,
   type SerializedEdgeDef,
@@ -62,10 +67,13 @@ export type DeserializedSchema = Readonly<{
   /** Get graph defaults */
   getDefaults: () => SerializedSchema["defaults"];
 
+  /** Get the durable TypeGraph Identity Profile configuration. */
+  getIdentity: () => SerializedSchema["identity"];
+
   /** Get the raw serialized schema */
   getRaw: () => SerializedSchema;
 
-  /** Build a KindRegistry from the closures */
+  /** Build a validated KindRegistry by recomputing closures from relations */
   buildRegistry: () => KindRegistry;
 }>;
 
@@ -91,22 +99,32 @@ export function deserializeSchema(
     version: schema.version,
     generatedAt: schema.generatedAt,
 
-    getNode: (name) => schema.nodes[name],
+    // Own-key reads, for the same reason `buildSerializedEdgeKindFacts` (`src/registry/edge-kind-facts.ts`)
+    // uses a `Map`: `schema` is parsed out of a stored JSON document and the
+    // caller supplies the name, so a raw read hands back an `Object.prototype`
+    // member typed as a definition for any name no kind is registered under.
+    getNode: (name) =>
+      hasOwnKey(schema.nodes, name) ? schema.nodes[name] : undefined,
     getNodeNames: () => nodeNames,
 
-    getEdge: (name) => schema.edges[name],
+    getEdge: (name) =>
+      hasOwnKey(schema.edges, name) ? schema.edges[name] : undefined,
     getEdgeNames: () => edgeNames,
 
-    getMetaEdge: (name) => schema.ontology.metaEdges[name],
+    getMetaEdge: (name) =>
+      hasOwnKey(schema.ontology.metaEdges, name) ?
+        schema.ontology.metaEdges[name]
+      : undefined,
     getMetaEdgeNames: () => metaEdgeNames,
 
     getRelations: () => schema.ontology.relations,
     getClosures: () => schema.ontology.closures,
 
     getDefaults: () => schema.defaults,
+    getIdentity: () => schema.identity,
     getRaw: () => schema,
 
-    buildRegistry: () => buildRegistryFromClosures(schema),
+    buildRegistry: () => buildRegistryFromSerializedSchema(schema),
   };
 }
 
@@ -115,89 +133,59 @@ export function deserializeSchema(
 // ============================================================
 
 /**
- * Builds a KindRegistry from serialized closures.
+ * Builds a KindRegistry from a serialized schema's ontology, nodes, edges,
+ * and identity slices.
  *
- * This allows query execution without recomputing closures.
+ * Persisted closures are a legacy inspection artifact. Relations are validated
+ * and closures are recomputed so old schemas gain current hardening rules.
+ *
+ * `nodes` registers no node kinds (node kinds are discovered through the
+ * ontology relations and edge endpoints, and no Zod schema can be
+ * reconstructed from JSON Schema): it only classifies names and supplies the
+ * property schemas the structural-subsumption check compares.
+ *
+ * The one construction for a persisted ontology, so the deserializer's
+ * registry and the ontology-tightening classifier's registry
+ * (`src/schema/ontology-change.ts`) cannot interpret one document two ways.
  */
-function buildRegistryFromClosures(schema: SerializedSchema): KindRegistry {
-  const { closures } = schema.ontology;
-
-  // Convert Record<string, string[]> back to Map<string, Set<string>>
-  const subClassAncestors = recordToMap(closures.subClassAncestors);
-  const subClassDescendants = recordToMap(closures.subClassDescendants);
-  const broaderClosure = recordToMap(closures.broaderClosure);
-  const narrowerClosure = recordToMap(closures.narrowerClosure);
-  const equivalenceSets = recordToMap(closures.equivalenceSets);
-  const partOfClosure = recordToMap(closures.partOfClosure);
-  const hasPartClosure = recordToMap(closures.hasPartClosure);
-  const iriToKind = simpleRecordToMap(closures.iriToKind);
-  const disjointPairs = new Set(closures.disjointPairs);
-  const edgeInverses = simpleRecordToMap(closures.edgeInverses);
-  const edgeImplicationsClosure = recordToMap(closures.edgeImplicationsClosure);
-  const edgeImplyingClosure = recordToMap(closures.edgeImplyingClosure);
-
+export function buildRegistryFromSerializedSchema(
+  schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,
+  structuralSubsumption: StructuralSubsumptionMode = "enforce",
+): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
-  const nodeKinds = new Map();
-  const edgeKinds = new Map();
-
-  const registry = new KindRegistry(nodeKinds, edgeKinds, {
-    subClassAncestors,
-    subClassDescendants,
-    broaderClosure,
-    narrowerClosure,
-    equivalenceSets,
-    iriToKind,
-    disjointPairs,
-    partOfClosure,
-    hasPartClosure,
-    edgeInverses,
-    edgeImplicationsClosure,
-    edgeImplyingClosure,
+  const nodeKinds = new Map<string, NodeType>();
+  const edgeKinds = new Map<string, AnyEdgeType>();
+  return buildValidatedKindRegistry({
+    nodeKinds,
+    edgeKinds,
+    ontology: schema.ontology.relations.map(
+      (relation): NamedOntologyRelation => ({
+        metaEdge: relation.metaEdge,
+        from: relation.from,
+        to: relation.to,
+        ...compositionRelationFields(relation),
+      }),
+    ),
+    edgeFacts: buildSerializedEdgeKindFacts(schema.edges),
+    // The registry above is built with EMPTY node/edge kind maps (no Zod
+    // schemas survive serialization), so the equivalence-class check needs
+    // its own classifier built from the document's own `nodes`/`edges`
+    // records, or every name would classify as neither and the check would
+    // silently pass a persisted schema `buildValidatedKindRegistry` would
+    // otherwise refuse.
+    kindClassification: {
+      isNodeKind: (name) => hasOwnKey(schema.nodes, name),
+      isEdgeKind: (name) => hasOwnKey(schema.edges, name),
+    },
+    // The persisted document's own projected property schema per node kind
+    // — the structural-subsumption check's schema source for a
+    // deserialized ontology (`src/registry/validate-structural-subsumption.ts`).
+    nodePropertySchemas: (kind) => {
+      const nodeDef =
+        hasOwnKey(schema.nodes, kind) ? schema.nodes[kind] : undefined;
+      return nodeDef?.properties;
+    },
+    structuralSubsumption,
+    ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
-
-  validateImpliesEndpointCompatibility(
-    buildEdgeEndpointKinds(schema.edges),
-    registry,
-  );
-
-  return registry;
-}
-
-/**
- * Maps each edge kind's serialized definition to its domain/range kind
- * names, for `validateImpliesEndpointCompatibility`. A `Map` (rather than
- * the plain `schema.edges` object) so a lookup for an edge kind literally
- * named "toString" or another `Object.prototype` member can't resolve to
- * an inherited member instead of `undefined`.
- */
-function buildEdgeEndpointKinds(
-  edges: Record<string, SerializedEdgeDef>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
-  for (const [kind, def] of Object.entries(edges)) {
-    result.set(kind, { from: def.fromKinds, to: def.toKinds });
-  }
-  return result;
-}
-
-/**
- * Converts Record<string, string[]> to Map<string, Set<string>>.
- */
-function recordToMap(
-  record: Record<string, readonly string[]>,
-): ReadonlyMap<string, ReadonlySet<string>> {
-  const result = new Map<string, Set<string>>();
-  for (const [key, values] of Object.entries(record)) {
-    result.set(key, new Set(values));
-  }
-  return result;
-}
-
-/**
- * Converts Record<string, string> to Map<string, string>.
- */
-function simpleRecordToMap(
-  record: Record<string, string>,
-): ReadonlyMap<string, string> {
-  return new Map(Object.entries(record));
 }

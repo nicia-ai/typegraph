@@ -47,9 +47,10 @@ queries execute, it extracts property access patterns from the query AST:
 The profiler then compares these patterns against your declared indexes and generates
 recommendations for missing coverage.
 
-## Kinds and `includeSubClasses`
+## Kinds and subclass expansion
 
-When you query with `includeSubClasses: true`, a single alias can represent multiple kinds.
+When an alias is polymorphic — the default for a kind that has subclasses, or an explicit
+`expansion: "subclasses"` — a single alias can represent multiple kinds.
 When the profiler is attached to a store, it uses the graph schema to attribute a property access
 only to kinds where that JSON path exists. This avoids recommending indexes for unrelated subclasses.
 
@@ -176,7 +177,8 @@ Use `assertIndexCoverage()` to fail tests when queries filter on unindexed prope
 
 ```typescript
 import { describe, it, beforeAll, afterAll } from "vitest";
-import { QueryProfiler } from "@nicia-ai/typegraph/profiler";
+import { toDeclaredIndexes } from "@nicia-ai/typegraph/indexes";
+import { type ProfiledStore, QueryProfiler } from "@nicia-ai/typegraph/profiler";
 
 describe("Query Performance", () => {
   let profiler: QueryProfiler;

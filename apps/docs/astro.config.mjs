@@ -3,180 +3,32 @@ import { satteri } from "@astrojs/markdown-satteri";
 import starlight from "@astrojs/starlight";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, envField, passthroughImageService } from "astro/config";
-import starlightLlmsTxt from "starlight-llms-txt";
+import starlightBlog from "starlight-blog";
 
-// Pages to include in llms-small.txt (unlisted pages are excluded automatically)
-const LLMS_SMALL_PAGES = new Set([
-  "overview",
-  "getting-started",
-  "core-concepts",
-  "backend-setup",
-  "schema-management",
-  "schema-evolution",
-  "graph-extensions",
-  "graph-merge",
-  "provenance",
-  "integration",
-  "materializing-event-logs",
-  "multiple-graphs",
-  "queries/overview",
-  "queries/filter",
-  "queries/traverse",
-  "queries/temporal",
-  "queries/execute",
-  "semantic-search",
-  "fulltext-search",
-  "troubleshooting",
-  "errors",
-  "limitations",
-]);
+import { documentationSidebar } from "./src/lib/sidebar.ts";
+import { PRODUCT_DESCRIPTION } from "./src/lib/structured-data.ts";
 
-const sidebar = [
-  {
-    label: "Getting Started",
-    items: [
-      { label: "What is TypeGraph?", slug: "overview" },
-      { label: "Quick Start", slug: "getting-started" },
-      { label: "Project Structure", slug: "project-structure" },
-    ],
-  },
-  {
-    label: "Guides",
-    items: [
-      { label: "Schemas & Types", slug: "core-concepts" },
-      { label: "Ontology & Reasoning", slug: "ontology" },
-      { label: "Semantic Search", slug: "semantic-search" },
-      { label: "Fulltext Search", slug: "fulltext-search" },
-      { label: "Graph Algorithms", slug: "graph-algorithms" },
-      { label: "Backend Setup", slug: "backend-setup" },
-      { label: "Schema Migrations", slug: "schema-management" },
-      { label: "Evolving Schemas", slug: "schema-evolution" },
-      { label: "Graph Extensions", slug: "graph-extensions" },
-      { label: "Graph Merge", slug: "graph-merge" },
-      { label: "Provenance and Retraction", slug: "provenance" },
-      { label: "Multiple Graphs", slug: "multiple-graphs" },
-      { label: "Import/export", slug: "interchange" },
-      { label: "Testing", slug: "testing" },
-    ],
-  },
-  {
-    label: "Query Builder",
-    items: [
-      { label: "Overview", slug: "queries/overview" },
-      { label: "Source", slug: "queries/source" },
-      { label: "Filter", slug: "queries/filter" },
-      { label: "Traverse", slug: "queries/traverse" },
-      { label: "Recursive", slug: "queries/recursive" },
-      { label: "Shape", slug: "queries/shape" },
-      { label: "Aggregate", slug: "queries/aggregate" },
-      { label: "Order", slug: "queries/order" },
-      { label: "Temporal", slug: "queries/temporal" },
-      { label: "Compose", slug: "queries/compose" },
-      { label: "Combine", slug: "queries/combine" },
-      { label: "Execute", slug: "queries/execute" },
-      { label: "Subqueries", slug: "queries/advanced" },
-      { label: "Predicates", slug: "queries/predicates" },
-    ],
-  },
-  {
-    label: "Recipes",
-    items: [
-      { label: "Common Patterns", slug: "recipes" },
-      { label: "Data Sync", slug: "data-sync" },
-      { label: "Integration Patterns", slug: "integration" },
-      { label: "Materializing Event Logs", slug: "materializing-event-logs" },
-    ],
-  },
-  {
-    label: "Examples",
-    items: [
-      {
-        label: "FHIR Graph Merge",
-        slug: "examples/fhir-graph-merge",
-      },
-      {
-        label: "Incremental Merge",
-        slug: "examples/incremental-merge",
-      },
-      {
-        label: "Agent-Driven Schema",
-        slug: "examples/agent-driven-schema",
-      },
-      {
-        label: "Research Copilot",
-        slug: "examples/research-copilot",
-      },
-      {
-        label: "Bitemporal Time Travel",
-        slug: "examples/bitemporal-time-travel",
-      },
-      {
-        label: "Agent Decision Replay",
-        slug: "examples/agent-decision-replay",
-      },
-      {
-        label: "Provenance Retraction",
-        slug: "examples/provenance-retraction",
-      },
-      {
-        label: "Breach Forensics",
-        slug: "examples/breach-forensics",
-      },
-      {
-        label: "Knowledge Graph for RAG",
-        slug: "examples/knowledge-graph-rag",
-      },
-      {
-        label: "Document Management",
-        slug: "examples/document-management",
-      },
-      { label: "Product Catalog", slug: "examples/product-catalog" },
-      { label: "Workflow Engine", slug: "examples/workflow-engine" },
-      { label: "Audit Trail", slug: "examples/audit-trail" },
-      { label: "Multi-Tenant SaaS", slug: "examples/multi-tenant" },
-    ],
-  },
-  {
-    label: "Performance",
-    items: [
-      { label: "Overview", slug: "performance/overview" },
-      { label: "Indexes", slug: "performance/indexes" },
-      { label: "Query Profiler", slug: "performance/profiler" },
-    ],
-  },
-  {
-    label: "Reference",
-    items: [
-      { label: "Schemas & Stores", slug: "schemas-stores" },
-      { label: "Types", slug: "types" },
-      { label: "Errors", slug: "errors" },
-      { label: "Troubleshooting", slug: "troubleshooting" },
-      { label: "Limitations", slug: "limitations" },
-      { label: "Architecture", slug: "architecture" },
-      { label: "LLM Support", slug: "llm-support" },
-    ],
-  },
-  {
-    label: "Ejecting",
-    slug: "ejecting",
-  },
-  {
-    label: "Changelog",
-    slug: "changelog",
-  },
+// Entrypoints that are only discovered lazily by Vite's dependency
+// optimizer (see the "optimize-ssr-deps" plugin comment below) — shared
+// between the client and non-client `optimizeDeps.include` lists so they
+// can't drift out of sync.
+const LAZILY_DISCOVERED_DEPS = [
+  "astro/actions/runtime/entrypoints/client.js",
+  "astro/assets/services/noop",
+  "astro/zod",
+  "starlight-blog/middleware",
+  "starlight-blog/routes/rss",
+  "starlight-blog/routes/rss-archive",
 ];
 
-function extractSlugs(items) {
-  return items.flatMap((item) => {
-    if (item.slug) return [item.slug];
-    if (item.items) return extractSlugs(item.items);
-    return [];
-  });
-}
-
-const llmsSmallExclude = extractSlugs(sidebar).filter(
-  (slug) => !LLMS_SMALL_PAGES.has(slug),
-);
+// Tailwind's layers must sit below Starlight's. Whichever stylesheet declares a
+// layer first fixes its priority, and in `astro dev` the CSS a route emits
+// follows its component import order: starlight-blog's routes emit Starlight
+// component styles before tailwind.css, which sank `starlight.components` and
+// `starlight.content` beneath Tailwind's Preflight and stripped the blog's
+// layout. Declaring the order up front makes it independent of emission order.
+const CASCADE_LAYER_ORDER =
+  "@layer properties, theme, base, components, utilities, starlight;";
 
 export default defineConfig({
   site: "https://typegraph.dev",
@@ -184,9 +36,45 @@ export default defineConfig({
     processor: satteri(),
   },
   vite: {
-    plugins: [tailwindcss()],
+    plugins: [
+      tailwindcss(),
+      // Works around a known upstream issue (withastro/astro#16248): Vite's
+      // initial crawl only sees statically-imported modules, so
+      // integration-injected entrypoints that only get imported once a
+      // matching route is actually hit (actions, the passthrough image
+      // service, Zod re-exports, starlight-blog's route middleware/RSS
+      // feeds) get discovered lazily instead. Each lazy discovery forces a
+      // mid-session "optimized dependencies changed" reload, which the
+      // Cloudflare/workerd dev runner doesn't survive (`deps_ssr` chunk
+      // hashes change out from under an already-warm worker isolate),
+      // crashing with "The file does not exist at .../deps_ssr/*.js".
+      //
+      // The root-level `optimizeDeps.include` below only reliably reaches
+      // the client Vite Environment — the SSR/workerd environment
+      // (`@cloudflare/vite-plugin`) has its own separate optimizer, so
+      // fixing this for real requires `configEnvironment` to inject the
+      // include list directly into every non-client environment. This is
+      // the same workaround Astro maintainers confirmed fixes the bug
+      // (see the issue above) pending an upstream fix in the adapter.
+      //
+      // If dev crashes again with this error, the offending module is
+      // named right before the crash in `astro dev logs` as
+      // "dependency optimized: <name>" — add it to this list.
+      {
+        name: "optimize-ssr-deps",
+        configEnvironment(name) {
+          if (name === "client") return;
+          return {
+            optimizeDeps: {
+              include: LAZILY_DISCOVERED_DEPS,
+            },
+          };
+        },
+      },
+    ],
     optimizeDeps: {
       exclude: ["astro/actions/runtime/entrypoints/route.js"],
+      include: LAZILY_DISCOVERED_DEPS,
     },
   },
   image: {
@@ -196,55 +84,31 @@ export default defineConfig({
     starlight({
       components: {
         Head: "./src/components/starlight/Head.astro",
+        PageTitle: "./src/components/starlight/PageTitle.astro",
         ThemeProvider: "./src/components/starlight/ThemeProvider.astro",
       },
+      routeMiddleware: "./src/starlight-route-data.ts",
       plugins: [
-        starlightLlmsTxt({
-          details: [
-            "Use these files progressively to control context size:",
-            "",
-            "1. Start with `/llms-small.txt` for implementation and debugging tasks.",
-            "2. Use `/llms-full.txt` only for deep reference lookups.",
-          ].join("\n"),
-          optionalLinks: [
-            {
-              label: "Package on npm",
-              url: "https://www.npmjs.com/package/@nicia-ai/typegraph",
-              description: "Install target and latest published metadata",
+        starlightBlog({
+          title: "Blog",
+          authors: {
+            paul: {
+              name: "Paul Dlug",
+              title: "Creator of TypeGraph",
+              url: "https://x.com/pdlug",
             },
-            {
-              label: "GitHub repository",
-              url: "https://github.com/nicia-ai/typegraph",
-              description: "Source code, issues, and release notes",
-            },
-          ],
-          promote: [
-            "overview*",
-            "getting-started*",
-            "core-concepts*",
-            "backend-setup*",
-            "queries/overview*",
-            "queries/temporal*",
-            "troubleshooting*",
-            "errors*",
-          ],
-          demote: ["ejecting*", "examples/*"],
-          exclude: llmsSmallExclude,
-          rawContent: true,
-          customSets: [
-            {
-              label: "Examples",
-              paths: ["examples/*"],
-              description:
-                "Complete application examples demonstrating TypeGraph patterns",
-            },
-          ],
+          },
+          metrics: {
+            readingTime: true,
+          },
+          // The sidebar lists every post: it defaults to the ten most recent,
+          // which left older posts absent with nothing saying so.
+          recentPostCount: Infinity,
         }),
       ],
       disable404Route: true,
       title: "TypeGraph",
-      description:
-        "TypeScript-first embedded knowledge graph library with reasoning",
+      description: PRODUCT_DESCRIPTION,
       logo: {
         light: "./src/assets/logo-light.svg",
         dark: "./src/assets/logo-dark.svg",
@@ -257,10 +121,11 @@ export default defineConfig({
           href: "https://github.com/nicia-ai/typegraph",
         },
       ],
-      sidebar,
+      sidebar: documentationSidebar,
       customCss: ["./src/styles/tailwind.css", "./src/styles/custom.css"],
       favicon: "/favicon.svg",
       head: [
+        { tag: "style", content: CASCADE_LAYER_ORDER },
         {
           tag: "link",
           attrs: { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
@@ -302,6 +167,9 @@ export default defineConfig({
     },
   },
   output: "server",
+  // No route in this app touches Astro's session API — opt out of bundling
+  // it to cut cold-start parsing overhead on Cloudflare Workers.
+  session: false,
   adapter: cloudflare({
     imageService: "passthrough",
     prerenderEnvironment: "node",

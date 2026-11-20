@@ -21,7 +21,7 @@ export async function executeReachable(
   sourceId: string,
   options: InternalReachableOptions,
 ): Promise<readonly ReachableNode[]> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
   const maxHops = resolveMaxHops(
     options.maxHops,
     DEFAULT_ALGORITHM_MAX_HOPS,
@@ -40,7 +40,7 @@ export async function executeCanReach(
   targetId: string,
   options: InternalTraversalOptions,
 ): Promise<boolean> {
-  assertEdgeKinds(options.edges);
+  assertEdgeKinds(ctx, options.edges);
 
   const maxHops = resolveMaxHops(
     options.maxHops,

@@ -8,18 +8,48 @@
  * against an existing compile-time graph happens later, when the
  * document is merged into a host `GraphDef`.
  */
-import { assertJsonValue } from "../core/json-value";
 import {
+  CARDINALITY_VALUES,
+  TARGET_CARDINALITY_VALUES,
+} from "../core/edge-integrity-options";
+import {
+  assertJsonValue,
+  cloneAndFreezeGraphAnnotations,
+} from "../core/json-value";
+import {
+  type GraphAnnotations,
   type KindAnnotations,
   type KindEntity,
   type NullCheckOp,
 } from "../core/types";
+import {
+  COLLATION_VALUES,
+  UNIQUENESS_SCOPE_VALUES,
+} from "../core/unique-constraint-options";
 import { ConfigurationError } from "../errors";
-import { computeTransitiveClosure } from "../ontology/closures";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
+import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
-import { RESERVED_EDGE_KEYS, RESERVED_NODE_KEYS } from "../store/reserved-keys";
-import { compactUndefined, freezeDeep, isPlainObject } from "../utils/object";
+import {
+  COMPOSITION_EXISTENCE_VALUES,
+  COMPOSITION_PART_SIDE_VALUES,
+  compositionRelationFields,
+  isCompositionExistence,
+  isCompositionPartSide,
+} from "../registry/composition-relation";
+import {
+  isUnstorablePropertyName,
+  RESERVED_EDGE_KEYS,
+  RESERVED_NODE_KEYS,
+  UNSTORABLE_PROPERTY_NAME_REASON,
+} from "../store/reserved-keys";
+import {
+  compactUndefined,
+  createDataKeyedBag,
+  freezeDeep,
+  hasOwnKey,
+  isPlainObject,
+} from "../utils/object";
 import { err, ok, type Result } from "../utils/result";
 import {
   type GraphExtensionIssue,
@@ -175,11 +205,17 @@ const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
   "from",
   "to",
   "properties",
+  "cardinality",
+  "targetCardinality",
+  "acyclic",
 ]);
 const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "metaEdge",
   "from",
   "to",
+  "via",
+  "partSide",
+  "existence",
 ]);
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
@@ -276,6 +312,12 @@ export function validateGraphExtension(
 
   const version = validateVersion(documentRecord["version"], issues);
 
+  const annotations = validateAnnotations<GraphAnnotations>(
+    documentRecord["annotations"],
+    "/annotations",
+    "Graph extension",
+    issues,
+  );
   const nodes = validateNodesSection(documentRecord["nodes"], issues, strict);
   const edges = validateEdgesSection(documentRecord["edges"], issues, strict);
 
@@ -290,7 +332,7 @@ export function validateGraphExtension(
     strict,
   );
   if (ontology !== undefined) {
-    validateOntology(ontology, nodes, issues);
+    validateOntology(ontology, issues);
   }
 
   const indexes = validateIndexesSection(
@@ -303,7 +345,9 @@ export function validateGraphExtension(
     return err(new GraphExtensionValidationError(issues));
   }
 
-  return ok(freezeDocument({ version, nodes, edges, ontology, indexes }));
+  return ok(
+    freezeDocument({ version, annotations, nodes, edges, ontology, indexes }),
+  );
 }
 
 /**
@@ -369,7 +413,10 @@ function validateNodesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionNodeDef> = {};
+  // Kind names are DATA: `isValidKindName` admits `__proto__`, so a `{}`
+  // accumulator would answer that write with the prototype setter and drop the
+  // kind — silently, since the document is otherwise valid.
+  const result = createDataKeyedBag<ExtensionNodeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawNode] of Object.entries(rawNodes)) {
@@ -399,7 +446,10 @@ function validateNodesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.nodes`, which
+  // `validateGraphExtension` returns. See `createDataKeyedBag` in
+  // ../utils/object.ts.
+  return { ...result };
 }
 
 function validateNodeDocument(
@@ -492,7 +542,8 @@ function validateEdgesSection(
     return undefined;
   }
 
-  const result: Record<string, ExtensionEdgeDef> = {};
+  // Kind names are DATA — see the node section for why `{}` loses `__proto__`.
+  const result = createDataKeyedBag<ExtensionEdgeDef>();
   const recorded = new Set<string>();
 
   for (const [kindName, rawEdge] of Object.entries(rawEdges)) {
@@ -522,7 +573,8 @@ function validateEdgesSection(
     recorded.add(kindName);
   }
 
-  return result;
+  // Spread at the boundary: this becomes `GraphExtension.edges`.
+  return { ...result };
 }
 
 function validateEdgeDocument(
@@ -568,7 +620,20 @@ function validateEdgeDocument(
   );
 
   const from = validateEndpointList(raw["from"], `${path}/from`, issues);
-  const to = validateEndpointList(raw["to"], `${path}/to`, issues);
+  let to:
+    readonly string[] | Readonly<Record<string, readonly string[]>> | undefined;
+  if (Array.isArray(raw["to"])) {
+    to = validateEndpointList(raw["to"], `${path}/to`, issues);
+  } else if (isPlainObject(raw["to"])) {
+    to = validateTargetMapping(raw["to"], from, `${path}/to`, issues);
+  } else {
+    issues.push({
+      path: `${path}/to`,
+      message:
+        "Edge 'to' must be an array of node-kind names or an object mapping source kinds to target kinds.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+  }
   if (from === undefined || to === undefined) return undefined;
 
   const propertiesRaw = raw["properties"];
@@ -585,12 +650,43 @@ function validateEdgeDocument(
       );
   if (properties === undefined) return undefined;
 
+  const cardinalityResult = validateOptionalLiteral(
+    raw["cardinality"],
+    CARDINALITY_VALUES,
+    `${path}/cardinality`,
+    "Edge `cardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!cardinalityResult.ok) return undefined;
+
+  const targetCardinalityResult = validateOptionalLiteral(
+    raw["targetCardinality"],
+    TARGET_CARDINALITY_VALUES,
+    `${path}/targetCardinality`,
+    "Edge `targetCardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!targetCardinalityResult.ok) return undefined;
+
+  const acyclic = validateOptionalBoolean(
+    raw["acyclic"],
+    `${path}/acyclic`,
+    "`acyclic`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+
   return compactUndefined<ExtensionEdgeDef>({
     description,
     annotations,
     from,
     to,
     properties,
+    cardinality: cardinalityResult.value,
+    targetCardinality: targetCardinalityResult.value,
+    acyclic,
   });
 }
 
@@ -628,6 +724,61 @@ function validateEndpointList(
     names.push(value);
   }
   return names;
+}
+
+function validateTargetMapping(
+  raw: unknown,
+  from: readonly string[] | undefined,
+  path: string,
+  issues: GraphExtensionIssue[],
+): Readonly<Record<string, readonly string[]>> | undefined {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      path,
+      message:
+        "Edge 'to' mapping must be an object mapping source-kind names to target-kind name arrays.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return undefined;
+  }
+  if (from === undefined || from.length === 0) {
+    issues.push({
+      path,
+      message:
+        "Edge declares source-dependent targets in 'to', but 'from' is missing or empty.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return undefined;
+  }
+  const fromSet = new Set(from);
+  const keys = Object.keys(raw);
+  for (const sourceKind of fromSet) {
+    if (!Object.hasOwn(raw, sourceKind)) {
+      issues.push({
+        path: `${path}/${sourceKind}`,
+        message: `Edge is missing target mapping for declared source kind "${sourceKind}".`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      return undefined;
+    }
+  }
+  for (const key of keys) {
+    if (!fromSet.has(key)) {
+      issues.push({
+        path: `${path}/${key}`,
+        message: `Edge target mapping key "${key}" is not in declared 'from' kinds.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      return undefined;
+    }
+  }
+  const result = createDataKeyedBag<readonly string[]>();
+  for (const [key, value] of Object.entries(raw)) {
+    const targets = validateEndpointList(value, `${path}/${key}`, issues);
+    if (targets === undefined) return undefined;
+    result[key] = targets;
+  }
+  return { ...result };
 }
 
 // ============================================================
@@ -700,211 +851,61 @@ function validateOntologySection(
       continue;
     }
 
-    result.push({ metaEdge: metaEdge as MetaEdgeName, from, to });
+    const via = entry["via"];
+    if (via !== undefined && (typeof via !== "string" || via.length === 0)) {
+      issues.push({
+        path: `${path}/via`,
+        message:
+          "Ontology relation `via` must be a non-empty string when present.",
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    const partSide = entry["partSide"];
+    if (partSide !== undefined && !isCompositionPartSide(partSide)) {
+      issues.push({
+        path: `${path}/partSide`,
+        message: `Ontology relation \`partSide\` must be one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} when present.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    const existence = entry["existence"];
+    if (existence !== undefined && !isCompositionExistence(existence)) {
+      issues.push({
+        path: `${path}/existence`,
+        message: `Ontology relation \`existence\` must be one of ${COMPOSITION_EXISTENCE_VALUES.join(", ")} when present.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    result.push({
+      metaEdge: metaEdge as MetaEdgeName,
+      from,
+      to,
+      ...compositionRelationFields({ via, partSide, existence }),
+    });
   }
   return result;
 }
 
 function validateOntology(
   ontology: readonly ExtensionOntologyRelation[],
-  _nodes: Record<string, ExtensionNodeDef> | undefined,
   issues: GraphExtensionIssue[],
 ): void {
-  const seenKey = new Set<string>();
-
-  for (const [index, relation] of ontology.entries()) {
-    const path = `/ontology/${index}`;
-
-    if (
-      relation.from === relation.to &&
-      isStrictlyHierarchicalMetaEdge(relation.metaEdge)
-    ) {
-      issues.push({
-        path,
-        message: `Hierarchical meta-edge "${relation.metaEdge}" cannot be a self-loop ("${relation.from}" → "${relation.to}").`,
-        code: "ONTOLOGY_SELF_LOOP",
-      });
-    }
-
-    const key = `${relation.metaEdge}::${relation.from}->${relation.to}`;
-    if (seenKey.has(key)) {
-      issues.push({
-        path,
-        message: `Duplicate ontology relation "${relation.metaEdge}" (${relation.from} → ${relation.to}).`,
-        code: "DUPLICATE_ONTOLOGY_RELATION",
-      });
-      continue;
-    }
-    seenKey.add(key);
-  }
-
-  // Cycle detection on transitive hierarchical relations declared *within*
-  // this document. Cross-document cycles will be caught at evolve() time
-  // when the graph extension is merged with the existing graph.
-  detectHierarchicalCycles(ontology, issues);
-
-  // disjointWith ↔ subClassOf contradictions: declaring two kinds as
-  // both subclass-related (subClassOf, broader, narrower) AND
-  // disjointWith is incoherent — a subclass instance is also an
-  // instance of its parent, so they can't be in disjoint sets.
-  // Detect within the document; cross-document detection happens at
-  // merge time when the registry's closures are rebuilt.
-  detectDisjointHierarchyContradictions(ontology, issues);
-}
-
-const STRICTLY_HIERARCHICAL: ReadonlySet<MetaEdgeName> = new Set([
-  "subClassOf",
-  "broader",
-  "narrower",
-  "partOf",
-  "hasPart",
-]);
-
-function isStrictlyHierarchicalMetaEdge(name: MetaEdgeName): boolean {
-  return STRICTLY_HIERARCHICAL.has(name);
-}
-
-/**
- * Maps each hierarchical meta-edge to the canonical group it normalizes
- * into, mirroring the registry's relation-table flattening
- * (`computeClosuresFromOntology`). `narrower A→B` is the inverse of
- * `broader A→B`; `hasPart A→B` is the inverse of `partOf A→B`. Cycle
- * detection must run on the same normalized set the registry will, or
- * mixed-direction cycles like `broader A→B` + `narrower A→B` slip
- * through validation and surface only at runtime.
- */
-const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
-  MetaEdgeName,
-  Readonly<{ canonical: MetaEdgeName; flip: boolean }>
-> = new Map([
-  ["subClassOf", { canonical: "subClassOf", flip: false }],
-  ["broader", { canonical: "broader", flip: false }],
-  ["narrower", { canonical: "broader", flip: true }],
-  ["partOf", { canonical: "partOf", flip: false }],
-  ["hasPart", { canonical: "partOf", flip: true }],
-]);
-
-type NormalizedHierarchicalEdge = Readonly<{
-  from: string;
-  to: string;
-  originalIndex: number;
-}>;
-
-/**
- * Group ontology relations by their canonical hierarchical meta-edge,
- * flipping `narrower` / `hasPart` entries into their canonical direction.
- * Mirrors `computeClosuresFromOntology`'s flattening so cycle and
- * disjoint-contradiction detection see the same edge set the registry
- * will. `skipSelfLoops` is set by the cycle detector (self-loops are
- * already reported by `detectOntologySelfLoops`) and unset by the
- * disjoint-contradiction detector (which still wants `(A, A)` in the
- * closure for a `disjointWith(A, A)` check).
- */
-function buildHierarchicalGroups(
-  ontology: readonly ExtensionOntologyRelation[],
-  options: Readonly<{ skipSelfLoops: boolean }>,
-): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
-  const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
-  for (const [index, relation] of ontology.entries()) {
-    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
-    if (normalization === undefined) continue;
-    if (options.skipSelfLoops && relation.from === relation.to) continue;
-
-    const from = normalization.flip ? relation.to : relation.from;
-    const to = normalization.flip ? relation.from : relation.to;
-
-    const list = groups.get(normalization.canonical) ?? [];
-    list.push({ from, to, originalIndex: index });
-    groups.set(normalization.canonical, list);
-  }
-  return groups;
-}
-
-function detectHierarchicalCycles(
-  ontology: readonly ExtensionOntologyRelation[],
-  issues: GraphExtensionIssue[],
-): void {
-  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: true });
-
-  for (const [name, edges] of groups) {
-    const closure = computeTransitiveClosure(
-      edges.map((edge) => [edge.from, edge.to] as const),
-    );
-    const reportedNodes = new Set<string>();
-    for (const [from, reachable] of closure) {
-      if (!reachable.has(from) || reportedNodes.has(from)) continue;
-      reportedNodes.add(from);
-      const offendingEdge = edges.find((edge) => edge.from === from);
-      const path =
-        offendingEdge === undefined ? "/ontology" : (
-          `/ontology/${offendingEdge.originalIndex}`
-        );
-      issues.push({
-        path,
-        message: `Cycle detected in "${name}" relations involving "${from}".`,
-        code: "ONTOLOGY_CYCLE",
-      });
-    }
-  }
-}
-
-/**
- * Detects `disjointWith` ↔ subClassOf-family contradictions: declaring
- * `(A, B) disjointWith` AND `(A, B) subClassOf` (or any subclass-
- * relating meta-edge) in the same document is incoherent — a subclass
- * instance is also an instance of its parent, so they can't be in
- * disjoint sets.
- *
- * Detection runs against the closure of the hierarchical relations
- * because `(A, B) subClassOf` plus `(B, C) subClassOf` makes A and C
- * disjoint-incompatible too. `narrower` / `hasPart` are flipped to
- * their canonical direction during normalization, mirroring how
- * `detectHierarchicalCycles` builds its groups.
- *
- * Cross-document contradictions (extension declares `disjointWith(A,B)`
- * while a previously-evolved extension declared `subClassOf(A,B)`) are
- * caught at merge time when the registry's closures are rebuilt.
- */
-function detectDisjointHierarchyContradictions(
-  ontology: readonly ExtensionOntologyRelation[],
-  issues: GraphExtensionIssue[],
-): void {
-  const disjointPairs = new Set<string>();
-  const disjointPath = new Map<string, string>();
-  for (const [index, relation] of ontology.entries()) {
-    if (relation.metaEdge !== "disjointWith") continue;
-    // disjointWith is symmetric; record both orderings so the closure
-    // check below catches the contradiction regardless of which side
-    // the subclass relation orders by.
-    disjointPairs.add(`${relation.from}|${relation.to}`);
-    disjointPairs.add(`${relation.to}|${relation.from}`);
-    disjointPath.set(`${relation.from}|${relation.to}`, `/ontology/${index}`);
-    disjointPath.set(`${relation.to}|${relation.from}`, `/ontology/${index}`);
-  }
-  if (disjointPairs.size === 0) return;
-
-  // Walk the closure of every hierarchical group; any (from, reachable)
-  // pair that also appears in `disjointPairs` is a contradiction.
-  const groups = buildHierarchicalGroups(ontology, { skipSelfLoops: false });
-  const reported = new Set<string>();
-  for (const [name, edges] of groups) {
-    const closure = computeTransitiveClosure(
-      edges.map((edge) => [edge.from, edge.to] as const),
-    );
-    for (const [from, reachable] of closure) {
-      for (const to of reachable) {
-        const pairKey = `${from}|${to}`;
-        if (!disjointPairs.has(pairKey)) continue;
-        if (reported.has(pairKey)) continue;
-        reported.add(pairKey);
-        issues.push({
-          path: disjointPath.get(pairKey) ?? "/ontology",
-          message: `Contradiction: "${from}" and "${to}" are declared disjointWith but also related by "${name}" (directly or transitively).`,
-          code: "ONTOLOGY_DISJOINT_CONFLICT",
-        });
-      }
-    }
-  }
+  issues.push(
+    ...validateOntologyRelations(ontology).map((issue) => ({
+      path:
+        issue.relationIndex === undefined ?
+          "/ontology"
+        : `/ontology/${issue.relationIndex}`,
+      message: issue.message,
+      code: issue.code,
+    })),
+  );
 }
 
 // ============================================================
@@ -1214,6 +1215,46 @@ function validateGraphExtensionIndexWhere(
 // Properties and refinements
 // ============================================================
 
+/**
+ * Refuses a property name the SCHEMA LAYER cannot carry, at any nesting level.
+ *
+ * Zod accepts `__proto__` in a shape but drops it from every parse result — and
+ * reports success even when the field is required — so a value written to such
+ * a field is silently lost. The declaration is refused rather than accepted as
+ * a field the storage layer can never honor.
+ *
+ * This DOCUMENT walker and the Zod-schema walker behind `defineNode` /
+ * `defineEdge` stay separate — one traverses JSON property descriptors, the
+ * other Zod wrappers, and neither structure can be expressed in the other — but
+ * the VERDICT is not duplicated: both ask
+ * {@link isUnstorablePropertyName} and both quote
+ * {@link UNSTORABLE_PROPERTY_NAME_REASON}, so the two refusals cannot drift into
+ * disagreeing about the same field.
+ *
+ * Within this walker it is likewise the single owner. Both the top-level
+ * `properties` map and a nested `object.properties` map ask here: the two maps
+ * compile through the same `z.object(...)` (see `buildObjectSchema` in
+ * ./compiler.ts), so a name unstorable at the top level is equally unstorable
+ * one level down, and a refusal that fired on only one of them would let a
+ * document declare a field that validates clean and then vanishes at parse.
+ *
+ * @returns `true` when the name was refused (an issue has been pushed).
+ */
+function refuseUnstorablePropertyName(
+  propertyName: string,
+  propertyPath: string,
+  owner: string,
+  issues: GraphExtensionIssue[],
+): boolean {
+  if (!isUnstorablePropertyName(propertyName)) return false;
+  issues.push({
+    path: propertyPath,
+    message: `Property name "${propertyName}" is not allowed for ${owner}: ${UNSTORABLE_PROPERTY_NAME_REASON}.`,
+    code: "RESERVED_PROPERTY_NAME",
+  });
+  return true;
+}
+
 function validatePropertiesMap(
   raw: unknown,
   path: string,
@@ -1233,9 +1274,21 @@ function validatePropertiesMap(
 
   const reserved =
     ownerType === "node" ? RESERVED_NODE_KEYS : RESERVED_EDGE_KEYS;
-  const result: Record<string, ExtensionPropertyType> = {};
+  // Property names are DATA, and unrestricted apart from the reserved list and
+  // the `$` prefix — `__proto__` reaches here from any JSON document.
+  const result = createDataKeyedBag<ExtensionPropertyType>();
   for (const [propertyName, propertyValue] of Object.entries(raw)) {
     const propertyPath = `${path}/${encodeJsonPointerSegment(propertyName)}`;
+    if (
+      refuseUnstorablePropertyName(
+        propertyName,
+        propertyPath,
+        `${ownerType} "${ownerName}"`,
+        issues,
+      )
+    ) {
+      continue;
+    }
     if (reserved.has(propertyName)) {
       issues.push({
         path: propertyPath,
@@ -1263,7 +1316,9 @@ function validatePropertiesMap(
     result[propertyName] = validated;
   }
 
-  return result;
+  // Spread at the boundary: this becomes `ExtensionNodeDef.properties` on the
+  // returned document.
+  return { ...result };
 }
 
 function validateProperty(
@@ -1660,9 +1715,15 @@ function validateObjectProperty(
     return undefined;
   }
 
-  const fields: Record<string, ExtensionObjectFieldProperty> = {};
+  // Data-keyed: nested object field names read out of the document.
+  const fields = createDataKeyedBag<ExtensionObjectFieldProperty>();
   for (const [name, value] of propertiesEntries) {
     const fieldPath = `${path}/properties/${encodeJsonPointerSegment(name)}`;
+    if (
+      refuseUnstorablePropertyName(name, fieldPath, "a nested object", issues)
+    ) {
+      continue;
+    }
     if (!isPlainObject(value)) {
       issues.push({
         path: fieldPath,
@@ -1690,7 +1751,7 @@ function validateObjectProperty(
 
   return finalizeProperty<ExtensionObjectProperty>(
     "object",
-    { properties: fields },
+    { properties: { ...fields } },
     modifiers,
   );
 }
@@ -1956,7 +2017,7 @@ function validateUniqueConstraints(
         fieldsValid = false;
         break;
       }
-      if (!(field in properties)) {
+      if (!hasOwnKey(properties, field)) {
         issues.push({
           path: `${constraintPath}/fields/${fieldIndex}`,
           message: `Unique constraint field "${field}" is not declared on this kind.`,
@@ -1972,7 +2033,7 @@ function validateUniqueConstraints(
 
     const scopeResult = validateOptionalLiteral(
       constraint["scope"],
-      ["kind", "kindWithSubClasses"] as const,
+      UNIQUENESS_SCOPE_VALUES,
       `${constraintPath}/scope`,
       "Unique constraint `scope`",
       "INVALID_DOCUMENT_SHAPE",
@@ -1983,7 +2044,7 @@ function validateUniqueConstraints(
 
     const collationResult = validateOptionalLiteral(
       constraint["collation"],
-      ["binary", "caseInsensitive"] as const,
+      COLLATION_VALUES,
       `${constraintPath}/collation`,
       "Unique constraint `collation`",
       "INVALID_DOCUMENT_SHAPE",
@@ -2053,7 +2114,7 @@ function validateUniqueWhere(
     });
     return undefined;
   }
-  if (!(field in properties)) {
+  if (!hasOwnKey(properties, field)) {
     issues.push({
       path: `${path}/field`,
       message: `Unique \`where.field\` "${field}" is not declared on this kind.`,
@@ -2076,12 +2137,14 @@ function validateUniqueWhere(
 // Annotations
 // ============================================================
 
-function validateAnnotations(
+function validateAnnotations<
+  T extends GraphAnnotations | KindAnnotations = KindAnnotations,
+>(
   raw: unknown,
   path: string,
   ownerLabel: string,
   issues: GraphExtensionIssue[],
-): KindAnnotations | undefined {
+): T | undefined {
   if (raw === undefined) return undefined;
   if (!isPlainObject(raw)) {
     issues.push({
@@ -2113,7 +2176,7 @@ function validateAnnotations(
     throw error;
   }
 
-  return raw as KindAnnotations;
+  return raw as T;
 }
 
 // ============================================================
@@ -2260,6 +2323,7 @@ function describeUnknownValue(value: unknown): string {
 
 function freezeDocument(input: {
   version: GraphExtensionVersion;
+  annotations: GraphAnnotations | undefined;
   nodes: Record<string, ExtensionNodeDef> | undefined;
   edges: Record<string, ExtensionEdgeDef> | undefined;
   ontology: readonly ExtensionOntologyRelation[] | undefined;
@@ -2268,12 +2332,17 @@ function freezeDocument(input: {
   return Object.freeze(
     compactUndefined<{
       version: GraphExtensionVersion;
+      annotations?: GraphAnnotations;
       nodes?: Record<string, ExtensionNodeDef>;
       edges?: Record<string, ExtensionEdgeDef>;
       ontology?: readonly ExtensionOntologyRelation[];
       indexes?: readonly ExtensionIndex[];
     }>({
       version: input.version,
+      annotations:
+        input.annotations === undefined ?
+          undefined
+        : cloneAndFreezeGraphAnnotations(input.annotations),
       nodes: input.nodes === undefined ? undefined : freezeDeep(input.nodes),
       edges: input.edges === undefined ? undefined : freezeDeep(input.edges),
       ontology:

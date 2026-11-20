@@ -1,4 +1,6 @@
+import { type GraphDef } from "../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type IdentityFacade } from "../identity/types";
 import type {
   EdgeCollection,
   NodeCollection,
@@ -31,11 +33,12 @@ export const NODE_TEMPORAL_READ_NAMES = [
   "count",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
-/** Current-state-only node reads (constraint / index lookups). */
+/** Current-state-only node reads (constraint / index lookups, delete plans). */
 export const CURRENT_ONLY_READ_NAMES = [
   "findByConstraint",
   "bulkFindByConstraint",
   "bulkFindByIndex",
+  "planDelete",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
 
 /** Node write method names: never available on a read-only StoreView. */
@@ -43,14 +46,20 @@ export const NODE_WRITE_NAMES = [
   "create",
   "createFromRecord",
   "update",
+  "reparent",
+  "bulkReparent",
+  "compareAndSet",
+  "updateWhere",
   "delete",
   "hardDelete",
   "upsertById",
   "upsertByIdFromRecord",
   "bulkCreate",
+  "bulkReplaceById",
   "bulkUpsertById",
   "bulkInsert",
   "bulkDelete",
+  "bulkHardDelete",
   "getOrCreateByConstraint",
   "bulkGetOrCreateByConstraint",
 ] as const satisfies readonly (keyof NodeCollection<NodeType, string>)[];
@@ -63,6 +72,8 @@ export const EDGE_TEMPORAL_READ_NAMES = [
   "count",
   "findFrom",
   "findTo",
+  "bulkFindFrom",
+  "bulkFindTo",
   "findByEndpoints",
 ] as const satisfies readonly (keyof EdgeCollection<
   AnyEdgeType,
@@ -91,6 +102,7 @@ export const EDGE_WRITE_NAMES = [
   "bulkUpsertById",
   "bulkInsert",
   "bulkDelete",
+  "bulkHardDelete",
   "getOrCreateByEndpoints",
   "bulkGetOrCreateByEndpoints",
 ] as const satisfies readonly (keyof EdgeCollection<
@@ -98,6 +110,42 @@ export const EDGE_WRITE_NAMES = [
   NodeType,
   NodeType
 >)[];
+
+/** Identity facade read method names: available on a read-only StoreView. */
+export const IDENTITY_READ_NAMES = [
+  "classes",
+  "representativeOf",
+  "membersOf",
+  "nodesOf",
+  "areSame",
+  "areDifferent",
+  "assertionsOf",
+  "explainSame",
+] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+
+/**
+ * Identity facade methods that answer across every recorded coordinate
+ * (transition history), never available on a coordinate-pinned StoreView —
+ * and not receipt-tracked writes either, so they are neither a "read" (the
+ * `IdentityReadFacade` split) nor a "write" (the receipt counters) in the
+ * senses those two buckets mean.
+ */
+export const IDENTITY_HISTORY_NAMES = [
+  "transitionsOf",
+  "replay",
+] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
+
+/** Identity facade write method names: never available on a read-only view. */
+export const IDENTITY_WRITE_NAMES = [
+  "assertSame",
+  "assertDifferent",
+  "bulkAssertSame",
+  "bulkAssertDifferent",
+  "retractAssertion",
+  "retractSameAssertion",
+  "retractDifferentAssertion",
+  "bulkRetractAssertions",
+] as const satisfies readonly (keyof IdentityFacade<GraphDef>)[];
 
 /** Recorded-time collection point reads that reconstruct safely by id. */
 export const RECORDED_POINT_READ_NAMES = [

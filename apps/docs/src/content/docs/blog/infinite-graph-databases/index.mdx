@@ -1,0 +1,255 @@
+---
+title: "An Infinite Supply of Graph Databases"
+date: 2026-07-24
+excerpt: "Put TypeGraph inside a Cloudflare Durable Object and every tenant gets a private graph database that exists the moment you name it and costs nothing while idle."
+tags:
+  - announcements
+cover:
+  alt: "Abstract diagram: a single small graph icon on the left fans out through a soft wedge into a scattered cluster of many identical graph icons on the right, most muted and idle, a few lit up active"
+  image: "./cover.png"
+social:
+  alt: "An Infinite Supply of Graph Databases"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+TypeGraph turns a SQLite (or PGlite, or Postgres) connection into a typed
+property graph. If you point that connection at a Cloudflare Durable Object's
+own storage, you **no longer have to provision the database at all**. Every
+user, agent conversation, or workspace can have its own graph database without
+anyone ever creating it, and I think that's a lot of fun.
+
+I built a companion repo to show it off,
+[cf-do-typegraph](https://github.com/nicia-ai/cf-do-typegraph). It wires
+TypeGraph into a single Durable Object class and runs three real apps on
+top, entirely on your laptop under `wrangler dev`. It's MIT-licensed.
+
+## Naming is the provisioning step
+
+Here's the whole multi-tenant boundary:
+
+```ts
+// the whole multi-tenant boundary, trimmed from src/worker.ts
+const stub = env.GRAPH_DO.get(env.GRAPH_DO.idFromName(`${example}:${tenant}`));
+return stub.fetch(request); // that tenant's graph, and nothing else, lives here
+```
+
+`idFromName` is effectively the provisioning API. The Durable Object it names,
+and the private SQLite database inside it, comes into existence on the first
+request and hibernates as soon as nothing is using it, so there's no
+`CREATE DATABASE`, no row to add to a `tenants` table, and no migration to run
+against a database that didn't exist five minutes ago. Giving every user,
+agent, or document its own graph stops being a capacity-planning question,
+because each one is just a name.
+
+Minting a lot of them is just a loop:
+
+```bash
+curl -X POST "localhost:8787/api/spawn/notes?count=25&prefix=demo"
+```
+
+```json
+{ "example": "notes", "seeded": ["demo-1", "demo-2", "...", "demo-25"] }
+```
+
+```bash
+curl "localhost:8787/api/notes/demo-7/search?q=hibernation"   # its own private graph
+```
+
+That endpoint forwards 25 `/seed` requests to 25 different names and lets
+each Durable Object materialize when its request arrives. There's nothing
+more to it than that.
+
+## Isolation and shared transactions
+
+Making each tenant a Durable Object has two consequences that matter more than
+the provisioning trick.
+
+**Isolation is physical.** Each tenant's SQLite file is its own `ctx.storage`
+rather than a slice of a shared table. The usual SaaS approach is a
+`tenant_id` column plus a promise that every query remembers its
+`WHERE tenant_id = ?`, but here there's no shared table to put that column in,
+so a bad join or a missing filter can only ever see one tenant's data.
+
+**The graph and the app's data live in the same file and the same
+transaction.** The Durable Object boots its store the same way on every
+request:
+
+```ts
+// src/do/graph-do.ts
+createSqliteBackend(drizzle(this.ctx.storage));
+```
+
+`ctx.storage` is the same SQLite the application would use for its regular
+tables, and TypeGraph doesn't need a separate connection or service, so
+writing an app row and the graph edge that describes it can be one
+`store.transaction(...)`. There's no sync job between your data and your
+graph, and nothing for them to drift apart on.
+
+## Three apps, one Durable Object class
+
+The repo runs the same `GraphDO` class three ways, distinguished only by
+what you name the tenant. I picked each example because it needs a query
+that's painful to hand-write in SQL.
+
+### `authz`: a graph per workspace
+
+Zanzibar-style permission checks are reachability questions, and
+TypeGraph's ontology does the reasoning you'd otherwise hand-roll in a
+`WITH RECURSIVE`:
+
+```ts
+// src/examples/authz/graph.ts
+ontology: [
+  implies(owner, editor), // owner ⇒ editor ⇒ viewer
+  implies(editor, viewer),
+  inverseOf(memberOf, hasMember), // group membership, read backwards, zero stored reverse edges
+],
+```
+
+A permission check is one `shortestPath` call over the edge kinds the
+requested relation implies:
+
+```bash
+curl "localhost:8787/api/authz/acme/check?user=alice&relation=editor&doc=roadmap"
+```
+
+```json
+{
+  "allowed": true,
+  "relation": "editor",
+  "subject": "user:alice",
+  "via": {
+    "grantSubject": "group:staff",
+    "grantRelation": "editor",
+    "grantTarget": "folder:engineering"
+  },
+  "pathNodeIds": [
+    "user:alice",
+    "group:eng",
+    "group:staff",
+    "folder:engineering",
+    "folder:specs",
+    "doc:roadmap"
+  ],
+  "pathEdgeKinds": ["memberOf", "memberOf", "editor", "parentOf", "parentOf"]
+}
+```
+
+Alice never got a direct grant on that doc, and the answer comes with the
+path that proves she has access anyway: nested group membership (`alice` →
+`eng` → `staff`), one group-level `editor` grant, and two levels of folder
+inheritance, all inferred at query time from five stored edges without a
+permissions table.
+
+### `notes`: a graph per user
+
+This one is a personal wiki with `[[wiki-links]]`, and the fun part is that
+**FTS5 runs inside the Durable Object's own SQLite**, so there's no search
+service to keep warm:
+
+```bash
+curl "localhost:8787/api/notes/me/search?q=reachability"
+```
+
+```json
+{
+  "hits": [
+    {
+      "id": "note:reachability",
+      "title": "Reachability",
+      "score": "...",
+      "snippet": "<mark>Reachability</mark> asks whether you can get from one node to another..."
+    }
+  ]
+}
+```
+
+Backlinks don't need any stored rows. The graph only writes a forward `linksTo`
+edge when a note contains `[[Some Target]]`, and one ontology declaration
+lets a `linkedFrom` traversal read those same edges backwards:
+
+```ts
+// src/examples/notes/graph.ts
+ontology: [inverseOf(linksTo, linkedFrom)],
+```
+
+There's no second edge to keep in sync, so backlinks can't drift from the
+links that produced them.
+
+### `agent-memory`: a graph per conversation
+
+Each session is its own graph, seeded by replaying a hand-written
+conversation one message at a time:
+
+```text
+"I'm Ada, and I'm PMing the Halo launch."
+"Grace is my lead engineer — we've shipped three products together."
+...
+"New development: we're partnering with Northwind, and Grace is their main contact."
+```
+
+That eighth message is my favorite part of the repo. `Organization` isn't a
+node kind in the compile-time schema, so it arrives at runtime, gets validated
+the same way an LLM's proposed schema change would be, and is applied live:
+
+```ts
+// src/examples/agent-memory/replay.ts
+const validation = validateGraphExtension(evolution.extension, {
+  strict: true,
+});
+current = await current.evolve(validation.data);
+```
+
+The graph grows a new node kind and a new `worksAt` edge kind in the middle
+of a conversation, while the Durable Object is running. The change is
+persisted, so it's still there the next time the object wakes from
+hibernation. And because the store boots with `{ history: true }`, the same
+graph can answer "what did the agent believe after message 4?", before
+Northwind existed, by reading at a recorded point in time instead of the
+live state.
+
+## The same pattern without Cloudflare
+
+The underlying idea, **a small, typed graph database per tenant, addressed by
+name**, works well whenever tenants are numerous, mostly idle, and shouldn't
+share a query surface. Durable Objects make it especially easy (SQLite at the
+edge, isolated per object, and hibernating for free), but TypeGraph doesn't
+know or care that one is underneath, and the same pattern works with:
+
+- **A directory of SQLite files.** One file per tenant, opened through
+  `createLocalSqliteStore`. Provisioning is choosing a file path.
+- **A pool of PGlite files.** Postgres-in-WASM via `createLocalPgliteStore`,
+  one file per tenant, no server process.
+- **A database per Neon branch.** Real network Postgres, with the standard
+  `createPostgresBackend` pointed at a different connection string per
+  tenant, provisioned through Neon's API instead of `idFromName`.
+
+I built the demo on Durable Objects because they need the least
+infrastructure to try: there's no server to run, and you don't need an account
+to develop against them.
+
+## Tested against the real thing
+
+Every example runs its tests against real Durable Objects via
+`@cloudflare/vitest-pool-workers`, not mocks, including a cross-tenant
+isolation test that seeds one tenant and checks that a same-shaped,
+differently named tenant reads back empty. `pnpm dev` runs the whole thing
+(landing page, live force-directed graph view, all three APIs) locally for
+free. Workers AI, the one billable piece, is only used for optional
+semantic search and entity extraction, and ships commented out.
+
+## Try it
+
+- [cf-do-typegraph](https://github.com/nicia-ai/cf-do-typegraph):
+  `pnpm install && pnpm dev`, then open `localhost:8787`
+- [Bring Your Own Database](/blog/bring-your-own-database): the backend
+  abstraction that lets the same store run on a different SQLite underneath
+- [Agent Memory That Knows Why It Believes Things](/blog/truth-maintenance-for-agent-memory):
+  the bitemporal history behind the `agent-memory` replay
+- [An Agent That Grows Its Own Schema](/blog/runtime-schema-evolution): `store.evolve()`,
+  the mechanism behind the live `Organization` extension
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

@@ -7,7 +7,7 @@ This example builds a document management system with:
 
 - **Document hierarchy** (folders, documents, sections)
 - **Semantic search** with vector embeddings
-- **Version history** using temporal queries
+- **Version history** using recorded time
 - **Access control** with permission inheritance
 - **Related documents** discovery
 
@@ -22,8 +22,10 @@ import {
   embedding,
   searchable,
   subClassOf,
-  partOf,
-  hasPart,
+  type Node,
+  type NodeId,
+  asEdgeId,
+  asNodeId,
 } from "@nicia-ai/typegraph";
 
 // Base content type (abstract)
@@ -118,7 +120,13 @@ const graph = defineGraph({
     Permission: { type: Permission },
   },
   edges: {
-    contains: { type: contains, from: [Folder], to: [Folder, Document] },
+    contains: {
+      type: contains,
+      from: [Folder],
+      to: [Folder, Document],
+      // A Folder or Document belongs to exactly one parent Folder.
+      targetCardinality: "one",
+    },
     relatedTo: { type: relatedTo, from: [Document], to: [Document] },
     hasPermission: { type: hasPermission, from: [User], to: [Content] },
     createdBy: { type: createdBy, from: [Content], to: [User] },
@@ -128,9 +136,17 @@ const graph = defineGraph({
     subClassOf(Folder, Content),
     subClassOf(Document, Content),
 
-    // Compositional relationships
-    partOf(Document, Folder),
-    hasPart(Folder, Document),
+    // `contains` is deliberately NOT declared as a `partOf`/`hasPart`
+    // composition relation. Composition means single ownership plus
+    // cascade-delete: deleting the whole deletes every part. A folder tree
+    // is the opposite case — folders and documents are shared/re-homeable
+    // containment, so deleting a Folder should move its children up to the
+    // deleted folder's parent, not delete them. `targetCardinality: "one"`
+    // above already gives "at most one parent folder"; that single-parent
+    // constraint is all this relationship needs. Reach for `partOf` only
+    // when a part's lifecycle is genuinely bound to its whole (a document's
+    // sections dying with the document, not a folder's contents surviving
+    // the folder).
   ],
 });
 ```
@@ -205,10 +221,10 @@ async function generateEmbedding(text: string): Promise<number[]> {
 }
 
 async function createDocument(
-  folderId: string,
+  folderId: NodeId<typeof Folder>,
   title: string,
   content: string,
-  userId: string
+  userId: NodeId<typeof User>
 ): Promise<Node<typeof Document>> {
   const embedding = await generateEmbedding(`${title}\n\n${content}`);
 
@@ -239,20 +255,20 @@ async function createDocument(
 
 ```typescript
 async function updateDocument(
-  documentId: string,
+  documentId: NodeId<typeof Document>,
   updates: { title?: string; content?: string; status?: "draft" | "published" | "archived" }
 ): Promise<Node<typeof Document>> {
   const current = await store.nodes.Document.getById(documentId);
   if (!current) throw new Error(`Document not found: ${documentId}`);
 
   // If content changed, regenerate embedding
-  let embedding = current.embedding;
+  let embedding: readonly number[] | undefined = current.embedding;
   if (updates.content && updates.content !== current.content) {
     const text = `${updates.title ?? current.title}\n\n${updates.content}`;
     embedding = await generateEmbedding(text);
   }
 
-  // Update creates a new version automatically
+  // Update rewrites the document in place and increments meta.version
   return store.nodes.Document.update(documentId, {
     ...updates,
     embedding,
@@ -276,17 +292,17 @@ a question rather than a set of keywords:
 async function searchDocumentsSemantically(
   query: string,
   options: {
-    folderId?: string;
+    folderId?: NodeId<typeof Folder>;
     status?: "draft" | "published" | "archived";
     limit?: number;
     minScore?: number;
   } = {}
-): Promise<DocumentProps[]> {
+): Promise<readonly Node<typeof Document>[]> {
   const { folderId, status = "published", limit = 10, minScore = 0.7 } = options;
 
   const queryEmbedding = await generateEmbedding(query);
 
-  let queryBuilder = store
+  const queryBuilder = store
     .query()
     .from("Document", "d")
     .whereNode("d", (d) =>
@@ -297,7 +313,7 @@ async function searchDocumentsSemantically(
 
   // If folderId specified, filter to folder descendants
   if (folderId) {
-    queryBuilder = store
+    return store
       .query()
       .from("Folder", "f")
       .whereNode("f", (f) => f.id.eq(folderId))
@@ -308,7 +324,9 @@ async function searchDocumentsSemantically(
         d.embedding
           .similarTo(queryEmbedding, limit, { metric: "cosine", minScore })
           .and(d.status.eq(status)),
-      );
+      )
+      .select((ctx) => ctx.d)
+      .execute();
   }
 
   // Results are already ordered by similarity (most similar first).
@@ -326,7 +344,7 @@ where the match occurred:
 async function findDocumentsByKeyword(
   query: string,
   options: { limit?: number } = {},
-): Promise<Array<{ document: DocumentProps; score: number; snippet?: string }>> {
+): Promise<Array<{ document: Node<typeof Document>; score: number; snippet?: string }>> {
   const hits = await store.search.fulltext("Document", {
     query,
     limit: options.limit ?? 10,
@@ -354,7 +372,7 @@ async function searchDocuments(
     status?: "draft" | "published" | "archived";
     limit?: number;
   } = {},
-): Promise<Array<{ document: DocumentProps; score: number; snippet?: string }>> {
+): Promise<Array<{ document: Node<typeof Document>; score: number; snippet?: string }>> {
   const { status = "published", limit = 10 } = options;
   const queryEmbedding = await generateEmbedding(query);
 
@@ -392,10 +410,10 @@ query-builder statement. The fusion runs at the SQL layer:
 
 ```typescript
 async function searchInFolder(
-  folderId: string,
+  folderId: NodeId<typeof Folder>,
   query: string,
   limit = 10,
-): Promise<DocumentProps[]> {
+): Promise<readonly Node<typeof Document>[]> {
   const queryEmbedding = await generateEmbedding(query);
 
   return store
@@ -422,9 +440,9 @@ async function searchInFolder(
 
 ```typescript
 async function findRelatedDocuments(
-  documentId: string,
+  documentId: NodeId<typeof Document>,
   limit = 5
-): Promise<Array<{ document: DocumentProps; relationship: string }>> {
+): Promise<ReadonlyArray<{ document: Node<typeof Document>; relationship: string }>> {
   // First, get explicit relationships
   const explicit = await store
     .query()
@@ -466,76 +484,58 @@ async function findRelatedDocuments(
 
 ## Version History
 
-### Get Document History
-
-```typescript
-interface DocumentVersion {
-  title: string;
-  content: string;
-  status: string;
-  validFrom: string;
-  validTo: string | undefined;
-  version: number;
-}
-
-async function getDocumentHistory(documentId: string): Promise<DocumentVersion[]> {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) => d.id.eq(documentId))
-    .orderBy((ctx) => ctx.d.validFrom, "desc")
-    .select((ctx) => ({
-      title: ctx.d.title,
-      content: ctx.d.content,
-      status: ctx.d.status,
-      validFrom: ctx.d.validFrom,
-      validTo: ctx.d.validTo,
-      version: ctx.d.version,
-    }))
-    .execute();
-}
-```
+A document has one stored row. An update rewrites it in place and raises `meta.version`, so no
+temporal mode returns an earlier version: `includeEnded` widens the validity-window filter, not the
+history, and `asOf` returns the current properties of a row that was valid at the instant. Earlier
+versions are kept by [recorded time](/queries/temporal#recorded-time-bitemporal). Open the store with
+`history: true` (`createStoreWithSchema(graph, backend, { history: true })`) to record every
+committed write, then read the document at a recorded instant.
 
 ### View Document at Point in Time
 
+Resolve the wall-clock time to the recorded instant at or before it, and read the document there:
+
 ```typescript
 async function getDocumentAsOf(
-  documentId: string,
+  documentId: NodeId<typeof Document>,
   timestamp: Date
-): Promise<DocumentProps | undefined> {
-  return store
-    .query()
-    .from("Document", "d")
-    .temporal("asOf", timestamp.toISOString())
-    .whereNode("d", (d) => d.id.eq(documentId))
-    .select((ctx) => ctx.d)
-    .first();
+): Promise<Node<typeof Document> | undefined> {
+  const anchor = await store.resolveRecordedInstant(timestamp.toISOString());
+  // undefined: nothing was recorded at or before that time.
+  if (anchor === undefined) return undefined;
+  return store.asOfRecorded(anchor).nodes.Document.getById(documentId);
 }
 ```
 
+The result carries the `meta.version` the document had then, or is `undefined` when the document did
+not exist (or was deleted) at that instant.
+
 ### Compare Versions
 
+An update rewrites the document's one stored row and raises `meta.version`, so the previous
+version is not a row any temporal mode can return. Comparing two versions reads them from
+[recorded time](/queries/temporal#recorded-time-bitemporal): open the store with `history: true`
+(`createStoreWithSchema(graph, backend, { history: true })`), keep a `store.recordedNow()`
+checkpoint after each revision worth comparing, and read the document at both checkpoints.
+
 ```typescript
+import { type RecordedInstant } from "@nicia-ai/typegraph/core";
+
+// After each revision worth comparing:
+//   await updateDocument(documentId, { content: revisedContent });
+//   const revised = await store.recordedNow();
 async function compareVersions(
-  documentId: string,
-  version1: number,
-  version2: number
-): Promise<{ before: DocumentProps; after: DocumentProps } | undefined> {
-  const versions = await store
-    .query()
-    .from("Document", "d")
-    .temporal("includeEnded")
-    .whereNode("d", (d) =>
-      d.id.eq(documentId).and(d.version.in([version1, version2]))
-    )
-    .orderBy((ctx) => ctx.d.version, "asc")
-    .select((ctx) => ctx.d)
-    .execute();
+  documentId: NodeId<typeof Document>,
+  before: RecordedInstant,
+  after: RecordedInstant
+): Promise<{ before: Node<typeof Document>; after: Node<typeof Document> } | undefined> {
+  const [earlier, later] = await Promise.all([
+    store.asOfRecorded(before).nodes.Document.getById(documentId),
+    store.asOfRecorded(after).nodes.Document.getById(documentId),
+  ]);
+  if (earlier === undefined || later === undefined) return undefined;
 
-  if (versions.length !== 2) return undefined;
-
-  return { before: versions[0], after: versions[1] };
+  return { before: earlier, after: later };
 }
 ```
 
@@ -544,15 +544,16 @@ async function compareVersions(
 ### Check Read Permission
 
 ```typescript
-async function canRead(userId: string, contentId: string): Promise<boolean> {
+async function canRead(userId: NodeId<typeof User>, contentId: NodeId<typeof Content>): Promise<boolean> {
   // Check direct permission
   const directPermission = await store
     .query()
     .from("User", "u")
     .whereNode("u", (u) => u.id.eq(userId))
     .traverse("hasPermission", "p")
-    .to("Content", "c", { includeSubClasses: true })
+    .to("Content", "c", { expansion: "subclasses" })
     .whereNode("c", (c) => c.id.eq(contentId))
+    .select((ctx) => ctx.c)
     .first();
 
   if (directPermission) return true;
@@ -562,15 +563,14 @@ async function canRead(userId: string, contentId: string): Promise<boolean> {
   if (!content) return false;
 
   // Walk up the folder tree checking permissions
-  const parentFolders = await store
-    .query()
-    .from("Folder", "f")
-    .traverse("contains", "e")
-    .recursive()
-    .to("Content", "c", { includeSubClasses: true })
-    .whereNode("c", (c) => c.id.eq(contentId))
-    .select((ctx) => ctx.f.id)
-    .execute();
+  const ancestors = await store.algorithms.reachable(contentId, {
+    edges: ["contains"],
+    direction: "in",
+    excludeSource: true,
+  });
+  const parentFolders = ancestors
+    .filter((node) => node.kind === "Folder")
+    .map((node) => asNodeId<typeof Folder>(node.id));
 
   for (const folderId of parentFolders) {
     const folderPermission = await store
@@ -578,8 +578,9 @@ async function canRead(userId: string, contentId: string): Promise<boolean> {
       .from("User", "u")
       .whereNode("u", (u) => u.id.eq(userId))
       .traverse("hasPermission", "p")
-      .to("Folder", "f")
+      .to("Content", "f", { expansion: "subclasses" })
       .whereNode("f", (f) => f.id.eq(folderId))
+      .select((ctx) => ctx.f)
       .first();
 
     if (folderPermission) return true;
@@ -593,8 +594,8 @@ async function canRead(userId: string, contentId: string): Promise<boolean> {
 
 ```typescript
 async function grantPermission(
-  userId: string,
-  contentId: string,
+  userId: NodeId<typeof User>,
+  contentId: NodeId<typeof Content>,
   level: "read" | "write" | "admin"
 ): Promise<void> {
   const user = await store.nodes.User.getById(userId);
@@ -616,11 +617,11 @@ async function grantPermission(
 
 ```typescript
 interface FolderContents {
-  folders: Array<{ id: string; title: string; path: string }>;
-  documents: Array<{ id: string; title: string; status: string }>;
+  folders: ReadonlyArray<{ id: string; title: string; path: string }>;
+  documents: ReadonlyArray<{ id: string; title: string; status: string }>;
 }
 
-async function getFolderContents(folderId: string): Promise<FolderContents> {
+async function getFolderContents(folderId: NodeId<typeof Folder>): Promise<FolderContents> {
   const folders = await store
     .query()
     .from("Folder", "parent")
@@ -658,7 +659,7 @@ every ancestor folder, tagged with its depth from the starting content:
 
 ```typescript
 async function getBreadcrumb(
-  contentId: string
+  contentId: NodeId<typeof Content>
 ): Promise<Array<{ id: string; title: string; path: string }>> {
   const ancestors = await store.algorithms.reachable(contentId, {
     edges: ["contains"],
@@ -671,7 +672,7 @@ async function getBreadcrumb(
   const folderIds = ancestors
     .filter((node) => node.kind === "Folder")
     .toSorted((a, b) => b.depth - a.depth) // root first
-    .map((node) => node.id);
+    .map((node) => asNodeId<typeof Folder>(node.id));
 
   const folders = await store.nodes.Folder.getByIds(folderIds);
   return folders
@@ -692,7 +693,7 @@ single batched `getByIds` hydrates the folder properties.
 ### Move Document to Folder
 
 ```typescript
-async function moveDocument(documentId: string, targetFolderId: string): Promise<void> {
+async function moveDocument(documentId: NodeId<typeof Document>, targetFolderId: NodeId<typeof Folder>): Promise<void> {
   await store.transaction(async (tx) => {
     // Remove from current folder
     const currentEdge = await tx
@@ -705,7 +706,7 @@ async function moveDocument(documentId: string, targetFolderId: string): Promise
       .first();
 
     if (currentEdge) {
-      await tx.edges.contains.delete(currentEdge);
+      await tx.edges.contains.delete(asEdgeId<typeof contains>(currentEdge));
     }
 
     // Add to new folder
@@ -721,7 +722,7 @@ async function moveDocument(documentId: string, targetFolderId: string): Promise
 ### Bulk Archive
 
 ```typescript
-async function archiveFolder(folderId: string): Promise<number> {
+async function archiveFolder(folderId: NodeId<typeof Folder>): Promise<number> {
   // Get all documents in folder and subfolders
   const documents = await store
     .query()

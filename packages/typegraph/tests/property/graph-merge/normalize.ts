@@ -14,6 +14,12 @@
  *     independent commits even when the logical result is identical. These are
  *     STRIPPED, and every props bag is re-serialized through the same canonical,
  *     recursively key-sorted JSON form so key-ordering noise cannot leak in.
+ *     `valid_to` is the one temporal column that is COMPARED, because the merge
+ *     decides it: it resolves a row's end-of-validity, so two orderings that end
+ *     a row differently must fail this gate — ids and props alone would certify
+ *     a window divergence as lawful. `valid_from` stays stripped, with
+ *     `created_at`: it defaults to the row's creation instant, so two
+ *     independent commits of the same logical result carry different values.
  *   - Every array in the report and the graph is sorted by a stable key so two
  *     orderings that produce the same SET produce the same SEQUENCE.
  *
@@ -24,7 +30,7 @@
  */
 
 import type { GraphDef, Store } from "@nicia-ai/typegraph";
-import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph";
+import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph/core";
 
 import { rowPropsToObject } from "../../../src/backend/types";
 import { canonicalizeProps } from "../../../src/graph-merge/canonical-props";
@@ -32,8 +38,13 @@ import {
   enumerateAllEdges,
   enumerateAllNodes,
 } from "../../../src/graph-merge/state-diff";
-import type { BranchId, MergeReport } from "../../../src/graph-merge/types";
+import type {
+  BranchId,
+  DroppedItem,
+  MergeReport,
+} from "../../../src/graph-merge/types";
 import { storeBackend } from "../../../src/store/runtime-port";
+import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 
 /** Lexicographic comparator over two strings (ids, kinds, properties). */
 function compareStrings(left: string, right: string): number {
@@ -70,6 +81,7 @@ type NormalizedResolution = Readonly<{
   kind: string;
   memberIds: readonly string[];
   branchOrigins: readonly string[];
+  decisiveEdges: MergeReport["resolutions"][number]["decisiveEdges"];
 }>;
 
 /** A delete/modify conflict in canonical form. */
@@ -90,9 +102,25 @@ type NormalizedTypeReconciliation = Readonly<{
 
 /** A dropped item in canonical form. */
 type NormalizedDropped = Readonly<{
-  kind: "edge" | "node";
+  kind: DroppedItem["kind"];
   id: string;
   reason: string;
+}>;
+
+/**
+ * A resolved end-of-validity in canonical form. `precedence` is COMPARED, not
+ * stripped: it is the difference between an end the merge wrote and one the
+ * incremental target already held, so two orderings that disagree about which
+ * happened must fail the gate rather than compare equal on the instant alone.
+ */
+type NormalizedValidityEnd = Readonly<{
+  entity: string;
+  kind: string;
+  id: string;
+  validTo: string | undefined;
+  clearValidTo: true | undefined;
+  claimedBy: readonly string[];
+  precedence: string | undefined;
 }>;
 
 /** Per-branch provenance materialized from the report closure, sorted. */
@@ -120,18 +148,20 @@ export type NormalizedReport = Readonly<{
   deleteModifyConflicts: readonly NormalizedDeleteModify[];
   typeReconciliations: readonly NormalizedTypeReconciliation[];
   dropped: readonly NormalizedDropped[];
+  validityEnds: readonly NormalizedValidityEnd[];
   baseAmbiguities: readonly NormalizedBaseAmbiguity[];
   provenance: readonly NormalizedProvenance[];
 }>;
 
-/** A committed node reduced to id + kind + canonical props (meta stripped). */
+/** A committed node reduced to id + kind + canonical props + end-of-validity. */
 type NormalizedNode = Readonly<{
   id: string;
   kind: string;
   props: string;
+  validTo: string | undefined;
 }>;
 
-/** A committed edge reduced to its structural identity (meta stripped). */
+/** A committed edge reduced to its structural identity + end-of-validity. */
 type NormalizedEdge = Readonly<{
   id: string;
   kind: string;
@@ -140,6 +170,7 @@ type NormalizedEdge = Readonly<{
   fromKind: string;
   toKind: string;
   props: string;
+  validTo: string | undefined;
 }>;
 
 /** The fully canonical, deep-equal-comparable form of a committed graph. */
@@ -189,6 +220,7 @@ export function normalizeReport<G extends GraphDef>(
       branchOrigins: [...resolution.branchOrigins]
         .map((id) => id as string)
         .sort((left, right) => compareStrings(left, right)),
+      decisiveEdges: resolution.decisiveEdges,
     }))
     .sort((left, right) => compareStrings(left.canonicalId, right.canonicalId));
 
@@ -244,6 +276,25 @@ export function normalizeReport<G extends GraphDef>(
       compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
     );
 
+  const validityEnds: readonly NormalizedValidityEnd[] = report.validityEnds
+    .map((entry) => ({
+      entity: entry.entity,
+      kind: entry.kind,
+      id: entry.id,
+      validTo: entry.validTo,
+      clearValidTo: entry.clearValidTo,
+      claimedBy: [...entry.claimedBy]
+        .map((branchId) => branchId as string)
+        .sort((left, right) => compareStrings(left, right)),
+      precedence: entry.precedence,
+    }))
+    .sort((left, right) =>
+      compareStrings(
+        `${left.entity}|${left.kind}|${left.id}`,
+        `${right.entity}|${right.kind}|${right.id}`,
+      ),
+    );
+
   const baseAmbiguities: readonly NormalizedBaseAmbiguity[] =
     report.baseAmbiguities
       .map((ambiguity) => ({
@@ -280,6 +331,7 @@ export function normalizeReport<G extends GraphDef>(
     deleteModifyConflicts,
     typeReconciliations,
     dropped,
+    validityEnds,
     baseAmbiguities,
     provenance,
   };
@@ -313,7 +365,12 @@ export async function normalizeGraph<G extends GraphDef>(
         continue;
       }
       const props = rowPropsToObject(row.props);
-      nodes.push({ id: row.id, kind: row.kind, props: canonicalProps(props) });
+      nodes.push({
+        id: row.id,
+        kind: row.kind,
+        props: canonicalProps(props),
+        validTo: canonicalizeDatabaseTimestamp(row.valid_to),
+      });
     }
   }
 
@@ -337,6 +394,7 @@ export async function normalizeGraph<G extends GraphDef>(
         fromKind: row.from_kind,
         toKind: row.to_kind,
         props: canonicalProps(props),
+        validTo: canonicalizeDatabaseTimestamp(row.valid_to),
       });
     }
   }

@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createQueryBuilder,
   defineEdge,
   defineGraph,
   defineNode,
@@ -16,6 +15,7 @@ import {
   subClassOf,
 } from "../src";
 import { type GraphBackend } from "../src/backend/types";
+import { createQueryBuilder } from "../src/query";
 import { type PropsAccessor } from "../src/query/builder/types";
 import { compileQuery } from "../src/query/compiler";
 import {
@@ -26,6 +26,7 @@ import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy"
 import { type FulltextAccessor } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
 import type { Store } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 import { toSqlString, toSqlWithParams } from "./sql-test-utils";
 import { createInitializedStore, createTestBackend } from "./test-utils";
 
@@ -568,13 +569,13 @@ describe(".matches() with polymorphic alias", () => {
       body: "casual take",
     });
 
-    // includeSubClasses expands "Content" to ["Content", "Article", "BlogPost"].
+    // expansion: "subclasses" expands "Content" to ["Content", "Article", "BlogPost"].
     // The polymorphic accessor types lose individual field typing; the
     // runtime introspector still recognizes title as searchable across
     // all three kinds and emits a node_kind IN (...) filter.
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "renewable",
@@ -588,12 +589,12 @@ describe(".matches() with polymorphic alias", () => {
     expect(ids).toEqual([article.id, blog.id].toSorted());
   });
 
-  it("rejects polymorphic matches when any subclass lacks searchable() fields", async () => {
-    // Parent + two subclasses where only one declares `searchable()`.
-    // `hasSearchableField` uses `.every()`, so the runtime guard throws
-    // rather than silently producing partial results across the mixed
-    // set. This pins the behavior for the kbgraph-style shape where a
-    // parent kind has heterogeneous children.
+  it("rejects polymorphic matches when the parent kind lacks searchable() fields", async () => {
+    // Parent + two subclasses where only one subclass declares
+    // `searchable()`. The parent alias reads the parent's declaration, which
+    // has no searchable content, so the runtime guard throws and names the
+    // parent kind rather than silently producing partial results across the
+    // mixed set.
     const Media = defineNode("Media", {
       schema: z.object({ title: z.string() }),
     });
@@ -626,7 +627,7 @@ describe(".matches() with polymorphic alias", () => {
     expect(() =>
       mixedStore
         .query()
-        .from("Media", "m", { includeSubClasses: true })
+        .from("Media", "m", { expansion: "subclasses" })
         .whereNode("m", (m) =>
           (m as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
             "searchable",
@@ -635,7 +636,7 @@ describe(".matches() with polymorphic alias", () => {
         )
         .select((ctx) => ({ id: ctx.m.id }))
         .execute(),
-    ).toThrow(/searchable\(\)/i);
+    ).toThrow(/kind "Media" has no fields declared with searchable\(\)/);
   });
 
   it("hybrid SQL appends user orderBy as RRF tiebreaker", () => {
@@ -683,13 +684,29 @@ describe(".matches() with polymorphic alias", () => {
     // The outer ORDER BY contains the fused RRF expression FOLLOWED BY
     // the user's `rank` orderBy as a tiebreaker (json-path extraction).
     expect(sqlText).toMatch(
-      /ORDER BY.*cte_embeddings\.ord.*cte_fulltext\.ord.*ARRAY\['rank'\].*DESC/,
+      /ORDER BY.*cte_embeddings\.ord.*cte_fulltext\.ord.*ARRAY\['rank'\].*DESC NULLS FIRST/,
     );
+    expect(sqlText).not.toMatch(/ARRAY\['rank'\].*IS NULL/);
     // The fulltext CTE's inner LIMIT must break rank ties by node_id so
     // the top-k cutoff matches the backend's fulltextSearch (rank DESC, node_id ASC).
     expect(sqlText).toMatch(
       /ORDER BY rank DESC,\s+"typegraph_node_fulltext"\."node_id" ASC\s+LIMIT/,
     );
+
+    const malformedAst = {
+      ...ast,
+      orderBy: requireDefined(ast.orderBy).map((orderSpec) => ({
+        ...orderSpec,
+        direction: "desc; SELECT 1" as "desc",
+      })),
+    };
+    expect(() =>
+      compileQuery(
+        malformedAst,
+        HybridGraph.id,
+        pgVectorCompileOptions([["HybridDoc", "embedding"]]),
+      ),
+    ).toThrow(/Invalid ORDER BY direction/);
   });
 
   it("hybrid SQL preserves single-source candidates before RRF ordering", () => {
@@ -766,7 +783,7 @@ describe(".matches() with polymorphic alias", () => {
 
     const results = await store
       .query()
-      .from("Content", "d", { includeSubClasses: true })
+      .from("Content", "d", { expansion: "subclasses" })
       .whereNode("d", (d) =>
         (d as unknown as { $fulltext: FulltextAccessor }).$fulltext.matches(
           "quantum",
@@ -815,7 +832,7 @@ describe(".matches() with polymorphic alias", () => {
       buildKindRegistry(VectorPolyGraph),
     );
     const ast = polyQuery
-      .from("PolyVector", "v", { includeSubClasses: true })
+      .from("PolyVector", "v", { expansion: "subclasses" })
       .whereNode("v", (v) =>
         (v as unknown as PropsAccessor<typeof PolyChild>).embedding.similarTo(
           queryEmbedding,

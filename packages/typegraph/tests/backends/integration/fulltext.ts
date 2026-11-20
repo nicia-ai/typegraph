@@ -55,6 +55,20 @@ async function seedArticles(
   };
 }
 
+function skipIfHybridUnsupported(
+  context: IntegrationTestContext,
+  ctx: { skip: () => void },
+): IntegrationStore {
+  const backend = context.getStore().backend;
+  if (
+    backend.capabilities.fulltext?.supported !== true ||
+    backend.capabilities.vector?.supported !== true
+  ) {
+    ctx.skip();
+  }
+  return context.getStore();
+}
+
 export function registerFulltextIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -319,6 +333,63 @@ export function registerFulltextIntegrationTests(
           .select((c) => ({ id: (c.a as unknown as { id: string }).id }))
           .execute(),
       ).rejects.toThrow(/cannot be nested under OR or NOT/i);
+    });
+
+    it("keeps distinct RRF ranks distinct in the SQL query-builder order", async (ctx) => {
+      const store = skipIfHybridUnsupported(context, ctx);
+
+      // Deliberately make the vector order the reverse of lexical id order,
+      // then let only `alpha` match fulltext. With k=60 the expected fused
+      // order is alpha (vector rank 3 + fulltext rank 1), zeta (vector rank
+      // 1), beta (vector rank 2). If either RRF division is integer division,
+      // every contribution becomes zero and the id tiebreak returns alpha,
+      // beta, zeta instead — this assertion therefore exercises the actual
+      // score/order contract rather than only inspecting emitted SQL.
+      await store.nodes.Article.create(
+        {
+          title: "Zeta vector candidate",
+          body: "ordinary corpus text",
+          category: "rrf",
+          published: true,
+          embedding: [1, 0, 0, 0],
+        },
+        { id: "zeta" },
+      );
+      await store.nodes.Article.create(
+        {
+          title: "Beta vector candidate",
+          body: "ordinary corpus text",
+          category: "rrf",
+          published: true,
+          embedding: [0.9, 0.1, 0, 0],
+        },
+        { id: "beta" },
+      );
+      await store.nodes.Article.create(
+        {
+          title: "Alpha fulltext candidate",
+          body: "exclusive rrf match",
+          category: "rrf",
+          published: true,
+          embedding: [0, 1, 0, 0],
+        },
+        { id: "alpha" },
+      );
+
+      const rows = await store
+        .query()
+        .from("Article", "article")
+        .whereNode("article", (article) =>
+          article.$fulltext
+            .matches("exclusive", 3)
+            .and(article.embedding.similarTo([1, 0, 0, 0], 3)),
+        )
+        .select((ctx) => ({
+          id: (ctx.article as unknown as { id: string }).id,
+        }))
+        .execute();
+
+      expect(rows.map((row) => row.id)).toEqual(["alpha", "zeta", "beta"]);
     });
 
     // ================================================================

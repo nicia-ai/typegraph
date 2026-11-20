@@ -87,6 +87,14 @@ Every traversal algorithm takes the same base options:
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `workingMemory` | `string` | *(inherits server `work_mem`)* | Opt-in, transaction-scoped `work_mem` override for iterative rounds on PostgreSQL (`SET LOCAL` semantics); validated as `<digits>kB\|MB\|GB` within 64kB–2147483647kB, ignored by SQLite |
 
+Every algorithm rejects with `KindNotFoundError` when `edges`, or the
+`nodeKinds` scope of `labelPropagation`, `weaklyConnectedComponents` and
+`pageRank`, names a kind the graph does not register, rather than answering
+with an empty result. A view returned by `store.asOf(...)` or `store.view(...)`
+exposes the same algorithms with its temporal coordinate sealed: stating
+`temporalMode` or `asOf` on a view call rejects with `ConfigurationError`
+(`STORE_VIEW_SEALED_COORDINATE`).
+
 `direction: "both"` treats edges as undirected. `cyclePolicy` remains accepted
 for compatibility with recursive query-builder traversals, but it does not
 change these algorithms: their node-set results and shortest paths never need
@@ -159,7 +167,7 @@ Options differ from the unweighted traversals:
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
 | `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight |
-| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e289) |
+| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e288) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
 | `temporalMode` / `asOf` / `workingMemory` | | | Same as the shared options above |
@@ -181,7 +189,7 @@ visible edge of the selected kinds is audited; the call throws a typed
 - **non-numeric** — a JSON string like `"5"` does not count; the property
   must be stored as a JSON number (a JSON `null` counts as missing, not
   non-numeric);
-- **out of range** — a magnitude above ~9.7e289 (bounded so path sums can
+- **out of range** — a magnitude above ~9.7e288 (bounded so path sums can
   never overflow the double range, on either backend) or a nonzero
   magnitude below the smallest IEEE 754 double. One engine caveat:
   SQLite's JSON parser rounds sub-denormal text like `1e-400` to `0`
@@ -195,6 +203,15 @@ precision on both backends: total weights are always backend-identical,
 and — unless a single call's `edges` list exceeds the backend's
 bind-parameter budget (hundreds of kinds, where equal-weight predecessor
 ties can resolve differently) — so is the returned node sequence.
+
+Path extraction honors the backend's
+[`recursiveTraversal`](/backend-setup#recursive-traversal-capability) declaration. A supported
+backend reconstructs the result with one recursive statement. A backend declaring
+`{ supported: false, reason }` still runs the full weighted search when it supports the temporary
+working-table operations the algorithm requires; TypeGraph reconstructs the same result by walking
+predecessors instead, using `path.depth + 1` extraction statements. This affects round trips, not
+the selected path or its weight. The unweighted traversal algorithms do not emit a recursive CTE
+and are unaffected by this capability.
 
 ## reachable
 
@@ -285,11 +302,18 @@ iteration but teleports to weighted seed nodes instead of uniformly across the
 graph. Both methods operate on the visible induced graph; `nodeKinds` can narrow
 that graph without allowing transitions through excluded nodes.
 
+Every algorithm's `nodeKinds` matches each listed kind exactly. Unlike a query
+source, which is polymorphic by default, it does not include a kind's
+`subClassOf` or `equivalentTo` kinds: `nodeKinds: ["Party"]` excludes `Person`
+nodes even where `Person` is a subclass of `Party`. List every kind the induced
+graph should hold (see [Scope at a glance](/queries/source#scope-at-a-glance)).
+
 ```typescript
 const globalScores = await store.algorithms.pageRank({
   edges: ["knows", "cites"],
   nodeKinds: ["Person", "Paper"],
   direction: "out",
+  topK: 20,
 });
 
 const relatedToAlice = await store.algorithms.personalizedPageRank({
@@ -311,6 +335,7 @@ const relatedToAlice = await store.algorithms.personalizedPageRank({
 | `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
 | `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |
 | `maxIterations` | positive integer | `1000` | Power-iteration backstop; exceeding it throws |
+| `topK` | positive safe integer | all scores | Return the first K scores after deterministic ordering |
 | `workingMemory` | PostgreSQL memory string | inherited | Same transaction-scoped override described above |
 
 Personalized seeds are qualified by the full `(kind, id)` identity so same-ID
@@ -332,6 +357,12 @@ requested numerical tolerance rather than bit-for-bit. Exact score ties use
 portable binary `(id, kind)` ordering. As with WCC, an exhausted iteration
 budget throws `GraphAlgorithmConvergenceError`—partial scores are never
 returned.
+
+`topK` bounds only result extraction: TypeGraph applies the limit in SQL after
+ordering by descending score and the deterministic tie-breaker, so rows beyond
+K do not reach the driver. PageRank still initializes and iterates over the
+entire visible induced graph; `topK` does not make the graph computation itself
+partial.
 
 Convergence needs roughly `ln(1/tolerance) / ln(1/dampingFactor)` rounds in the
 worst case. With the default `tolerance` and `maxIterations`, damping factors
@@ -409,6 +440,7 @@ const memberships =
   await store.algorithms.weaklyConnectedComponents({
     edges: ["knows", "worksAt"],
     nodeKinds: ["Person", "Company"], // optional; all kinds by default
+    minComponentSize: 2, // optional; singleton components are omitted
     maxIterations: 1000, // default
   });
 // [{ id, kind, componentId, componentKind, size }, ...]
@@ -420,13 +452,26 @@ SQLite and PostgreSQL even when the PostgreSQL database uses a linguistic
 default collation. Edges are always treated as undirected—WCC has no
 `direction` option.
 
+`minComponentSize` is an inclusive positive safe-integer filter: a value of
+`2` returns every member of components containing two or more nodes, while a
+value of `1` preserves the default result. TypeGraph computes component sizes
+and filters memberships in extraction SQL, before rows reach the driver. The
+full visible induced graph is still processed to convergence, so the option
+bounds result materialization rather than WCC computation.
+
 WCC is iterative and runs multiple SQL rounds in one repeatable snapshot. It
 requires `backend.capabilities.graphAnalytics?.supported === true`; built-in
 SQLite and PostgreSQL connections that permit temporary tables advertise
 support. Cloudflare D1, Durable Objects SQLite, `neon-http`, and other
 restricted backends throw `UnsupportedBackendCapabilityError` before temporary
-state is created. If propagation has not converged after `maxIterations`, TypeGraph throws
-`GraphAlgorithmConvergenceError` rather than returning a partial partition.
+state is created. PostgreSQL is checked again at execution time, because a read
+replica or a role without `TEMP` can reject the working-table transaction even
+when the backend's static capability is true: a replica refuses the read-write
+transaction itself, and a role without `TEMP` refuses the `CREATE TEMP TABLE`
+inside it. Both are reported as `UnsupportedBackendCapabilityError`; its `cause`
+preserves the original database error. If propagation has not converged after
+`maxIterations`, TypeGraph throws `GraphAlgorithmConvergenceError` rather than
+returning a partial partition.
 
 Each round expands only the indexed frontier of nodes whose label changed in
 the previous round. Candidate labels remain staged until every edge-kind chunk
@@ -486,7 +531,7 @@ const alice = await store.nodes.Person.getById(aliceId);
 // All equivalent
 store.algorithms.canReach(alice, bobId, { edges: ["knows"] });
 store.algorithms.canReach(alice.id, bobId, { edges: ["knows"] });
-store.algorithms.canReach(aliceId, { kind: "Person", id: bobId }, {
+store.algorithms.canReach(aliceId, { id: bobId }, {
   edges: ["knows"],
 });
 ```

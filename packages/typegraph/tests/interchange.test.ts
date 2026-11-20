@@ -3,16 +3,31 @@
  *
  * Tests that graphs can be exported and imported while preserving data integrity.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import { defineEdge, defineGraph, defineNode, StaleVersionError } from "../src";
+import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
-import { UniquenessError } from "../src/errors";
+import {
+  ConfigurationError,
+  UniquenessError,
+  ValidationError,
+} from "../src/errors";
+import { defineGraphExtension } from "../src/graph-extension";
 import {
   exportGraph,
   exportGraphStream,
   type GraphData,
+  type GraphDataHeader,
+  GraphDataSchema,
   type GraphInterchangeChunk,
   importGraph,
   importGraphStream,
@@ -20,9 +35,19 @@ import {
   InterchangeEdgeSchema,
   InterchangeNodeSchema,
 } from "../src/interchange";
-import { createStore } from "../src/store";
+import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import {
+  createGate,
+  type Gate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "./concurrency-utils";
+import {
+  createInitializedStore,
+  createPlanCaptureBackend,
+  createTestBackend,
+} from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -80,6 +105,155 @@ const testGraph = defineGraph({
 
 type TestStore = ReturnType<typeof createStore<typeof testGraph>>;
 
+// Same shape as testGraph, but with Operational Identity enabled — the target
+// for identity interchange tests. `createInitializedStore` boots it because an
+// identity-enabled graph needs the async schema-materialization path.
+const identityGraph = defineGraph({
+  id: "interchange_identity_test",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const identitySameBackendTargetGraph = defineGraph({
+  id: "identity_same_backend_target",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+/**
+ * Same shape as `testGraph` under a different id: the import target when both
+ * stores live on ONE SQLite connection.
+ */
+const sameHandleTargetGraph = defineGraph({
+  id: "interchange_same_handle_target",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
+/**
+ * A SECOND import target on that one connection. Two streaming imports at once
+ * is a pairing of its own, and giving each its own graph id keeps the refusal's
+ * `graphId` unambiguous about which import was turned away.
+ */
+const secondSameHandleTargetGraph = defineGraph({
+  id: "interchange_same_handle_target_2",
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+  },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+    },
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
+const DelimitedPerson = defineNode("Person:x", {
+  schema: z.object({ name: z.string() }),
+});
+const delimitedKnows = defineEdge("delimitedKnows", {
+  schema: z.object({}),
+});
+const delimiterCollisionGraph = defineGraph({
+  id: "interchange_delimiter_collision",
+  nodes: {
+    Person: { type: Person },
+    "Person:x": { type: DelimitedPerson },
+  },
+  edges: {
+    delimitedKnows: {
+      type: delimitedKnows,
+      from: [Person, DelimitedPerson],
+      to: [Person, DelimitedPerson],
+    },
+  },
+});
+
+const CANONICAL_TIMESTAMP = "2024-01-01T00:00:00.000Z";
+
+/** A header carrying an identity section, for hand-built stream chunks. */
+const identityStreamHeader: GraphDataHeader = {
+  formatVersion: "2.0",
+  exportedAt: CANONICAL_TIMESTAMP,
+  source: { type: "external" },
+  identity: { profile: "typegraph-identity-v1", mode: "state" },
+};
+
+function sampleIdentityAssertion(): GraphData["identity"] {
+  return {
+    profile: "typegraph-identity-v1",
+    mode: "state",
+    assertions: [
+      {
+        id: "assertion-1",
+        relation: "same",
+        a: { kind: "Person", id: "person-1" },
+        b: { kind: "Person", id: "person-2" },
+        validFrom: CANONICAL_TIMESTAMP,
+      },
+    ],
+  };
+}
+
 /**
  * Helper to create import options with defaults applied.
  */
@@ -108,6 +282,97 @@ async function* chunkStream(
   }
 }
 
+/**
+ * Makes the snapshot transaction's node reads fail once `deliveredReads` of
+ * them have answered, so an export's producer fails MID-STREAM: chunks already
+ * handed to the consumer, the read transaction still open, and the snapshot
+ * registration still held.
+ */
+function failNodeReadsAfter(
+  backend: GraphBackend,
+  deliveredReads: number,
+  error: unknown,
+): void {
+  const runTransaction = backend.transaction;
+  const failing: GraphBackend["transaction"] = (run, options) => {
+    let reads = 0;
+    return runTransaction(
+      (target) =>
+        run({
+          ...target,
+          findNodesByKind: async (params) => {
+            reads += 1;
+            if (reads > deliveredReads) throw error;
+            return target.findNodesByKind(params);
+          },
+        }),
+      options,
+    );
+  };
+  vi.spyOn(backend, "transaction").mockImplementation(failing);
+}
+
+/**
+ * Parks the FIRST transaction this backend opens: `paused` opens once the BEGIN
+ * has landed and the callback is running, and the transaction stays open until
+ * `resume` does. That is the moment a second long-lived stream on the same
+ * connection must be refused instead of nesting its own BEGIN inside this one.
+ */
+function parkInsideFirstTransaction(
+  backend: GraphBackend,
+  paused: Gate,
+  resume: Gate,
+): void {
+  const runTransaction = backend.transaction;
+  let parked = false;
+  const parking: GraphBackend["transaction"] = (run, options) =>
+    runTransaction(async (target) => {
+      if (!parked) {
+        parked = true;
+        paused.open();
+        await resume.opened;
+      }
+      return run(target);
+    }, options);
+  vi.spyOn(backend, "transaction").mockImplementation(parking);
+}
+
+/** Pulls an export stream to completion through the iterator already opened on it. */
+async function drainIterator(
+  iterator: AsyncIterator<GraphInterchangeChunk>,
+): Promise<GraphInterchangeChunk[]> {
+  const drained: GraphInterchangeChunk[] = [];
+  for (;;) {
+    const next = await iterator.next();
+    if (next.done === true) return drained;
+    drained.push(next.value);
+  }
+}
+
+/**
+ * Replays chunks, parking the consumer between two of them: `paused` opens once
+ * `pauseBefore` chunks have been delivered and the next is being asked for, and
+ * nothing more is delivered until `resume` opens. That is the deterministic
+ * mid-import moment — chunks committed, chunks still to come — at which a
+ * snapshot export on the same connection must be refused.
+ */
+async function* pausingChunkStream(
+  chunks: readonly GraphInterchangeChunk[],
+  pauseBefore: number,
+  paused: Gate,
+  resume: Gate,
+): AsyncIterable<GraphInterchangeChunk> {
+  let delivered = 0;
+  for (const chunk of chunks) {
+    if (delivered === pauseBefore) {
+      paused.open();
+      await resume.opened;
+    }
+    delivered++;
+    yield chunk;
+  }
+}
+
 // ============================================================
 // Round-Trip Tests
 // ============================================================
@@ -126,7 +391,7 @@ describe("Interchange Round-Trip", () => {
 
     expect(exported.nodes).toHaveLength(0);
     expect(exported.edges).toHaveLength(0);
-    expect(exported.formatVersion).toBe("1.0");
+    expect(exported.formatVersion).toBe("3.0");
     expect(exported.source.type).toBe("typegraph-export");
 
     const targetBackend = createTestBackend();
@@ -141,6 +406,32 @@ describe("Interchange Round-Trip", () => {
     expect(result.success).toBe(true);
     expect(result.nodes.created).toBe(0);
     expect(result.edges.created).toBe(0);
+  });
+
+  it("rejects importGraph writes from a stale managed Store", async () => {
+    const backend = createTestBackend();
+    const [staleStore] = await createStoreWithSchema(testGraph, backend);
+    await staleStore.evolve(
+      defineGraphExtension({
+        nodes: {
+          ImportExtra: { properties: { label: { type: "string" } } },
+        },
+      }),
+    );
+    const data: GraphData = {
+      formatVersion: "1.0",
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "stale import regression" },
+      nodes: [
+        { kind: "Person", id: "too-late", properties: { name: "Alice" } },
+      ],
+      edges: [],
+    };
+
+    await expect(
+      importGraph(staleStore, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(StaleVersionError);
+    await expect(staleStore.nodes.Person.count()).resolves.toBe(0);
   });
 
   it("streams bounded header, node, and edge chunks before importing them", async () => {
@@ -218,13 +509,24 @@ describe("Interchange Round-Trip", () => {
     }
     const header = headerChunk.header;
 
-    await expect(
-      importGraphStream(
-        createStore(testGraph, createTestBackend()),
-        chunkStream([{ type: "nodes", nodes: [] }]),
-        importOptions({ onConflict: "error" }),
-      ),
-    ).rejects.toThrow("must start with a header");
+    // Every chunk kind carries the same requirement, and each states it from
+    // its own branch: a stream that opens with edges or with identity rows is
+    // as headerless as one that opens with nodes, and must say so rather than
+    // dereference the missing header or report the end-of-stream error instead.
+    const headerless: readonly GraphInterchangeChunk[] = [
+      { type: "nodes", nodes: [] },
+      { type: "edges", edges: [] },
+      { type: "identity", assertions: [] },
+    ];
+    for (const chunk of headerless) {
+      await expect(
+        importGraphStream(
+          createStore(testGraph, createTestBackend()),
+          chunkStream([chunk]),
+          importOptions({ onConflict: "error" }),
+        ),
+      ).rejects.toThrow("must start with a header");
+    }
     await expect(
       importGraphStream(
         createStore(testGraph, createTestBackend()),
@@ -235,6 +537,32 @@ describe("Interchange Round-Trip", () => {
         importOptions({ onConflict: "error" }),
       ),
     ).rejects.toThrow("more than one header");
+  });
+
+  it("writes nothing for an empty chunk instead of opening a transaction for it", async () => {
+    // An empty chunk is a no-op, not a write: taking a write transaction for
+    // one would claim the connection's writer slot for a chunk with nothing in
+    // it — exactly the contention the serialized-connection guards exist for.
+    const [headerChunk] = await collectChunks(exportGraphStream(sourceStore));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    const targetBackend = createTestBackend();
+    const targetStore = createStore(testGraph, targetBackend);
+    const transaction = vi.spyOn(targetBackend, "transaction");
+
+    const result = await importGraphStream(
+      targetStore,
+      chunkStream([
+        { type: "header", header: headerChunk.header },
+        { type: "nodes", nodes: [] },
+        { type: "edges", edges: [] },
+      ]),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it("rejects streams that end before emitting a header", async () => {
@@ -266,7 +594,11 @@ describe("Interchange Round-Trip", () => {
         ]),
         importOptions({ onConflict: "error" }),
       ),
-    ).rejects.toThrow("stream aborted after a chunk reported import errors");
+    ).rejects.toThrow(
+      new RegExp(
+        `stream aborted after a chunk reported import errors.*Reported errors: node Person ${alice.id}: Node already exists`,
+      ),
+    );
     expect(await targetStore.nodes.Person.getById(alice.id)).toBeDefined();
   });
 
@@ -295,7 +627,13 @@ describe("Interchange Round-Trip", () => {
   );
 
   it("warns without failing when streamed-import statistics refresh fails", async () => {
-    await sourceStore.nodes.Person.create({ name: "Alice" });
+    // The stream carries a node chunk AND an edge chunk: every per-chunk import
+    // passes `refreshStatistics: false`, so the whole stream refreshes ONCE,
+    // after the last chunk — a per-chunk refresh would re-analyze (and re-warn)
+    // for every chunk of a bulk load.
+    const alice = await sourceStore.nodes.Person.create({ name: "Alice" });
+    const bob = await sourceStore.nodes.Person.create({ name: "Bob" });
+    await sourceStore.edges.knows.create(alice, bob, { since: "2024" });
     const targetStore = createStore(testGraph, createTestBackend());
     const refreshError = new Error("planner unavailable");
     const refreshStatistics = vi
@@ -583,6 +921,77 @@ describe("Export Options", () => {
 // ============================================================
 // Import Conflict Strategy Tests
 // ============================================================
+
+function expectUnknownOption(
+  error: unknown,
+  operation: string,
+  option: string,
+): void {
+  expect(error).toBeInstanceOf(ConfigurationError);
+  expect((error as ConfigurationError).details).toEqual({
+    code: "INTERCHANGE_OPTION_UNKNOWN",
+    operation,
+    option,
+  });
+}
+
+describe("Interchange option keys", () => {
+  let store: TestStore;
+
+  beforeEach(async () => {
+    store = createStore(testGraph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+  });
+
+  it("refuses an undeclared importGraph option instead of dropping it", async () => {
+    const data = await exportGraph(store);
+    const target = createStore(testGraph, createTestBackend());
+
+    const refusal = await importGraph(target, data, {
+      onConflict: "error",
+      validateReference: false,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraph", "validateReference");
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses an undeclared importGraphStream option before reading a chunk", async () => {
+    const target = createStore(testGraph, createTestBackend());
+    let pulled = false;
+    async function* chunks(): AsyncIterable<GraphInterchangeChunk> {
+      pulled = true;
+      yield* await Promise.resolve([]);
+    }
+
+    const refusal = await importGraphStream(target, chunks(), {
+      onConflict: "error",
+      bogus: true,
+    } as never).catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "importGraphStream", "bogus");
+    expect(pulled).toBe(false);
+  });
+
+  it("refuses an undeclared exportGraph option, including a stream-only one", async () => {
+    for (const option of ["bogus", "batchSize"]) {
+      const refusal = await exportGraph(store, { [option]: 10 }).catch(
+        (error: unknown) => error,
+      );
+      expectUnknownOption(refusal, "exportGraph", option);
+    }
+  });
+
+  it("refuses an undeclared exportGraphStream option", async () => {
+    const chunks = exportGraphStream(store, {
+      includeMetadata: true,
+    } as never)[Symbol.asyncIterator]();
+    // The refusal arrives with the first chunk request.
+    const refusal = await chunks.next().catch((error: unknown) => error);
+
+    expectUnknownOption(refusal, "exportGraphStream", "includeMetadata");
+  });
+});
 
 describe("Import Conflict Strategies", () => {
   let sourceBackend: GraphBackend;
@@ -1180,6 +1589,55 @@ describe("Interchange import integrity", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("keeps node kind and id tuple boundaries distinct during reference validation", async () => {
+    const target = createStore(delimiterCollisionGraph, createTestBackend());
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [
+        {
+          // The old `${kind}:${id}` key for this row was `Person:x:y`, the
+          // same key as the missing edge endpoint (`Person:x`, `y`).
+          kind: "Person",
+          id: "x:y",
+          properties: { name: "Present" },
+        },
+        {
+          kind: "Person",
+          id: "destination",
+          properties: { name: "Destination" },
+        },
+      ],
+      edges: [
+        {
+          kind: "delimitedKnows",
+          id: "collision-edge",
+          from: { kind: "Person:x", id: "y" },
+          to: { kind: "Person", id: "destination" },
+          properties: {},
+        },
+      ],
+    };
+
+    const result = await importGraph(
+      target,
+      document,
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.edges.created).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({
+      entityType: "edge",
+      id: "collision-edge",
+    });
+    expect(result.errors[0]?.error).toContain(
+      "From node not found: Person:x:y",
+    );
+  });
+
   it("rejects edges referencing tombstoned nodes outside the batch", async () => {
     // Target: person-a exists only as a tombstone and is NOT in the import
     // document, so the reference check falls back to the database — which
@@ -1280,7 +1738,7 @@ describe("Interchange import property fidelity", () => {
   it("preserves properties verbatim under onUnknownProperty: allow", async () => {
     const store = createStore(transformGraph, createTestBackend());
     const data: GraphData = {
-      formatVersion: "1.0",
+      formatVersion: "2.0",
       exportedAt: "2024-01-01T00:00:00.000Z",
       source: { type: "external" },
       nodes: [
@@ -1311,5 +1769,1182 @@ describe("Interchange import property fidelity", () => {
     expect(document?.title).toBe("  hello  ");
     expect((document as unknown as { status?: string }).status).toBeUndefined();
     expect((document as unknown as { extra?: string }).extra).toBe("keepme");
+  });
+});
+
+// ============================================================
+// Read-side format-version compatibility (1.0 accepted, exports write 2.0)
+// ============================================================
+
+describe("Interchange format version compatibility", () => {
+  it("exports always carry formatVersion 3.0", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    await store.nodes.Person.create({ name: "Alice" });
+
+    const exported = await exportGraph(store);
+    expect(exported.formatVersion).toBe("3.0");
+
+    const [headerChunk] = await collectChunks(exportGraphStream(store));
+    if (headerChunk?.type !== "header") {
+      throw new Error("Expected the export stream to start with a header.");
+    }
+    expect(headerChunk.header.formatVersion).toBe("3.0");
+  });
+
+  it("accepts a 1.0 document (no identity section) via schema and import", async () => {
+    // A pre-existing 1.0 export is structurally a valid 2.0 document; the
+    // documented GraphDataSchema.parse path must keep accepting it.
+    const document = {
+      formatVersion: "1.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+    };
+
+    const parsed = GraphDataSchema.parse(document);
+    expect(parsed.formatVersion).toBe("1.0");
+
+    const store = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      store,
+      parsed,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
+    expect(await store.nodes.Person.getById("p1" as never)).toMatchObject({
+      name: "Alice",
+    });
+  });
+
+  it("accepts a 1.0 document that already carries an identity section (schema-wise)", () => {
+    const document = {
+      formatVersion: "1.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [],
+      edges: [],
+      identity: sampleIdentityAssertion(),
+    };
+
+    expect(GraphDataSchema.safeParse(document).success).toBe(true);
+  });
+
+  it("accepts a 2.0 document (no transitions/retention) via schema and import", async () => {
+    // A pre-existing 2.0 export is structurally a valid 3.0 document; the
+    // documented GraphDataSchema.parse path must keep accepting it.
+    const document = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" as const },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+    };
+
+    const parsed = GraphDataSchema.parse(document);
+    expect(parsed.formatVersion).toBe("2.0");
+
+    const store = createStore(testGraph, createTestBackend());
+    const result = await importGraph(
+      store,
+      parsed,
+      importOptions({ onConflict: "error" }),
+    );
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(1);
+  });
+});
+
+// ============================================================
+// Identity interchange compatibility, validation, and streaming
+// ============================================================
+
+describe("Identity interchange import guards", () => {
+  it("rejects an empty identity envelope aimed at an identity-disabled graph before any write", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    const data: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [],
+      },
+    };
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+    // The guard runs before processNodes, so nothing was written.
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("rejects a non-empty identity envelope aimed at an identity-disabled graph before any write", async () => {
+    const store = createStore(testGraph, createTestBackend());
+    const data: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "Alice" } }],
+      edges: [],
+      identity: sampleIdentityAssertion(),
+    };
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ConfigurationError);
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("rejects a streamed identity header aimed at an identity-disabled graph at the header, before nodes", async () => {
+    const store = createStore(testGraph, createTestBackend());
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          {
+            type: "nodes",
+            nodes: [
+              { kind: "Person", id: "p1", properties: { name: "Alice" } },
+            ],
+          },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+    expect(await store.nodes.Person.getById("p1" as never)).toBeUndefined();
+  });
+
+  it("rejects an identity-bearing header aimed at an identity-disabled graph with no chunk behind it", async () => {
+    // The header branch owns this refusal. `importGraph` raises the same error
+    // for each chunk it is handed, which hides a missing header check whenever
+    // a chunk follows — a header-only stream (or one whose chunks are all
+    // empty) is refused only if the header itself is checked.
+    const store = createStore(testGraph, createTestBackend());
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([{ type: "header", header: identityStreamHeader }]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "IDENTITY_IMPORT_REQUIRES_PROFILE" },
+    });
+  });
+
+  it("runtime-validates a streamed identity header even when no assertions follow", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const invalidHeader = {
+      ...identityStreamHeader,
+      identity: { profile: "not-the-typegraph-profile", mode: "state" },
+    } as unknown as GraphDataHeader;
+
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header: invalidHeader },
+          { type: "identity", assertions: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects an out-of-domain identity relation before any write (schema bypassed)", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    // A JS caller casting past the GraphData type can smuggle a bad relation;
+    // importGraph must runtime-validate the identity section and reject it
+    // rather than pass "banana" straight to SQL.
+    const data = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "assertion-1",
+            relation: "banana",
+            a: { kind: "Person", id: "person-1" },
+            b: { kind: "Person", id: "person-2" },
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    } as unknown as GraphData;
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("rejects a non-canonical identity validFrom before any write (schema bypassed)", async () => {
+    const store = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const data = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: "typegraph-identity-v1",
+        mode: "state",
+        assertions: [
+          {
+            id: "assertion-1",
+            relation: "same",
+            a: { kind: "Person", id: "person-1" },
+            b: { kind: "Person", id: "person-2" },
+            // Missing milliseconds — parses under lenient z.iso.datetime() but
+            // is not canonical fixed-width UTC.
+            validFrom: "2024-01-15T10:30:00Z",
+          },
+        ],
+      },
+    } as unknown as GraphData;
+
+    await expect(
+      importGraph(store, data, importOptions({ onConflict: "error" })),
+    ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("Identity interchange streaming", () => {
+  it("refuses a snapshot import into the same SQLite backend before iteration", async () => {
+    const backend = createTestBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    const target = await createInitializedStore(
+      identitySameBackendTargetGraph,
+      backend,
+    );
+    const exported = exportGraphStream(source);
+
+    await expect(
+      importGraphStream(
+        target,
+        exported,
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: { code: "INTERCHANGE_SAME_SQLITE_BACKEND_SNAPSHOT" },
+    });
+  });
+
+  it("holds one repeatable-read snapshot across the complete export", async () => {
+    const backend = createTestBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "snapshot-a" });
+    const transaction = vi.spyOn(backend, "transaction");
+    const activeSchemaRead = vi.spyOn(backend, "getActiveSchema");
+    const nodeRead = vi.spyOn(backend, "findNodesByKind");
+    const edgeRead = vi.spyOn(backend, "findEdgesByKind");
+    const rawRead = vi.spyOn(backend, "executeRaw");
+
+    await exportGraph(source);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "repeatable_read",
+      accessMode: "read_only",
+    });
+    expect(activeSchemaRead).not.toHaveBeenCalled();
+    expect(nodeRead).not.toHaveBeenCalled();
+    expect(edgeRead).not.toHaveBeenCalled();
+    expect(rawRead).not.toHaveBeenCalled();
+  });
+
+  it("omits redundant kind predicates from an unfiltered export", async () => {
+    const { backend, captured } = createPlanCaptureBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+
+    captured.length = 0;
+    await exportGraph(source);
+
+    const identityRead = requireDefined(
+      captured.find((statement) =>
+        statement.sql.includes("typegraph_identity_assertions"),
+      ),
+    );
+    expect(identityRead.sql).not.toContain("a_kind IN");
+    expect(identityRead.sql).not.toContain("b_kind IN");
+  });
+
+  it("reads one bounded assertion page before delivering its first identity chunk", async () => {
+    const { backend, captured } = createPlanCaptureBackend();
+    const source = await createInitializedStore(identityGraph, backend);
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "page-alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "page-bob" },
+    );
+    const carol = await source.nodes.Person.create(
+      { name: "Carol" },
+      { id: "page-carol" },
+    );
+    await source.identity.assertSame(alice, bob);
+    await source.identity.assertSame(bob, carol);
+
+    captured.length = 0;
+    const iterator = exportGraphStream(source, {
+      batchSize: 1,
+    })[Symbol.asyncIterator]();
+    let firstIdentity: GraphInterchangeChunk | undefined;
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      if (next.value.type === "identity") {
+        firstIdentity = next.value;
+        break;
+      }
+    }
+
+    expect(firstIdentity).toEqual({
+      type: "identity",
+      assertions: [expect.objectContaining({ relation: "same" })],
+    });
+    const identityReads = captured.filter((statement) =>
+      statement.sql.includes("typegraph_identity_assertions"),
+    );
+    expect(identityReads).toHaveLength(1);
+    expect(identityReads[0]?.sql).toContain("ORDER BY identity_assertions.id");
+    expect(identityReads[0]?.sql).toContain("LIMIT");
+
+    await iterator.return?.();
+  });
+
+  it("omits identity assertions whose endpoint kinds are filtered out", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const person = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "filtered-person" },
+    );
+    const company = await source.nodes.Company.create(
+      { name: "Acme" },
+      { id: "filtered-company" },
+    );
+    await source.identity.assertSame(person, company);
+
+    const document = await exportGraph(source, { nodeKinds: ["Person"] });
+
+    expect(document.nodes.map((node) => node.kind)).toEqual(["Person"]);
+    expect(document.identity?.assertions).toEqual([]);
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await expect(
+      importGraph(target, document, importOptions({ onConflict: "error" })),
+    ).resolves.toMatchObject({ success: true });
+  });
+
+  it("omits archival identity assertions whose deleted endpoint is excluded", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const first = await source.nodes.Person.create(
+      { name: "First" },
+      { id: "archival-live" },
+    );
+    const deleted = await source.nodes.Person.create(
+      { name: "Deleted" },
+      { id: "archival-deleted" },
+    );
+    await source.identity.assertSame(first, deleted);
+    await source.nodes.Person.delete(deleted.id);
+
+    const document = await exportGraph(source, { identityMode: "archival" });
+
+    expect(document.nodes.map((node) => node.id)).toEqual([first.id]);
+    expect(document.identity?.assertions).toEqual([]);
+  });
+
+  it("refuses identity export when temporal fields are explicitly disabled", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await expect(
+      exportGraph(source, {
+        identityMode: "archival",
+        includeTemporal: false,
+      }),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "IDENTITY_EXPORT_REQUIRES_TEMPORAL_FIELDS",
+      },
+    });
+  });
+
+  it("round-trips header, nodes, edges, and identity through the stream", async () => {
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const acme = await source.nodes.Company.create(
+      { name: "Acme" },
+      { id: "acme" },
+    );
+    await source.edges.worksAt.create(alice, acme, { role: "Engineer" });
+    await source.identity.assertSame(alice, bob);
+
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source, { includeTemporal: true, batchSize: 1 }),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.nodes.created).toBe(3);
+    expect(result.edges.created).toBe(1);
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+
+    expect(await target.identity.areSame(alice, bob)).toBe(true);
+    expect(await target.identity.membersOf(alice)).toEqual(
+      expect.arrayContaining([
+        { kind: "Person", id: "alice" },
+        { kind: "Person", id: "bob" },
+      ]),
+    );
+  });
+
+  it("refreshes statistics once for a stream whose last chunk is identity", async () => {
+    // The identity chunk is the last write of a stream, and like the node and
+    // edge chunks it must not refresh statistics itself: the single post-loop
+    // refresh covers the whole stream.
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "stats-alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "stats-bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const refreshStatistics = vi.spyOn(target, "refreshStatistics");
+
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source, { batchSize: 1 }),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+    expect(refreshStatistics).toHaveBeenCalledOnce();
+  });
+
+  it("writes nothing for an empty identity chunk", async () => {
+    const targetBackend = createTestBackend();
+    const target = await createInitializedStore(identityGraph, targetBackend);
+    const transaction = vi.spyOn(targetBackend, "transaction");
+
+    const result = await importGraphStream(
+      target,
+      chunkStream([
+        { type: "header", header: identityStreamHeader },
+        { type: "identity", assertions: [] },
+      ]),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.identity).toEqual({ created: 0, skipped: 0 });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("omits the identity chunk entirely from an export with no assertions", async () => {
+    // An identity-enabled graph with nothing asserted yet still walks the
+    // assertion pages. An empty page must produce NO chunk: an
+    // `{ assertions: [] }` chunk would set the stream's identity phase (closing
+    // it to further node and edge chunks) for a graph that asserted nothing.
+    const source = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-assertion" });
+
+    const chunks = await collectChunks(exportGraphStream(source));
+
+    expect(chunks.map((chunk) => chunk.type)).toEqual(["header", "nodes"]);
+  });
+
+  it("rejects nodes emitted after identity assertions", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          { type: "identity", assertions: [] },
+          { type: "nodes", nodes: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("cannot emit nodes after identity assertions");
+  });
+
+  it("rejects edges emitted after identity assertions", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          { type: "identity", assertions: [] },
+          { type: "edges", edges: [] },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("cannot emit edges after identity assertions");
+  });
+
+  it("rejects identity rows that arrive without an identity header", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const plainHeader: GraphDataHeader = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+    };
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: plainHeader },
+          {
+            type: "identity",
+            assertions: [
+              {
+                id: "assertion-1",
+                relation: "same",
+                a: { kind: "Person", id: "person-1" },
+                b: { kind: "Person", id: "person-2" },
+                validFrom: CANONICAL_TIMESTAMP,
+              },
+            ],
+          },
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow("identity rows without an identity header");
+  });
+
+  it("runtime-validates streamed identity assertions (bad relation rejected)", async () => {
+    const target = await createInitializedStore(
+      identityGraph,
+      createTestBackend(),
+    );
+    const badIdentityChunk = {
+      type: "identity",
+      assertions: [
+        {
+          id: "assertion-1",
+          relation: "banana",
+          a: { kind: "Person", id: "person-1" },
+          b: { kind: "Person", id: "person-2" },
+          validFrom: CANONICAL_TIMESTAMP,
+        },
+      ],
+    } as unknown as GraphInterchangeChunk;
+
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream([
+          { type: "header", header: identityStreamHeader },
+          badIdentityChunk,
+        ]),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toThrow(ValidationError);
+  });
+});
+
+describe("Serialized-connection snapshot streaming guards", () => {
+  /**
+   * A guard that regressed into a wedge instead of a refusal makes the export
+   * and the import wait on one connection, so a bounded wait reports the
+   * regression instead of hanging the suite.
+   */
+  const GUARD_TIMEOUT_MS = 10_000;
+  const openDatabases: Database.Database[] = [];
+
+  afterEach(() => {
+    for (const database of openDatabases.splice(0)) database.close();
+  });
+
+  /**
+   * A bounded wait for the failure paths below. Shorter than the suite's
+   * per-test budget on purpose: a producer failure that never reaches the
+   * consumer is a deadlock, and this reports it as one instead of as a slow
+   * test.
+   */
+  const PRODUCER_FAILURE_TIMEOUT_MS = 2000;
+
+  function openMigratedDatabase(): Database.Database {
+    const database = new Database(":memory:");
+    openDatabases.push(database);
+    for (const statement of generateSqliteDDL()) database.exec(statement);
+    return database;
+  }
+
+  it("releases the export's snapshot registration when its producer fails mid-stream", async () => {
+    // The producer's rejection handler is the only place a failed export gives
+    // the connection back. It owes the consumer two things: the error (nothing
+    // else ever settles the chunk the consumer is waiting for) and the released
+    // registration (a stream that is over must not refuse the next import).
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "producer-fail" },
+    );
+    const chunks = await collectChunks(exportGraphStream(source));
+    const producerError = new Error("snapshot read failed mid-stream");
+    failNodeReadsAfter(sourceBackend, 1, producerError);
+
+    const delivered: GraphInterchangeChunk[] = [];
+    const streaming = (async () => {
+      for await (const chunk of exportGraphStream(source)) {
+        delivered.push(chunk);
+      }
+    })();
+
+    await expect(
+      raceTimeout(streaming, PRODUCER_FAILURE_TIMEOUT_MS),
+    ).rejects.toBe(producerError);
+    // Mid-stream: the header and the first node chunk were already consumed
+    // when the next read rejected.
+    expect(delivered.map((chunk) => chunk.type)).toEqual(["header", "nodes"]);
+
+    const imported = await raceTimeout(
+      importGraphStream(
+        target,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+      PRODUCER_FAILURE_TIMEOUT_MS,
+    );
+    if (imported === TIMEOUT_SENTINEL) {
+      throw new Error(
+        "The import waited on the connection the failed export never released.",
+      );
+    }
+    expect(imported.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("surfaces a non-Error producer failure as an Error carrying it as the cause", async () => {
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "non-error" });
+    const thrown = "the driver rejected with a string";
+    failNodeReadsAfter(backend, 1, thrown);
+
+    const failure = await raceTimeout(
+      collectChunks(exportGraphStream(source)).catch((error: unknown) => error),
+      PRODUCER_FAILURE_TIMEOUT_MS,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("Graph export failed.");
+    expect((failure as Error).cause).toBe(thrown);
+  });
+
+  it("refuses a snapshot import across two backends over one SQLite handle", async () => {
+    // Distinct wrappers, so the object-identity check cannot see them; one
+    // better-sqlite3 connection, so the export's transaction and the import's
+    // writer lock are the same lock. Before ownership marking, this ran until
+    // the driver failed mid-stream with "cannot start a transaction within a
+    // transaction" — after chunks had already committed.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "same-handle" });
+    const beginExport = vi.spyOn(sourceBackend, "transaction");
+
+    await expect(
+      importGraphStream(
+        target,
+        exportGraphStream(source),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+      },
+    });
+    // Refused before the export opened its snapshot, so nothing was read and
+    // nothing was written.
+    expect(beginExport).not.toHaveBeenCalled();
+    expect(await target.nodes.Person.count()).toBe(0);
+  });
+
+  it("refuses an export snapshot that opens between import chunks", async () => {
+    // The mirror of the refusal above, in the other order. The import's lease is
+    // taken in the same synchronous section that finds no export snapshot open,
+    // so the export starting second is the side refused — and the import, whose
+    // header chunk is already processed, finishes instead of waiting on a read
+    // transaction that cannot end until it does.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "mid-stream" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    expect(chunks.length).toBeGreaterThan(1);
+    const paused = createGate();
+    const resume = createGate();
+
+    const importing = importGraphStream(
+      target,
+      // Parked after the header: the lease is held, the node chunk is still to
+      // come.
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(exportGraph(source)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        graphId: testGraph.id,
+      },
+    });
+
+    resume.open();
+    const settled = await raceTimeout(importing, GUARD_TIMEOUT_MS);
+    if (settled === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The import did not finish within ${GUARD_TIMEOUT_MS}ms: it is waiting on the connection an export took mid-stream.`,
+      );
+    }
+    expect(settled.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("refuses a second streaming import into one serialized connection", async () => {
+    // Both sides used to check only the OPPOSITE registry: two IMPORTS each
+    // found no export snapshot, both claimed the connection, and the second
+    // one's chunk transaction opened inside the first one's — SQLITE_ERROR
+    // "cannot start a transaction within a transaction", after chunks had
+    // already committed. The first import is parked INSIDE its chunk
+    // transaction here, so the connection really is mid-BEGIN when the second
+    // one asks for it.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const firstTargetBackend = createSqliteBackend(drizzle(database));
+    const secondTargetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
+    const secondTarget = createStore(
+      secondSameHandleTargetGraph,
+      secondTargetBackend,
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "two-imports" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+    parkInsideFirstTransaction(firstTargetBackend, paused, resume);
+
+    const firstImport = importGraphStream(
+      firstTarget,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(
+      importGraphStream(
+        secondTarget,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        graphId: secondSameHandleTargetGraph.id,
+        requested: "import-stream",
+        heldBy: "import-stream",
+      },
+    });
+
+    resume.open();
+    const settled = await raceTimeout(firstImport, GUARD_TIMEOUT_MS);
+    if (settled === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The first import did not finish within ${GUARD_TIMEOUT_MS}ms: the refused import took something it was supposed to be denied.`,
+      );
+    }
+    expect(settled.success).toBe(true);
+    expect(await firstTarget.nodes.Person.count()).toBe(1);
+    expect(await secondTarget.nodes.Person.count()).toBe(0);
+
+    // The lease is scoped to a RUNNING import: once the first one is done the
+    // second target imports the same chunks without complaint.
+    const retried = await importGraphStream(
+      secondTarget,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(retried.success).toBe(true);
+  });
+
+  it("refuses a second snapshot export from one serialized connection", async () => {
+    // The export side had the mirror hole: it consulted only the import lease,
+    // so a second export opened its snapshot transaction inside the first one's
+    // BEGIN on the shared connection. The first export is held open at its
+    // header here, which is precisely when its read transaction is live.
+    const database = openMigratedDatabase();
+    const firstBackend = createSqliteBackend(drizzle(database));
+    const secondBackend = createSqliteBackend(drizzle(database));
+    const first = createStore(testGraph, firstBackend);
+    const second = createStore(sameHandleTargetGraph, secondBackend);
+    await first.nodes.Person.create({ name: "Alice" }, { id: "two-exports" });
+
+    const stream = exportGraphStream(first)[Symbol.asyncIterator]();
+    const header = await stream.next();
+    expect(header.done).toBe(false);
+
+    await expect(exportGraph(second)).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+        requested: "export-snapshot",
+        heldBy: "export-snapshot",
+      },
+    });
+
+    // The first export still owns the connection and runs to completion.
+    const drained = await raceTimeout(drainIterator(stream), GUARD_TIMEOUT_MS);
+    if (drained === TIMEOUT_SENTINEL) {
+      throw new Error(
+        `The first export did not finish within ${GUARD_TIMEOUT_MS}ms: the refused export took the connection it was supposed to be denied.`,
+      );
+    }
+    expect(drained.some((chunk) => chunk.type === "nodes")).toBe(true);
+
+    // ...and once it releases, the next export on that connection succeeds.
+    const exported = await exportGraph(first);
+    expect(exported.nodes).toHaveLength(1);
+  });
+
+  it("releases the export's lease when opening the transaction throws synchronously", async () => {
+    // A driver can refuse a transaction BEFORE returning a promise (a closed
+    // handle, a pool that will not check a connection out). The release is
+    // installed on the promise `transaction()` returns, so a synchronous throw
+    // bypassed it and stranded the lease for the life of the process — every
+    // later stream on that connection refused on behalf of an export that never
+    // ran a single statement.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "sync-throw" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const driverFailure = new Error("transaction refused before it began");
+    vi.spyOn(sourceBackend, "transaction").mockImplementation(() => {
+      throw driverFailure;
+    });
+
+    // The original error is what the consumer sees: the guard rethrows rather
+    // than converting a driver failure into a refusal.
+    await expect(collectChunks(exportGraphStream(source))).rejects.toBe(
+      driverFailure,
+    );
+
+    // And the connection is free — a leaked lease would refuse this import
+    // with INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT instead.
+    const imported = await importGraphStream(
+      target,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(imported.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
+  });
+
+  it("refuses a hand-rolled export-stream-into-importGraph loop", async () => {
+    // The loop a caller writes when they do not reach for importGraphStream.
+    // `importGraph` carried no guard at all, so the first chunk's BEGIN
+    // IMMEDIATE landed inside the export's still-open snapshot on the one
+    // handle — the documented refusal was simply not true of this surface.
+    const database = openMigratedDatabase();
+    const sourceBackend = createSqliteBackend(drizzle(database));
+    const targetBackend = createSqliteBackend(drizzle(database));
+    const source = createStore(testGraph, sourceBackend);
+    const target = createStore(sameHandleTargetGraph, targetBackend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "hand-rolled" });
+
+    const handRolled = async (): Promise<void> => {
+      for await (const chunk of exportGraphStream(source)) {
+        if (chunk.type !== "nodes") continue;
+        await importGraph(
+          target,
+          {
+            formatVersion: "2.0",
+            exportedAt: CANONICAL_TIMESTAMP,
+            source: { type: "external" },
+            nodes: chunk.nodes,
+            edges: [],
+          },
+          importOptions({ onConflict: "error" }),
+        );
+      }
+    };
+
+    await expect(handRolled()).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SHARED_SERIALIZED_BACKEND_SNAPSHOT",
+        graphId: sameHandleTargetGraph.id,
+        requested: "import-stream",
+        heldBy: "export-snapshot",
+      },
+    });
+    expect(await target.nodes.Person.count()).toBe(0);
+
+    // The refusal is scoped to the open snapshot: the same import off a
+    // collected stream succeeds.
+    const chunks = await collectChunks(exportGraphStream(source));
+    const imported = await importGraphStream(
+      target,
+      chunkStream(chunks),
+      importOptions({ onConflict: "error" }),
+    );
+    expect(imported.success).toBe(true);
+  });
+
+  it("refuses a second import on a non-transactional connection: a documented, deliberate false refusal", async () => {
+    // RESIDUAL R6, pinned so it stays a decision rather than becoming an
+    // accident. With `transactionMode: "none"` neither import frames anything,
+    // so these two would in fact interleave harmlessly on the one handle — and
+    // the second is refused anyway, because the import side claims the
+    // connection whatever its backend reports. Gating that claim on
+    // `capabilities.execution.interactiveTransactions` would buy this case back at the price of
+    // letting a REAL export snapshot open mid-import on a mixed-profile
+    // connection, which is the far likelier pairing. See the residual note in
+    // `backend/transaction-resource.ts`.
+    const database = openMigratedDatabase();
+    const executionProfile = { transactionMode: "none", isSync: true } as const;
+    const source = createStore(
+      testGraph,
+      createSqliteBackend(drizzle(database), { executionProfile }),
+    );
+    const firstTargetBackend = createSqliteBackend(drizzle(database), {
+      executionProfile,
+    });
+    const secondTargetBackend = createSqliteBackend(drizzle(database), {
+      executionProfile,
+    });
+    expect(
+      firstTargetBackend.capabilities.execution.interactiveTransactions,
+    ).toBe(false);
+    const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
+    const secondTarget = createStore(
+      secondSameHandleTargetGraph,
+      secondTargetBackend,
+    );
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-twice" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+
+    const firstImport = importGraphStream(
+      firstTarget,
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    await expect(
+      importGraphStream(
+        secondTarget,
+        chunkStream(chunks),
+        importOptions({ onConflict: "error" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: {
+        code: "INTERCHANGE_SERIALIZED_IMPORT_IN_PROGRESS",
+        heldBy: "import-stream",
+      },
+    });
+
+    resume.open();
+    const settled = await firstImport;
+    expect(settled.success).toBe(true);
+  });
+
+  it("allows an export while a non-transactional import holds the connection", async () => {
+    // `transactionMode: "none"` exports statement by statement with nothing held
+    // open, so it cannot strand an import's next chunk. Refusing it would deny
+    // working behavior citing a transaction that does not exist — the same
+    // abstention the import-side guard makes.
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database), {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    const source = createStore(testGraph, backend);
+    const target = createStore(sameHandleTargetGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-lease" });
+    const chunks = await collectChunks(exportGraphStream(source));
+    const paused = createGate();
+    const resume = createGate();
+
+    const importing = importGraphStream(
+      target,
+      pausingChunkStream(chunks, 1, paused, resume),
+      importOptions({ onConflict: "error" }),
+    );
+    await paused.opened;
+
+    const exported = await exportGraph(source);
+    expect(exported.nodes).toHaveLength(1);
+
+    resume.open();
+    const imported = await importing;
+    expect(imported.success).toBe(true);
+  });
+
+  it("streams between two SQLite connections to one file", async () => {
+    // Separate connections are genuinely concurrent under WAL; refusing them
+    // would refuse work that succeeds.
+    const directory = await mkdtemp(path.join(tmpdir(), "typegraph-stream-"));
+    try {
+      const file = path.join(directory, "graph.db");
+      const sourceDatabase = new Database(file);
+      openDatabases.push(sourceDatabase);
+      sourceDatabase.pragma("journal_mode = WAL");
+      for (const statement of generateSqliteDDL()) {
+        sourceDatabase.exec(statement);
+      }
+      const targetDatabase = new Database(file);
+      openDatabases.push(targetDatabase);
+      const source = createStore(
+        testGraph,
+        createSqliteBackend(drizzle(sourceDatabase)),
+      );
+      const target = createStore(
+        sameHandleTargetGraph,
+        createSqliteBackend(drizzle(targetDatabase)),
+      );
+      await source.nodes.Person.create({ name: "Alice" }, { id: "wal-alice" });
+
+      const result = await importGraphStream(
+        target,
+        exportGraphStream(source),
+        importOptions({ onConflict: "error" }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(await target.nodes.Person.count()).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("streams into the same non-transactional SQLite backend", async () => {
+    // `transactionMode: "none"` exports statement by statement with no read
+    // transaction held, so the deadlock the refusal describes cannot happen.
+    // Refusing here would deny working behavior citing a transaction that does
+    // not exist.
+    const database = openMigratedDatabase();
+    const backend = createSqliteBackend(drizzle(database), {
+      executionProfile: { transactionMode: "none", isSync: true },
+    });
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    const source = createStore(testGraph, backend);
+    const target = createStore(sameHandleTargetGraph, backend);
+    await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-alice" });
+
+    const result = await importGraphStream(
+      target,
+      exportGraphStream(source),
+      importOptions({ onConflict: "error" }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(await target.nodes.Person.count()).toBe(1);
   });
 });

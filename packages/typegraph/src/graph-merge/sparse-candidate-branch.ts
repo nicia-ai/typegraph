@@ -1,0 +1,623 @@
+import type { EdgeRow } from "../backend/types";
+import type { GraphData } from "../interchange";
+import { validateImportProperties } from "../interchange/import";
+import { acyclicEdgeRelations } from "../store/acyclicity";
+import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalitySpec,
+} from "../store/claims/edge-claims";
+import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
+import {
+  type CandidateIdentityScope,
+  readCandidateIdentityClosure,
+} from "./candidate-identity-closure";
+import type { CandidateWriteSet } from "./candidate-write-set";
+import { parseRowProps } from "./canonical-props";
+import { CandidateWriteSetError } from "./errors";
+import { captureMergePlanTargetFence } from "./merge";
+import type { MergePlanTargetFence } from "./plan-schema";
+import type {
+  GraphBackend,
+  GraphDef,
+  LineageDelta,
+  Store,
+} from "./typegraph-internal";
+import {
+  batchPointReadVerdict,
+  canonicalizeDatabaseTimestamp,
+  createStoreWithSchema,
+  getEdgeRowsByIds,
+  getNodeRowsByIds,
+  hasScopedIdentityReads,
+  importGraph,
+  isBackendDerivedFrom,
+  sharesSerializedTransactionResource,
+  storeBackend,
+  storeRuntime,
+} from "./typegraph-internal";
+import type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
+import { graphWithoutNodeUniqueness } from "./working-copy";
+
+type EntityReference = Readonly<{ kind: string; id: string }>;
+
+/**
+ * Why candidate planning stages the whole target instead of the candidate's
+ * own rows. Each scope produces a correct plan; the reason names the cost.
+ */
+export type CandidatePlanningScopeReason =
+  | "composition"
+  | "acyclic-relation"
+  | "target-side-cardinality"
+  | "missing-active-source-read"
+  | "missing-match-identity-read"
+  | "missing-scoped-identity-reads"
+  | "match-identity-owner-not-clone-visible"
+  | "planned-evolution"
+  | "full-requested";
+
+/** The rows candidate planning stages, and why when it is not the candidate's own. */
+export type CandidatePlanningScope =
+  Readonly<{ scope: "candidate" }> | FullPlanningScope;
+
+/** {@link CandidatePlanningScope}'s `"full"` decision: planning copies the whole target. */
+export type FullPlanningScope = Readonly<{
+  scope: "full";
+  reason: CandidatePlanningScopeReason;
+}>;
+
+const CANDIDATE_SCOPE = Object.freeze({ scope: "candidate" } as const);
+
+export function fullPlanningScope(
+  reason: CandidatePlanningScopeReason,
+): FullPlanningScope {
+  return { scope: "full", reason };
+}
+
+/**
+ * The scope a target admits before any candidate is read: the one owner of
+ * candidate-planning eligibility. Callers have already established that the
+ * target can carry a public merge plan (revision tracking included).
+ *
+ * Cardinality peers use the exact claim key and holder liveness. `oneActive`
+ * needs the optional active-only source read so ended history cannot make a
+ * candidate lookup grow with the graph. Durable match identity requires an
+ * exact keyed owner read. Ontology disjointness uses live same-id siblings.
+ *
+ * A target-side cardinality, an acyclic relation and composition (which is
+ * both a one-whole claim and an acyclic relation) each constrain rows the
+ * sparse base never reads: the holders at an edge's target endpoint, and the
+ * paths between its endpoints. A graph declaring any of them plans against
+ * the whole target instead.
+ */
+export function candidatePlanningScope<G extends GraphDef>(
+  target: Store<G>,
+): CandidatePlanningScope {
+  const acyclicRelations = acyclicEdgeRelations(target.graph, target.registry);
+  if (
+    acyclicRelations.some(
+      (relation) => relation.name === COMPOSITION_RELATION_NAME,
+    )
+  )
+    return fullPlanningScope("composition");
+  if (acyclicRelations.length > 0) return fullPlanningScope("acyclic-relation");
+  const edges = Object.values(target.graph.edges);
+  if (
+    edges.some((edge) =>
+      edgeCardinalityAxisReferences(edge).some(
+        (axis) => axis.direction === "target",
+      ),
+    )
+  )
+    return fullPlanningScope("target-side-cardinality");
+  const backend = storeBackend(target);
+  if (
+    backend.findActiveEdgesBySourceV1 === undefined &&
+    edges.some((edge) => edge.cardinality === "oneActive")
+  )
+    return fullPlanningScope("missing-active-source-read");
+  if (
+    backend.findEdgesByMatchIdentity === undefined &&
+    edges.some((edge) => edge.matchIdentity !== undefined)
+  )
+    return fullPlanningScope("missing-match-identity-read");
+  if (
+    target.graph.identity !== undefined &&
+    !hasScopedIdentityReads(storeRuntime(target))
+  )
+    return fullPlanningScope("missing-scoped-identity-reads");
+  return CANDIDATE_SCOPE;
+}
+
+/**
+ * The durable match-identity owners named by candidate edges. `malformed`
+ * lists the edges whose owner key cannot be derived (an unknown kind, invalid
+ * properties, or an identity value that cannot be stored); `owners` still
+ * covers every edge whose key can be. Import refuses each malformed edge
+ * itself, so staging such a candidate reports its own validation error.
+ */
+export type CandidateMatchIdentityOwnerRead =
+  | Readonly<{ status: "complete"; owners: readonly EdgeRow[] }>
+  | Readonly<{
+      status: "malformed";
+      owners: readonly EdgeRow[];
+      malformed: readonly EntityReference[];
+    }>;
+
+/**
+ * The decided scope. A candidate scope carries what seeds its sparse base: the
+ * durable match-identity owners its edges name, read under `fence`.
+ */
+export type CandidatePlanningScopeResolution =
+  | Readonly<{
+      planningScope: typeof CANDIDATE_SCOPE;
+      fence: MergePlanTargetFence;
+      ownerRead: CandidateMatchIdentityOwnerRead;
+    }>
+  | Readonly<{
+      planningScope: FullPlanningScope;
+    }>;
+
+/**
+ * {@link candidatePlanningScope} refined by the candidate itself. The owner
+ * query controls whether sparse import sees an existing edge, so it is bound
+ * to one target revision with the sparse seed; an owner excluded from the
+ * clone projection plans against the whole target.
+ */
+export async function resolveCandidatePlanningScope<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+): Promise<CandidatePlanningScopeResolution> {
+  const planningScope = candidatePlanningScope(target);
+  if (planningScope.scope === "full") return { planningScope };
+  const fence = await captureMergePlanTargetFence(target);
+  const ownerRead = await readCandidateMatchIdentityOwners(target, writeSet);
+  if (!matchIdentityOwnersAreCloneVisible(ownerRead.owners))
+    return {
+      planningScope: fullPlanningScope(
+        "match-identity-owner-not-clone-visible",
+      ),
+    };
+  return { planningScope, fence, ownerRead };
+}
+
+/**
+ * Reads only the durable owners named by candidate edges. Requires the keyed
+ * owner read whenever a candidate edge declares a match identity, which
+ * {@link candidatePlanningScope} establishes before this runs.
+ */
+export async function readCandidateMatchIdentityOwners<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+): Promise<CandidateMatchIdentityOwnerRead> {
+  const identities = new Map<
+    string,
+    Readonly<{ kind: string; name: string; key: string }>
+  >();
+  const malformed: EntityReference[] = [];
+  for (const edge of writeSet.edges) {
+    const identity = candidateEdgeMatchIdentity(target, edge);
+    if (identity === "malformed") {
+      malformed.push({ kind: edge.kind, id: edge.id });
+      continue;
+    }
+    if (identity === undefined) continue;
+    identities.set(JSON.stringify([edge.kind, identity.name, identity.key]), {
+      kind: edge.kind,
+      name: identity.name,
+      key: identity.key,
+    });
+  }
+  const owners = await readMatchIdentityOwners(target, [
+    ...identities.values(),
+  ]);
+  return malformed.length === 0 ?
+      { status: "complete", owners }
+    : { status: "malformed", owners, malformed };
+}
+
+/** The durable owner key one candidate edge names, as import would derive it. */
+function candidateEdgeMatchIdentity<G extends GraphDef>(
+  target: Store<G>,
+  edge: CandidateWriteSet["edges"][number],
+): Readonly<{ name: string; key: string }> | "malformed" | undefined {
+  const registration = target.graph.edges[edge.kind];
+  if (registration === undefined) return "malformed";
+  if (registration.matchIdentity === undefined) return undefined;
+  const validatedProperties = validateImportProperties(
+    edge.properties,
+    registration.type.schema,
+    "allow",
+  );
+  if (!validatedProperties.success) return "malformed";
+  try {
+    return resolveEdgeMatchIdentityStorage(
+      registration.matchIdentity,
+      {
+        fromKind: edge.from.kind,
+        fromId: edge.from.id,
+        toKind: edge.to.kind,
+        toId: edge.to.id,
+        props: validatedProperties.data,
+      },
+      { graphId: target.graphId, edgeKind: edge.kind },
+    );
+  } catch {
+    return "malformed";
+  }
+}
+
+async function readMatchIdentityOwners<G extends GraphDef>(
+  target: Store<G>,
+  identities: readonly Readonly<{ kind: string; name: string; key: string }>[],
+): Promise<readonly EdgeRow[]> {
+  if (identities.length === 0) return [];
+  const readOwners = matchIdentityOwnerReader(target);
+  if (readOwners === undefined) {
+    throw new CandidateWriteSetError(
+      "Candidate planning requires the keyed durable match-identity owner read.",
+    );
+  }
+  return readOwners(identities);
+}
+
+/** Exact owner read shared by candidate input and validated mutation postimages. */
+export function matchIdentityOwnerReader<G extends GraphDef>(
+  target: Store<G>,
+):
+  | ((
+      identities: readonly Readonly<{
+        kind: string;
+        name: string;
+        key: string;
+      }>[],
+    ) => Promise<readonly EdgeRow[]>)
+  | undefined {
+  const readOwners = storeBackend(target).findEdgesByMatchIdentity;
+  return readOwners === undefined ? undefined : (
+      (identities) => readOwners({ graphId: target.graphId, identities })
+    );
+}
+
+/** Whether every returned owner is included in the default clone projection. */
+export function matchIdentityOwnersAreCloneVisible(
+  owners: readonly EdgeRow[],
+): boolean {
+  return owners.every((owner) => owner.deleted_at === undefined);
+}
+
+function referenceKey(reference: EntityReference): string {
+  return JSON.stringify([reference.kind, reference.id]);
+}
+
+function canonicalTimestamp(value: unknown): string {
+  const timestamp = canonicalizeDatabaseTimestamp(value);
+  if (timestamp === undefined) {
+    throw new CandidateWriteSetError(
+      "A committed candidate peer has an invalid stored timestamp.",
+    );
+  }
+  return timestamp;
+}
+
+function candidateKeys(writeSet: CandidateWriteSet): LineageDelta {
+  return {
+    kind: "keys",
+    nodes: writeSet.nodes.map((node) => ({ kind: node.kind, id: node.id })),
+    edges: writeSet.edges.map((edge) => ({ kind: edge.kind, id: edge.id })),
+  };
+}
+
+/** The exact node/edge rows whose prior state changes candidate import semantics. */
+async function sparseBaseDocument<G extends GraphDef>(
+  target: Store<G>,
+  writeSet: CandidateWriteSet,
+  matchIdentityOwners: readonly EdgeRow[],
+  additionalNodes: readonly EntityReference[] = [],
+): Promise<
+  Readonly<{ document: GraphData; identityScope?: CandidateIdentityScope }>
+> {
+  const backend = storeBackend(target);
+  const verdict = batchPointReadVerdict(backend);
+  const edgesById = await getEdgeRowsByIds(
+    backend,
+    verdict,
+    target.graphId,
+    writeSet.edges.map((edge) => edge.id),
+  );
+  const cardinalityReads = new Map<
+    string,
+    Parameters<GraphBackend["findEdgesByKind"]>[0]
+  >();
+  const activeReads = new Map<
+    string,
+    Parameters<NonNullable<GraphBackend["findActiveEdgesBySourceV1"]>>[0]
+  >();
+  function addActiveRead(
+    edgeKind: string,
+    fromKind: string,
+    fromId: string,
+  ): void {
+    activeReads.set(JSON.stringify([edgeKind, fromKind, fromId]), {
+      graphId: target.graphId,
+      edgeKind,
+      fromKind,
+      fromId,
+    });
+  }
+  for (const edge of writeSet.edges) {
+    const cardinality = target.graph.edges[edge.kind]?.cardinality ?? "many";
+    if (cardinality === "many") continue;
+    const spec = edgeCardinalitySpec({ direction: "source", cardinality });
+    if (spec.holderLiveness === "liveAndActive") {
+      addActiveRead(edge.kind, edge.from.kind, edge.from.id);
+      continue;
+    }
+    const exactPair = spec.keyShape === "fromAndTo";
+    const read = {
+      graphId: target.graphId,
+      kind: edge.kind,
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      ...(exactPair ? { toKind: edge.to.kind, toId: edge.to.id } : {}),
+      excludeDeleted: true,
+      orderBy: "id" as const,
+    };
+    cardinalityReads.set(
+      JSON.stringify([
+        edge.kind,
+        edge.from.kind,
+        edge.from.id,
+        ...(exactPair ? [edge.to.kind, edge.to.id] : []),
+      ]),
+      read,
+    );
+  }
+  for (const edge of edgesById.values()) {
+    if (target.graph.edges[edge.kind]?.cardinality === "oneActive")
+      addActiveRead(edge.kind, edge.from_kind, edge.from_id);
+  }
+  const relevantEdgesById = new Map(edgesById);
+  for (const edge of matchIdentityOwners) {
+    relevantEdgesById.set(edge.id, edge);
+  }
+  for (const read of cardinalityReads.values()) {
+    for (const edge of await backend.findEdgesByKind(read))
+      relevantEdgesById.set(edge.id, edge);
+  }
+  const readActive = backend.findActiveEdgesBySourceV1;
+  if (readActive === undefined) {
+    if (activeReads.size > 0)
+      throw new CandidateWriteSetError(
+        "Bounded oneActive planning requires an active-only source read.",
+      );
+  } else {
+    for (const read of activeReads.values()) {
+      for (const edge of await readActive(read))
+        relevantEdgesById.set(edge.id, edge);
+    }
+  }
+  const references = new Map<string, EntityReference>();
+  function add(reference: EntityReference): void {
+    references.set(referenceKey(reference), reference);
+  }
+  for (const node of writeSet.nodes) add(node);
+  for (const node of additionalNodes) add(node);
+  for (const edge of writeSet.edges) {
+    add(edge.from);
+    add(edge.to);
+  }
+  for (const edge of relevantEdgesById.values()) {
+    if (edge.deleted_at !== undefined) continue;
+    add({ kind: edge.from_kind, id: edge.from_id });
+    add({ kind: edge.to_kind, id: edge.to_id });
+  }
+  for (const assertion of writeSet.identity?.assertions ?? []) {
+    add(assertion.a);
+    add(assertion.b);
+    if (assertion.endedBy !== undefined) add(assertion.endedBy);
+  }
+  if (target.graph.ontology.length > 0 && target.graph.identity === undefined) {
+    const ids = [...new Set([...references.values()].map((ref) => ref.id))];
+    for (const peer of await storeRuntime(target).liveNodesSharingIds(
+      ids,
+      backend,
+    ))
+      add(peer);
+  }
+  const identityClosure =
+    target.graph.identity === undefined ?
+      undefined
+    : await readCandidateIdentityClosure(target, backend, {
+        references: [...references.values()],
+        ...(writeSet.identity === undefined ?
+          {}
+        : {
+            assertionIds: writeSet.identity.assertions.map(
+              (assertion) => assertion.id,
+            ),
+          }),
+        includeArchival: false,
+      });
+  for (const reference of identityClosure?.cloneReferences ?? [])
+    add(reference);
+  const idsByKind = new Map<string, string[]>();
+  for (const reference of references.values()) {
+    const ids = idsByKind.get(reference.kind) ?? [];
+    ids.push(reference.id);
+    idsByKind.set(reference.kind, ids);
+  }
+  const nodes: GraphData["nodes"] = [];
+  for (const [kind, ids] of idsByKind) {
+    const rows = await getNodeRowsByIds(
+      backend,
+      verdict,
+      target.graphId,
+      kind,
+      ids,
+    );
+    for (const row of rows.values()) {
+      if (row.deleted_at !== undefined) continue;
+      nodes.push({
+        kind: row.kind,
+        id: row.id,
+        properties: parseRowProps(row.props),
+        validFrom:
+          row.valid_from === undefined ?
+            null
+          : canonicalTimestamp(row.valid_from),
+        ...(row.valid_to === undefined ?
+          {}
+        : { validTo: canonicalTimestamp(row.valid_to) }),
+        meta: {
+          version: row.version,
+          createdAt: canonicalTimestamp(row.created_at),
+          updatedAt: canonicalTimestamp(row.updated_at),
+        },
+      });
+    }
+  }
+  const edges: GraphData["edges"] = [];
+  for (const row of relevantEdgesById.values()) {
+    if (row.deleted_at !== undefined) continue;
+    edges.push({
+      kind: row.kind,
+      id: row.id,
+      from: { kind: row.from_kind, id: row.from_id },
+      to: { kind: row.to_kind, id: row.to_id },
+      properties: parseRowProps(row.props),
+      validFrom:
+        row.valid_from === undefined ?
+          null
+        : canonicalTimestamp(row.valid_from),
+      ...(row.valid_to === undefined ?
+        {}
+      : { validTo: canonicalTimestamp(row.valid_to) }),
+      meta: {
+        createdAt: canonicalTimestamp(row.created_at),
+        updatedAt: canonicalTimestamp(row.updated_at),
+      },
+    });
+  }
+  return {
+    document: {
+      formatVersion: "2.0",
+      exportedAt: "1970-01-01T00:00:00.000Z",
+      source: { type: "external", description: "bounded candidate baseline" },
+      nodes,
+      edges,
+      ...(identityClosure === undefined ?
+        {}
+      : {
+          identity: {
+            profile: "typegraph-identity-v1",
+            mode: "state",
+            assertions: [...identityClosure.cloneState],
+          },
+        }),
+    },
+    ...(identityClosure === undefined ?
+      {}
+    : {
+        identityScope: {
+          baseState: identityClosure.baseState,
+          cloneState: identityClosure.cloneState,
+        },
+      }),
+  };
+}
+
+function assertIndependentBackend(
+  targetBackend: GraphBackend,
+  candidateBackend: GraphBackend,
+): void {
+  if (
+    targetBackend === candidateBackend ||
+    isBackendDerivedFrom(targetBackend, candidateBackend) ||
+    isBackendDerivedFrom(candidateBackend, targetBackend) ||
+    sharesSerializedTransactionResource(targetBackend, candidateBackend)
+  ) {
+    throw new CandidateWriteSetError(
+      "The transient candidate backend must be independent of the target backend.",
+    );
+  }
+}
+
+/**
+ * A disposable working copy seeded only with candidate rows and references.
+ * The scope accessor exposes the same target identity projection used to seed
+ * the copy, so the subsequent diff compares one bounded baseline.
+ */
+export function sparseCandidateWorkingCopyStrategy<G extends GraphDef>(
+  writeSet: CandidateWriteSet,
+  makeBackend: MakeBackend,
+  matchIdentityOwners: readonly EdgeRow[],
+  options: Readonly<{
+    preserveNodeUniqueness?: boolean;
+    captureChanges?: boolean;
+    additionalNodes?: readonly EntityReference[];
+  }> = {},
+): Readonly<{
+  strategy: WorkingCopyStrategy<G>;
+  identityScope: () => CandidateIdentityScope | undefined;
+}> {
+  let scopedIdentity: CandidateIdentityScope | undefined;
+  return {
+    strategy: {
+      create: async (target) => {
+        const { document, identityScope } = await sparseBaseDocument(
+          target,
+          writeSet,
+          matchIdentityOwners,
+          options.additionalNodes,
+        );
+        scopedIdentity = identityScope;
+        const backend = await makeBackend();
+        // An aliased backend still belongs to the target. Refuse it before
+        // cleanup takes ownership of independently allocated backends.
+        assertIndependentBackend(storeBackend(target), backend);
+        try {
+          const [store] = await createStoreWithSchema(
+            options.preserveNodeUniqueness === true ?
+              target.graph
+            : graphWithoutNodeUniqueness(target.graph),
+            backend,
+            {
+              ...(options.captureChanges === true ?
+                { history: true as const }
+              : { revisionTracking: target.revisionTrackingEnabled }),
+              revisionJournal: false,
+            },
+          );
+          const imported = await importGraph(store, document, {
+            onConflict: "error",
+            onUnknownProperty: "allow",
+            validateReferences: true,
+            refreshStatistics: false,
+          });
+          if (!imported.success) {
+            throw new CandidateWriteSetError(
+              "Unable to seed candidate peers into the transient staging store.",
+              { details: { errors: imported.errors } },
+            );
+          }
+          return store;
+        } catch (error) {
+          try {
+            await backend.close();
+          } catch {
+            // Preserve the staging failure.
+          }
+          throw error;
+        }
+      },
+    },
+    identityScope: () => scopedIdentity,
+  };
+}
+
+export function boundedCandidateKeys(
+  writeSet: CandidateWriteSet,
+): LineageDelta {
+  return candidateKeys(writeSet);
+}

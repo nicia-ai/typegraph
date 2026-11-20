@@ -22,10 +22,9 @@ import {
   type SqlFragment,
 } from "../../../src/query/sql-fragment";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH = "g1";
 const TS = "2026-06-01T00:00:00.000Z";
@@ -357,6 +356,15 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
     expect(pgvectorStrategy.capabilities.filteredApproximateSearch).toEqual({
       mode: "iterative-scan",
       guaranteesFullPage: false,
+    });
+    // The one bundled engine with a per-search frontier: `hnsw.ef_search`,
+    // honored by HNSW slots only and scoped to the search's own transaction.
+    // Every other combination is a refusal, not a silent drop (#433).
+    expect(pgvectorStrategy.capabilities.searchFrontierTuning).toEqual({
+      tunable: true,
+      parameter: "hnsw.ef_search",
+      indexType: "hnsw",
+      requiresTransactionScope: true,
     });
   });
 });

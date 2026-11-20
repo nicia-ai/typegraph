@@ -37,16 +37,47 @@ type NodeId<N extends NodeType> = string & { readonly [__nodeId]: N };
 **Example:**
 
 ```typescript
-import { type NodeId } from "@nicia-ai/typegraph";
+import { type Node, type NodeId } from "@nicia-ai/typegraph";
 
 type PersonId = NodeId<typeof Person>;
 type CompanyId = NodeId<typeof Company>;
 
-function getPersonById(id: PersonId): Promise<Node<typeof Person>> {
+function getPersonById(id: PersonId): Promise<Node<typeof Person> | undefined> {
   // TypeScript prevents passing a CompanyId here
   return store.nodes.Person.getById(id);
 }
 ```
+
+### `PolymorphicNodeReference<N>`
+
+The `{ kind, id }` a polymorphic read carries for a node of type `N`: a row from a supertype query,
+an alias stated `{ expansion: "subclasses" }` (on any graph, including over a subclass a runtime
+extension adds), a widened edge endpoint (`{ kind: edge.toKind, id: edge.toId }`), or an expanded
+search hit. Every node-reference input accepts it: edge endpoints, `neighbors()`, the bulk edge
+reads, composition `partOf.whole` and `reparent`, `subgraph()`, the recorded-time `adjacency()` root,
+`getNodeByRef()`, the identity reads
+and the provenance retraction verbs.
+
+```typescript
+type PolymorphicNodeReference<N extends NodeType> = Readonly<{
+  kind: string;
+  id: NodeId<PolymorphicNodeType<N>>;
+}>;
+```
+
+What each reference form guarantees:
+
+- **An exact reference** (`NodeRef<N>`, `GraphNodeReference<G>`, a node) keeps its kind and id
+  correlated at compile time: a Run's id cannot be written under kind `"Task"`.
+- **A polymorphic reference** requires a branded id, so an unbranded `{ kind: string, id: string }`
+  and the id of an unrelated kind (even one with the same properties) do not compile. Its `kind` is
+  a `string`, so it cannot guarantee the kind and the id belong together: a Run's branded id under
+  kind `"Task"` compiles.
+- **The runtime** reads the `(kind, id)` pair as stated and checks registration
+  (`KindNotFoundError`), existence, and the operation's own constraints (`EndpointError` for a kind
+  an edge does not admit, the configured source kinds for a retraction). Brands are erased and one
+  id can exist under several kinds, so a mislabelled reference whose id also exists under the stated
+  kind names that other node: reads return it and writes affect it.
 
 ### `NodeProps<N>`
 
@@ -261,18 +292,34 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 }))
 ```
 
-### `TypedEdgeCollection<R>`
+### `TypedEdgeCollection<R, G>`
 
-A type-safe edge collection with From/To types extracted from the edge
-registration. This is what `store.edges.*` returns.
+A type-safe edge collection derived from the edge registration. This is what
+`store.edges.*` returns, with `G` the store's graph. In `G`, each declared
+endpoint reads back as `SubsumedNodeType<G, N>` (its `kind` and `NodeId` widen
+when `G`'s ontology gives the kind subclasses or equivalent kinds) and endpoint
+arguments take an `EdgeEndpointRef<G, N>`, which also admits the kinds in
+`AssignableNodeKinds<G, N["kind"]>` and polymorphic query rows; see
+[typed edge collections under subsumption](/ontology#subsumption-type-inheritance).
+Named without `G`, the declared kinds are taken exactly. With array-valued `to`, each source type can connect to
+each target type. With a [source-dependent target map](/core-concepts#source-dependent-targets),
+typed writes preserve the allowed pairs instead of accepting independent endpoint unions.
 
 ```typescript
-type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
-  R["type"],
-  R["from"][number], // Union of allowed 'from' node types
-  R["to"][number]    // Union of allowed 'to' node types
->;
+// assignedTo allows Employee -> Department and Student -> Course.
+await store.edges.assignedTo.create(employee, department, {});
+await store.edges.assignedTo.create(student, course, {});
+
+// @ts-expect-error Employee cannot be assigned to Course.
+await store.edges.assignedTo.create(employee, course, {});
 ```
+
+Keep the inferred edge and graph types to retain this information. Widening a
+declaration to a generic endpoint union can lose compile-time correlation;
+runtime validation still enforces the graph's allowed pairs. The same runtime
+validation applies to dynamic collections whose kinds are only known at runtime.
+This write-side guarantee does not make query results a correlated union of
+source/target pairs; narrow result kinds explicitly when consuming them.
 
 ### `DynamicNodeCollection`
 
@@ -283,37 +330,101 @@ Exposes the full `NodeCollection` API (`create`, `getById`, `find`, `count`,
 parameters since the concrete node type is not known at compile time.
 
 ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
-`bulkDelete`) accept plain `string` instead of branded `NodeId<N>`, since the
+`bulkDelete`, `bulkHardDelete`) accept plain `string` instead of branded `NodeId<N>`, since the
 dynamic path typically receives IDs from edge metadata, snapshots, or external
 input where the brand is not available.
 
 ```typescript
-import type { DynamicNodeCollection } from "@nicia-ai/typegraph";
+import type { DynamicNodeCollection } from "@nicia-ai/typegraph/store";
 
-// Derived from NodeCollection<NodeType, string> with branded ID parameters widened to string
+// Derived from NodeCollection<DynamicNodeType, string> with ID parameters widened to string
 ```
+
+### `DynamicNodeKind`, `DynamicNode`, and `DynamicNodeReference`
+
+`DynamicNodeKind<K>` preserves and nominally marks the requested collection
+key. `DynamicNode` is the node value returned by a `DynamicNodeCollection`, and
+`DynamicNodeReference` is the nominal lightweight `{ kind, id }` form returned
+by runtime-aware identity reads. The markers let those results flow back into
+identity operations without making arbitrary string kinds valid compile-time
+inputs.
+
+```typescript
+import type {
+  DynamicNode,
+  DynamicNodeReference,
+} from "@nicia-ai/typegraph/store";
+import type { DynamicNodeKind } from "@nicia-ai/typegraph/query";
+```
+
+Identity reads return `IdentityNodeReference<G>`, the union of the graph's
+compile-time node references and `DynamicNodeReference`, because a class can
+contain both after runtime evolution.
 
 ### `DynamicEdgeCollection`
 
-An edge collection with widened generics for runtime string-keyed access via
-[`store.getEdgeCollection(kind)`](/schemas-stores#storegetedgecollectionkind).
-Exposes the full `EdgeCollection` API (`create`, `getById`, `find`, `count`,
-`findFrom`, `findTo`, etc.) with widened endpoint types.
+`DynamicEdgeCollection<E>` is an edge collection for runtime endpoint dispatch. Obtain it from
+[`store.getEdgeCollection(kind)`](/schemas-stores#storegetedgecollectionkind),
+`store.getEdgeCollectionOrThrow(kind)`, or either method on a transaction context.
+When `kind` belongs to the graph's TypeScript definition, `E` retains that edge's
+property schema and result type. An arbitrary `string` uses the default
+`AnyEdgeType`, so properties are checked at runtime.
 
-ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
-`bulkDelete`, `bulkUpsertById`) accept plain `string` instead of branded
-`EdgeId<E>`, since the dynamic path typically receives IDs from edge metadata,
-snapshots, or external input where the brand is not available.
+Endpoints accept `{ kind: string; id: string }`. Writes validate endpoint domains
+and source-dependent pairs against the graph's schema. ID parameters accept
+plain `string`; returned edges retain their typed IDs. This surface exposes the
+full collection API, including bulk operations.
+
+Use it for helpers generic over a graph and edge kind:
 
 ```typescript
-import type { DynamicEdgeCollection } from "@nicia-ai/typegraph";
+import type { EdgeKinds, GraphDef, NodeRef, TransactionContext } from "@nicia-ai/typegraph";
+import type { z } from "zod";
 
-// Derived from EdgeCollection<AnyEdgeType, NodeType, NodeType> with branded ID parameters widened to string
+async function connect<G extends GraphDef, K extends EdgeKinds<G>>(
+  tx: TransactionContext<G>,
+  kind: K,
+  from: NodeRef,
+  to: NodeRef,
+  props: z.input<G["edges"][K]["type"]["schema"]>,
+) {
+  return tx.getEdgeCollectionOrThrow(kind).getOrCreateByEndpoints(
+    from, to, props, { ifExists: "update" },
+  );
+}
 ```
+
+For a reusable collection parameter, use `DynamicEdgeCollection<E>`. No collection
+cast or dependency on generated declaration filenames is needed.
+
+**Upgrading from 0.54/0.55:** source-dependent targets in 0.55 made endpoint
+arguments a union of valid pairs. TypeScript cannot resolve that union inside
+some generic `G`/`K` helpers, even for array-valued targets. Migrate dynamic calls
+from `tx.edges[kind]` to `tx.getEdgeCollectionOrThrow(kind)` (or check the optional
+lookup result). Generic `EdgeCollection<E, From, To>` and
+`TypedEdgeCollection<EdgeRegistration<E, From, To>>` annotations can encounter the
+same deferred-type limitation; use `DynamicEdgeCollection<E>` when endpoints are
+runtime data. Keep `store.edges.specificKind` for compile-time endpoint checking.
+
+`EdgeRegistration` now permits array or map targets in broad annotations. Code
+inspecting `.to` must narrow with `isEdgeTargetMap`; an explicitly Cartesian
+registration can specify `readonly To[]` as its fourth type argument.
+
+Known-kind dynamic lookups now check properties at compile time. Callers passing
+an unvalidated record should parse it with the selected schema first. An `unknown`
+property value was not accepted by the typed 0.54 API either.
+
+### `DynamicStoreViewEdgeCollection<E>`
+
+`view.getEdgeCollection(kind)` returns an optional dynamic collection bound to the
+view's valid-time coordinate. It retains known edge property types and accepts
+runtime endpoint references and string IDs. It exposes only the view's reads:
+there are no writes, deferred batch reads, or per-call temporal overrides.
+Recorded-time views retain their narrower reconstructing-read API.
 
 ## Subgraph Types
 
-These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphrootid-options) for
+These types are used with [`store.subgraph()`](/schemas-stores#storesubgraphroot-options) for
 typed neighborhood extraction.
 
 ### `AnyNode<G>`
@@ -322,7 +433,7 @@ Discriminated union of all runtime node types in a graph. Each member carries it
 own `kind` literal, so `switch (node.kind)` narrows the type automatically.
 
 ```typescript
-import type { AnyNode } from "@nicia-ai/typegraph";
+import type { AnyNode } from "@nicia-ai/typegraph/store";
 
 type MyNode = AnyNode<typeof graph>;
 // = Node<typeof Person> | Node<typeof Company> | ...
@@ -333,7 +444,7 @@ type MyNode = AnyNode<typeof graph>;
 Discriminated union of all runtime edge types in a graph.
 
 ```typescript
-import type { AnyEdge } from "@nicia-ai/typegraph";
+import type { AnyEdge } from "@nicia-ai/typegraph/store";
 
 type MyEdge = AnyEdge<typeof graph>;
 // = Edge<typeof worksAt> | Edge<typeof knows> | ...
@@ -345,7 +456,7 @@ Narrows `AnyNode<G>` to a subset of node kinds. Useful when `store.subgraph()`
 is called with `includeKinds`.
 
 ```typescript
-import type { SubsetNode } from "@nicia-ai/typegraph";
+import type { SubsetNode } from "@nicia-ai/typegraph/store";
 
 type TaskOrAgent = SubsetNode<typeof graph, "Task" | "Agent">;
 // = Node<typeof Task> | Node<typeof Agent>
@@ -356,15 +467,42 @@ type TaskOrAgent = SubsetNode<typeof graph, "Task" | "Agent">;
 Narrows `AnyEdge<G>` to a subset of edge kinds.
 
 ```typescript
-import type { SubsetEdge } from "@nicia-ai/typegraph";
+import type { SubsetEdge } from "@nicia-ai/typegraph/store";
 
 type TraversedEdges = SubsetEdge<typeof graph, "has_task" | "runs_agent">;
+```
+
+### `SubgraphNodeKey`
+
+The `{ kind, id }` key every subgraph lookup takes. A node, a `GraphNodeReference<G>`, or an
+edge's endpoint (`{ kind: edge.toKind, id: edge.toId }`) fits, so following an edge needs no
+cast. The subgraph root is a `GraphNodeReferenceInput<G>`: an exact `GraphNodeReference<G>`,
+whose kind and branded id stay correlated, or a
+[`PolymorphicNodeReference`](#polymorphicnodereferencen), which cannot guarantee that.
+
+```typescript
+type SubgraphNodeKey<K extends string = string> = Readonly<{ kind: K; id: string }>;
+```
+
+### `indexSubgraph(result)` and `SubgraphIndex<N, E>`
+
+Builds `(kind, id)` lookups over a subgraph result, which itself stays plain data. `N` and `E` are
+the result's node and edge element types, so lookups narrow by kind without naming the graph.
+
+```typescript
+type SubgraphIndex<N, E> = Readonly<{
+  node: SubgraphNodeLookup<N>; // (key) => node | undefined; a literal kind narrows
+  outgoing: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose source is key
+  incoming: SubgraphEdgeLookup<E>; // (key, edgeKind?) => edges whose target is key
+}>;
+
+const { node, outgoing, incoming } = indexSubgraph(await store.subgraph(run, options));
 ```
 
 ### `SubgraphOptions<G, EK, NK>`
 
 Options for `store.subgraph()`. See the
-[store reference](/schemas-stores#storesubgraphrootid-options) for the full
+[store reference](/schemas-stores#storesubgraphroot-options) for the full
 parameter table.
 
 ```typescript
@@ -380,15 +518,15 @@ type SubgraphOptions<G, EK, NK> = Readonly<{
 
 ### `SubgraphResult<G, NK, EK>`
 
-The return type of `store.subgraph()`. Contains the root node, a node index, and
-forward/reverse adjacency maps for immediate traversal.
+The return type of `store.subgraph()`: plain data holding the root node and the returned nodes
+and edges. Two nodes of different kinds that share an id are both returned, each under its own
+kind. Use `indexSubgraph(result)` for `(kind, id)` lookups.
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
-  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
-  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  nodes: readonly SubgraphNodeResult<G, NK>[]; // ordered by kind, then id
+  edges: readonly SubgraphEdgeResult<G, EK>[]; // ordered by id
 }>;
 ```
 
@@ -423,20 +561,24 @@ type Cardinality = "many" | "one" | "unique" | "oneActive";
 | `"unique"` | At most one edge per source-target pair |
 | `"oneActive"` | At most one active edge (`validTo` is `undefined`) per source node |
 
-### `InferenceType`
+### `TargetCardinality`
 
-Controls how ontology relationships affect queries.
+Controls how many edges of a type can point AT one target node, independent
+of `Cardinality`, which bounds the edges leaving one source.
 
 ```typescript
-type InferenceType =
-  | "subsumption"   // Query for X includes subclass instances
-  | "hierarchy"     // Enables broader/narrower traversal
-  | "substitution"  // Can substitute equivalent types
-  | "constraint"    // Validation rules
-  | "composition"   // Part-whole navigation
-  | "association"   // Discovery/recommendation
-  | "none";         // No automatic inference
+type TargetCardinality = "many" | "one" | "oneActive";
 ```
+
+| Value | Description |
+|-------|-------------|
+| `"many"` | No limit on edges (default) |
+| `"one"` | At most one edge per target node |
+| `"oneActive"` | At most one active edge (`validTo` is `undefined`) per target node |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, already declared from the source side by
+`Cardinality`'s `"unique"` value.
 
 ## Query Types
 
@@ -448,6 +590,7 @@ Configuration for variable-length (recursive) traversals.
 type VariableLengthSpec = Readonly<{
   minDepth: number;                   // Minimum hops (default: 1)
   maxDepth: number;                   // Maximum hops (-1 = unlimited)
+  exhaustive?: boolean;               // No hop ceiling; needs cyclePolicy "prevent" and maxDepth -1
   cyclePolicy: "prevent" | "allow";   // Cycle handling mode
   pathAlias?: string;                 // Column alias for projected path
   depthAlias?: string;                // Column alias for projected depth
@@ -506,10 +649,9 @@ type StreamOptions = Readonly<{
 Generates a unique ID using nanoid.
 
 ```typescript
-import { generateId } from "@nicia-ai/typegraph";
+import { generateId } from "@nicia-ai/typegraph/core";
 
-function generateId(): string;
-
+// generateId(): string
 const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 ```
 
@@ -520,7 +662,7 @@ const id = generateId(); // "V1StGXR8_Z5jdHi6B-myT"
 Maximum depth for unbounded recursive traversals (10).
 
 ```typescript
-import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import { MAX_RECURSIVE_DEPTH } from "@nicia-ai/typegraph/query";
 
 // MAX_RECURSIVE_DEPTH = 10
 ```
@@ -535,7 +677,7 @@ To allow revisits for maximum performance, use `cyclePolicy: "allow"`.
 Maximum allowed value for the `maxHops` option in recursive traversals (1000).
 
 ```typescript
-import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "@nicia-ai/typegraph";
+import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "@nicia-ai/typegraph/query";
 
 // MAX_EXPLICIT_RECURSIVE_DEPTH = 1000
 ```

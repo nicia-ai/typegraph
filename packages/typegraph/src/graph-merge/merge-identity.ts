@@ -1,0 +1,1412 @@
+/**
+ * Identity semantics of graph merge, in one module: the plan-time derivation
+ * of identity changes (dedupe, retraction truth validation, endpoint remap),
+ * the plan-time contradiction simulation, and the commit-transaction guards
+ * that prove the validated identity state still holds when the plan applies.
+ *
+ * The dependency is one-directional: `merge.ts` (the orchestrator) imports
+ * from here, never the reverse. Functions that need plan data take
+ * {@link IdentityPlanSlice} — a structural subset of `MergePlan` — so this
+ * module never names the full plan type.
+ *
+ * COMMIT-GUARD LAYERING. Correctness rests on what runs INSIDE the commit
+ * transaction: the by-id freshness check ({@link assertPlannedIdentityIdsFresh}
+ * — ended rows included, which no ledger slice or class fingerprint can see),
+ * the identity applier's own refusals, and — after the identity DML — the
+ * post-write affected-class assertion
+ * ({@link assertMergedIdentityClassesConsistent}), which re-derives the
+ * touched identity classes from the state the merge just wrote and refuses a
+ * contradiction there. All of them translate typed at the apply boundary
+ * through {@link translateIdentityCommitError}.
+ *
+ * Every layer ABOVE that is diagnosability. The plan-time simulation
+ * ({@link assertNoContradictoryIdentityClosure}) and the window fingerprints
+ * (direct-peer arrivals, per-seed class/liveness fingerprints, the
+ * negative-ledger fingerprint, and the simulation re-run inside
+ * {@link assertIdentityPeersStable}) exist to refuse EARLY — before any write,
+ * with a message naming exactly what drifted — rather than to make the commit
+ * sound. Never add a NEW invariant as a fingerprint or a simulation arm alone:
+ * make the applier or the post-write assertion enforce it against real state,
+ * then simulate it for the error message if useful.
+ *
+ * Beneath all of it sits a layer that is not code at all: the derived identity
+ * separation relation (`identity/separation.ts`) carries a CHECK constraint
+ * that no plan, simulation, or applier can satisfy while a `different`
+ * assertion sits inside one identity class. A plan that slips past every guard
+ * above still aborts in the engine, and its
+ * `IdentitySeparationViolationError` — an `IDENTITY_`-coded refusal — is
+ * translated here like any other applier refusal.
+ */
+import {
+  identityReferenceKey,
+  normalizeIdentityPair,
+} from "../identity/reference";
+import { isCurrentIdentityAssertion } from "../identity/validity-window";
+import { nowIso } from "../utils/date";
+import { encodeTupleKey } from "../utils/tuple-key";
+import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
+import {
+  BaseVersionMismatchError,
+  describeCause,
+  IdentityMergeConflictError,
+  MergeError,
+} from "./errors";
+import {
+  assertNoOpposingIdentityRelationsRaw,
+  dedupeIdentityAssertionsRaw,
+  endpointTuple,
+  identityDedupeKey,
+  planIdentityThreeWay,
+} from "./identity-three-way";
+import {
+  compareMergeKeys,
+  compareStrings,
+  idOf,
+  kindOf,
+  type MergeKey,
+  mergeKey,
+  mergeKeyOf,
+} from "./node-key";
+import type { StagingSet } from "./staging";
+import { assertTemporalIdentityClosureConsistent } from "./temporal-identity-closure";
+import {
+  compareCodePoints,
+  type GraphBackend,
+  type GraphDef,
+  hasScopedIdentityReads,
+  IdentityContradictionError,
+  type IdentityTransferAssertion,
+  loadIdentityWindowHistory,
+  NodeNotFoundError,
+  type Store,
+  storeBackend,
+  storeRuntime,
+  type TransactionBackend,
+  TypeGraphError,
+} from "./typegraph-internal";
+import type { DroppedItem } from "./types";
+
+/**
+ * The identity-relevant slice of a resolved merge plan: a STRUCTURAL subset of
+ * `MergePlan` (which `merge.ts` defines), so the orchestrator can hand its
+ * plan to every function here without this module importing the plan type.
+ */
+export type IdentityPlanSlice = Readonly<{
+  canonicalEntities: readonly CanonicalEntity[];
+  identityAssertions: readonly IdentityTransferAssertion[];
+  identityRetractions: readonly IdentityTransferAssertion[];
+  nodeDeletions: ReadonlyMap<MergeKey, string>;
+  retypeMap: ReadonlyMap<MergeKey, string>;
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
+}>;
+
+export { DUPLICATE_IDENTITY_ASSERTION_DROP_REASON } from "./identity-three-way";
+
+/**
+ * Reason recorded when node reconciliation collapsed both endpoints of a `same`
+ * assertion onto one survivor, making the assertion vacuous.
+ */
+export const REDUNDANT_IDENTITY_ASSERTION_DROP_REASON =
+  "identity:endpoints-collapsed";
+
+/**
+ * Reason recorded when node reconciliation fused both endpoints of a
+ * `different` assertion that no longer holds — retracted, or ended by deleting
+ * an endpoint. It forbade nothing, and its pair is now one node, so the
+ * history row has no pair left to describe.
+ */
+export const COLLAPSED_ENDED_DIFFERENT_DROP_REASON =
+  "identity:ended-different-collapsed";
+
+/** Reason recorded when endpoint remapping leaves no shared validity window. */
+export const EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON =
+  "identity:empty-remapped-window";
+
+/** The report entry for an identity assertion the merge did not apply. */
+function droppedIdentityAssertion(
+  assertion: IdentityTransferAssertion,
+  reason: string,
+): DroppedItem {
+  return { kind: "identity", id: assertion.id, reason };
+}
+
+/**
+ * Reason recorded when a branch retracted an assertion whose id identifies a
+ * DIFFERENT complete truth on the target's current ledger. Ending that row
+ * would delete truth the branch never saw, while the branch's actual intent —
+ * "the assertion I retracted no longer holds" — is already satisfied by that
+ * assertion's absence, so the retraction is skipped and reported instead.
+ */
+export const RETRACTION_TARGET_MISMATCH_DROP_REASON =
+  "identity:retraction-target-mismatch";
+
+/**
+ * Reason recorded when EVERY branch that staged a retraction staged it as the
+ * cascade of a node deletion the delete/modify resolution then OVERRULED.
+ *
+ * A node soft-delete ends every open assertion touching the node, so the
+ * deleting branch's diff stages those endings as retractions — but it stages
+ * them with their derived cause (the deleted node), not as bare retractions.
+ * When the modification wins and the node survives, the cause is gone: applying
+ * the ending would strip the resurrected node's identity truth, so it is
+ * dropped (visibly) along with the deletion that caused it. A retraction any
+ * branch made EXPLICITLY, or whose cause deletion survived, is never dropped
+ * here.
+ */
+export const RETRACTION_DELETION_OVERRULED_DROP_REASON =
+  "identity:deletion-overruled";
+
+/** The empty stored-row map, for validating staged assertions intra-plan only. */
+export const NO_STORED_ASSERTIONS: ReadonlyMap<string, LedgerAssertion> =
+  new Map();
+
+/**
+ * Structural validation: one assertion id was staged for retraction under two
+ * different identity truths — a data-integrity fault, checked independently of
+ * the three-way classification below.
+ */
+function assertRetractedIdsHaveOneTruth(staging: StagingSet): void {
+  const seenById = new Map<string, IdentityTransferAssertion>();
+  for (const staged of staging.retractedIdentityAssertions) {
+    const previous = seenById.get(staged.assertion.id);
+    if (
+      previous !== undefined &&
+      assertionIdentityKey(previous) !== assertionIdentityKey(staged.assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged for retraction with two different identity truths.",
+        {
+          details: {
+            assertionId: staged.assertion.id,
+            first: previous,
+            second: staged.assertion,
+          },
+        },
+      );
+    }
+    seenById.set(staged.assertion.id, staged.assertion);
+  }
+}
+
+/**
+ * @internal Exported for deterministic phase-level verification.
+ *
+ * Plans every identity change for one merge: three-way classifies the staged
+ * assertions against the staged base slice ({@link planIdentityThreeWay}: the
+ * duplicate-assertion survivor rule, the opposing-relations refusal, and the
+ * retract/reassert race refusal), then applies the duties owned here: the raw
+ * one-id-one-truth checks, the
+ * committed-id set the classifier's survivor rule needs, the retraction
+ * target-truth filter against the target's ACTUAL stored rows (independent of
+ * — and stricter than — the staged base slice the classifier reasons about),
+ * and the assert/retract id-collision backstop.
+ */
+export function planIdentityChanges(
+  staging: StagingSet,
+  storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>,
+): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  retractions: readonly IdentityTransferAssertion[];
+  dropped: readonly DroppedItem[];
+}> {
+  // Staged ids the target ALREADY holds with the exact staged truth. The
+  // classifier's survivor rule must prefer these: the applier is idempotent
+  // per semantic pair, so a freshly minted branch id can never displace the
+  // target's committed row — choosing it would report an id as applied that
+  // is never written while listing the target's own row as dropped.
+  const committedIds = committedIdentityIds(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    storedIdentityRowsById,
+  );
+  const classified = planIdentityThreeWay(staging, committedIds);
+
+  // One id, one truth — over the RAW staged assertions, never the classifier's
+  // survivors: two branches staging one id for the same pair with different
+  // validFrom values collapse into one survivor under the semantic key (which
+  // excludes validity), so a check reading the survivors would never see the
+  // collision — while the report would list the id as both applied and
+  // dropped.
+  //
+  // ORDER IS BEHAVIOR. A staging set that trips more than one check reports
+  // the first of: opposing-relations, then the retract/reassert race (both
+  // inside `planIdentityThreeWay`), then one-id-one-truth, then the
+  // retraction's two-truths check.
+  assertOneIdOneTruth(
+    staging.newIdentityAssertions.map((staged) => staged.assertion),
+    NO_STORED_ASSERTIONS,
+  );
+  assertRetractedIdsHaveOneTruth(staging);
+
+  const retractionById = new Map<string, IdentityTransferAssertion>();
+  for (const retraction of classified.retractions) {
+    retractionById.set(retraction.id, retraction);
+  }
+  const retractions: IdentityTransferAssertion[] = [];
+  const retractionDropped: DroppedItem[] = [];
+  for (const [assertionId, retraction] of retractionById) {
+    const stored = storedIdentityRowsById.get(assertionId);
+    if (
+      stored !== undefined &&
+      isCurrentIdentityAssertion(stored) &&
+      assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
+    ) {
+      retractionDropped.push({
+        kind: "identity",
+        id: assertionId,
+        reason: RETRACTION_TARGET_MISMATCH_DROP_REASON,
+      });
+      continue;
+    }
+    retractions.push(retraction);
+  }
+  // Defensive: one id planned as BOTH a new assertion and a retraction would
+  // reach the applier as retract-then-import of one id, which the import
+  // refuses generically (the freshly ended row fails its exact-match test).
+  // Unreachable through the supported staging paths today — the truth-aware
+  // diff and the retraction truth filter each break every construction we
+  // know — so refuse typed if a future path assembles it.
+  const survivingIds = new Set(
+    classified.assertions.map((survivor) => survivor.id),
+  );
+  for (const retraction of retractions) {
+    if (survivingIds.has(retraction.id)) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged as both a new assertion and a retraction.",
+        { details: { assertionId: retraction.id } },
+      );
+    }
+  }
+  return {
+    assertions: [...classified.assertions].sort((left, right) =>
+      compareCodePoints(identityDedupeKey(left), identityDedupeKey(right)),
+    ),
+    retractions: retractions.toSorted((left, right) =>
+      compareCodePoints(left.id, right.id),
+    ),
+    dropped: [...classified.dropped, ...retractionDropped],
+  };
+}
+
+/** A plain `(kind, id)` node reference — an identity assertion endpoint. */
+type IdentityEndpoint = Readonly<{ kind: string; id: string }>;
+
+/**
+ * Maps an endpoint onto the `(kind, id)` it will actually carry in the committed
+ * target: first through the cluster canonical map (the SAME map edge repoint
+ * uses), then through the ontology retype cascade, keyed EXACTLY as
+ * {@link applyMergePlan} keys an edge endpoint — `mergeKey(kind, id)` of the
+ * post-canonical endpoint, whose retype value is the survivor's reconciled kind.
+ *
+ * Both hops are required. Under `reconcileTypes: "ontology"` a cluster survivor
+ * is written under its most-specific kind, so an assertion that still named the
+ * pre-retype kind would reference a `(kind, id)` no live row carries and the
+ * commit-time endpoint guard would reject it (or, worse, bind to a stale row of
+ * the old kind).
+ */
+function resolveIdentityEndpoint(
+  endpoint: IdentityEndpoint,
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+): IdentityEndpoint {
+  const key = mergeKeyOf(endpoint);
+  const canonical = canonicalOf.get(key) ?? key;
+  return {
+    kind: retypeMap.get(canonical) ?? kindOf(canonical),
+    id: idOf(canonical),
+  };
+}
+
+/**
+ * Repoints every planned identity assertion's endpoints onto the identity they
+ * will hold after the commit ({@link resolveIdentityEndpoint}), so an assertion
+ * naming a branch node that reconciliation folded away — or retyped — references
+ * the surviving row instead of a dangling `(kind, id)` (which the commit-time
+ * `requireLiveEndpoints` guard would reject with a NodeNotFoundError, rolling back
+ * the whole merge). After remapping it re-establishes the identity-pair invariants:
+ * a `same` assertion whose endpoints collapse onto one survivor is redundant
+ * and dropped (reported), as is a collapsed `different` that no longer holds,
+ * while a collapsed CURRENT `different` assertion is a typed conflict. A row
+ * the target already holds with the staged truth is never reported dropped —
+ * it stays on the target untouched;
+ * surviving endpoints are re-normalized into code-point order (the
+ * import path rejects a non-normalized pair), and assertions that now share a
+ * semantic key are re-deduped by the same survivor rule
+ * ({@link compareIdentitySurvivors}) that {@link planIdentityChanges} applied
+ * before the remap.
+ */
+export function remapIdentityAssertionEndpoints(
+  assertions: readonly IdentityTransferAssertion[],
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+  endpointWindows: ReadonlyMap<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  > = new Map(),
+): Readonly<{
+  assertions: readonly IdentityTransferAssertion[];
+  dropped: readonly DroppedItem[];
+  warnings: readonly string[];
+}> {
+  const remapped: IdentityTransferAssertion[] = [];
+  const dropped: DroppedItem[] = [];
+  const narrowingWarningById = new Map<string, string>();
+  for (const assertion of assertions) {
+    const remappedA = resolveIdentityEndpoint(
+      assertion.a,
+      canonicalOf,
+      retypeMap,
+    );
+    const remappedB = resolveIdentityEndpoint(
+      assertion.b,
+      canonicalOf,
+      retypeMap,
+    );
+    const stored = storedRowsById.get(assertion.id);
+    const committed =
+      stored !== undefined &&
+      assertionTruthKey(stored) === assertionTruthKey(assertion);
+    if (mergeKeyOf(remappedA) === mergeKeyOf(remappedB)) {
+      if (
+        assertion.relation === "different" &&
+        isCurrentIdentityAssertion(assertion)
+      ) {
+        throw new IdentityMergeConflictError(
+          "Node reconciliation collapsed a different-identity assertion onto one survivor.",
+          { details: { assertion, survivor: remappedA } },
+        );
+      }
+      // A row the target already holds stays there as it is: the merge writes
+      // nothing for it, so reporting it dropped would contradict the target.
+      if (committed) continue;
+      dropped.push(
+        droppedIdentityAssertion(
+          assertion,
+          assertion.relation === "same" ?
+            REDUNDANT_IDENTITY_ASSERTION_DROP_REASON
+          : COLLAPSED_ENDED_DIFFERENT_DROP_REASON,
+        ),
+      );
+      continue;
+    }
+    const [a, b] = normalizeIdentityPair(remappedA, remappedB);
+    const endpointWindowA = endpointWindows.get(mergeKeyOf(a));
+    const endpointWindowB = endpointWindows.get(mergeKeyOf(b));
+    const validFrom = [
+      assertion.validFrom,
+      endpointWindowA?.validFrom,
+      endpointWindowB?.validFrom,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce((latest, bound) =>
+        compareCodePoints(latest, bound) < 0 ? bound : latest,
+      );
+    const validTo = [
+      assertion.validTo,
+      endpointWindowA?.validTo,
+      endpointWindowB?.validTo,
+    ]
+      .filter((bound): bound is string => bound !== undefined)
+      .reduce<string | undefined>(
+        (earliest, bound) =>
+          earliest === undefined || compareCodePoints(bound, earliest) < 0 ?
+            bound
+          : earliest,
+        undefined,
+      );
+    if (validTo !== undefined && compareCodePoints(validFrom, validTo) >= 0) {
+      if (committed) continue;
+      dropped.push(
+        droppedIdentityAssertion(
+          assertion,
+          EMPTY_REMAPPED_IDENTITY_WINDOW_DROP_REASON,
+        ),
+      );
+      continue;
+    }
+    if (validFrom !== assertion.validFrom || validTo !== assertion.validTo) {
+      const originalUpper = assertion.validTo ?? "open";
+      const remappedUpper = validTo ?? "open";
+      narrowingWarningById.set(
+        assertion.id,
+        `Identity assertion ${JSON.stringify(assertion.id)} was narrowed from [${assertion.validFrom}, ${originalUpper}) to [${validFrom}, ${remappedUpper}) to fit its remapped endpoint windows.`,
+      );
+    }
+    const result = {
+      ...assertion,
+      a,
+      b,
+      validFrom,
+      ...(validTo === undefined ? {} : { validTo }),
+    };
+    // A COMMITTED row's endpoints must never be canonicalized away: the
+    // applier cannot rewrite a stored row, so a plan carrying its id with
+    // moved endpoints could only end as a false one-truth refusal or —
+    // worse, if the challenger won the dedupe — a report/ledger divergence.
+    // Refuse early with the specific cause instead.
+    if (
+      committed &&
+      assertionTruthKey(result) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "Node reconciliation moved the endpoints of an assertion already committed on the target; committed identity rows cannot be rewritten by a merge.",
+        {
+          details: { assertionId: assertion.id, stored, remapped: result },
+          suggestion:
+            "Exclude the colliding nodes from entity resolution, or manually retract the committed assertion and re-assert the canonical pair under a new id before merging.",
+        },
+      );
+    }
+    remapped.push(result);
+  }
+  // Committed-id precedence must be RE-DERIVED post-remap: node
+  // reconciliation can collapse two previously distinct pairs onto one
+  // semantic key (a branch pair canonicalized onto a target pair), and the
+  // target's committed row — whose endpoints the remap leaves unchanged —
+  // still exactly matches its stored truth here. Without the recompute, the
+  // branch's unwritable challenger could win this second dedupe and recreate
+  // the applied-but-never-written report divergence.
+  const committedIds = committedIdentityIds(remapped, storedRowsById);
+  const deduped = dedupeIdentityAssertionsRaw(remapped, committedIds);
+  // Node reconciliation can collapse previously distinct endpoint pairs onto
+  // the same canonical pair, so the pre-reconciliation check above is not
+  // sufficient on its own.
+  assertNoOpposingIdentityRelationsRaw(deduped.survivors);
+  return {
+    assertions: deduped.survivors,
+    dropped: [...dropped, ...deduped.dropped],
+    warnings: deduped.survivors.flatMap((assertion) => {
+      const warning = narrowingWarningById.get(assertion.id);
+      return warning === undefined ? [] : [warning];
+    }),
+  };
+}
+
+/**
+ * Refuses an assertion that names a node the merge is about to DELETE.
+ *
+ * The commit soft-deletes nodes before applying the identity changes, which
+ * detaches every assertion touching them, so an assertion naming a deleted
+ * endpoint could only ever fail at commit time — rolling the whole merge back
+ * behind a generic error. Detecting it here turns it into a deterministic,
+ * plan-time {@link IdentityMergeConflictError}: one branch says the entity exists
+ * and is (not) the same as another, a second says it is gone, and unlike the
+ * delete/modify case there is no policy the caller can set to arbitrate.
+ *
+ * Only an assertion that holds NOW conflicts with a deletion this merge
+ * applies from a branch. One that ended — retracted, or ended by the very
+ * deletion of its endpoint — claims nothing about the entity's present, and the
+ * commit lands it as history: an ended row needs only its endpoint ROWS, which
+ * the merge's soft delete keeps, and that delete lands at the merge instant,
+ * after the row ended.
+ *
+ * A deletion the incremental TARGET already holds is different: it landed at the
+ * target's own, earlier instant, or removed the row outright, so even an ended
+ * assertion over it cannot be written. Every assertion over such a node is
+ * refused, except a row the target itself already holds with the exact staged
+ * truth — the applier writes nothing for it.
+ *
+ * `nodeDeletions` is keyed by the deleted node's own kind, while the assertions
+ * arrive post-retype, so a retyped identity is checked in BOTH forms.
+ */
+export function assertIdentityEndpointsNotDeleted(
+  assertions: readonly IdentityTransferAssertion[],
+  nodeDeletions: ReadonlyMap<MergeKey, string>,
+  stagedDeletions: StagingSet["deletedNodes"],
+  retypeMap: ReadonlyMap<MergeKey, string>,
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+): void {
+  const withRetypedForms = (
+    keys: Iterable<MergeKey>,
+  ): ReadonlySet<MergeKey> => {
+    const identities = new Set<MergeKey>();
+    for (const key of keys) {
+      identities.add(key);
+      const retyped = retypeMap.get(key);
+      if (retyped !== undefined) identities.add(mergeKey(retyped, idOf(key)));
+    }
+    return identities;
+  };
+  const deletedIdentities = withRetypedForms(nodeDeletions.keys());
+  const targetHeldDeletions = withRetypedForms(
+    stagedDeletions
+      .filter((staged) => staged.branchId === COMMITTED_TARGET_BRANCH)
+      .map((staged) => mergeKey(staged.node.kind, staged.node.id))
+      .filter((key) => nodeDeletions.has(key)),
+  );
+  const committedIds = committedIdentityIds(assertions, storedRowsById);
+  for (const assertion of assertions) {
+    const current = isCurrentIdentityAssertion(assertion);
+    for (const endpoint of [assertion.a, assertion.b]) {
+      const key = mergeKeyOf(endpoint);
+      if (!deletedIdentities.has(key)) continue;
+      if (!current && !targetHeldDeletions.has(key)) continue;
+      if (!current && committedIds.has(assertion.id)) continue;
+      throw new IdentityMergeConflictError(
+        "A branch asserted an identity relation over a node another branch deleted.",
+        { details: { assertion, deletedEndpoint: endpoint } },
+      );
+    }
+  }
+}
+
+/**
+ * Refuses — BEFORE any write — a merge whose committed ledger would claim two
+ * nodes are BOTH the same and different, including through a chain of `same`
+ * assertions no single branch ever wrote.
+ *
+ * This is the DIAGNOSABILITY layer, not the correctness one. It simulates the
+ * post-merge ledger from reads taken before the commit, so it can name the
+ * exact branch assertion and identity class at fault while nothing has been
+ * written yet — but a target that moves between this simulation and the commit
+ * makes its verdict stale. What the committed state is actually held to is
+ * {@link assertMergedIdentityClassesConsistent}, which re-derives the affected
+ * classes from the written state inside the commit transaction. Keep the two
+ * in agreement: a simulation arm with no post-write counterpart is a message,
+ * not a guarantee.
+ *
+ * {@link assertNoOpposingIdentityRelations} only sees a DIRECT collision (one
+ * endpoint pair carrying both relations). The common shape is transitive: base
+ * holds `same(p2, p3)`, one branch asserts `same(p1, p2)` and another asserts
+ * `different(p1, p3)`. Nothing collides pairwise, so planning used to pass and the
+ * identity import raised its own contradiction error inside the commit
+ * transaction, where the orchestrator's catch-all rewrote it as a generic
+ * `MergeError` — the documented `GRAPH_MERGE_IDENTITY_CONFLICT` code never fired.
+ *
+ * The check evaluates the ledger the merge would actually leave behind: the base's
+ * CURRENT assertions, each one a planned retraction ends kept as the history it
+ * becomes (valid until the retraction's own end, so a branch claim that
+ * overlaps the time it still held is judged against it), plus the already
+ * remapped and deduped staged assertions. Base endpoints are put through the same
+ * {@link resolveIdentityEndpoint} mapping, so an inherited assertion whose node
+ * was folded or retyped is judged at its post-merge identity. The `same`
+ * assertions are folded into equivalence classes and every `different` pair —
+ * staged or inherited — is rejected when both of its endpoints land in one class.
+ *
+ * Two DERIVED relations join the explicit ledger in the simulation, because
+ * canonicalization and retyping can manufacture contradictions no branch wrote:
+ * under `sameIdAcrossKinds: "fold"` endpoints sharing an id across kinds are
+ * implicitly the same (a remapped cross-kind `different` pair can land on one
+ * id), and a retyped endpoint can pull a kind into a class that the ontology
+ * declares disjoint with another member's kind. Both used to surface only at
+ * commit time as a generic merge error.
+ *
+ * @internal Exported for deterministic phase-level verification.
+ */
+export function assertNoContradictoryIdentityClosure(
+  plannedAssertions: readonly IdentityTransferAssertion[],
+  retractions: readonly IdentityTransferAssertion[],
+  baseAssertions: readonly IdentityTransferAssertion[],
+  deletedNodes: ReadonlySet<MergeKey>,
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>,
+  retypeMap: ReadonlyMap<MergeKey, string>,
+  identityContext: PlanIdentityContext,
+  nodeUniverse: readonly Readonly<{ kind: string; id: string }>[],
+): void {
+  const retractionEndById = new Map(
+    retractions.map((retraction) => [retraction.id, retraction.validTo]),
+  );
+  // The one rule for how a planned deletion changes the ledger, applied
+  // here for all three call sites, exactly as the commit's validator sees it:
+  // a branch that ended an assertion over the deleted node — by retracting it
+  // or by its own delete — ends it on the target when the branch did, as any
+  // retraction does, because the commit's delete ends them at the planned
+  // retraction's instant. Only an assertion still holding over the node with
+  // no planned retraction, such as one dropped as a target-truth mismatch,
+  // ends at the merge instant. The history it already had is never erased.
+  const deletionInstant = nowIso();
+  const touchesDeletedNode = (
+    assertion: Readonly<{
+      a: Readonly<{ kind: string; id: string }>;
+      b: Readonly<{ kind: string; id: string }>;
+    }>,
+  ): boolean =>
+    deletedNodes.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
+    deletedNodes.has(mergeKey(assertion.b.kind, assertion.b.id));
+  const mergedLedger: readonly IdentityTransferAssertion[] = [
+    ...plannedAssertions,
+    ...baseAssertions
+      .flatMap((assertion) => {
+        const retracted = retractionEndById.has(assertion.id);
+        const validTo =
+          retracted ? retractionEndById.get(assertion.id)
+          : assertion.validTo === undefined && touchesDeletedNode(assertion) ?
+            deletionInstant
+          : assertion.validTo;
+        if (retracted && validTo === undefined) return [];
+        if (validTo !== undefined && validTo <= assertion.validFrom) return [];
+        return validTo === assertion.validTo ?
+            [assertion]
+          : [{ ...assertion, validTo }];
+      })
+      .map((assertion) => ({
+        ...assertion,
+        a: resolveIdentityEndpoint(assertion.a, canonicalOf, retypeMap),
+        b: resolveIdentityEndpoint(assertion.b, canonicalOf, retypeMap),
+      })),
+  ];
+  assertTemporalIdentityClosureConsistent(
+    mergedLedger,
+    identityContext,
+    nodeUniverse,
+  );
+}
+
+/**
+ * The identity semantics the plan-time contradiction simulation needs from the
+ * target: whether same-id folding is on, and which kind pairs the ontology
+ * declares disjoint.
+ */
+export type PlanIdentityContext = Readonly<{
+  sameIdAcrossKinds: "fold" | "ignore" | undefined;
+  areDisjoint: (left: string, right: string) => boolean;
+}>;
+
+/**
+ * The plan-time same-id fold probe the incremental commit guard revalidates
+ * inside the transaction (`IncrementalCommitGuard.identityPeerProbe`).
+ */
+export type IdentityPeerProbe = Readonly<{
+  /**
+   * The target's identity profile. The direct-peer window check below only
+   * applies under `"fold"` — a same-id row appearing under `"ignore"` never
+   * changes plan legality, so refusing on it would reject an unrelated
+   * target advance.
+   */
+  profile: "fold" | "ignore";
+  ids: readonly string[];
+  observed: ReadonlySet<MergeKey>;
+  /**
+   * The plan's node deletions, by composite key. Rows the plan removes are
+   * excluded from BOTH sides of every comparison — they are gone in the
+   * committed state, so treating them as present would falsely reject a
+   * legal delete-and-replace (and a still-live-at-tx-time row the plan
+   * deletes must not read as an "appeared" peer either).
+   */
+  plannedDeletions: ReadonlySet<MergeKey>;
+  /**
+   * Every `(kind, id)` the guarded universe contains — the seeds plus all
+   * snapshot class members. The negative-truth fingerprint below ranges
+   * over `different` assertions touching this set.
+   */
+  memberKeys: ReadonlySet<MergeKey>;
+  /**
+   * Deterministic fingerprint of the CURRENT `different` assertions
+   * touching the guarded universe at snapshot time. Negative truth changes
+   * plan legality without moving peers, liveness, or equivalence classes,
+   * so it needs its own drift signal.
+   */
+  differentFingerprint: string;
+  /**
+   * The plan-time structural identity class of every final fold seed,
+   * serialized to a comparable fingerprint per seed. The direct-peer set
+   * above covers planned ids that do not exist yet; this covers
+   * class-TRANSITIVE drift — a window row or assertion joining a seed's
+   * class through another member changes the class without changing the
+   * seed's direct same-id peers.
+   */
+  classFingerprints: ReadonlyMap<string, string>;
+  seeds: readonly Readonly<{ kind: string; id: string }>[];
+}>;
+
+/**
+ * Narrows the plan-time fold probe to the ids the FINAL plan folds on: the
+ * commit-ready canonical node identities (minus planned deletions) and the
+ * remapped assertion endpoints. The observed peer set is filtered the same
+ * way so the in-transaction comparison ranges over one universe.
+ */
+export async function buildIdentityPeerProbe<G extends GraphDef>(
+  target: Store<G>,
+  probedIds: readonly string[],
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+  plan: IdentityPlanSlice,
+  profile: "fold" | "ignore",
+): Promise<
+  Readonly<{
+    probe: IdentityPeerProbe;
+    snapshot: IdentityClassSnapshot;
+    ledger: readonly LedgerAssertion[];
+  }>
+> {
+  const finalIds = new Set([
+    ...plan.canonicalEntities
+      .filter(
+        (entity) =>
+          !plan.nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
+      )
+      .map((entity) => entity.canonicalId),
+    ...plan.identityAssertions.flatMap((assertion) => [
+      assertion.a.id,
+      assertion.b.id,
+    ]),
+  ]);
+  const plannedDeletions = new Set<MergeKey>(plan.nodeDeletions.keys());
+  const relevantPeers = targetPeers.filter(
+    (peer) =>
+      finalIds.has(peer.id) &&
+      !plannedDeletions.has(mergeKey(peer.kind, peer.id)),
+  );
+  // The fold seeds whose classes plan legality depends on: the commit-ready
+  // canonical nodes (final retyped kinds), the remapped assertion endpoints,
+  // and the live target peers anchoring them into existing classes.
+  const seedsByKey = new Map<string, Readonly<{ kind: string; id: string }>>();
+  const addSeed = (kind: string, id: string): void => {
+    seedsByKey.set(mergeKey(kind, id), { kind, id });
+  };
+  for (const entity of plan.canonicalEntities) {
+    const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+    if (plan.nodeDeletions.has(sourceKey)) continue;
+    addSeed(plan.retypeMap.get(sourceKey) ?? entity.kind, entity.canonicalId);
+  }
+  for (const assertion of plan.identityAssertions) {
+    addSeed(assertion.a.kind, assertion.a.id);
+    addSeed(assertion.b.kind, assertion.b.id);
+  }
+  for (const peer of relevantPeers) addSeed(peer.kind, peer.id);
+  const seeds = [...seedsByKey.values()];
+  const liveKeys = new Set(
+    targetPeers
+      .map((peer) => mergeKey(peer.kind, peer.id))
+      .filter((key) => !plannedDeletions.has(key)),
+  );
+  const snapshot = await snapshotIdentityClasses(
+    target,
+    seeds,
+    liveKeys,
+    plannedDeletions,
+  );
+  const memberKeys = new Set<MergeKey>([
+    ...seeds.map((seed) => mergeKey(seed.kind, seed.id)),
+    ...snapshot.groups.flatMap((group) =>
+      group.map((member) => mergeKey(member.kind, member.id)),
+    ),
+  ]);
+  // Negative truth is invisible to peers, liveness, and class structure, so
+  // the CURRENT ledger touching the universe is read fresh here: the recheck
+  // validates the plan against it, and its `different` slice is fingerprinted
+  // for the in-transaction comparison.
+  const ledger = await relevantLedgerAssertions(
+    target,
+    memberKeys,
+    storeBackend(target),
+  );
+  return {
+    probe: {
+      profile,
+      plannedDeletions,
+      ids: probedIds.filter((id) => finalIds.has(id)),
+      observed: new Set(
+        relevantPeers.map((peer) => mergeKey(peer.kind, peer.id)),
+      ),
+      memberKeys,
+      differentFingerprint: differentLedgerFingerprint(
+        withoutPlannedDeletions(ledger, plannedDeletions),
+      ),
+      classFingerprints: snapshot.fingerprints,
+      seeds,
+    },
+    snapshot,
+    ledger,
+  };
+}
+
+type IdentityClassSnapshot = Readonly<{
+  /**
+   * One comparable fingerprint per seed: the seed's LIVENESS plus its sorted
+   * class member tuples, JSON-encoded — structural encoding because caller
+   * ids may contain any character, so a joined string is not injective, and
+   * the liveness bit because a live singleton and a deleted or missing one
+   * have identical (self-coalesced) classes.
+   */
+  fingerprints: ReadonlyMap<string, string>;
+  /** The raw class member groups, for revalidating the plan against them. */
+  groups: readonly (readonly Readonly<{ kind: string; id: string }>[])[];
+}>;
+
+async function snapshotIdentityClasses<G extends GraphDef>(
+  target: Store<G>,
+  seeds: readonly Readonly<{ kind: string; id: string }>[],
+  liveKeys: ReadonlySet<MergeKey>,
+  plannedDeletions: ReadonlySet<MergeKey>,
+  txBackend?: TransactionBackend,
+): Promise<IdentityClassSnapshot> {
+  const classes = await storeRuntime(target).structuralIdentityClasses(
+    seeds,
+    txBackend,
+  );
+  const fingerprints = new Map<string, string>();
+  const groups: (readonly Readonly<{ kind: string; id: string }>[])[] = [];
+  for (const seed of seeds) {
+    const key = mergeKey(seed.kind, seed.id);
+    // Members the plan DELETES are excluded on both sides of the comparison — the
+    // committed state no longer contains them, so keeping them would reject
+    // a legal delete-and-replace.
+    const members = (classes.get(identityReferenceKey(seed)) ?? [seed]).filter(
+      (member) => !plannedDeletions.has(mergeKey(member.kind, member.id)),
+    );
+    groups.push(members);
+    fingerprints.set(key, encodeClassFingerprint(liveKeys.has(key), members));
+  }
+  return { fingerprints, groups };
+}
+
+export type LedgerAssertion = Readonly<{
+  id: string;
+  relation: "same" | "different";
+  a: Readonly<{ kind: string; id: string }>;
+  b: Readonly<{ kind: string; id: string }>;
+  validFrom: string;
+  validTo?: string | undefined;
+}>;
+
+/**
+ * The target's CURRENT assertions touching the guarded universe, read fresh
+ * from `backend` (the tx backend inside the commit transaction).
+ */
+async function relevantLedgerAssertions<G extends GraphDef>(
+  target: Store<G>,
+  memberKeys: ReadonlySet<MergeKey>,
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly LedgerAssertion[]> {
+  const runtime = storeRuntime(target);
+  if (hasScopedIdentityReads(runtime)) {
+    return runtime.identityAssertionsTouchingAtTarget(
+      backend,
+      [...memberKeys].map((key) => ({ kind: kindOf(key), id: idOf(key) })),
+      "state",
+    );
+  }
+  // Older custom Store runtimes lack the scoped read. Preserve their original
+  // full-ledger guard, using the same transaction target and endpoint filter.
+  return (await runtime.identityAssertionsAtTarget(backend, "state")).filter(
+    (assertion) =>
+      memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
+      memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  );
+}
+
+/**
+ * A ledger slice without the rows over nodes the plan deletes — the slice a
+ * drift fingerprint compares, since those rows end with the merge anyway.
+ */
+function withoutPlannedDeletions(
+  ledger: readonly LedgerAssertion[],
+  plannedDeletions: ReadonlySet<MergeKey>,
+): readonly LedgerAssertion[] {
+  return ledger.filter(
+    (assertion) =>
+      !plannedDeletions.has(mergeKey(assertion.a.kind, assertion.a.id)) &&
+      !plannedDeletions.has(mergeKey(assertion.b.kind, assertion.b.id)),
+  );
+}
+
+/** Deterministic fingerprint of the `different` assertions in a ledger slice. */
+/** @internal Deterministic fingerprint for commit-guard verification. */
+export function differentLedgerFingerprint(
+  assertions: readonly LedgerAssertion[],
+): string {
+  return JSON.stringify(
+    assertions
+      .filter((assertion) => assertion.relation === "different")
+      .map((assertion) => [assertion.id, ...endpointTuple(assertion)])
+      .toSorted((left, right) =>
+        compareStrings(encodeTupleKey(left), encodeTupleKey(right)),
+      ),
+  );
+}
+
+/**
+ * @internal Exported for deterministic verification. Structural (JSON)
+ * encoding of a seed's liveness plus its sorted class member tuples —
+ * injective even when ids contain the separator characters a joined string
+ * would collide on.
+ */
+export function encodeClassFingerprint(
+  live: boolean,
+  members: readonly Readonly<{ kind: string; id: string }>[],
+): string {
+  return JSON.stringify([
+    live,
+    members
+      .map((member) => [member.kind, member.id] as const)
+      .toSorted(([leftKind, leftId], [rightKind, rightId]) =>
+        compareMergeKeys(
+          mergeKey(leftKind, leftId),
+          mergeKey(rightKind, rightId),
+        ),
+      ),
+  ]);
+}
+
+/**
+ * The ids among `assertions` the target ALREADY holds with the exact same
+ * complete truth — the set the three-way survivor rule must prefer, since the
+ * applier is idempotent per pair and never writes a fresh challenger over it.
+ */
+function committedIdentityIds(
+  assertions: readonly IdentityTransferAssertion[],
+  storedRowsById: ReadonlyMap<string, LedgerAssertion>,
+): ReadonlySet<string> {
+  return new Set(
+    assertions
+      .filter((assertion) => {
+        const stored = storedRowsById.get(assertion.id);
+        return (
+          stored !== undefined &&
+          assertionTruthKey(stored) === assertionTruthKey(assertion)
+        );
+      })
+      .map((assertion) => assertion.id),
+  );
+}
+
+/** The complete truth an assertion id identifies, as a comparable string. */
+export function assertionTruthKey(assertion: LedgerAssertion): string {
+  return JSON.stringify([
+    assertion.relation,
+    ...endpointTuple(assertion),
+    assertion.validFrom,
+    assertion.validTo ?? null,
+  ]);
+}
+
+/**
+ * The immutable identity of a ledger row — everything but `validTo`. Two
+ * captures of ONE row always agree on this key (retraction only sets
+ * `validTo`), so it is the right comparator for "is the target's row the same
+ * assertion the branch retracted": the branch's staged copy carries its own end
+ * timestamp while the target's current row carries none, which makes the
+ * complete {@link assertionTruthKey} unusable for that question.
+ */
+export function assertionIdentityKey(assertion: LedgerAssertion): string {
+  return JSON.stringify([
+    assertion.relation,
+    ...endpointTuple(assertion),
+    assertion.validFrom,
+  ]);
+}
+
+/**
+ * One assertion id identifies ONE complete truth — the invariant the import
+ * coordinator enforces with `IDENTITY_IMPORT_ID_CONFLICT` inside the commit.
+ * Validated here at plan time instead: intra-plan (two branches staging one
+ * id for different truths) and against every stored row for those ids —
+ * ended rows included, exactly the set the importer compares. An exact match
+ * is fine (the importer skips it as already applied).
+ */
+export function assertOneIdOneTruth(
+  planned: readonly IdentityTransferAssertion[],
+  storedById: ReadonlyMap<string, LedgerAssertion>,
+): void {
+  const plannedById = new Map<string, IdentityTransferAssertion>();
+  for (const assertion of planned) {
+    const previous = plannedById.get(assertion.id);
+    if (
+      previous !== undefined &&
+      assertionTruthKey(previous) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "One assertion id was staged for two different identity truths.",
+        {
+          details: {
+            assertionId: assertion.id,
+            first: previous,
+            second: assertion,
+          },
+        },
+      );
+    }
+    plannedById.set(assertion.id, assertion);
+    const stored = storedById.get(assertion.id);
+    if (
+      stored !== undefined &&
+      assertionTruthKey(stored) !== assertionTruthKey(assertion)
+    ) {
+      throw new IdentityMergeConflictError(
+        "A staged assertion id already identifies different truth in the target ledger.",
+        { details: { assertionId: assertion.id, staged: assertion, stored } },
+      );
+    }
+  }
+}
+
+/**
+ * In-transaction freshness of every planned assertion and retraction id,
+ * shared by BOTH commit modes. The plan validated each id against the target's
+ * ledger as of planning; a row committed (or ended) in the plan→commit window
+ * can claim a planned id — with endpoints entirely outside the guarded member
+ * universe — without moving the legacy base@V token, which fingerprints
+ * CURRENT assertions only. A planned NEW assertion refuses when its id
+ * identifies any different complete truth (ended rows included, exactly the
+ * set the applier compares); a planned RETRACTION refuses when the CURRENT row
+ * its id ends is no longer the truth the branch retracted.
+ */
+export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  plan: Pick<IdentityPlanSlice, "identityAssertions" | "identityRetractions">,
+): Promise<void> {
+  const plannedIds = [
+    ...plan.identityAssertions.map((assertion) => assertion.id),
+    ...plan.identityRetractions.map((retraction) => retraction.id),
+  ];
+  if (plannedIds.length === 0) return;
+  const storedById = await storeRuntime(target).identityAssertionRowsByIds(
+    plannedIds,
+    txBackend,
+  );
+  for (const assertion of plan.identityAssertions) {
+    const stored = storedById.get(assertion.id);
+    if (
+      stored !== undefined &&
+      assertionTruthKey(stored) !== assertionTruthKey(assertion)
+    ) {
+      throw new BaseVersionMismatchError(
+        "The merge validated its assertion ids as of planning, but a row identifying different truth under a planned id was committed before the commit transaction.",
+        {
+          details: { assertionId: assertion.id },
+          suggestion:
+            "Retry the merge — the plan is recomputed from current state. A persistent refusal means the branch's assertion id conflicts with target truth and needs manual resolution.",
+        },
+      );
+    }
+  }
+  for (const retraction of plan.identityRetractions) {
+    const stored = storedById.get(retraction.id);
+    if (
+      stored !== undefined &&
+      isCurrentIdentityAssertion(stored) &&
+      assertionIdentityKey(stored) !== assertionIdentityKey(retraction)
+    ) {
+      throw new BaseVersionMismatchError(
+        "The merge validated each planned retraction against the target row its id identified at planning, but that row's truth changed before the commit transaction.",
+        {
+          details: { assertionId: retraction.id },
+          suggestion:
+            "Retry the merge — the plan is recomputed from current state.",
+        },
+      );
+    }
+  }
+}
+
+/**
+ * The identity classes a commit can move, as the `(kind, id)` seeds the
+ * post-write assertion expands through the closure. Three sources, all minus
+ * the plan's node deletions (a deleted identity carries no class, and seeding
+ * one would ask the assertion to reason about a row the commit removed):
+ *
+ *  - both endpoints of every planned assertion — the classes the commit
+ *    MERGES, and the pairs it constrains;
+ *  - both endpoints of every planned retraction — the classes it SPLITS,
+ *    where the closure repair must have landed;
+ *  - under `sameIdAcrossKinds: "fold"`, every node identity the commit writes,
+ *    at the kind it is written under (the retype cascade's kind when the
+ *    ontology reconciled one). A written row folds with every live row sharing
+ *    its id, so a node write alone can move a class. Under `"ignore"` it
+ *    cannot: folding is off and a node write creates no assertion, so a
+ *    written identity that no planned assertion names stays a singleton.
+ */
+export function affectedIdentityClassSeeds(
+  plan: IdentityPlanSlice,
+  profile: "fold" | "ignore" | undefined,
+): readonly Readonly<{ kind: string; id: string }>[] {
+  const seedsByKey = new Map<
+    MergeKey,
+    Readonly<{ kind: string; id: string }>
+  >();
+  const addSeed = (kind: string, id: string): void => {
+    const key = mergeKey(kind, id);
+    if (plan.nodeDeletions.has(key)) return;
+    seedsByKey.set(key, { kind, id });
+  };
+  for (const assertion of [
+    ...plan.identityAssertions,
+    ...plan.identityRetractions,
+  ]) {
+    addSeed(assertion.a.kind, assertion.a.id);
+    addSeed(assertion.b.kind, assertion.b.id);
+  }
+  if (profile === "fold") {
+    for (const entity of plan.canonicalEntities) {
+      const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+      if (plan.nodeDeletions.has(sourceKey)) continue;
+      addSeed(plan.retypeMap.get(sourceKey) ?? entity.kind, entity.canonicalId);
+    }
+  }
+  return [...seedsByKey.values()];
+}
+
+/**
+ * The correctness-bearing identity guard: after the commit's identity DML, the
+ * applier re-derives the affected identity classes FROM THE WRITTEN STATE and
+ * refuses a contradiction, inside the commit transaction. Every earlier
+ * identity guard reasons about a simulated post-merge universe assembled from
+ * reads taken before the writes; this one reads the database the merge is
+ * about to leave behind, so it holds whatever the plan assumed and however the
+ * target moved underneath it. A refusal aborts the transaction, so the merge
+ * is never partially applied.
+ *
+ * Shared by BOTH commit modes through {@link applyMergePlan}, and raised
+ * inside the identity-applier boundary so
+ * {@link translateIdentityCommitError} gives it the same typed conflict
+ * surface as the applier's own refusals.
+ */
+export async function assertMergedIdentityClassesConsistent<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  plan: IdentityPlanSlice,
+): Promise<void> {
+  await storeRuntime(target).assertIdentityClassesConsistentAtTarget(
+    txBackend,
+    affectedIdentityClassSeeds(plan, target.graph.identity?.sameIdAcrossKinds),
+  );
+}
+
+/**
+ * Codes the identity service raises for ENVIRONMENT problems — a missing
+ * profile, a non-atomic backend, an undersized bind budget. These are not
+ * statements about identity truth, so they pass through untranslated; every
+ * other identity refusal escaping the commit IS a truth conflict.
+ */
+const IDENTITY_ENVIRONMENT_CODES: ReadonlySet<string> = new Set([
+  "IDENTITY_MERGE_REQUIRES_PROFILE",
+  "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+  "IDENTITY_REQUIRES_STATEMENT_EXECUTION",
+  "IDENTITY_BIND_BUDGET_TOO_SMALL",
+  // Environment/corruption statements — translating one into "re-plan against
+  // the current target" would be advice that can never succeed. The applier
+  // reaches the last two through the current different-ness probe (see
+  // `identity/separation`), which refuses rather than guessing when the derived
+  // separation relation is missing or disagrees with the ledger.
+  "IDENTITY_NOT_ENABLED",
+  "IDENTITY_STORAGE_MISSING",
+  "IDENTITY_SCHEMA_CONTRADICTION",
+  "IDENTITY_IMPORT_REQUIRES_PROFILE",
+]);
+
+/**
+ * The identity code carried by an applier refusal, wherever the applier put
+ * it: the top-level error code, a `details.code` field (the coordinator's
+ * `ConfigurationError`s), or a per-assertion `details.issues[].code` (the
+ * transfer validator's `ValidationError`s report per-row issues, so the code
+ * never reaches the top level).
+ */
+function identityRefusalCode(error: TypeGraphError): string | undefined {
+  const detailCode = error.details["code"];
+  if (typeof detailCode === "string" && detailCode.startsWith("IDENTITY_")) {
+    return detailCode;
+  }
+  if (error.code.startsWith("IDENTITY_")) return error.code;
+  const issues = error.details["issues"];
+  if (Array.isArray(issues)) {
+    for (const issue of issues) {
+      const code = (issue as Readonly<Record<string, unknown>>)["code"];
+      if (typeof code === "string" && code.startsWith("IDENTITY_")) {
+        return code;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The commit-phase completeness backstop for identity invariants. The planner
+ * SIMULATES the identity applier's rules to refuse illegal plans early and
+ * typed — but a simulation can lag the applier, and an invariant it does not
+ * (yet) mirror would surface as the generic merge wrapper around the applier's
+ * refusal. Translating every refusal that escapes an identity-owned commit
+ * boundary (the identity applier, plus the node-window guard that protects
+ * open assertions) into the typed conflict error (cause preserved) gives NEW
+ * invariants a typed surface by construction instead of by hand-built
+ * plan-time twins.
+ *
+ * A {@link NodeNotFoundError} is translated only at the identity-applier call,
+ * where it can mean just one thing — an assertion endpoint the plan validated
+ * vanished. Node writes invoke this translator only for their explicit
+ * identity-window refusal. Typed {@link MergeError}s (the guards' own refusals)
+ * and non-identity failures pass through unchanged.
+ *
+ * @internal Exported for isolated verification of the translation contract.
+ */
+export function translateIdentityCommitError(error: unknown): unknown {
+  return asIdentityMergeConflict(
+    error,
+    (cause) =>
+      `The identity applier refused the resolved plan inside the commit transaction — identity truth on the target is incompatible with the plan. Cause: ${cause}`,
+    // A target that moved after planning is refused earlier, by the plan
+    // fence and identity guards, with their own re-plan errors; reaching
+    // this arm means the plan-time simulation missed an applier rule, so a
+    // re-plan from unchanged state reproduces the refusal.
+    "The plan-time identity checks did not foresee this refusal, so re-planning against the same target refuses again. Resolve the conflict named in the cause — change the branch's assertion, or the target's identity truth — then re-plan the merge.",
+  );
+}
+
+/**
+ * The plan-time twin of {@link translateIdentityCommitError}: an identity
+ * refusal raised while the planner reads what the importer would read (a
+ * staged assertion the importer's own shape validation refuses) becomes the
+ * same typed conflict, through the same classification, before any write.
+ */
+export function translateIdentityPlanError(error: unknown): unknown {
+  return asIdentityMergeConflict(
+    error,
+    (cause) =>
+      `A staged identity assertion cannot be applied to the target. Cause: ${cause}`,
+    "Correct the branch's assertion named in the cause, then re-plan the merge.",
+  );
+}
+
+function asIdentityMergeConflict(
+  error: unknown,
+  message: (cause: string) => string,
+  suggestion: string,
+): unknown {
+  if (error instanceof MergeError) return error;
+  if (!(error instanceof TypeGraphError)) return error;
+  const identityCode = identityRefusalCode(error);
+  const identityRefusal =
+    error instanceof IdentityContradictionError ||
+    error instanceof NodeNotFoundError ||
+    (identityCode !== undefined &&
+      !IDENTITY_ENVIRONMENT_CODES.has(identityCode));
+  if (!identityRefusal) return error;
+  return new IdentityMergeConflictError(message(describeCause(error)), {
+    cause: error,
+    details: { ...(identityCode === undefined ? {} : { identityCode }) },
+    suggestion,
+  });
+}
+
+/**
+ * Fold-peer TOCTOU guard: proves the identity state the plan-time simulation
+ * validated still holds inside the commit transaction — direct peers,
+ * per-seed class/liveness fingerprints, the negative ledger, and finally the
+ * FULL simulation re-run on transaction reads (drift that leaves every
+ * fingerprint unchanged, like a redundant `same(a, b)` that becomes decisive
+ * once the plan removes the pair's bridge, can only be caught by
+ * re-deriving legality itself). Drift is refused as the same typed replan
+ * error the other window guards raise.
+ */
+export async function assertIdentityPeersStable<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  probe: IdentityPeerProbe | undefined,
+  plan: IdentityPlanSlice,
+): Promise<void> {
+  if (probe === undefined) return;
+  const live = (
+    await storeRuntime(target).liveNodesSharingIds(probe.ids, txBackend)
+  ).filter((peer) => !probe.plannedDeletions.has(mergeKey(peer.kind, peer.id)));
+  // Under "fold" ANY new same-id peer changes the classes the plan folded
+  // on; under "ignore" only a peer of a kind DISJOINT with a seed sharing
+  // its id changes legality (the create-time disjoint-id constraint) — a
+  // benign same-id row is an unrelated target advance.
+  const seedKindsById = new Map<string, Set<string>>();
+  for (const seed of probe.seeds) {
+    const kinds = seedKindsById.get(seed.id) ?? new Set<string>();
+    kinds.add(seed.kind);
+    seedKindsById.set(seed.id, kinds);
+  }
+  const appeared = live
+    .filter(
+      (peer) =>
+        probe.profile === "fold" ||
+        [...(seedKindsById.get(peer.id) ?? [])].some((kind) =>
+          target.registry.areDisjoint(peer.kind, kind),
+        ),
+    )
+    .map((peer) => mergeKey(peer.kind, peer.id))
+    .filter((key) => !probe.observed.has(key))
+    .sort((left, right) => compareMergeKeys(left, right));
+  if (appeared.length > 0) {
+    throw new BaseVersionMismatchError(
+      `mergeIncremental() simulated identity folding against the target's live same-id peers as of planning, but ${appeared.length} committed row(s) sharing a planned node's id appeared before the commit transaction. Committing the plan could fold nodes into classes the plan never validated.`,
+      { details: { appeared } },
+    );
+  }
+  // Class-transitive drift: a window row or assertion can change a seed's
+  // identity class through ANOTHER member without touching the seed's direct
+  // same-id peers — and a seed can DISAPPEAR without changing its
+  // self-coalesced class, so liveness is part of the fingerprint.
+  const { fingerprints: liveFingerprints, groups: liveGroups } =
+    await snapshotIdentityClasses(
+      target,
+      probe.seeds,
+      new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
+      probe.plannedDeletions,
+      txBackend,
+    );
+  const drifted = [...probe.classFingerprints]
+    .filter(([key, fingerprint]) => liveFingerprints.get(key) !== fingerprint)
+    .map(([key]) => key)
+    .sort((left, right) => compareStrings(left, right));
+  if (drifted.length > 0) {
+    throw new BaseVersionMismatchError(
+      `mergeIncremental() validated identity against the classes visible at planning, but the identity class of ${drifted.length} node(s) the plan folds on changed before the commit transaction. Committing the plan could contradict identity truth it never validated.`,
+      { details: { drifted } },
+    );
+  }
+  // Negative truth: a `different` assertion committed (or retracted) in the
+  // window changes plan legality without moving any class or peer.
+  const ledger = await relevantLedgerAssertions(
+    target,
+    probe.memberKeys,
+    txBackend,
+  );
+  if (
+    differentLedgerFingerprint(
+      withoutPlannedDeletions(ledger, probe.plannedDeletions),
+    ) !== probe.differentFingerprint
+  ) {
+    throw new BaseVersionMismatchError(
+      "mergeIncremental() validated identity against the `different` assertions visible at planning, but that ledger changed before the commit transaction. Committing the plan could contradict identity truth it never validated.",
+      { details: {} },
+    );
+  }
+
+  // The decisive backstop: re-run the identity simulation on TRANSACTION
+  // reads. Every fingerprint above can survive a window write that still
+  // changes post-plan legality — the canonical example is a `same(a, b)`
+  // added while a and b are already transitively connected (no class or
+  // ledger-slice fingerprint moves) that becomes the surviving link once the
+  // plan removes their bridge and asserts them different.
+  // The target's history too, read through the same window-ledger owner the
+  // plan and the importer use: a `different` committed AND ended in the
+  // window moves no current-ledger fingerprint, yet it contradicts a claim
+  // over the span it held — a target change, so it must refuse here as a
+  // re-plan rather than reach the importer's refusal.
+  const ledgerIds = new Set(ledger.map((assertion) => assertion.id));
+  const history =
+    plan.identityAssertions.length === 0 ?
+      []
+    : (
+        await loadIdentityWindowHistory(
+          storeRuntime(target).identityContext(),
+          txBackend,
+          plan.identityAssertions,
+          nowIso(),
+        )
+      ).filter((assertion) => !ledgerIds.has(assertion.id));
+  try {
+    assertNoContradictoryIdentityClosure(
+      plan.identityAssertions,
+      plan.identityRetractions,
+      [...ledger, ...history],
+      probe.plannedDeletions,
+      plan.canonicalOf,
+      plan.retypeMap,
+      {
+        sameIdAcrossKinds: probe.profile,
+        areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
+      },
+      [...probe.seeds, ...liveGroups.flat()],
+    );
+  } catch (error) {
+    if (!(error instanceof IdentityMergeConflictError)) throw error;
+    throw new BaseVersionMismatchError(
+      "mergeIncremental() validated identity as of planning, but identity truth committed before the commit transaction invalidates the plan. Re-plan against the current target.",
+      { details: { conflict: error.message } },
+    );
+  }
+}

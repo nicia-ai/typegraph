@@ -73,6 +73,9 @@ function emptyPlan(): MergePlan<CareGraph> {
     mergedEdges: [],
     inheritedEdgeBaseProps: new Map(),
     retypeMap: new Map(),
+    nodeValidityEnds: new Map(),
+    edgeValidityEnds: new Map(),
+    validityEnds: [],
     resolutions: [],
     propertyConflicts: [],
     deleteModifyConflicts: [],
@@ -81,6 +84,10 @@ function emptyPlan(): MergePlan<CareGraph> {
     baseAmbiguities: [],
     provenanceRecords: [],
     warnings: [],
+    identityAssertions: [],
+    identityRetractions: [],
+    identityConflicts: [],
+    canonicalOf: new Map(),
   };
 }
 
@@ -129,6 +136,7 @@ describe.each(backendMatrix())(
           memberIds: [nodeId("base-1"), nodeId("new-2")],
           kind: "Patient",
           branchOrigins: [],
+          decisiveEdges: [],
         },
         conflicts: [],
       };
@@ -199,6 +207,7 @@ describe.each(backendMatrix())(
           memberIds: [nodeId("base-1")],
           kind: "Patient",
           branchOrigins: [],
+          decisiveEdges: [],
         },
         conflicts: [],
       };

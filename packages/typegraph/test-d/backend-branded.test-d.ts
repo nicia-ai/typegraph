@@ -20,7 +20,13 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../src/backend/branded";
-import { createBackendOverlay, type GraphBackend } from "../src/backend/types";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { type PostgresBackendOptions } from "../src/backend/drizzle/postgres";
+import { type SqliteBackendOptions } from "../src/backend/drizzle/sqlite";
+import { type LocalPgliteBackendOptions } from "../src/backend/postgres/pglite";
+import { type LibsqlBackendOptions } from "../src/backend/sqlite/libsql";
+import { type LocalSqliteBackendOptions } from "../src/backend/sqlite/local";
+import { type GraphBackend } from "../src/backend/types";
 import { sqliteDialect } from "../src/query/dialect/sqlite";
 import { type DialectAdapter } from "../src/query/dialect/types";
 import { type SqlFragment } from "../src/query/sql-fragment";
@@ -128,11 +134,30 @@ expectType<never>(backendMemberWithInvalidReceiver);
 
 // Backend overlays must only replace real backend members. This catches typoed
 // wrapper keys at compile time instead of silently dropping them at runtime.
-expectAssignable<GraphBackend>(
-  createBackendOverlay(plain, { dialect: "sqlite" }),
-);
+expectAssignable<GraphBackend>(deriveBackend(plain, { dialect: "sqlite" }));
 expectError(
-  createBackendOverlay(plain, {
+  deriveBackend(plain, {
     doesNotExistOnBackend: () => undefined,
   }),
 );
+
+// The `serializedResource` declaration exists on exactly the two options types
+// whose factory resolves it — `createSqliteBackend` and `createPostgresBackend`.
+expectAssignable<SqliteBackendOptions>({
+  serializedResource: { mode: "independent" },
+});
+expectAssignable<PostgresBackendOptions>({
+  serializedResource: { mode: "shared", resource: {} },
+});
+
+// The three batteries-included wrappers build their inner options literal
+// explicitly and forward nothing, so a member accepted there would be silently
+// dropped. Each must therefore refuse it outright — and each already detects
+// its own connection (local libsql, better-sqlite3, PGlite), so there is
+// nothing for a caller to declare.
+declare const libsqlOptions: LibsqlBackendOptions;
+declare const localSqliteOptions: LocalSqliteBackendOptions;
+declare const pgliteOptions: LocalPgliteBackendOptions;
+expectError(libsqlOptions.serializedResource);
+expectError(localSqliteOptions.serializedResource);
+expectError(pgliteOptions.serializedResource);

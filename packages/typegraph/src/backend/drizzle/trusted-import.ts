@@ -1,6 +1,12 @@
 import { TrustedImportError } from "../../errors";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
+import { resolveStampedValidityLowerBound } from "../../utils/date";
+import {
+  requireFenceLockTables,
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../capabilities/write-fence";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
@@ -20,6 +26,7 @@ type SqliteIndexDefinition = Readonly<{
 }>;
 
 type PostgresIndexDefinition = Readonly<{
+  index_schema: string;
   index_name: string;
   index_definition: string;
 }>;
@@ -88,18 +95,67 @@ export async function assertTrustedImportDatabaseEmpty(
   );
 }
 
+/**
+ * Excludes every other writer from the imported relations for the whole
+ * import: trusted import owns the entire node and edge tables for its
+ * duration (the emptiness precondition `assertTrustedImportDatabaseEmpty`
+ * checks right after this lock is the point), and runs inside its own
+ * transaction (`transactionWithNative` in the PostgreSQL profile builder), so
+ * there is no wider fence above it for an advisory key to nest inside. This
+ * is the one write-fence site that takes a table lock with no advisory lock
+ * preceding it.
+ *
+ * Resolves the write-fence plan through {@link resolveWriteFencePlan}; the
+ * `lock` arm takes the relation lock below, spelled by the target's own
+ * `fenceSql`.
+ */
 export async function lockPostgresTrustedImportTables(
   backend: TransactionBackend,
   tableNames: TrustedImportTableNames,
 ): Promise<void> {
   const executeStatement = requireStatementExecution(backend);
-  await executeStatement(
-    asCompiledStatementSql(
-      sql.raw(
-        `LOCK TABLE ${quoteSqlIdentifier(tableNames.nodes)}, ${quoteSqlIdentifier(tableNames.edges)} IN ACCESS EXCLUSIVE MODE`,
-      ),
-    ),
-  );
+  const plan = resolveWriteFencePlan(backend);
+  const fence = requireWriteFence(plan, "trusted import", "drain");
+  switch (fence.kind) {
+    case "lock":
+    case "row": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means, so this site takes no statement.
+        return;
+      }
+      await executeStatement(
+        asCompiledStatementSql(
+          requireFenceLockTables(fence, "lockPostgresTrustedImportTables")(
+            [tableNames.nodes, tableNames.edges],
+            "access-exclusive",
+          ),
+        ),
+      );
+      return;
+    }
+    case "engine-serialized":
+    case "caller-serialized": {
+      // Two things read `engine-serialized` as "take no relation lock". The
+      // bundled SQLite import session takes that reading its own way,
+      // without ever calling this function: it is built by
+      // `createSqliteTrustedImportSession`, which inserts under the writer
+      // slot `BEGIN IMMEDIATE` already holds. Any target — SQLite dialect
+      // or not — that declares `writeFence.mechanism: "engine-serialized"`
+      // instead of locks reaches this arm directly through
+      // `resolveWriteFencePlan`, and
+      // taking no relation lock is the deliberate reading of that
+      // declaration: the engine already excludes concurrent writers by
+      // construction, so this function's own table lock would add nothing.
+      // `caller-serialized` reads the same way: the deployment's own
+      // promise that no other client writes to this database already
+      // excludes the writer this table lock would otherwise hold off.
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
 export async function suspendSqliteSecondaryIndexes(
@@ -127,14 +183,27 @@ export async function suspendSqliteSecondaryIndexes(
   return definitions;
 }
 
+/**
+ * The index is dropped by the schema the catalog read found it in, never by
+ * whatever the session's `search_path` reaches first, so a same-named index in
+ * an earlier schema is not the one dropped.
+ */
+function qualifiedIndexName(definition: PostgresIndexDefinition): string {
+  return `${quoteSqlIdentifier(definition.index_schema)}.${quoteSqlIdentifier(definition.index_name)}`;
+}
+
 export async function suspendPostgresSecondaryIndexes(
   backend: TransactionBackend,
   tableNames: TrustedImportTableNames,
+  allocationSchema: string | undefined,
 ): Promise<readonly PostgresIndexDefinition[]> {
   const executeRaw = requireRawExecution(backend);
   const executeStatement = requireStatementExecution(backend);
+  const schemaPredicate =
+    allocationSchema === undefined ? "current_schema()" : "$3";
   const definitions = await executeRaw<PostgresIndexDefinition>(
-    `SELECT index_class.relname AS index_name,
+    `SELECT namespace.nspname AS index_schema,
+            index_class.relname AS index_name,
             pg_get_indexdef(index_class.oid) AS index_definition
        FROM pg_class AS table_class
        JOIN pg_namespace AS namespace
@@ -145,17 +214,19 @@ export async function suspendPostgresSecondaryIndexes(
          ON index_class.oid = index_metadata.indexrelid
        LEFT JOIN pg_constraint AS table_constraint
          ON table_constraint.conindid = index_class.oid
-      WHERE namespace.nspname = current_schema()
+      WHERE namespace.nspname = ${schemaPredicate}
         AND table_class.relname IN ($1, $2)
         AND table_constraint.oid IS NULL
         AND NOT index_metadata.indisprimary
       ORDER BY index_class.relname`,
-    [tableNames.nodes, tableNames.edges],
+    allocationSchema === undefined ?
+      [tableNames.nodes, tableNames.edges]
+    : [tableNames.nodes, tableNames.edges, allocationSchema],
   );
   for (const definition of definitions) {
     await executeStatement(
       asCompiledStatementSql(
-        sql.raw(`DROP INDEX ${quoteSqlIdentifier(definition.index_name)}`),
+        sql.raw(`DROP INDEX ${qualifiedIndexName(definition)}`),
       ),
     );
   }
@@ -191,13 +262,6 @@ export async function analyzeImportedTables(
   );
 }
 
-function resolvedValidFrom(
-  validFrom: string | null | undefined,
-  timestamp: string,
-): string | null {
-  return validFrom === undefined ? timestamp : validFrom;
-}
-
 /**
  * Encodes one-dimensional Postgres arrays as text accepted by an explicit
  * `::text[]` / `::timestamptz[]` cast. postgres.js's raw `unsafe` parameters
@@ -214,6 +278,17 @@ function postgresArray(values: readonly (string | null)[]): string {
     .join(",")}}`;
 }
 
+/**
+ * Both sessions below decide their stored lower bound through
+ * {@link resolveStampedValidityLowerBound}, the same owner the Drizzle insert
+ * builders use, mapping "no bound" to an explicit SQL NULL. Trusted import
+ * bypasses those builders for throughput, so a private copy of the decision here
+ * would keep minting rows readable at no coordinate long after the builders
+ * stopped — which is exactly what it did before issue #407 was closed. Its
+ * canonicality precondition is established per chunk by the stream's own format
+ * check (`src/interchange/trusted-import.ts`), which is what makes the
+ * lexicographic comparison inside the owner a chronological one here too.
+ */
 export function createSqliteTrustedImportSession(
   executionAdapter: SqliteExecutionAdapter,
   tableNames: TrustedImportTableNames,
@@ -230,8 +305,8 @@ export function createSqliteTrustedImportSession(
     (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`;
   const edgeSql = `INSERT INTO ${quoteSqlIdentifier(tableNames.edges)}
-    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, match_identity_name, match_identity_key, valid_from, valid_to, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
   return {
     async insertNodes(params: readonly InsertNodeParams[]): Promise<void> {
@@ -244,7 +319,8 @@ export function createSqliteTrustedImportSession(
           item.kind,
           item.id,
           JSON.stringify(item.props),
-          resolvedValidFrom(item.validFrom, timestamp),
+          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+            DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -265,7 +341,10 @@ export function createSqliteTrustedImportSession(
           item.toKind,
           item.toId,
           JSON.stringify(item.props),
-          resolvedValidFrom(item.validFrom, timestamp),
+          item.matchIdentity?.name ?? DATABASE_NULL,
+          item.matchIdentity?.key ?? DATABASE_NULL,
+          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+            DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -288,16 +367,16 @@ export function createPostgresTrustedImportSession(
         $5::timestamptz[], $6::timestamptz[], $7::timestamptz[]
       ) AS imported(graph_id, kind, id, props, valid_from, valid_to, created_at)`;
   const edgeSql = `INSERT INTO ${quoteSqlIdentifier(tableNames.edges)}
-    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at)
+    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, match_identity_name, match_identity_key, valid_from, valid_to, created_at, updated_at)
     SELECT graph_id, id, kind, from_kind, from_id, to_kind, to_id, props::jsonb,
-           valid_from, valid_to, created_at, created_at
+           match_identity_name, match_identity_key, valid_from, valid_to, created_at, created_at
       FROM UNNEST(
         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
-        $6::text[], $7::text[], $8::text[], $9::timestamptz[],
-        $10::timestamptz[], $11::timestamptz[]
+        $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
+        $11::timestamptz[], $12::timestamptz[], $13::timestamptz[]
       ) AS imported(
         graph_id, id, kind, from_kind, from_id, to_kind, to_id, props,
-        valid_from, valid_to, created_at
+        match_identity_name, match_identity_key, valid_from, valid_to, created_at
       )`;
 
   return {
@@ -310,7 +389,11 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.id)),
         postgresArray(params.map((item) => JSON.stringify(item.props))),
         postgresArray(
-          params.map((item) => resolvedValidFrom(item.validFrom, timestamp)),
+          params.map(
+            (item) =>
+              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+              DATABASE_NULL,
+          ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),
         postgresArray(params.map(() => timestamp)),
@@ -329,7 +412,17 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.toId)),
         postgresArray(params.map((item) => JSON.stringify(item.props))),
         postgresArray(
-          params.map((item) => resolvedValidFrom(item.validFrom, timestamp)),
+          params.map((item) => item.matchIdentity?.name ?? DATABASE_NULL),
+        ),
+        postgresArray(
+          params.map((item) => item.matchIdentity?.key ?? DATABASE_NULL),
+        ),
+        postgresArray(
+          params.map(
+            (item) =>
+              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
+              DATABASE_NULL,
+          ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),
         postgresArray(params.map(() => timestamp)),

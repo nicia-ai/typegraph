@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type {
   GraphBackend,
@@ -22,17 +23,21 @@ import {
   GraphAlgorithmConvergenceError,
   ValidationError,
 } from "../src/errors";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { sqliteDialect } from "../src/query/dialect/sqlite";
+import { sql } from "../src/query/sql-fragment";
 import type {
   CompiledRowsSql,
   CompiledTemporaryStatementSql,
 } from "../src/query/sql-intent";
 import { createStore, type Store } from "../src/store";
+import type { AlgorithmContext } from "../src/store/algorithms/context";
+import { WORKING_TABLE_ANALYZE_MINIMUM_ROWS } from "../src/store/algorithms/iterative-graph-operation";
+import { executeLabelPropagation } from "../src/store/algorithms/label-propagation";
+import { executePageRank } from "../src/store/algorithms/page-rank";
 import { requireDefined } from "../src/utils/presence";
-import {
-  collectAllEdges,
-  createTestBackend,
-  TEMPORAL_ANCHORS,
-} from "./test-utils";
+import { createStatementCountingBackend } from "./statement-counting-backend";
+import { createTestBackend, TEMPORAL_ANCHORS } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -168,61 +173,219 @@ async function seed(store: Store<TestGraph>): Promise<Fixture> {
   };
 }
 
-/**
- * Counts every statement (row-returning and temporary) issued inside a
- * traversal's transaction, so a reintroduced per-round COUNT or meeting
- * probe fails the round-trip budget tests instead of silently doubling
- * round-trips.
- */
-function createCountingBackend(
+function createPostgresTemporaryStatementFailureBackend(
   backend: GraphBackend,
-  collected: string[],
+  failure: Error,
 ): GraphBackend {
-  return {
-    ...backend,
+  return deriveBackend(backend, {
+    dialect: "postgres",
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> {
       return backend.transaction(async (tx) => {
-        const observedTransaction: TransactionBackend = {
+        const failingTransaction: TransactionBackend = {
           ...tx,
-          execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
-            collected.push(requireDefined(backend.compileSql)(query).sql);
-            return tx.execute<Result>(query);
-          },
-          async executeTemporaryStatement(
-            query: CompiledTemporaryStatementSql,
-          ): Promise<void> {
-            collected.push(requireDefined(backend.compileSql)(query).sql);
-            await requireDefined(tx.executeTemporaryStatement)(query);
+          dialect: "postgres",
+          executeTemporaryStatement(): Promise<void> {
+            return Promise.reject(failure);
           },
         };
-        return fn(observedTransaction);
+        return fn(failingTransaction);
       }, options);
     },
-  };
+  });
+}
+
+/**
+ * A standby rejects the read-write access mode in the `BEGIN` itself, so the
+ * transaction callback never runs and no temporary statement is ever issued.
+ */
+function createPostgresTransactionOpenFailureBackend(
+  backend: GraphBackend,
+  failure: Error,
+): GraphBackend {
+  return deriveBackend(backend, {
+    dialect: "postgres",
+    transaction<T>(): Promise<T> {
+      return Promise.reject(failure);
+    },
+  });
+}
+
+function postgresError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
 }
 
 function personMembership(id: string, labelId: string) {
   return { id, kind: "Person", labelId, labelKind: "Person" };
 }
 
+/**
+ * Runs one iterative algorithm on a SQLite ring large enough to pass the
+ * statistics size gate, with the dialect's temporary-table ANALYZE seam
+ * overridden by a real SQLite `ANALYZE temp.<table>` (the production SQLite
+ * dialect emits none), and reports where the runner refreshed the main
+ * working table relative to the first statement containing `joinMarker`.
+ */
+async function observeInitializationStatistics<Result>(
+  run: (ctx: AlgorithmContext) => Promise<Result>,
+  joinMarker: string,
+): Promise<
+  Readonly<{
+    analyzeIndexes: readonly number[];
+    firstJoin: number;
+    result: Result;
+    store: Store<typeof testGraph>;
+  }>
+> {
+  const sqliteBackend = createTestBackend();
+  const store = createStore(testGraph, sqliteBackend);
+  const people = await Promise.all(
+    Array.from({ length: WORKING_TABLE_ANALYZE_MINIMUM_ROWS + 4 }, (_, index) =>
+      store.nodes.Person.create(
+        { name: `Ring ${index}` },
+        { id: `ring-${String(index).padStart(2, "0")}` },
+      ),
+    ),
+  );
+  await Promise.all(
+    people.map((person, index) =>
+      store.edges.knows.create(
+        person,
+        requireDefined(people[(index + 1) % people.length]),
+        {},
+      ),
+    ),
+  );
+  const statements: string[] = [];
+  const ctx: AlgorithmContext = {
+    graphId: store.graphId,
+    graph: testGraph,
+    registry: store.registry,
+    backend: createStatementCountingBackend(sqliteBackend, statements),
+    dialect: {
+      ...sqliteDialect,
+      analyzeTemporaryTable: (table) => sql`ANALYZE temp.${table}`,
+    },
+    schema: createSqlSchema(sqliteBackend.tableNames),
+    recordedReadBinding: undefined,
+    defaultTemporalMode: "current",
+  };
+
+  const result = await run(ctx);
+
+  // The main working table is the first one a run creates.
+  const workingTable = requireDefined(
+    statements
+      .map((statement) =>
+        /CREATE TEMP TABLE ("typegraph_iterative_[^"]+")/u.exec(statement),
+      )
+      .find((match) => match !== null)?.[1],
+  );
+  const analyze = `ANALYZE temp.${workingTable}`;
+  const analyzeIndexes = statements.flatMap((statement, index) =>
+    statement === analyze ? [index] : [],
+  );
+  const firstJoin = statements.findIndex((statement) =>
+    statement.includes(joinMarker),
+  );
+  expect(firstJoin).toBeGreaterThanOrEqual(0);
+  return { analyzeIndexes, firstJoin, result, store };
+}
+
+const ITERATIVE_WORKING_TABLE_PREFIX = "typegraph_iterative_";
+const ITERATIVE_NEIGHBOR_TABLE_PREFIX = "typegraph_iterative_n_";
+const ITERATIVE_ASSIGNMENT_TABLE_PREFIX = "typegraph_iterative_a_";
+
+type IterativeTableNames = Readonly<{
+  working: string;
+  neighbor: string;
+  assignment: string;
+}>;
+
+/**
+ * The temporary tables of one label-propagation run, read from the statements
+ * it issued: the working table `typegraph_iterative_<run>` and the neighbor
+ * and assignment tables `typegraph_iterative_{n,a}_<run>`.
+ *
+ * A run id is random and can itself start with `n_` or `a_`, so a name cannot
+ * be classified by its prefix: `typegraph_iterative_n_x` is the neighbor table
+ * of run `x` or the working table of run `n_x`. The working table is the one
+ * identifier whose neighbor-prefixed twin also appears.
+ */
+function iterativeTableNames(
+  statements: readonly string[],
+): IterativeTableNames | undefined {
+  const identifiers = new Set(
+    statements.flatMap((statement) =>
+      [...statement.matchAll(/"(typegraph_iterative_[^"]+)"/gu)].flatMap(
+        (match) => (match[1] === undefined ? [] : [match[1]]),
+      ),
+    ),
+  );
+  for (const working of identifiers) {
+    const run = working.slice(ITERATIVE_WORKING_TABLE_PREFIX.length);
+    const neighbor = `${ITERATIVE_NEIGHBOR_TABLE_PREFIX}${run}`;
+    if (!identifiers.has(neighbor)) continue;
+    return {
+      working,
+      neighbor,
+      assignment: `${ITERATIVE_ASSIGNMENT_TABLE_PREFIX}${run}`,
+    };
+  }
+  return undefined;
+}
+
+function dropStatement(table: string): string {
+  return `DROP TABLE IF EXISTS "${table}"`;
+}
+
 function expectAuxiliaryTableDroppedBeforeWorkingTable(
   statements: readonly string[],
 ): void {
-  const neighborDropIndex = statements.findIndex((statement) =>
-    statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_n_'),
-  );
-  const workingDropIndex = statements.findIndex(
-    (statement, index) =>
-      index > neighborDropIndex &&
-      statement.includes('DROP TABLE IF EXISTS "typegraph_iterative_') &&
-      !statement.includes('"typegraph_iterative_n_'),
-  );
-  expect(neighborDropIndex).toBeGreaterThan(-1);
-  expect(workingDropIndex).toBeGreaterThan(neighborDropIndex);
+  const tables = iterativeTableNames(statements);
+  expect(tables).toBeDefined();
+  if (tables === undefined) return;
+  const dropIndex = (table: string) =>
+    statements.findIndex((statement) =>
+      statement.startsWith(dropStatement(table)),
+    );
+  const neighborDrop = dropIndex(tables.neighbor);
+  const workingDrop = dropIndex(tables.working);
+  expect(neighborDrop).toBeGreaterThanOrEqual(0);
+  expect(workingDrop).toBeGreaterThanOrEqual(0);
+  expect(neighborDrop).toBeLessThan(workingDrop);
 }
+
+describe("temporary table cleanup assertion", () => {
+  it("matches a working suffix that starts with the neighbor prefix", () => {
+    const statements = [
+      'DROP TABLE IF EXISTS "typegraph_iterative_n_n_regression"',
+      'DROP TABLE IF EXISTS "typegraph_iterative_n_regression"',
+    ];
+    expectAuxiliaryTableDroppedBeforeWorkingTable(statements);
+    expect(iterativeTableNames(statements)).toEqual({
+      working: "typegraph_iterative_n_regression",
+      neighbor: "typegraph_iterative_n_n_regression",
+      assignment: "typegraph_iterative_a_n_regression",
+    });
+  });
+
+  it("matches a working suffix that starts with the assignment prefix", () => {
+    expect(
+      iterativeTableNames([
+        'CREATE TEMP TABLE "typegraph_iterative_a_regression" (x)',
+        'CREATE TEMP TABLE "typegraph_iterative_n_a_regression" (x)',
+        'CREATE TEMP TABLE "typegraph_iterative_a_a_regression" (x)',
+      ]),
+    ).toEqual({
+      working: "typegraph_iterative_a_regression",
+      neighbor: "typegraph_iterative_n_a_regression",
+      assignment: "typegraph_iterative_a_a_regression",
+    });
+  });
+});
 
 // ============================================================
 // Test Setup
@@ -237,6 +400,220 @@ describe("store.algorithms", () => {
     backend = createTestBackend();
     store = createStore(testGraph, backend);
     ids = await seed(store);
+  });
+
+  describe("PostgreSQL temporary-table capability failures", () => {
+    const failureCases = [
+      {
+        environment: "read-only execution",
+        sqlState: "25006",
+        createFailure: () =>
+          postgresError(
+            "cannot execute CREATE TABLE in a read-only transaction",
+            "25006",
+          ),
+      },
+      {
+        environment: "read-only execution behind a driver wrapper",
+        sqlState: "25006",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: CREATE TEMP TABLE"), {
+            cause: postgresError(
+              "cannot execute CREATE TABLE in a read-only transaction",
+              "25006",
+            ),
+          }),
+      },
+      {
+        environment: "a role without TEMP privilege",
+        sqlState: "42501",
+        createFailure: () =>
+          postgresError(
+            "permission denied to create temporary tables",
+            "42501",
+          ),
+      },
+      {
+        environment: "a role without TEMP privilege behind a driver wrapper",
+        sqlState: "42501",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: CREATE TEMP TABLE"), {
+            cause: postgresError(
+              "permission denied to create temporary tables",
+              "42501",
+            ),
+          }),
+      },
+    ] as const;
+
+    const algorithmCases = [
+      {
+        operation: "weaklyConnectedComponents",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.weaklyConnectedComponents({ edges: ["knows"] }),
+      },
+      {
+        operation: "labelPropagation",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.labelPropagation({ edges: ["knows"] }),
+      },
+      {
+        operation: "pageRank",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.pageRank({ edges: ["knows"] }),
+      },
+      {
+        operation: "personalizedPageRank",
+        run: (target: Store<TestGraph>) =>
+          target.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            seeds: [{ id: ids.alice, kind: "Person" }],
+          }),
+      },
+    ] as const;
+
+    for (const failureCase of failureCases) {
+      for (const algorithmCase of algorithmCases) {
+        it(`translates ${failureCase.environment} for ${algorithmCase.operation}`, async () => {
+          const failure = failureCase.createFailure();
+          const failingStore = createStore(
+            testGraph,
+            createPostgresTemporaryStatementFailureBackend(backend, failure),
+          );
+
+          await expect(algorithmCase.run(failingStore)).rejects.toMatchObject({
+            code: "UNSUPPORTED_BACKEND_CAPABILITY",
+            cause: failure,
+            details: {
+              operation: algorithmCase.operation,
+              capability: "graphAnalytics",
+              dialect: "postgres",
+              supported: false,
+              requirement: "transaction-local temporary tables",
+              sqlState: failureCase.sqlState,
+            },
+          });
+        });
+      }
+    }
+
+    it("preserves unrelated PostgreSQL failures during table creation", async () => {
+      const failure = postgresError("connection failure", "08006");
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    it("preserves permission failures outside table creation", async () => {
+      const failure = postgresError(
+        "permission denied to set parameter",
+        "42501",
+      );
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.pageRank({
+          edges: ["knows"],
+          workingMemory: "64MB",
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    const transactionOpenFailureCases = [
+      {
+        environment: "a standby refusing read-write mode",
+        sqlState: "0A000",
+        createFailure: () =>
+          postgresError(
+            "cannot set transaction read-write mode during recovery",
+            "0A000",
+          ),
+      },
+      {
+        environment:
+          "a standby refusing read-write mode behind a driver wrapper",
+        sqlState: "0A000",
+        createFailure: () =>
+          Object.assign(new Error("Failed query: begin"), {
+            cause: postgresError(
+              "cannot set transaction read-write mode during recovery",
+              "0A000",
+            ),
+          }),
+      },
+      {
+        environment: "a session pinned read-only",
+        sqlState: "25006",
+        createFailure: () =>
+          postgresError("cannot start a read-write transaction", "25006"),
+      },
+    ] as const;
+
+    for (const failureCase of transactionOpenFailureCases) {
+      for (const algorithmCase of algorithmCases) {
+        it(`translates ${failureCase.environment} for ${algorithmCase.operation}`, async () => {
+          const failure = failureCase.createFailure();
+          const failingStore = createStore(
+            testGraph,
+            createPostgresTransactionOpenFailureBackend(backend, failure),
+          );
+
+          await expect(algorithmCase.run(failingStore)).rejects.toMatchObject({
+            code: "UNSUPPORTED_BACKEND_CAPABILITY",
+            cause: failure,
+            details: {
+              operation: algorithmCase.operation,
+              capability: "graphAnalytics",
+              dialect: "postgres",
+              supported: false,
+              requirement: "transaction-local temporary tables",
+              sqlState: failureCase.sqlState,
+            },
+          });
+        });
+      }
+    }
+
+    it("preserves unrelated failures while opening the transaction", async () => {
+      const failure = postgresError("connection terminated", "08006");
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTransactionOpenFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toBe(failure);
+    });
+
+    it("preserves unsupported-feature failures raised inside the transaction", async () => {
+      const failure = postgresError(
+        "RETURNING is not supported in this context",
+        "0A000",
+      );
+      const failingStore = createStore(
+        testGraph,
+        createPostgresTemporaryStatementFailureBackend(backend, failure),
+      );
+
+      await expect(
+        failingStore.algorithms.weaklyConnectedComponents({
+          edges: ["knows"],
+        }),
+      ).rejects.toBe(failure);
+    });
   });
 
   // --------------------------------------------------------------
@@ -685,10 +1062,18 @@ describe("store.algorithms", () => {
         kind: "Person",
       });
 
-      const inlineStore = createStore(testGraph, {
-        ...backend,
-        capabilities: { ...backend.capabilities, transactions: false },
-      });
+      const inlineStore = createStore(
+        testGraph,
+        deriveBackend(backend, {
+          capabilities: {
+            ...backend.capabilities,
+            execution: {
+              ...backend.capabilities.execution,
+              interactiveTransactions: false,
+            },
+          },
+        }),
+      );
       const inlinePath = await inlineStore.algorithms.weightedShortestPath(
         a,
         targetId,
@@ -724,10 +1109,15 @@ describe("store.algorithms", () => {
 
     it("produces identical results through the inline fallback", async () => {
       const roads = await seedRoads();
-      const inlineBackend: GraphBackend = {
-        ...backend,
-        capabilities: { ...backend.capabilities, transactions: false },
-      };
+      const inlineBackend: GraphBackend = deriveBackend(backend, {
+        capabilities: {
+          ...backend.capabilities,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
+        },
+      });
       const inlineStore = createStore(testGraph, inlineBackend);
 
       const workingTablePath = await store.algorithms.weightedShortestPath(
@@ -817,14 +1207,19 @@ describe("store.algorithms", () => {
 
     it("uses bounded frontier queries and stops when the frontier is empty", async () => {
       const statements: string[] = [];
-      const observedBackend: GraphBackend = {
-        ...backend,
-        capabilities: { ...backend.capabilities, transactions: false },
+      const observedBackend: GraphBackend = deriveBackend(backend, {
+        capabilities: {
+          ...backend.capabilities,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
+        },
         execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
           statements.push(requireDefined(backend.compileSql)(query).sql);
           return backend.execute<T>(query);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
 
       const reachable = await observedStore.algorithms.reachable(ids.alice, {
@@ -841,8 +1236,7 @@ describe("store.algorithms", () => {
 
     it("deduplicates edge targets before node visibility without ranking predecessors", async () => {
       const statements: string[] = [];
-      const observedBackend: GraphBackend = {
-        ...backend,
+      const observedBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -860,7 +1254,7 @@ describe("store.algorithms", () => {
             return fn(observedTransaction);
           }, options);
         },
-      };
+      });
       const observedStore = createStore(testGraph, observedBackend);
 
       await observedStore.algorithms.reachable(ids.alice, {
@@ -881,14 +1275,16 @@ describe("store.algorithms", () => {
     });
 
     it("chunks duplicate edge filters within a small bind budget", async () => {
-      const constrainedBackend: GraphBackend = {
-        ...backend,
+      const constrainedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
-          transactions: false,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
           maxBindParameters: 100,
         },
-      };
+      });
       const constrainedStore = createStore(testGraph, constrainedBackend);
 
       const reachable = await constrainedStore.algorithms.reachable(ids.alice, {
@@ -914,8 +1310,7 @@ describe("store.algorithms", () => {
     it("drops the temporary working table when initialization fails", async () => {
       const temporaryStatements: string[] = [];
       let failNextRead = false;
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -946,7 +1341,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -971,7 +1366,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const reached = await observedStore.algorithms.reachable(ids.alice, {
@@ -997,7 +1392,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const path = await observedStore.algorithms.shortestPath(
@@ -1032,7 +1427,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const reached = await observedStore.algorithms.reachable(ids.alice, {
@@ -1055,8 +1450,7 @@ describe("store.algorithms", () => {
       // parsers) deliver INTEGER columns as BigInt. A meeting must still be
       // detected — regression for a typeof guard that silently dropped
       // BigInt rows and made shortestPath return undefined.
-      const bigintBackend: GraphBackend = {
-        ...backend,
+      const bigintBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1078,7 +1472,7 @@ describe("store.algorithms", () => {
             return fn(observedTransaction);
           }, options);
         },
-      };
+      });
       const bigintStore = createStore(testGraph, bigintBackend);
 
       const path = await bigintStore.algorithms.shortestPath(
@@ -1281,7 +1675,10 @@ describe("store.algorithms", () => {
 
     it("uses indexed delta frontiers without reset or redundant joins", async () => {
       const statements: string[] = [];
-      const observedBackend = createCountingBackend(backend, statements);
+      const observedBackend = createStatementCountingBackend(
+        backend,
+        statements,
+      );
       const observedStore = createStore(testGraph, observedBackend);
 
       await observedStore.algorithms.weaklyConnectedComponents({
@@ -1333,13 +1730,12 @@ describe("store.algorithms", () => {
     });
 
     it("rejects a backend without graph-analytics support", async () => {
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
 
       await expect(
@@ -1376,6 +1772,28 @@ describe("store.algorithms", () => {
   // --------------------------------------------------------------
 
   describe("labelPropagation", () => {
+    it("refreshes label propagation's working-table statistics before the neighbor materialization", async () => {
+      const observed = await observeInitializationStatistics(
+        (ctx) =>
+          executeLabelPropagation(ctx, {
+            edges: ["knows"],
+            onMaxIterations: "return",
+          }),
+        " scoped_neighbor",
+      );
+
+      expect(observed.analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(observed.analyzeIndexes[0])).toBeLessThan(
+        observed.firstJoin,
+      );
+      expect(observed.result).toEqual(
+        await observed.store.algorithms.labelPropagation({
+          edges: ["knows"],
+          onMaxIterations: "return",
+        }),
+      );
+    });
+
     it("uses synchronous neighbor-mode labels and retains isolated nodes", async () => {
       const labelStore = createStore(testGraph, createTestBackend());
       const [alpha, beta, gamma, isolated] = await Promise.all([
@@ -1427,7 +1845,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [alpha, beta, gamma] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
@@ -1442,24 +1860,20 @@ describe("store.algorithms", () => {
 
       await labelStore.algorithms.labelPropagation({ edges: ["knows"] });
 
+      const tables = requireDefined(iterativeTableNames(statements));
       const adjacencyWrites = statements.filter(
         (statement) =>
-          statement.includes('INSERT INTO "typegraph_iterative_n_') &&
+          statement.includes(`INSERT INTO "${tables.neighbor}"`) &&
           statement.includes('"typegraph_edges"'),
       );
       expect(adjacencyWrites).toHaveLength(1);
 
-      const auxiliaryIdentifiers = new Set(
-        statements.flatMap((statement) =>
-          [
-            ...statement.matchAll(
-              /"(typegraph_iterative_[an]_[a-zA-Z0-9_]+)"/g,
-            ),
-          ].flatMap((match) => (match[1] === undefined ? [] : [match[1]])),
-        ),
-      );
-      expect(auxiliaryIdentifiers.size).toBe(2);
-      for (const identifier of auxiliaryIdentifiers) {
+      // Both auxiliary relations are used, under PostgreSQL-safe names.
+      for (const identifier of [tables.neighbor, tables.assignment]) {
+        expect(
+          statements.some((statement) => statement.includes(`"${identifier}"`)),
+        ).toBe(true);
+        expect(identifier).toMatch(/^[a-zA-Z0-9_]+$/u);
         expect(identifier.length).toBeLessThanOrEqual(63);
       }
 
@@ -1470,7 +1884,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [left, right] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Left" }, { id: "left" }),
@@ -1503,7 +1917,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [left, right] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Left" }, { id: "osc-a" }),
@@ -1632,13 +2046,12 @@ describe("store.algorithms", () => {
         ).rejects.toBeInstanceOf(ConfigurationError);
       }
 
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
       await expect(
         unsupportedStore.algorithms.labelPropagation({ edges: ["knows"] }),
@@ -1654,8 +2067,7 @@ describe("store.algorithms", () => {
 
     it("preserves a mid-run failure over cleanup of the auxiliary table", async () => {
       const temporaryStatements: string[] = [];
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1686,7 +2098,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -1694,20 +2106,18 @@ describe("store.algorithms", () => {
       ).rejects.toThrow("forced round failure");
 
       // The root failure survives both cleanup drops, in hook-then-table order.
+      const tables = requireDefined(iterativeTableNames(temporaryStatements));
       expect(temporaryStatements.at(-2)).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_n_',
+        dropStatement(tables.neighbor),
       );
-      const finalStatement = temporaryStatements.at(-1) ?? "";
-      expect(finalStatement).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      expect(temporaryStatements.at(-1)).toContain(
+        dropStatement(tables.working),
       );
-      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
     });
 
     it("propagates an auxiliary-cleanup failure after a computed result", async () => {
       const temporaryStatements: string[] = [];
-      const failingBackend: GraphBackend = {
-        ...backend,
+      const failingBackend: GraphBackend = deriveBackend(backend, {
         transaction<T>(
           fn: (tx: TransactionBackend) => Promise<T>,
           options?: TransactionOptions,
@@ -1720,10 +2130,11 @@ describe("store.algorithms", () => {
               ): Promise<void> {
                 const statement = requireDefined(backend.compileSql)(query).sql;
                 temporaryStatements.push(statement);
+                const neighbor =
+                  iterativeTableNames(temporaryStatements)?.neighbor;
                 if (
-                  statement.includes(
-                    'DROP TABLE IF EXISTS "typegraph_iterative_n_',
-                  )
+                  neighbor !== undefined &&
+                  statement.includes(dropStatement(neighbor))
                 ) {
                   throw new Error("forced cleanup failure");
                 }
@@ -1733,7 +2144,7 @@ describe("store.algorithms", () => {
             return fn(failingTransaction);
           }, options);
         },
-      };
+      });
       const failingStore = createStore(testGraph, failingBackend);
 
       await expect(
@@ -1745,11 +2156,10 @@ describe("store.algorithms", () => {
       ).rejects.toThrow("forced cleanup failure");
 
       // The hook failure wins, and the working-table drop is still attempted.
-      const finalStatement = temporaryStatements.at(-1) ?? "";
-      expect(finalStatement).toContain(
-        'DROP TABLE IF EXISTS "typegraph_iterative_',
+      const tables = requireDefined(iterativeTableNames(temporaryStatements));
+      expect(temporaryStatements.at(-1)).toContain(
+        dropStatement(tables.working),
       );
-      expect(finalStatement).not.toContain('"typegraph_iterative_n_');
     });
   });
 
@@ -1823,11 +2233,28 @@ describe("store.algorithms", () => {
       );
     });
 
+    it("refreshes working-table statistics after population and before the out-weight join", async () => {
+      const observed = await observeInitializationStatistics(
+        (ctx) => executePageRank(ctx, { edges: ["knows"] }),
+        " scoped_target",
+      );
+
+      // One refresh: the post-initialize refresh sees an unchanged row count.
+      expect(observed.analyzeIndexes).toHaveLength(1);
+      expect(requireDefined(observed.analyzeIndexes[0])).toBeLessThan(
+        observed.firstJoin,
+      );
+      // Statistics never change the result.
+      expect(observed.result).toEqual(
+        await observed.store.algorithms.pageRank({ edges: ["knows"] }),
+      );
+    });
+
     it("precomputes weights and ping-pongs scores without an apply rewrite", async () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       await observedStore.algorithms.pageRank({ edges: ["knows"] });
@@ -2005,13 +2432,12 @@ describe("store.algorithms", () => {
     });
 
     it("rejects a backend without graph-analytics support", async () => {
-      const unsupportedBackend: GraphBackend = {
-        ...backend,
+      const unsupportedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: false, mathFunctions: false },
         },
-      };
+      });
       const unsupportedStore = createStore(testGraph, unsupportedBackend);
 
       await expect(
@@ -2040,14 +2466,13 @@ describe("store.algorithms", () => {
     });
 
     it("requires window functions for label algorithms but not PageRank", async () => {
-      const noWindowFunctionsBackend: GraphBackend = {
-        ...backend,
+      const noWindowFunctionsBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
           graphAnalytics: { supported: true, mathFunctions: true },
           windowFunctions: false,
         },
-      };
+      });
       const noWindowFunctionsStore = createStore(
         testGraph,
         noWindowFunctionsBackend,
@@ -2786,8 +3211,9 @@ describe("store.algorithms temporal behavior", () => {
         { validFrom: recentValidFrom },
       );
 
-      // buildReachableCte: reachable/canReach/neighbors/shortestPath all share
-      // the same CTE — one assertion exercises the recursive path.
+      // resolveTemporalOptions: reachable routes through the iterative
+      // working-table path (iterative-graph-operation.ts), not a recursive
+      // CTE — this assertion exercises that path's temporal resolution.
       const reached = await freshStore.algorithms.reachable(alice.id, {
         edges: ["knows"],
         excludeSource: true,
@@ -2810,8 +3236,8 @@ describe("store.algorithms temporal behavior", () => {
       expect(outDegree).toBe(1);
 
       // fetchSubgraphEdges: subgraph hydrates edges via compileTemporalFilter.
-      const sub = await freshStore.subgraph(alice.id, { edges: ["knows"] });
-      expect(collectAllEdges(sub.adjacency)).toHaveLength(1);
+      const sub = await freshStore.subgraph(alice, { edges: ["knows"] });
+      expect(sub.edges).toHaveLength(1);
     });
 
     it("excludes rows whose valid_to was earlier today", async () => {

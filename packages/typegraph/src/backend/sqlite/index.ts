@@ -33,9 +33,22 @@ export {
   tables,
 } from "../drizzle/sqlite";
 
+// Fulltext and vector strategies for createSqliteBackend
+export { fts5Strategy } from "../../query/dialect/fulltext-strategy";
+export { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
+export type { SerializedResourceDeclaration } from "../transaction-resource";
+export type {
+  BundledBackendCapabilityOverrides,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+} from "../types";
+
 // Schema: table definitions and factory options
 export {
   type CreateSqliteTablesOptions,
+  edgeClaims,
   edges,
   nodes,
   recordedClock,
@@ -46,4 +59,5 @@ export {
 } from "../drizzle/schema/sqlite";
 
 // DDL generation
+export type { GraphIdentityConfig } from "../../core/define-graph";
 export { generateSqliteDDL, generateSqliteMigrationSQL } from "../drizzle/ddl";

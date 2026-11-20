@@ -64,6 +64,16 @@ const LIBSQL_CAPABILITIES: VectorCapabilities = {
     mode: "post-filter",
     guaranteesFullPage: false,
   },
+  // `vector_top_k(idx, q, k)` is a table function whose only parameters are
+  // the index, the query vector, and `k`. DiskANN's search-list width
+  // (`search_l`) is fixed when the index is created by
+  // `libsql_vector_idx(...)` and cannot be varied per query, so there is no
+  // per-search frontier for `efSearch` to set.
+  searchFrontierTuning: {
+    tunable: false,
+    reason:
+      "`vector_top_k` takes only (index, query, k); DiskANN's search_l is fixed at index-creation time",
+  },
 };
 
 /** Whether a slot's declared index type maps to a real libSQL ANN index. */
@@ -170,6 +180,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
 
     return [
       {
+        scope: "graph",
         logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
         owner: "libsql-native",
         tableName: table,
@@ -235,6 +246,23 @@ export const libsqlVectorStrategy: VectorStrategy = {
         DELETE FROM ${table}
         WHERE "graph_id" = ${params.graphId} AND "node_id" = ${params.nodeId}
       `,
+    ];
+  },
+
+  buildDeleteBatch(
+    slot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ): readonly SqlFragment[] {
+    if (params.nodeIds.length === 0) return [];
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    return [
+      sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})`,
     ];
   },
 

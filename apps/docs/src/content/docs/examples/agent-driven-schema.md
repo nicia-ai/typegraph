@@ -101,6 +101,20 @@ the agent shows up. Everything compile-time stays type-safe end-to-end
 even as extension kinds accumulate around it:
 
 ```typescript
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "@nicia-ai/typegraph";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import {
+  type GraphExtension,
+  IncompatibleChangeError,
+  validateGraphExtension,
+} from "@nicia-ai/typegraph/graph-extension";
+import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
+import { z } from "zod";
+
 const Document = defineNode("Document", {
   schema: z.object({
     title: z.string(),
@@ -207,6 +221,7 @@ const attention = await papers.create({
   doi: "10.5555/3295222.3295349",
   year: 2017,
 });
+const vaswani = await authors.create({ name: "Ashish Vaswani" });
 await authoredBy.create(attention, vaswani, { order: 1 });
 
 // The `searchable: {}` brand on Paper.title flows through to the
@@ -331,8 +346,8 @@ const [restored, validation] = await createStoreWithSchema(baseGraph, backend);
 // restored.registry.hasNodeType("Author")  -> false (removed in step 6)
 // restored.introspect().deprecatedKinds    -> ["Document"]
 
-const papers = restored.getNodeCollectionOrThrow("Paper");
-await papers.find({}); // returns the rows from step 3
+const restoredPapers = restored.getNodeCollectionOrThrow("Paper");
+await restoredPapers.find({}); // returns the rows from step 3
 ```
 
 This is what makes runtime evolution safe for production: agent-proposed

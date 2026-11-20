@@ -18,13 +18,17 @@
  *   `SchemaContentConflictError` depending on which CAS check fired
  *   first.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../src/backend/derive-backend";
+import { type ContributionRepairResult } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
+import { type NodeType } from "../src/core/types";
 import {
+  CardinalityError,
   ConfigurationError,
   KindNotFoundError,
   SchemaContentConflictError,
@@ -35,6 +39,7 @@ import {
   GraphExtensionValidationError,
   IncompatibleChangeError,
 } from "../src/graph-extension";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import {
   createAdapterStoreWithSchema,
   createStore,
@@ -185,13 +190,12 @@ describe("Store.evolve — basic flow", () => {
   });
 
   it("does not row-count probe for purely additive extensions", async () => {
-    const backend = {
-      ...createTestBackend(),
+    const backend = deriveBackend(createTestBackend(), {
       countNodesByKind: () =>
         Promise.reject(new Error("additive evolve should not count node rows")),
       countEdgesByKind: () =>
         Promise.reject(new Error("additive evolve should not count edge rows")),
-    } satisfies ReturnType<typeof createTestBackend>;
+    });
     const [store] = await createStoreWithSchema(baseGraph, backend);
 
     const evolved = await store.evolve(
@@ -450,7 +454,13 @@ describe("Store.evolve — round-trip parity matrix", () => {
 
     const edgeType = evolved.registry.getEdgeType("appliesTo");
     expect(edgeType?.from?.map((node) => node.kind)).toEqual(["Tag"]);
-    expect(edgeType?.to?.map((node) => node.kind)).toEqual(["Person"]);
+    expect(
+      Array.isArray(edgeType?.to) ?
+        (edgeType.to as readonly NodeType[]).map(
+          (node: NodeType): string => node.kind,
+        )
+      : undefined,
+    ).toEqual(["Person"]);
 
     // Compile-time `Person` is reachable through the merged registry
     // unchanged, and the runtime `Tag` shows up alongside it.
@@ -535,9 +545,9 @@ describe("StoreRef pattern (consumer-composed)", () => {
   // The ref is a consumer pattern, not a library factory. Apps that need
   // many callers to share a stable handle (request handlers, background
   // workers, repeated schema-evolution loops) compose their own ref and
-  // pass it to evolve, which re-points it atomically with the schema
-  // commit. Apps with a single caller can skip the ref entirely and
-  // reassign the store from evolve's return value.
+  // pass it to evolve, which re-points it before the call completes. Apps with
+  // a single caller can skip the ref entirely and reassign the store from
+  // evolve's return value.
   it("evolve(ext, { ref }) re-points the consumer-composed ref", async () => {
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(baseGraph, backend);
@@ -693,6 +703,52 @@ describe("Store.evolve — runtime vector index derivation", () => {
     expect(personIndex?.origin).toBeUndefined();
     expect(paperIndex).toBeDefined();
     expect(paperIndex?.origin).toBe("runtime");
+  });
+
+  it("repairs contributions from the committed graph when called on a stale Store", async () => {
+    const baseBackend = createTestBackend();
+    const repairResult: ContributionRepairResult = {
+      results: [],
+      remaining: [],
+    };
+    const repairContributions = vi.fn(() => Promise.resolve(repairResult));
+    const backend = deriveBackend(baseBackend, {
+      capabilities: {
+        ...baseBackend.capabilities,
+        vector: pgvectorStrategy.capabilities,
+      },
+      vectorStrategy: pgvectorStrategy,
+      repairContributions,
+    });
+    const [staleStore] = await createStoreWithSchema(baseGraph, backend);
+
+    await staleStore.evolve(
+      defineGraphExtension({
+        nodes: {
+          Paper: {
+            properties: {
+              embedding: {
+                type: "array",
+                items: { type: "number" },
+                embedding: { dimensions: 384 },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    await expect(staleStore.repairContributions()).resolves.toBe(repairResult);
+    expect(repairContributions).toHaveBeenCalledWith(
+      baseGraph.id,
+      expect.arrayContaining([
+        expect.objectContaining({
+          nodeKind: "Paper",
+          fieldPath: "embedding",
+          dimensions: 384,
+        }),
+      ]),
+    );
   });
 });
 
@@ -968,5 +1024,78 @@ describe("Store.evolve — graph-extension-declared relational indexes", () => {
         }),
       ),
     ).rejects.toBeInstanceOf(GraphExtensionValidationError);
+  });
+});
+
+describe("Store.evolve — runtime-authored edge cardinality (issue #610)", () => {
+  it("enforces a runtime-declared targetCardinality on a live write", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          ownedBy: {
+            from: ["Tag"],
+            to: ["Person"],
+            properties: {},
+            targetCardinality: "one",
+          },
+        },
+      }),
+    );
+
+    const alice = await evolved.nodes.Person.create({ name: "alice" });
+    const bob = await evolved.nodes.Person.create({ name: "bob" });
+    const tagCol = requireDefined(evolved.getNodeCollection("Tag"));
+    const featured = (await tagCol.create({
+      label: "featured",
+    })) as unknown as ExtensionTag;
+    const important = (await tagCol.create({
+      label: "important",
+    })) as unknown as ExtensionTag;
+
+    const ownedBy = requireDefined(evolved.getEdgeCollection("ownedBy"));
+    await ownedBy.create(
+      { kind: "Tag", id: featured.id },
+      { kind: "Person", id: alice.id },
+      {},
+    );
+    await expect(
+      ownedBy.create(
+        { kind: "Tag", id: important.id },
+        { kind: "Person", id: alice.id },
+        {},
+      ),
+    ).rejects.toBeInstanceOf(CardinalityError);
+    // A different target still succeeds — the axis is scoped per target.
+    await expect(
+      ownedBy.create(
+        { kind: "Tag", id: important.id },
+        { kind: "Person", id: bob.id },
+        {},
+      ),
+    ).resolves.toBeDefined();
+  });
+  // MUTATION CHECK (verified): drop the
+  // `targetCardinality: document.targetCardinality` line from `compileEdge`
+  // (`src/graph-extension/compiler.ts`). `important`'s second create then
+  // wrongly succeeds instead of refusing.
+
+  it("refuses an unknown cardinality value in the extension document", () => {
+    expect(() =>
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+        edges: {
+          ownedBy: {
+            from: ["Tag"],
+            to: ["Person"],
+            properties: {},
+            // @ts-expect-error -- deliberately invalid for this test
+            targetCardinality: "atMostFive",
+          },
+        },
+      }),
+    ).toThrow(GraphExtensionValidationError);
   });
 });

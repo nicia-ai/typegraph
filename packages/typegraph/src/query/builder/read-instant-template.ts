@@ -18,9 +18,11 @@
  */
 import { ConfigurationError } from "../../errors";
 import { nowIso } from "../../utils/date";
+import { readOwnProperty } from "../../utils/object";
 import { type ComposableQuery, type QueryAst } from "../ast";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
+import { getDialect } from "../dialect";
 import { bindSqlValue } from "../dialect/profile";
 import { type SqlDialect } from "../dialect/types";
 import { isSqlPlaceholder, type SqlFragment } from "../sql-fragment";
@@ -57,9 +59,18 @@ function templateHasReadInstant(template: CompiledTemplate): boolean {
  * True when a query's compiled SQL must bind a fresh "current" instant per
  * execution — i.e. it reads valid-time "current" and is not pinned to a
  * recorded instant (a recorded pin replaces the wall clock with a fixed
- * instant). `asOf`, `includeEnded`, and `includeTombstones` reads bind no
- * read instant at all, so their compiled statement is stable and cacheable
- * verbatim.
+ * instant).
+ *
+ * This is the *guard's* question, not "does the statement contain a read
+ * instant". An `includeEnded` or `includeTombstones` read drops node validity,
+ * but if it expands identity its class relation still binds the wall clock for
+ * the assertion window — so such a statement can carry a read instant while
+ * this returns false. That is safe rather than stale: placeholder-mode
+ * compilation templatizes every read-instant emission through the one
+ * placeholder seam, and {@link fillTemplateParams} fills a fresh value on each
+ * execution whether or not the guard demanded one. `false` only relaxes the
+ * "the placeholder MUST be present" check, which exists to refuse caching a
+ * statement that froze "now" into a literal.
  */
 function queryAstNeedsCurrentReadInstant(ast: QueryAst): boolean {
   return ast.temporalMode.mode === "current" && ast.recordedAsOf === undefined;
@@ -155,6 +166,8 @@ export function buildQueryTemplate(
   });
 }
 
+const EMPTY_LIST_PARAMETERS: ReadonlyMap<string, unknown> = new Map();
+
 /**
  * Resolves a template's positional parameters for `executeRaw`, replacing
  * every {@link Placeholder} with a concrete value:
@@ -164,12 +177,16 @@ export function buildQueryTemplate(
  *   per statement" invariant the literal path guaranteed;
  * - a user `param()` placeholder → its binding, mapped the same way the
  *   compile path binds a literal (Date → ISO string; everything else through
- *   the dialect's `bindValue`).
+ *   the dialect's `bindValue`);
+ * - a list-valued `param()` placeholder (the whole right side of
+ *   `in()`/`notIn()`) → the dialect's packed representation of the array, so
+ *   the statement binds ONE value no matter how long the list is.
  */
 export function fillTemplateParams(
   params: readonly unknown[],
   bindings: Readonly<Record<string, unknown>>,
   dialect: SqlDialect,
+  listParameters: ReadonlyMap<string, unknown> = EMPTY_LIST_PARAMETERS,
 ): unknown[] {
   let readInstant: string | undefined;
   return params.map((parameter) => {
@@ -181,12 +198,35 @@ export function fillTemplateParams(
       return readInstant;
     }
 
-    const value = bindings[name];
+    // Own-key read: a parameter named after an `Object.prototype` member must
+    // read as an absent binding, not as the inherited member (the same guard
+    // `bindSqlValue`'s placeholder path applies).
+    const value = readOwnProperty(bindings, name);
     if (value === undefined) {
       throw new ConfigurationError(`Missing binding for parameter "${name}"`, {
         parameterName: name,
       });
     }
+    if (listParameters.has(name)) {
+      assertListBinding(name, value);
+      return getDialect(dialect).packListValue(value);
+    }
     return bindSqlValue(value, dialect);
   });
+}
+
+/**
+ * Narrows a binding destined for an `in()`/`notIn()` parameter to an array.
+ * An empty array is valid — it compiles to an empty relation, matching the
+ * literal `in([])` short circuit.
+ */
+export function assertListBinding(
+  name: string,
+  value: unknown,
+): asserts value is readonly unknown[] {
+  if (Array.isArray(value)) return;
+  throw new ConfigurationError(
+    `Parameter "${name}" must be an array for in()/notIn()`,
+    { parameterName: name, actualType: typeof value },
+  );
 }

@@ -1,9 +1,10 @@
 import { type GraphDef } from "../core/define-graph";
 import { defineEdge } from "../core/edge";
+import { mergeGraphAnnotations } from "../core/json-value";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
-  type EdgeType,
+  type EdgeTargetMap,
   type KindEntity,
   type NodeRegistration,
   type NodeType,
@@ -20,14 +21,21 @@ import {
   type NodeIndexConfig,
   type VectorIndexDeclaration,
 } from "../indexes/types";
+import { META_EDGE_IMPLIES, META_EDGE_INVERSE_OF } from "../ontology/constants";
+import { isExternalIri } from "../ontology/external-iri";
 import { type OntologyRelation } from "../ontology/types";
 import { canonicalEqual } from "../schema/canonical";
-import { compactUndefined } from "../utils/object";
+import {
+  compactUndefined,
+  createDataKeyedBag,
+  hasOwnKey,
+} from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { unwrap } from "../utils/result";
 import { compileGraphExtension } from "./compiler";
 import {
   GraphExtensionUnresolvedEndpointError,
+  GraphExtensionUnresolvedOntologyEndpointError,
   KindCollisionError,
 } from "./errors";
 import { type ExtensionIndex, type GraphExtension } from "./extension-types";
@@ -136,7 +144,10 @@ export function mergeGraphExtension<G extends GraphDef>(
     nodeKinds.set(node.type.kind, node.type);
   }
 
-  const mergedNodes: Record<string, NodeRegistration> = {};
+  // Kind-keyed, and `isValidKindName` admits `__proto__`: a `{}` accumulator
+  // would answer `mergedNodes["__proto__"] = registration` with the prototype
+  // setter, dropping a kind the document legally declared.
+  const mergedNodes = createDataKeyedBag<NodeRegistration>();
   for (const [name, registration] of Object.entries(graph.nodes)) {
     if (runtimeNodeNames.has(name)) continue;
     mergedNodes[name] = registration;
@@ -148,16 +159,21 @@ export function mergeGraphExtension<G extends GraphDef>(
     };
   }
 
-  const mergedEdges: Record<string, EdgeRegistration> = {};
+  const mergedEdges = createDataKeyedBag<EdgeRegistration>();
   for (const [name, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(name)) continue;
     mergedEdges[name] = registration;
   }
   for (const edge of compiled.edges) {
+    // Own-key membership: extension kind names match
+    // `/^[A-Za-z_][A-Za-z0-9_]*$/`, which admits `toString`, `constructor`, and
+    // `valueOf`. An `in`-style or `!== undefined` probe against a plain record
+    // reports the inherited member as a collision, so a legally-named
+    // extension edge would be rejected for colliding with nothing.
     assertNoCollision(
       edge.kindName,
       "edge",
-      mergedEdges[edge.kindName] !== undefined,
+      hasOwnKey(mergedEdges, edge.kindName),
       graph.id,
     );
     const from = resolveEndpoints(edge.from, nodeKinds, {
@@ -165,26 +181,56 @@ export function mergeGraphExtension<G extends GraphDef>(
       edgeKind: edge.kindName,
       side: "from",
     });
-    const to = resolveEndpoints(edge.to, nodeKinds, {
-      graphId: graph.id,
-      edgeKind: edge.kindName,
-      side: "to",
-    });
+    const edgeTo = edge.to;
+    const to =
+      Array.isArray(edgeTo) ?
+        resolveEndpoints(edgeTo, nodeKinds, {
+          graphId: graph.id,
+          edgeKind: edge.kindName,
+          side: "to",
+        })
+      : resolveTargetMap(
+          edgeTo as Readonly<Record<string, readonly (NodeType | string)[]>>,
+          nodeKinds,
+          {
+            graphId: graph.id,
+            edgeKind: edge.kindName,
+          },
+        );
     // Build the EdgeType once with the cross-graph-resolved endpoints.
     // The compiler intentionally doesn't construct an EdgeType — its
     // view is graph-extension-only, so endpoint resolution against
     // compile-time host kinds isn't possible there.
-    const type = defineEdge(
-      edge.kindName,
-      compactUndefined({
-        schema: edge.schema,
-        description: edge.description,
-        annotations: edge.annotations,
-        from,
-        to,
-      }),
-    ) as unknown as EdgeType;
-    mergedEdges[edge.kindName] = { type, from, to };
+    const type =
+      Array.isArray(to) ?
+        defineEdge(
+          edge.kindName,
+          compactUndefined({
+            schema: edge.schema,
+            description: edge.description,
+            annotations: edge.annotations,
+            from,
+            to,
+          }),
+        )
+      : defineEdge(
+          edge.kindName,
+          compactUndefined({
+            schema: edge.schema,
+            description: edge.description,
+            annotations: edge.annotations,
+            from,
+            to: to as Record<string, readonly [NodeType, ...NodeType[]]>,
+          }),
+        );
+    mergedEdges[edge.kindName] = compactUndefined<EdgeRegistration>({
+      type,
+      from,
+      to,
+      cardinality: edge.cardinality,
+      targetCardinality: edge.targetCardinality,
+      ...(edge.acyclic === true ? { acyclic: true } : {}),
+    });
   }
 
   // Drop ontology relations that came from the previous graph-extension
@@ -200,7 +246,7 @@ export function mergeGraphExtension<G extends GraphDef>(
   const mergedOntology: readonly OntologyRelation[] = [
     ...compileTimeOntology,
     ...compiled.ontology.map((relation) =>
-      resolveOntologyEndpoints(relation, nodeKinds),
+      resolveOntologyEndpoints(relation, nodeKinds, mergedEdges, graph.id),
     ),
   ];
 
@@ -233,10 +279,17 @@ export function mergeGraphExtension<G extends GraphDef>(
 
   // Returned as `G` even though graph-extension kinds aren't in the static
   // type — consumers reach them via the registry.
+  // Spread the two bags at the boundary: they become `graph.nodes` /
+  // `graph.edges` on the returned (public) `GraphDef`. See
+  // `createDataKeyedBag` in ../utils/object.ts.
   return Object.freeze({
     ...graph,
-    nodes: mergedNodes,
-    edges: mergedEdges,
+    annotations: mergeGraphAnnotations(
+      graph.annotations,
+      validatedUnion.annotations,
+    ),
+    nodes: { ...mergedNodes },
+    edges: { ...mergedEdges },
     ontology: mergedOntology,
     indexes: mergedIndexes,
     extension: validatedUnion,
@@ -247,7 +300,7 @@ function deriveGraphExtensionVectorIndexes(
   compiledNodes: ReturnType<typeof compileGraphExtension>["nodes"],
 ): readonly VectorIndexDeclaration[] {
   if (compiledNodes.length === 0) return [];
-  const registrations: Record<string, NodeRegistration> = {};
+  const registrations = createDataKeyedBag<NodeRegistration>();
   for (const compiled of compiledNodes) {
     registrations[compiled.type.kind] = {
       type: compiled.type,
@@ -430,6 +483,11 @@ function unionDocuments(
     return next;
   }
 
+  const annotations = mergeGraphAnnotations(
+    existing.annotations,
+    next.annotations,
+  );
+
   const nodes =
     existing.nodes === undefined && next.nodes === undefined ?
       undefined
@@ -462,6 +520,7 @@ function unionDocuments(
 
   return Object.freeze({
     ...(version === undefined ? {} : { version }),
+    ...(annotations === undefined ? {} : { annotations }),
     ...(nodes === undefined ? {} : { nodes }),
     ...(edges === undefined ? {} : { edges }),
     ...(ontology === undefined ? {} : { ontology }),
@@ -513,6 +572,7 @@ function indexCompositeKey(entry: ExtensionIndex): string {
 function isEmptyExtension(extension: GraphExtension): boolean {
   return (
     extension.nodes === undefined &&
+    extension.annotations === undefined &&
     extension.edges === undefined &&
     extension.ontology === undefined &&
     extension.indexes === undefined
@@ -549,14 +609,49 @@ function resolveEndpoints(
   });
 }
 
+function resolveTargetMap(
+  map: Readonly<Record<string, readonly (NodeType | string)[]>>,
+  nodeKinds: ReadonlyMap<string, NodeType>,
+  context: Readonly<{ graphId: string; edgeKind: string }>,
+): EdgeTargetMap {
+  const result = createDataKeyedBag<readonly NodeType[]>();
+  for (const [sourceKind, targets] of Object.entries(map)) {
+    result[sourceKind] = resolveEndpoints(targets, nodeKinds, {
+      graphId: context.graphId,
+      edgeKind: context.edgeKind,
+      side: "to",
+    });
+  }
+  return { ...result };
+}
+
 function resolveOntologyEndpoints(
   relation: OntologyRelation,
   nodeKinds: ReadonlyMap<string, NodeType>,
+  edgeKinds: Readonly<Record<string, EdgeRegistration>>,
+  graphId: string,
 ): OntologyRelation {
-  // Ontology endpoints are intentionally permissive — unresolved strings
-  // pass through as external IRIs (matching the existing runtime
-  // compiler behavior). Cross-graph kind validation only fires for edge
-  // endpoints, which require a NodeType reference.
+  if (
+    relation.metaEdge.name === META_EDGE_INVERSE_OF ||
+    relation.metaEdge.name === META_EDGE_IMPLIES
+  ) {
+    return {
+      ...relation,
+      from: resolveOntologyEdgeEndpoint(
+        relation.metaEdge.name,
+        relation.from,
+        edgeKinds,
+        graphId,
+      ),
+      to: resolveOntologyEdgeEndpoint(
+        relation.metaEdge.name,
+        relation.to,
+        edgeKinds,
+        graphId,
+      ),
+    };
+  }
+
   const from =
     typeof relation.from === "string" ?
       (nodeKinds.get(relation.from) ?? relation.from)
@@ -566,4 +661,20 @@ function resolveOntologyEndpoints(
       (nodeKinds.get(relation.to) ?? relation.to)
     : relation.to;
   return { ...relation, from, to };
+}
+
+function resolveOntologyEdgeEndpoint(
+  metaEdge: "inverseOf" | "implies",
+  endpoint: OntologyRelation["from"],
+  edgeKinds: Readonly<Record<string, EdgeRegistration>>,
+  graphId: string,
+): OntologyRelation["from"] {
+  if (typeof endpoint !== "string") return endpoint;
+  if (Object.hasOwn(edgeKinds, endpoint)) return endpoint;
+  if (isExternalIri(endpoint)) return endpoint;
+  throw new GraphExtensionUnresolvedOntologyEndpointError(
+    metaEdge,
+    endpoint,
+    graphId,
+  );
 }

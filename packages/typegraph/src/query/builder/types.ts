@@ -21,9 +21,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
+import { type ConfigurationError } from "../../errors";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
+  type FieldRef,
   type GroupBySpec,
   type HybridFusionOptions,
   type NodePredicate,
@@ -45,6 +48,11 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import type { CompiledSelectSql } from "../sql-intent";
+import {
+  type AliasExpansionAxis,
+  type DefaultAliasExpansionAxis,
+} from "./alias-expansion";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -53,6 +61,7 @@ import {
   type IsDynamicEdgeType,
   type IsDynamicNodeType,
 } from "./dynamic";
+import type { ArrayNodeKinds, EdgeTargetKinds } from "./edge-target-kinds";
 
 export type { TraversalExpansion } from "../ast";
 
@@ -63,16 +72,74 @@ export type QueryCoordinateState = "open" | "sealed";
 // ============================================================
 
 /**
- * A query that can be executed within a `store.batch()` call.
+ * A query deferred for execution inside a `store.batch()` call.
  *
  * Both `ExecutableQuery` and `UnionableQuery` satisfy this interface.
  * The result type `R` is preserved per-query in the batch return tuple.
+ *
+ * Deferring costs nothing and saves nothing on its own: `store.batch()` runs
+ * each query as its own statement (sometimes two — see `ExecutableQuery`'s
+ * `executeOn`), so it does not fold these into a single round trip. Whether
+ * they share one connection is up to the adapter, not to
+ * `backend.capabilities.execution.interactiveTransactions` — see `store.batch()` for the full cost
+ * model.
  */
 export type BatchableQuery<R = unknown> = Readonly<{
   executeOn: (
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly R[]>;
 }>;
+
+/** A read whose result can be embedded in an exact-one-statement batch. */
+export type OneStatementBatchableQuery<R = unknown> = Readonly<{
+  execute?: () => Promise<R>;
+  /** @internal Resolved by `store.batchOnce()` before execution. */
+  compileOneStatementBatchItem?: () => Readonly<{
+    query: CompiledSelectSql;
+    /** Graph and execution target that authorized this compiled read. */
+    provenance: Readonly<{
+      graphId: string;
+      executionTarget: object;
+    }>;
+    outputNames: readonly string[];
+    /** Internal columns carried through the batch envelope for result mapping. */
+    hiddenOutputNames?: readonly string[];
+    orderBy: readonly Readonly<{
+      column: string;
+      direction: "asc" | "desc";
+      nulls: "first" | "last";
+    }>[];
+    mapRows: (rows: readonly Record<string, unknown>[]) => R;
+  }>;
+}>;
+
+/** A cold read with a concrete one-statement batch compilation contract. */
+export type CompiledOneStatementRead<R> = Required<
+  Pick<OneStatementBatchableQuery<R>, "compileOneStatementBatchItem">
+>;
+
+/** A read that can be embedded in an exact-one-statement batch. */
+export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> &
+  (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
+
+/** An embeddable one-statement read that can also execute independently. */
+export type ExecutableOneStatementRead<R> = CompiledOneStatementRead<R> &
+  Required<Pick<OneStatementBatchableQuery<R>, "execute">>;
+
+/** Preserves each input query's result type in an exact-one-statement batch. */
+export type OneStatementBatchResults<
+  Queries extends readonly EmbeddableOneStatementRead<unknown>[],
+> = {
+  -readonly [K in keyof Queries]: Queries[K] extends (
+    EmbeddableOneStatementRead<infer R>
+  ) ?
+    R
+  : never;
+};
+
+/** Public input accepted by the exact-one-statement batch surface. */
+export type OneStatementBatchReads =
+  readonly EmbeddableOneStatementRead<unknown>[];
 
 /**
  * Maps a tuple of BatchableQuery types to their result types.
@@ -86,20 +153,30 @@ export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
   : never;
 };
 
+/** Provenance and root identity for a set-update candidate source. */
+export type NodeCandidateSelection = Readonly<{
+  graphId: string;
+  executionTarget: object | undefined;
+  kind: string;
+  idColumn: string;
+  temporalMode: "current" | "asOf" | "includeEnded" | "includeTombstones";
+  recordedAsOf: string | undefined;
+}>;
+
+/** A Store-created query that can provide candidate node ids to a set update. */
+export type NodeCandidateQuery = Readonly<{
+  compileNodeCandidateIds: (readInstant?: string) => CompiledSelectSql;
+  toNodeCandidateSelection: () => NodeCandidateSelection;
+}>;
+
 // ============================================================
 // Edge Target Type Helpers
 // ============================================================
 
 /**
- * Extracts the names of valid target node kinds for an edge traversal.
- *
- * For "out" direction: returns the names of node kinds in the edge's "to" array.
- * For "in" direction: returns the names of node kinds in the edge's "from" array.
- *
- * @example
- * // Given: worksAt: { from: [Person], to: [Company, Organization] }
- * // ValidEdgeTargets<G, "worksAt", "out"> = "Company" | "Organization"
- * // ValidEdgeTargets<G, "worksAt", "in"> = "Person"
+ * Extracts the declared target kinds for an edge traversal.
+ * Outgoing traversals use the full range of an array or source-dependent map;
+ * incoming traversals use the source array.
  */
 export type ValidEdgeTargets<
   G extends GraphDef,
@@ -107,8 +184,11 @@ export type ValidEdgeTargets<
   Dir extends TraversalDirection,
 > =
   G["edges"][EK] extends EdgeRegistration ?
+    // Keep the direct array projection: a generic node schema must not wait
+    // for the distributive helper to resolve before its known kind is usable.
     Dir extends "out" ?
-      G["edges"][EK]["to"][number]["kind"]
+      | ArrayNodeKinds<G["edges"][EK]["to"]>
+      | EdgeTargetKinds<G["edges"][EK]["to"]>
     : G["edges"][EK]["from"][number]["kind"]
   : never;
 
@@ -127,6 +207,456 @@ export type NodeAlias<
   alias: string;
   optional: Optional;
 }>;
+
+/**
+ * True when an ontology endpoint carries no `kind` literal for
+ * {@link SubsumptionElementNamesKind}'s `Extract` to match or rule out. An
+ * endpoint is one of three things:
+ *
+ * - a `NodeType`/`AnyEdgeType` with a LITERAL `kind` — decidable: the
+ *   `Extract` either matches this kind or proves the endpoint does not name
+ *   it.
+ * - an IRI `string` — never a registered node kind, so the `{ kind: K }`
+ *   `Extract` rules it out soundly. A second kind co-registered on the same
+ *   IRI carries its OWN literal endpoint and widens through that element.
+ * - anything whose `kind` is the general `string` — a kind literal an
+ *   annotation ERASED. Nothing can be ruled out.
+ *
+ * Distributes over an endpoint UNION (`typeof Audio | typeof Video`), so a
+ * union is erased exactly when one of its members is.
+ */
+type EndpointKindErased<Endpoint> =
+  Endpoint extends string ? false
+  : Endpoint extends { kind: infer Kind extends string } ?
+    string extends Kind ?
+      true
+    : false
+  : true;
+
+/**
+ * The endpoint positions that decide whether an ontology element affects a
+ * kind, for an element whose meta-edge name is `Name`: a `subClassOf` is
+ * decided by its `to` alone (the supertype; which subtype declares itself
+ * under `K` never changes whether `K` is affected), an
+ * `equivalentTo`/`sameAs` by both sides. `never` for a name that is none of
+ * the three: no endpoint of such a relation can affect any kind.
+ *
+ * The SOLE owner of that position mapping: both per-element tests —
+ * {@link SubsumptionLiteralsErased} (can this element be decided at all?)
+ * and {@link SubsumptionElementNamesKind} (does it name `K`?) — read their
+ * endpoints from here, so the two cannot drift.
+ */
+type MatchedEndpoints<Name extends string, From, To> =
+  | ([Extract<Name, "subClassOf">] extends [never] ? never : To)
+  | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never
+    : From | To);
+
+/**
+ * True for an ontology-tuple element whose literals are too weak for
+ * {@link SubsumptionElementNamesKind} to rule it out — the conservative
+ * arm's per-element test.
+ *
+ * An element is undecidable when its `metaEdge.name` is the general `string`
+ * (the degenerate case: a caller's `const relation: OntologyRelation =
+ * subClassOf(Child, Parent)` annotation erases the name along with
+ * everything else), or when the name can be a subsumption name while a
+ * {@link MatchedEndpoints} position has lost its kind literal — what a
+ * caller helper annotated `(child: NodeType, parent: NodeType) =>
+ * TypedOntologyRelation<"subClassOf", NodeType, NodeType>` produces. Both
+ * are assignable to `OntologyRelation` and neither is mutually assignable
+ * WITH it, so an assignability test sees only the first.
+ *
+ * Distributes over the element union, so `true extends
+ * SubsumptionLiteralsErased<...>` is "at least one element is undecidable".
+ */
+type SubsumptionLiteralsErased<Relation> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      string extends Name ? true
+      : true extends EndpointKindErased<MatchedEndpoints<Name, From, To>> ? true
+      : false
+    : true
+  : never;
+
+type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
+
+/**
+ * True for an ontology-tuple element that NAMES kind `K` at one of the
+ * endpoint positions {@link MatchedEndpoints} selects — the decided arm's
+ * per-element test.
+ *
+ * The match reduces the element's selected endpoints to the set of kind
+ * LITERALS they can hold and asks whether `K` is one of them, rather than
+ * asking whether the element is assignable to a single-kind shape. That is
+ * what makes an endpoint kind UNION decidable, in both shapes a caller can
+ * write it:
+ *
+ * - a union of endpoint TYPES, from a helper that declares a subclass of
+ *   either media root (`(root: typeof Audio | typeof Video) =>
+ *   subClassOf(Episode, root)`), leaving `to` as `Audio | Video`. The
+ *   endpoint filter distributes over it.
+ * - a union inside ONE endpoint's `kind`, from a helper annotated
+ *   `NodeType<"Audio" | "Video">`, leaving `to` as a single object typed
+ *   `{ kind: "Audio" | "Video" }`. The indexed access collects it.
+ *
+ * An `Extract` over the element itself — `Extract<Element, { to: { kind:
+ * "Audio" } }>` — matches NEITHER shape for EITHER kind, because neither
+ * `{ to: Audio | Video }` nor `{ to: { kind: "Audio" | "Video" } }` is
+ * assignable to a single-kind shape. Both roots would then keep an exact
+ * alias while either one really can return the subclass's rows: an unsound
+ * under-widening, not the conservative over-widening the erased arms above
+ * deliberately take.
+ *
+ * Distributes over the element union, so `true extends
+ * SubsumptionElementNamesKind<...>` is "at least one element names `K`".
+ * Endpoints the position mapping does not select (`never`) contribute no
+ * kinds, and an IRI `string` endpoint carries no `kind` at all, so the
+ * endpoint filter drops it — exactly the soundness
+ * {@link EndpointKindErased} describes.
+ */
+type SubsumptionElementNamesKind<Relation, K extends string> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      [Extract<EndpointKinds<MatchedEndpoints<Name, From, To>>, K>] extends (
+        [never]
+      ) ?
+        false
+      : true
+    : false
+  : never;
+
+/**
+ * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
+ * relation that could hand a polymorphic-default query a row of a DIFFERENT
+ * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
+ * `equivalentTo`/`sameAs` pair. Direct participation is enough — a kind with
+ * a transitive descendant necessarily has a direct one — so this is a single
+ * non-recursive per-element `Extract` over `G["ontology"]`, computable with
+ * no transitive-closure type engine. `false` (a graph with `ontology: []`, or
+ * a kind no relation touches) costs zero type churn.
+ *
+ * The `Extract` reads the IRI-routed `equivalentTo(Kind, iri)` form too:
+ * every meta-edge factory returns a `TypedOntologyRelation` carrying
+ * its meta-edge name literal, the IRI overload included
+ * (`from: Kind, to: string`), so a kind whose only equivalence is to an
+ * external vocabulary term still widens — the registry folds an IRI-routed
+ * equivalence class into `subClassAncestors`/`subClassDescendants` exactly
+ * like a two-kind one, so rows of the co-registered kind really can come
+ * back.
+ *
+ * The test reads the ontology's ELEMENT union (`G["ontology"][number]`), never
+ * its length, so a tuple and a plain array decide alike: an array cannot hold
+ * a value outside its element type, so a separately built
+ * `const ontology = [subClassOf(A, B), disjointWith(C, D)]` (an array, not a
+ * tuple) still names exactly the kinds its elements can name. An empty
+ * array's element type is `never`, which affects nothing.
+ *
+ * **One arm widens conservatively rather than answer `false`**: an element
+ * {@link SubsumptionLiteralsErased} flags has lost the very literals the
+ * `Extract` matches on — an annotation erased the meta-edge name (the
+ * `readonly OntologyRelation[]` array annotation, and `GraphDef`'s own
+ * default, both do) or the endpoint kind the match reads. Answering `false`
+ * there would be an unsound under-widening: the alias would stay narrow while
+ * the runtime alias is genuinely polymorphic.
+ *
+ * Every other element is decided by {@link SubsumptionElementNamesKind}, and
+ * that decision is sound for the relations the ontology DECLARES — including
+ * one whose endpoint is a UNION of node types, which that helper distributes
+ * over so every kind the union can hold is decided. A relation added at
+ * runtime is a separate, documented limitation — see {@link AliasNodeType}.
+ */
+type SubsumptionAffected<G extends GraphDef, K extends string> =
+  true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
+  : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true
+  : false;
+
+/**
+ * Node type `N` as graph `G`'s subsumption lets it read back: the
+ * {@link PolymorphicNodeType} of `N` when its kind is
+ * {@link SubsumptionAffected}, `N` itself otherwise. Distributes over an
+ * endpoint union, deciding each member on its own kind.
+ *
+ * The one owner of "the type a declared kind's row carries": a polymorphic
+ * alias ({@link AliasNodeType}), an expanded search hit, and an edge's
+ * declared endpoint all read through it, so a row typed one way by a query
+ * is typed the same way by the edge that points at it.
+ */
+export type SubsumedNodeType<G extends GraphDef, N extends NodeType> =
+  N extends NodeType ?
+    SubsumptionAffected<G, N["kind"]> extends true ?
+      PolymorphicNodeType<N>
+    : N
+  : never;
+
+declare const IRI_ENDPOINT: unique symbol;
+
+type IriEndpointKey = Readonly<{ [IRI_ENDPOINT]: true }>;
+
+/**
+ * The closure key an ontology endpoint contributes to
+ * {@link AssignableNodeKinds}: a node or edge type's `kind` literal, or one
+ * shared marker for every IRI endpoint. The IRI overload of `equivalentTo`
+ * types its IRI as the general `string`, so two IRI endpoints cannot be told
+ * apart; folding them all onto one marker over-admits (every kind mapped to
+ * any IRI joins one class) rather than missing a kind two relations really
+ * route through the same IRI.
+ */
+type SubsumptionEndpointKeys<Endpoint> =
+  Endpoint extends string ? IriEndpointKey
+  : Endpoint extends { kind: infer Kind extends string } ? Kind
+  : never;
+
+/**
+ * The closure keys one step of {@link AssignableNodeKinds} adds from the
+ * ontology-tuple elements whose matched endpoints ({@link MatchedEndpoints})
+ * name a key already in `Reached`: a `subClassOf` contributes its child, an
+ * `equivalentTo`/`sameAs` both sides.
+ *
+ * Distributes over the element union.
+ */
+type DirectlyAssignableKeys<Relation, Reached> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      [
+        Extract<
+          SubsumptionEndpointKeys<MatchedEndpoints<Name, From, To>>,
+          Reached
+        >,
+      ] extends [never] ?
+        never
+      : SubsumptionEndpointKeys<From | To>
+    : never
+  : never;
+
+type AssignableKeyClosure<Relation, Reached> =
+  [Exclude<DirectlyAssignableKeys<Relation, Reached>, Reached>] extends (
+    [never]
+  ) ?
+    Reached
+  : AssignableKeyClosure<
+      Relation,
+      Reached | DirectlyAssignableKeys<Relation, Reached>
+    >;
+
+/**
+ * The node kinds of graph `G` an edge endpoint declared as kind `K` admits at
+ * runtime (`KindRegistry.isAssignableTo(kind, K)`): `K` itself, its
+ * transitive `subClassOf` descendants, and every kind folded into the same
+ * class by `equivalentTo`, followed through any mix of the two.
+ *
+ * Takes the same conservative arm as {@link SubsumptionAffected}: one element
+ * whose literals are {@link SubsumptionLiteralsErased} admits every node kind
+ * of `G` rather than under-admitting a kind the runtime accepts. Kinds mapped to an IRI
+ * join one class (see {@link SubsumptionEndpointKeys}). The runtime check
+ * stays authoritative for every kind this admits.
+ */
+export type AssignableNodeKinds<G extends GraphDef, K extends string> =
+  true extends SubsumptionLiteralsErased<G["ontology"][number]> ?
+    K | (keyof G["nodes"] & string)
+  : | K
+    | Extract<
+        AssignableKeyClosure<G["ontology"][number], K>,
+        keyof G["nodes"] & string
+      >;
+
+/**
+ * The meta-edge names that make one kind assignable to another at runtime
+ * (`KindRegistry.isAssignableTo`): a declared composition pair then also
+ * admits every kind assignable to its part or whole endpoint.
+ */
+type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
+
+type CompositionMetaEdgeName = "partOf" | "hasPart";
+
+/**
+ * True for an ontology-tuple element that stops {@link CompositionWholeKinds}
+ * from proving its restriction, so the whole kind falls back to any node kind
+ * of the graph:
+ *
+ * - its meta-edge name is the general `string` (an annotation erased it), so
+ *   it may be a composition pair this type cannot read;
+ * - it is, or may be, a subsumption relation. A declared pair then also
+ *   admits kinds reached through the subclass/equivalence closure, which no
+ *   single-element test computes — widening is the sound answer;
+ * - it is a composition pair whose endpoint lost its kind literal.
+ *
+ * Distributes over the element union.
+ */
+type CompositionWholeKindsUndecidable<Relation> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      string extends Name ? true
+      : [Extract<Name, SubsumptionMetaEdgeName>] extends [never] ?
+        [Extract<Name, CompositionMetaEdgeName>] extends [never] ? false
+        : true extends EndpointKindErased<From | To> ? true
+        : false
+      : true
+    : true
+  : never;
+
+/**
+ * The whole kinds one ontology-tuple element declares for part kind `K`:
+ * `partOf(Part, Whole)` reads part → whole, `hasPart(Whole, Part)` the
+ * mirror. An endpoint union contributes every kind it can hold.
+ *
+ * Distributes over the element union.
+ */
+type DeclaredCompositionWholeKinds<Relation, K extends string> =
+  Relation extends unknown ?
+    Relation extends (
+      {
+        metaEdge: { name: infer Name extends string };
+        from: infer From;
+        to: infer To;
+      }
+    ) ?
+      | ([Extract<Name, "partOf">] extends [never] ? never
+        : [Extract<EndpointKinds<From>, K>] extends [never] ? never
+        : EndpointKinds<To>)
+      | ([Extract<Name, "hasPart">] extends [never] ? never
+        : [Extract<EndpointKinds<To>, K>] extends [never] ? never
+        : EndpointKinds<From>)
+    : never
+  : never;
+
+/**
+ * The whole kinds a part of kind `K` may be attached to in graph `G` — what
+ * `partOf.whole.kind` accepts on `store.nodes.<K>`.
+ *
+ * Exactly the kinds `G`'s ontology declares through `partOf`/`hasPart` when
+ * that is provable from the ontology tuple; `never` for a kind that is no
+ * declared part, so stating an attachment for it does not compile. Falls
+ * back to every node kind of `G` whenever the restriction cannot be proven
+ * sound: any element {@link CompositionWholeKindsUndecidable} flags — notably
+ * any subclass or equivalence relation, since a declared pair then admits
+ * kinds only the registry's closure can enumerate.
+ *
+ * A composition pair added at runtime through `store.evolve()` is invisible
+ * here, as it is to every type computed from `G`; reach such a pair through
+ * `store.getNodeCollection(kind)`, whose whole kind is any string. The
+ * runtime refusal (`COMPOSITION_WHOLE_NOT_DECLARED`) is authoritative either
+ * way.
+ */
+export type CompositionWholeKinds<G extends GraphDef, K extends string> =
+  true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ?
+    keyof G["nodes"] & string
+  : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
+
+/**
+ * The alias type a `from(kind, alias)` call with NO explicit
+ * `expansion` resolves to, under the polymorphic-by-default
+ * axis. `PolymorphicNodeType` only when `K` is actually
+ * {@link SubsumptionAffected} — the structural-subtype check on `subClassOf`
+ * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
+ * brand, so a row may come back as a narrower concrete kind whenever the
+ * axis can expand at all.
+ *
+ * **A `subClassOf` (or registered-kind `equivalentTo`/`sameAs`) added at
+ * runtime is invisible to this type, so the runtime refuses the expansion it
+ * would mistype.** `store.evolve()` merges the extension into the LIVE
+ * registry (and `createStoreWithSchema` folds a persisted one back in on
+ * every later boot) but returns `Store<G>` with the compile-time `G`
+ * unchanged, so `SubsumptionAffected<G, K>` still evaluates against the
+ * graph as it was declared. When that keeps `K` exact while the live
+ * registry expands it to further kinds, every row-returning
+ * terminal refuses with `QUERY_ALIAS_EXPANSION_UNTYPED_SUBCLASSES`
+ * (`./alias-expansion.ts`) rather than return rows whose `kind` and `NodeId`
+ * contradict this type; `count()` and `exists()`, which type no row, answer.
+ * State `{ expansion: "subclasses" }` (typed {@link PolymorphicNodeType}
+ * unconditionally) or `{ expansion: "exact" }`, or use `fromDynamic()`.
+ * The refusal reads the graph's ontology values, which cannot show a widened
+ * `G` (`GraphDef`, or relation literals an `OntologyRelation` annotation
+ * erased), so it also fires where this type is already polymorphic.
+ */
+export type AliasNodeType<
+  G extends GraphDef,
+  K extends string,
+> = SubsumedNodeType<G, G["nodes"][K]["type"]>;
+
+/**
+ * The alias type of a list source that states no `expansion`: each listed
+ * kind typed as {@link AliasNodeType} types a `from(kind, alias)` over it,
+ * as one union. Distributed explicitly, because `SubsumptionAffected` asked
+ * of the whole union would widen every listed kind once any one is affected.
+ */
+export type ListAliasNodeType<G extends GraphDef, K extends string> =
+  K extends unknown ? AliasNodeType<G, K> : never;
+
+/**
+ * The alias type of a list source stated `expansion: "subclasses"`: each
+ * listed kind widened to {@link PolymorphicNodeType}, as one union — what a
+ * `from(kind, alias, { expansion: "subclasses" })` over each kind types.
+ */
+export type ListPolymorphicNodeType<G extends GraphDef, K extends string> =
+  K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
+
+/**
+ * Every axis an options bag of type `O` can carry into `from()` / `to()` /
+ * `fromDynamic()` / `toDynamic()`, with `undefined` standing for "the store
+ * default" wherever the bag, or its `expansion`, may be absent. Distributes
+ * over `O`, so a caller's optional `options?: { expansion?: … }` parameter
+ * contributes both its axes and the default.
+ */
+export type ForwardedExpansionAxes<O> =
+  O extends Readonly<{ expansion: infer Axis }> ? Axis
+  : O extends Readonly<{ expansion?: infer Axis }> ?
+    // `{}` infers `unknown`: a bag that states no axis takes the default.
+    unknown extends Axis ?
+      undefined
+    : Axis | undefined
+  : undefined;
+
+/**
+ * The alias node type for an alias whose expansion is any of `Axes` (an
+ * {@link ForwardedExpansionAxes} result): the narrowest type every one of
+ * those axes' rows is assignable to.
+ *
+ * - any `"narrower"` axis: the untyped `NodeType` — that axis claims no
+ *   schema relationship, so no per-kind type can be promised;
+ * - else any `"subclasses"` axis: `Polymorphic`, which every exact and
+ *   default row is also assignable to;
+ * - else any default (`undefined`) axis: `Default`, the type the call site's
+ *   no-options overload gives (it is `Exact` or `Polymorphic`, so an
+ *   `"exact"` row fits it too);
+ * - else (`"exact"` only): `Exact`.
+ */
+export type ExpansionAliasNodeType<
+  Axes,
+  Exact extends NodeType,
+  Default extends NodeType,
+  Polymorphic extends NodeType,
+> =
+  [Extract<Axes, "narrower">] extends [never] ?
+    [Extract<Axes, "subclasses">] extends [never] ?
+      [Extract<Axes, undefined>] extends [never] ?
+        Exact
+      : Default
+    : Polymorphic
+  : NodeType;
 
 /**
  * A map of alias names to their node aliases.
@@ -161,23 +691,60 @@ export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 /**
  * A recursive alias marker with its associated type (depth or path).
  */
-export type RecursiveAlias<T extends "depth" | "path"> = Readonly<{ type: T }>;
+export type RecursiveAlias<
+  T extends "depth" | "path",
+  PathFormat extends "ids" | "qualified" = "ids",
+  Optional extends boolean = false,
+> = Readonly<{
+  type: T;
+  pathFormat?: PathFormat;
+  optional?: Optional;
+}>;
+
+export type QualifiedRecursivePathNode = Readonly<{
+  type: "node";
+  kind: string;
+  id: string;
+}>;
+
+export type QualifiedRecursivePathEdge = Readonly<{
+  type: "edge";
+  kind: string;
+  id: string;
+  direction: "out" | "in";
+}>;
+
+export type QualifiedRecursivePathElement =
+  QualifiedRecursivePathNode | QualifiedRecursivePathEdge;
+
+export type QualifiedRecursivePath = readonly QualifiedRecursivePathElement[];
+
+export type QualifiedRecursivePathOption = Readonly<{
+  alias?: string;
+  format: "qualified";
+}>;
 
 /**
  * A map of recursive alias names to their types.
  */
 export type RecursiveAliasMap = Readonly<
-  Record<string, RecursiveAlias<"depth" | "path">>
+  Record<string, RecursiveAlias<"depth" | "path", "ids" | "qualified", boolean>>
 >;
 export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 /**
  * Resolves a recursive alias marker to its runtime value type.
  */
-export type RecursiveAliasValue<RA> =
-  RA extends RecursiveAlias<"depth"> ? number
-  : RA extends RecursiveAlias<"path"> ? readonly string[]
+type RequiredRecursiveAliasValue<RA> =
+  RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number
+  : RA extends RecursiveAlias<"path", "qualified", boolean> ?
+    QualifiedRecursivePath
+  : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[]
   : never;
+
+export type RecursiveAliasValue<RA> =
+  RA extends { optional?: true } ? RequiredRecursiveAliasValue<RA> | undefined
+  : RequiredRecursiveAliasValue<RA>;
 
 /**
  * Resolves the depth alias name from the recursive config.
@@ -195,19 +762,31 @@ type ResolveDepthAlias<DC, A extends string> =
 type ResolvePathAlias<PC, A extends string> =
   PC extends string ? PC
   : PC extends true ? `${A}_path`
+  : PC extends QualifiedRecursivePathOption ?
+    PC["alias"] extends string ?
+      PC["alias"]
+    : `${A}_path`
   : never;
+
+type ResolvePathFormat<PC> =
+  PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
 
 /**
  * Builds the recursive alias map from depth/path config and target node alias.
  */
 /* eslint-disable @typescript-eslint/no-empty-object-type -- Empty when depth/path config is false */
-export type BuildRecursiveAliases<DC, PC, A extends string> = ([DC] extends (
-  [false]
-) ?
-  {}
-: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth">>) &
+export type BuildRecursiveAliases<
+  DC,
+  PC,
+  A extends string,
+  Optional extends boolean = false,
+> = ([DC] extends [false] ? {}
+: Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) &
   ([PC] extends [false] ? {}
-  : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path">>);
+  : Record<
+      ResolvePathAlias<PC, A>,
+      RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>
+    >);
 /* eslint-enable @typescript-eslint/no-empty-object-type */
 
 /**
@@ -226,12 +805,46 @@ export type UniqueAlias<A extends string, Aliases extends AliasMap> =
 /**
  * Creates typed field accessors for a node kind's properties.
  */
-export type PropsAccessor<N extends NodeType> = Readonly<
-  {
-    // Remove optional modifier so optional fields still have accessor methods.
-    [K in keyof z.infer<N["schema"]>]-?: FieldAccessor<z.infer<N["schema"]>[K]>;
-  }
->;
+export type PropsAccessor<N extends NodeType> = Readonly<{
+  // Remove optional modifier so optional fields still have accessor methods.
+  [K in CommonPropertyKeys<NodePropsFor<N>>]-?: FieldAccessor<
+    NodePropsFor<N>[K]
+  >;
+}>;
+
+export type NodePropsFor<N extends Readonly<{ schema: z.ZodType }>> =
+  N extends Readonly<{ schema: z.ZodType }> ? z.infer<N["schema"]> : never;
+
+type FieldCategory<T> =
+  T extends unknown ?
+    [NonNullable<T>] extends [never] ? never
+    : [NonNullable<T>] extends [EmbeddingValue] ? "embedding"
+    : [NonNullable<T>] extends [string] ? "string"
+    : [NonNullable<T>] extends [number] ? "number"
+    : [NonNullable<T>] extends [boolean] ? "boolean"
+    : [NonNullable<T>] extends [Date] ? "date"
+    : [NonNullable<T>] extends [readonly unknown[]] ? "array"
+    : [NonNullable<T>] extends [Record<string, unknown>] ?
+      string extends keyof NonNullable<T> ?
+        "record"
+      : "object"
+    : "unknown"
+  : never;
+
+export type IsUnion<T, Whole = T> =
+  T extends Whole ?
+    [Whole] extends [T] ?
+      false
+    : true
+  : never;
+
+/** Keys present on every polymorphic member with one shared accessor category. */
+export type CommonPropertyKeys<Props, Keys extends keyof Props = keyof Props> =
+  true extends IsUnion<Props> ?
+    {
+      [K in Keys]-?: true extends IsUnion<FieldCategory<Props[K]>> ? never : K;
+    }[Keys]
+  : Keys;
 
 /**
  * A field accessor with type-appropriate predicate methods.
@@ -239,53 +852,70 @@ export type PropsAccessor<N extends NodeType> = Readonly<
  */
 export type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
-type FieldAccessorForType<T> =
-  [T] extends [EmbeddingValue] ? EmbeddingFieldAccessor
-  : [T] extends [string] ? StringFieldAccessor
-  : [T] extends [number] ? NumberFieldAccessor
-  : [T] extends [boolean] ? BooleanFieldAccessor
-  : [T] extends [Date] ? DateFieldAccessor
-  : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U>
-  : [T] extends [Record<string, unknown>] ? ObjectFieldAccessor<T>
-  : BaseFieldAccessor;
+/** A value accepted by equality predicates for a schema field. */
+type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
-export type BaseFieldAccessor = Readonly<{
-  eq: (value: unknown) => Predicate;
-  neq: (value: unknown) => Predicate;
+/** Values accepted by membership predicates for a schema field. */
+type MembershipOperand<T> = readonly T[] | ParameterRef;
+
+type NullFieldAccessor = Readonly<{
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[]) => Predicate;
-  notIn: (values: readonly unknown[]) => Predicate;
 }>;
 
-export type StringFieldAccessor = BaseFieldAccessor &
-  Readonly<{
-    gt: (value: string | ParameterRef) => Predicate;
-    gte: (value: string | ParameterRef) => Predicate;
-    lt: (value: string | ParameterRef) => Predicate;
-    lte: (value: string | ParameterRef) => Predicate;
-    contains: (pattern: string | ParameterRef) => Predicate;
-    startsWith: (pattern: string | ParameterRef) => Predicate;
-    endsWith: (pattern: string | ParameterRef) => Predicate;
-    like: (pattern: string | ParameterRef) => Predicate;
-    ilike: (pattern: string | ParameterRef) => Predicate;
-  }>;
+type FieldAccessorForType<T> =
+  [T] extends [EmbeddingValue] ? EmbeddingFieldAccessor
+  : [T] extends [string] ? StringFieldAccessor<T>
+  : [T] extends [number] ? NumberFieldAccessor<T>
+  : [T] extends [boolean] ? BooleanFieldAccessor<T>
+  : [T] extends [Date] ? DateFieldAccessor<T>
+  : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U>
+  : [T] extends [Record<string, unknown>] ?
+    keyof T extends never ?
+      BaseFieldAccessor
+    : ObjectFieldAccessor<T>
+  : BaseFieldAccessor;
 
-export type NumberFieldAccessor = BaseFieldAccessor &
-  Readonly<{
-    gt: (value: number | ParameterRef) => Predicate;
-    gte: (value: number | ParameterRef) => Predicate;
-    lt: (value: number | ParameterRef) => Predicate;
-    lte: (value: number | ParameterRef) => Predicate;
-    between: (
-      lower: number | ParameterRef,
-      upper: number | ParameterRef,
-    ) => Predicate;
-  }>;
+export type BaseFieldAccessor<T = unknown> = Readonly<{
+  eq: (value: EqualityOperand<T>) => Predicate;
+  neq: (value: EqualityOperand<T>) => Predicate;
+  isNull: () => Predicate;
+  isNotNull: () => Predicate;
+  in: (values: MembershipOperand<T>) => Predicate;
+  notIn: (values: MembershipOperand<T>) => Predicate;
+}>;
 
-export type BooleanFieldAccessor = BaseFieldAccessor;
+export type StringFieldAccessor<T extends string = string> =
+  BaseFieldAccessor<T> &
+    Readonly<{
+      gt: (value: string | ParameterRef) => Predicate;
+      gte: (value: string | ParameterRef) => Predicate;
+      lt: (value: string | ParameterRef) => Predicate;
+      lte: (value: string | ParameterRef) => Predicate;
+      contains: (pattern: string | ParameterRef) => Predicate;
+      startsWith: (pattern: string | ParameterRef) => Predicate;
+      endsWith: (pattern: string | ParameterRef) => Predicate;
+      like: (pattern: string | ParameterRef) => Predicate;
+      ilike: (pattern: string | ParameterRef) => Predicate;
+    }>;
 
-export type DateFieldAccessor = BaseFieldAccessor &
+export type NumberFieldAccessor<T extends number = number> =
+  BaseFieldAccessor<T> &
+    Readonly<{
+      gt: (value: number | ParameterRef) => Predicate;
+      gte: (value: number | ParameterRef) => Predicate;
+      lt: (value: number | ParameterRef) => Predicate;
+      lte: (value: number | ParameterRef) => Predicate;
+      between: (
+        lower: number | ParameterRef,
+        upper: number | ParameterRef,
+      ) => Predicate;
+    }>;
+
+export type BooleanFieldAccessor<T extends boolean = boolean> =
+  BaseFieldAccessor<T>;
+
+export type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> &
   Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
     gte: (value: Date | string | ParameterRef) => Predicate;
@@ -297,12 +927,11 @@ export type DateFieldAccessor = BaseFieldAccessor &
     ) => Predicate;
   }>;
 
-export type ArrayFieldAccessor<U> = BaseFieldAccessor &
+export type ArrayFieldAccessor<U> = NullFieldAccessor &
   Readonly<{
     contains: (value: U) => Predicate;
     containsAny: (values: readonly U[]) => Predicate;
     containsAll: (values: readonly U[]) => Predicate;
-    length: NumberFieldAccessor;
     isEmpty: () => Predicate;
     isNotEmpty: () => Predicate;
     lengthEq: (length: number) => Predicate;
@@ -312,7 +941,7 @@ export type ArrayFieldAccessor<U> = BaseFieldAccessor &
     lengthLte: (length: number) => Predicate;
   }>;
 
-export type EmbeddingFieldAccessor = BaseFieldAccessor &
+export type EmbeddingFieldAccessor = NullFieldAccessor &
   Readonly<{
     /**
      * Finds the k most similar items using vector similarity.
@@ -328,9 +957,12 @@ export type EmbeddingFieldAccessor = BaseFieldAccessor &
     ) => Predicate;
   }>;
 
-export type ObjectFieldAccessor<T> = BaseFieldAccessor &
+type ObjectComparisonAccessor<T> =
+  string extends keyof T ? BaseFieldAccessor<T> : NullFieldAccessor;
+
+export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> &
   Readonly<{
-    get: <K extends keyof T & string>(
+    get: <K extends CommonPropertyKeys<T> & string>(
       key: K,
     ) => T[K] extends Record<string, unknown> ? ObjectFieldAccessor<T[K]>
     : FieldAccessor<T[K]>;
@@ -349,11 +981,41 @@ export type ObjectFieldAccessor<T> = BaseFieldAccessor &
   }>;
 
 /**
+ * `n.$meta` in a node predicate: `version`, `validFrom`, `validTo`,
+ * `createdAt`, `updatedAt` and `deletedAt`, keyed as a selected row carries
+ * them under `meta` and as the expression context exposes them under `$meta`.
+ * Timestamps compare as dates; `version` compares as a number.
+ *
+ * A metadata predicate narrows the rows the query's temporal mode admits; it
+ * never widens them. Under the default `"current"` mode a deleted row is
+ * already excluded, so `n.$meta.deletedAt.isNotNull()` matches nothing there;
+ * query `temporal("includeTombstones")` to reach deleted rows.
+ */
+export type NodeMetadataAccessor = Readonly<{
+  [Field in keyof SelectableNodeMeta]-?: [
+    NonNullable<SelectableNodeMeta[Field]>,
+  ] extends [number] ?
+    NumberFieldAccessor
+  : DateFieldAccessor;
+}>;
+
+/**
+ * `e.$meta` in an edge predicate: the node metadata fields except `version`,
+ * which edges do not store.
+ */
+export type EdgeMetadataAccessor = Readonly<{
+  [Field in keyof SelectableEdgeMeta]-?: NodeMetadataAccessor[Field];
+}>;
+
+/**
  * Node accessor for predicate building.
  *
  * Properties are available at the top level for ergonomic access:
  * - `n.name` instead of `n.props.name`
  * - System fields: `n.id`, `n.kind`
+ * - Metadata: `n.$meta.createdAt`, `n.$meta.version`, … under the reserved
+ *   `$` prefix, so a declared property named `version` or `createdAt` stays
+ *   `n.version` / `n.createdAt`.
  * - Fulltext: `n.$fulltext.matches(...)` — throws at query build time if
  *   the node kind has no `searchable()` fields. Exposed at the type
  *   level on every accessor so refinements like
@@ -369,18 +1031,17 @@ export type NodeAccessor<N extends NodeType> =
       id: StringFieldAccessor;
       kind: StringFieldAccessor;
       $fulltext: FulltextAccessor;
+      $meta: NodeMetadataAccessor;
     }> &
       PropsAccessor<N>;
 
 /**
  * Creates typed field accessors for an edge kind's properties.
  */
-type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<
-  {
-    // Remove optional modifier so optional fields still have accessor methods.
-    [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
-  }
->;
+type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
+  // Remove optional modifier so optional fields still have accessor methods.
+  [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
+}>;
 
 /**
  * Edge accessor for predicate building.
@@ -388,6 +1049,7 @@ type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<
  * Properties are available at the top level for ergonomic access:
  * - `e.role` instead of `e.props.role`
  * - System fields: `e.id`, `e.kind`, `e.fromId`, `e.toId`
+ * - Metadata: `e.$meta.createdAt`, `e.$meta.validTo`, … (no `version`)
  *
  * Dynamic-mode counterpart: see `NodeAccessor` for the brand-detection
  * pattern.
@@ -399,6 +1061,7 @@ export type EdgeAccessor<E extends AnyEdgeType> =
       kind: StringFieldAccessor;
       fromId: StringFieldAccessor;
       toId: StringFieldAccessor;
+      $meta: EdgeMetadataAccessor;
     }> &
       EdgePropsAccessor<E>;
 
@@ -434,13 +1097,16 @@ export type SelectableNodeMeta = Readonly<{
  * without a cast.
  */
 export type SelectableNode<N extends NodeType> =
-  IsDynamicNodeType<N> extends true ? DynamicSelectableNode
-  : Readonly<{
-      id: NodeId<N>;
-      kind: N["kind"];
-      meta: SelectableNodeMeta;
-    }> &
-      Readonly<z.infer<N["schema"]>>;
+  N extends NodeType ?
+    IsDynamicNodeType<N> extends true ?
+      DynamicSelectableNode
+    : Readonly<{
+        id: NodeId<N>;
+        kind: N["kind"];
+        meta: SelectableNodeMeta;
+      }> &
+        Readonly<z.infer<N["schema"]>>
+  : never;
 
 /**
  * Metadata for a selectable edge result.
@@ -512,6 +1178,43 @@ export type SelectableEdge<E extends AnyEdgeType = EdgeType> =
       meta: SelectableEdgeMeta;
     }> &
       Readonly<z.infer<E["schema"]>>;
+
+/**
+ * The field names `orderBy(alias, field)` accepts for a node alias: a
+ * declared property, `id`, `kind`, or a metadata field by its path in a
+ * selected row (`meta.createdAt`, `meta.version`, …). A dynamic alias accepts
+ * any name and refuses an unknown one at runtime.
+ */
+export type NodeOrderField<N extends NodeType> =
+  IsDynamicNodeType<N> extends true ? string
+  : | "id"
+    | "kind"
+    | `meta.${keyof SelectableNodeMeta}`
+    | (keyof z.infer<N["schema"]> & string);
+
+/**
+ * The field names `orderBy(alias, field)` accepts for an edge alias: a
+ * declared property, `id`, `kind`, `fromId`, `toId`, or a metadata field by
+ * its path in a selected row (`meta.createdAt`, …).
+ */
+export type EdgeOrderField<E extends AnyEdgeType> =
+  IsDynamicEdgeType<E> extends true ? string
+  : | "id"
+    | "kind"
+    | "fromId"
+    | "toId"
+    | `meta.${keyof SelectableEdgeMeta}`
+    | (keyof z.infer<E["schema"]> & string);
+
+/** The field names `orderBy(alias, field)` accepts for `alias`. */
+export type AliasOrderField<
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  A extends string,
+> =
+  A extends keyof EdgeAliases ? EdgeOrderField<EdgeAliases[A]["type"]>
+  : A extends keyof Aliases ? NodeOrderField<Aliases[A]["type"]>
+  : never;
 
 /**
  * Selection context passed to select callback.
@@ -594,7 +1297,7 @@ export type RecursiveTraversalOptions = Readonly<{
   /** Cycle handling policy (default: "prevent") */
   cyclePolicy?: RecursiveCyclePolicy;
   /** Include path in output. Pass a string to customize alias. */
-  path?: boolean | string;
+  path?: boolean | string | QualifiedRecursivePathOption;
   /** Include depth in output. Pass a string to customize alias. */
   depth?: boolean | string;
 }>;
@@ -612,6 +1315,17 @@ export type QueryBuilderConfig = Readonly<{
   schemaIntrospector: SchemaIntrospector;
   /** Default traversal ontology expansion mode. */
   defaultTraversalExpansion: TraversalExpansion;
+  /**
+   * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
+   * expansion axis when an alias states no `expansion`.
+   * `"subclasses"` (the default everywhere a store doesn't override it)
+   * makes a supertype query polymorphic.
+   */
+  defaultExpansion: DefaultAliasExpansionAxis;
+  /** Whether this builder's graph enables Operational Identity. */
+  identityEnabled: boolean;
+  /** Equal-id behavior used by historical identity traversal compilation. */
+  identitySameIdAcrossKinds: "fold" | "ignore";
   backend?: GraphBackend;
   dialect?: SqlDialect;
   /** SQL schema configuration from createSqlSchema(...) for custom table names. */
@@ -624,11 +1338,22 @@ export type QueryBuilderConfig = Readonly<{
 export type QueryBuilderState = Readonly<{
   startAlias: string;
   startKinds: readonly string[];
+  /** The kinds the source named, before `startExpansion` expanded them. */
+  startRequestedKinds: readonly string[];
   /** The current alias (last traversal target, or startAlias if no traversals) */
   currentAlias: string;
-  includeSubClasses: boolean;
+  /** The start alias's resolved expansion axis — see `alias-expansion.ts`. */
+  startExpansion: AliasExpansionAxis;
+  /**
+   * The first alias's refusal of rows its static type does not admit
+   * (`ResolvedAliasKinds.rowTypeRefusal`, `alias-expansion.ts`), raised by
+   * every row-returning terminal and by no scalar `count()` / `exists()`.
+   */
+  rowTypeRefusal?: ConfigurationError | undefined;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
+  /** Filters completed match rows without restricting optional or recursive expansion. */
+  resultPredicate?: PredicateExpression;
   projection: readonly ProjectedField[];
   orderBy: readonly OrderSpec[];
   /** ORDER BY entries added via `ExecutableAggregateQuery.orderBy()`. */
@@ -663,4 +1388,26 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /**
+   * Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an
+   * alias states no `expansion` (default: `"subclasses"`). A
+   * store-issued builder threads its own `queryDefaults.expansion`; a
+   * standalone `createQueryBuilder` defaults to `"subclasses"` too, so a
+   * store-less builder and a store-issued one agree.
+   *
+   * Spelled `| undefined` so a stated `undefined` forwards from a caller's
+   * own options bag, the same way the per-alias `expansion` option does.
+   */
+  defaultExpansion?: DefaultAliasExpansionAxis | undefined;
+  /**
+   * Overrides whether a builder may compile identity-aware traversals
+   * (`traverse(..., { includeIdentityMembers: true })`).
+   *
+   * Defaults to the graph capability carried by `buildKindRegistry(graph)`.
+   * Passing `true` with a registry from a graph that does not enable identity
+   * throws a `ConfigurationError` instead of producing invalid SQL.
+   */
+  identityEnabled?: boolean;
+  /** Overrides the graph registry's same-id behavior. */
+  identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;

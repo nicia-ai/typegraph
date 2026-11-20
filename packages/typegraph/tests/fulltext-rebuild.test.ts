@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { defineGraph, defineNode, searchable } from "../src";
 import { KindNotFoundError } from "../src";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
 import { ConfigurationError, ValidationError } from "../src/errors";
@@ -171,12 +172,10 @@ describe("store.search.rebuildFulltext", () => {
   });
 
   it("throws ConfigurationError on a backend without fulltext support", async () => {
-    const {
-      upsertFulltext: _upsert,
-      deleteFulltext: _delete,
-      ...rest
-    } = backend;
-    const backendNoFulltext = rest as GraphBackend;
+    const backendNoFulltext: GraphBackend = projectBackendWithout(backend, [
+      "upsertFulltext",
+      "deleteFulltext",
+    ]);
     const storeNoFulltext = await createInitializedStore(
       TestGraph,
       backendNoFulltext,

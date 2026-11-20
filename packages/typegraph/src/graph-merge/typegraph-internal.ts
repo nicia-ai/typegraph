@@ -1,11 +1,43 @@
+export { bindExtraIfReachable } from "../backend/capabilities/bind";
+export { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+export {
+  batchPointReadVerdict,
+  recordedRevisionOriginsVerdict,
+} from "../backend/capabilities/resolve";
+export { runRetriedUnit } from "../backend/capabilities/retried-unit";
+export {
+  requireFenceLockTables,
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
+export {
+  isBackendDerivedFrom,
+  wrapWithManagedClose,
+} from "../backend/derive-backend";
+export {
+  GRAPH_RELATIONS,
+  resolveGraphRelationNames,
+} from "../backend/graph-relations";
+export { REVISION_JOURNAL_ENTITY } from "../backend/revision-journal";
+export { sharesSerializedTransactionResource } from "../backend/transaction-resource";
 export type {
+  ClaimEdgeCardinalityParams,
+  EdgeRow,
+  EngineRevision,
+  EntityKey,
   GraphBackend,
+  GraphReadBackend,
+  InsertEdgeParams,
+  LineageDelta,
+  NodeRow,
+  SchemaVersionRow,
   TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
+export { isLiveNodeRow } from "../backend/types";
 export { computeUniqueKey } from "../constraints";
 export {
-  defineGraph,
+  defineInternalGraph,
   getEdgeKinds,
   getNodeKinds,
   type GetNodeType,
@@ -14,24 +46,138 @@ export {
 } from "../core/define-graph";
 export { defineNode } from "../core/node";
 export type { EdgeId, JsonValue, NodeId, NodeType } from "../core/types";
-export { TypeGraphError, type TypeGraphErrorOptions } from "../errors";
-export { exportGraphStream } from "../interchange/export";
-export { importGraphStream } from "../interchange/import";
-export { computeTransitiveClosure, isReachable } from "../ontology/closures";
+export {
+  ConfigurationError,
+  IdentityContradictionError,
+  NodeNotFoundError,
+  TransactionConflictError,
+  TypeGraphError,
+  type TypeGraphErrorOptions,
+} from "../errors";
+export {
+  bulkIsSeparated,
+  separationClassPairKey,
+  separationFactsEmpty,
+} from "../identity/separation";
+export type { IdentityTransferAssertion } from "../identity/service";
+export { loadIdentityWindowHistory } from "../identity/service-interchange-write";
+export { currentClassKey } from "../identity/service-mutation";
+export {
+  loadCurrentStructuralClasses,
+  loadSpanningDifferentAssertion,
+} from "../identity/service-read";
+export type { PlainNodeRef } from "../identity/sql-target";
+export type { IdentityDecisionProvenance } from "../identity/transition-log";
+export type {
+  IdentityAssertionWriteFacade,
+  IdentityFacade,
+  IdentityRelation,
+} from "../identity/types";
+export { exportGraph, exportGraphStream } from "../interchange/export";
+export {
+  importGraph,
+  importGraphStream,
+  streamedImportRefusal,
+  summarizeImportErrors,
+} from "../interchange/import";
+export { getEdgeRowsByIds } from "../store/edge-fetch";
+export { getNodeRowsByIds } from "../store/node-fetch";
+// The provenance ownership probe needs graph-scoped raw SQL to look for rows
+// under a graph id whose schema was never registered.
+export {
+  createSqlSchema,
+  type ResolvedSqlTableNames,
+} from "../query/compiler/schema";
+export { getDialect } from "../query/dialect";
+export { sql } from "../query/sql-fragment";
+export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+export { orientCompositionEndpoints } from "../registry/composition-relation";
+export { type KindRegistry } from "../registry/kind-registry";
 export { sortedReplacer } from "../schema/canonical";
-export { computeSchemaHash, serializeSchema } from "../schema/serializer";
+export { activeSchemaHash } from "../schema/manager";
 export {
-  type OntologyIntrospection,
-  type UniqueIntrospection,
-} from "../store/introspect";
+  computeSchemaHash,
+  getGraphDefinitionHash,
+  serializeSchema,
+} from "../schema/serializer";
 export {
-  lockRecordedGraphWrite,
+  acyclicEdgeRelations,
+  edgeKindIsInAcyclicRelation,
+  type ProposedEdgeAcyclicityViolation,
+  type ProposedRelationEdge,
+  readProposedEdgeAcyclicityViolations,
+} from "../store/acyclicity";
+export { targetIdentity } from "../store/claims/axis";
+export {
+  edgeInsertClaims,
+  edgeKindOwesAnyClaim,
+} from "../store/claims/composition-claims";
+export {
+  assertCompositionWindowsDisjoint,
+  compositionWindowOverlapError,
+  type CompositionWindowTransition,
+  type CompositionWindowVerdict,
+  type CompositionWindowWrites,
+  readCompositionWindowConflict,
+  withDecidedCompositionWindows,
+} from "../store/claims/composition-windows";
+export {
+  claimRefusalFor,
+  claimsInProbeOrder,
+  edgeCardinalityClaimTarget,
+} from "../store/claims/edge-claims";
+export { edgeKindCardinalityDeclarations } from "../store/constraints";
+export { type UniqueIntrospection } from "../store/introspect";
+export { planCompositionCascade } from "../store/operations/composition-cascade";
+export {
+  compositionEdgeAttachesPart,
+  findLiveCompositionAttachment,
+  findLiveCompositionWhole,
+  withDeferredCompositionExistence,
+} from "../store/operations/composition-create";
+export {
+  judgeNodeDeleteBehavior,
+  type NodeDeletePolicy,
+} from "../store/operations/node-write-pipeline";
+export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
+export {
+  advanceRevisionClock,
+  encodeRecordedLineageRevision,
+  ensureRevisionOrigin,
+  ensureRevisionOriginRow,
+  forceRecordedGraphRevision,
+  mintsOriginNamespacedAnchor,
   readRecordedClock,
   readRevisionOrigin,
+  recordedRelationsLineage,
+  resolveLineage,
+  withRecordedIdentityDecision,
 } from "../store/recorded-capture";
-export { storeBackend, transactionBackend } from "../store/runtime-port";
+export {
+  type GraphWriteLock,
+  lockRecordedGraphWrite,
+  uncapturedGraphWriteLock,
+} from "../store/recorded-capture/clock";
+export {
+  hasScopedIdentityReads,
+  storeBackend,
+  storeCaptureEnabled,
+  storeQueryBackend,
+  storeRuntime,
+  transactionAssertWritable,
+  transactionBackend,
+  type TransactionDeleteNodeWithPolicy,
+  transactionDeleteNodeWithPolicy,
+} from "../store/runtime-port";
 export type { Store } from "../store/store";
-export { createStoreWithSchema } from "../store/store";
-export { type Edge, type Node } from "../store/types";
+export { createStore, createStoreWithSchema } from "../store/store";
+export {
+  type Edge,
+  type Node,
+  type StoreOptions,
+  type ValidityEndMutation,
+} from "../store/types";
+export { compareCodePoints } from "../utils/compare";
+export { canonicalizeDatabaseTimestamp } from "../utils/date";
 export { sha256Hex } from "../utils/hash";
 export { generateId } from "../utils/id";

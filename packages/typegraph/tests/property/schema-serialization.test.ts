@@ -13,6 +13,7 @@ import {
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
+import { ConfigurationError } from "../../src/errors";
 import { defineGraphExtension } from "../../src/graph-extension";
 import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import {
@@ -29,14 +30,18 @@ import {
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
+import { validateOntologyRelations } from "../../src/ontology/validation";
+import { buildKindRegistry } from "../../src/registry";
 import { sortedReplacer } from "../../src/schema/canonical";
 import { deserializeSchema } from "../../src/schema/deserializer";
+import { computeSchemaDiff } from "../../src/schema/migration";
 import {
   computeSchemaHash,
   serializeSchema,
 } from "../../src/schema/serializer";
 import { serializedSchemaZod } from "../../src/schema/types";
 import { requireDefined } from "../../src/utils/presence";
+import { propertyRuns } from "./run-budget";
 
 // ============================================================
 // Arbitrary Generators
@@ -80,18 +85,26 @@ const descriptionArb = fc.option(fc.string({ minLength: 1, maxLength: 100 }), {
 const annotationsKeyArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,7}$/);
 
 /**
- * A JSON-escape sequence in an OBJECT KEY (a `"`, a `\`, or a control
- * character — the characters `JSON.stringify` escapes) triggers an upstream
- * V8 `JSON.parse` data-corruption bug on Node >= 23: parsing an object whose
- * key needs escaping poisons an internal shape-keyed cache, so a LATER
- * same-shaped object with a DIFFERENT escaped key at the same position gets
- * the earlier object's key string back. It is not a TypeGraph defect and has
- * no clean parse-level workaround (the correct key is already gone once
- * `JSON.parse` returns). Upstream, open/assigned: V8
+ * Two object-key shapes cannot make the byte-identical round-trip this
+ * property covers:
+ *
+ * - A JSON-escape sequence in an OBJECT KEY (a `"`, a `\`, or a control
+ *   character — the characters `JSON.stringify` escapes) triggers an upstream
+ *   V8 `JSON.parse` data-corruption bug on Node >= 23: parsing an object whose
+ *   key needs escaping poisons an internal shape-keyed cache, so a LATER
+ *   same-shaped object with a DIFFERENT escaped key at the same position gets
+ *   the earlier object's key string back. It is not a TypeGraph defect and has
+ *   no clean parse-level workaround (the correct key is already gone once
+ *   `JSON.parse` returns). Upstream, open/assigned: V8
  * https://issues.chromium.org/issues/521080746 and Node
- * https://github.com/nodejs/node/issues/63785. This filter keeps the
- * arbitrary broad (all other Unicode, nesting, and value shapes) while
- * excluding only the region V8 cannot round-trip;
+ * https://github.com/nodejs/node/issues/63785.
+ * - Zod's JSON record parser deliberately discards an own `__proto__` key to
+ *   prevent prototype-pollution assignments while rebuilding objects. The
+ *   serialized-schema boundary relies on that behavior, so the round-trip is
+ *   intentionally not byte-identical for that key.
+ *
+ * This filter keeps the arbitrary broad (all other Unicode, nesting, and
+ * value shapes) while excluding only the regions the boundary cannot preserve;
  * `escaped-key-round-trip.test.ts` pins the bug so we notice when a Node
  * release fixes it and can drop this guard.
  */
@@ -100,13 +113,13 @@ const annotationsKeyArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,7}$/);
 // eslint-disable-next-line no-control-regex
 const KEY_ESCAPE_PATTERN = /["\\\u0000-\u001F]/;
 
-function hasEscapedObjectKey(value: unknown): boolean {
+function hasNonRoundTrippableObjectKey(value: unknown): boolean {
   if (Array.isArray(value))
-    return value.some((item) => hasEscapedObjectKey(item));
+    return value.some((item) => hasNonRoundTrippableObjectKey(item));
   if (value !== null && typeof value === "object") {
     for (const [key, nested] of Object.entries(value)) {
-      if (KEY_ESCAPE_PATTERN.test(key)) return true;
-      if (hasEscapedObjectKey(nested)) return true;
+      if (key === "__proto__" || KEY_ESCAPE_PATTERN.test(key)) return true;
+      if (hasNonRoundTrippableObjectKey(nested)) return true;
     }
   }
   return false;
@@ -114,7 +127,7 @@ function hasEscapedObjectKey(value: unknown): boolean {
 
 const safeJsonValueArb = fc
   .jsonValue()
-  .filter((value) => !hasEscapedObjectKey(value));
+  .filter((value) => !hasNonRoundTrippableObjectKey(value));
 
 // fc.jsonValue() produces values that are valid JSON at runtime, but its
 // TypeScript type is wider than our KindAnnotations type. Cast the arbitrary
@@ -375,7 +388,13 @@ const graphDefArb = fc
       nodeTypes.length >= 2 ?
         fc
           .array(
-            fc.integer({ min: 0, max: 5 }).chain((relationType) => {
+            // `partOf`/`hasPart` are deliberately not generated here: they
+            // now require a `via` edge kind whose registration (existence,
+            // endpoint compatibility, a constraining cardinality) this
+            // generic relation-shape fuzzer has no way to guarantee.
+            // Composition's own structural and registration-dependent rules
+            // are covered by `tests/ontology-composition-declaration.test.ts`.
+            fc.integer({ min: 0, max: 3 }).chain((relationType) => {
               // Pick two distinct nodes
               return fc
                 .record({
@@ -398,12 +417,6 @@ const graphDefArb = fc
                     }
                     case 3: {
                       return relatedTo(from, to);
-                    }
-                    case 4: {
-                      return partOf(from, to);
-                    }
-                    case 5: {
-                      return hasPart(from, to);
                     }
                     default: {
                       return equivalentTo(from, to);
@@ -430,6 +443,20 @@ const graphDefArb = fc
               seen.add(key);
               return true;
             });
+          })
+          .filter((relations) => {
+            const namedRelations = relations.map((relation) => ({
+              metaEdge: relation.metaEdge.name,
+              from:
+                typeof relation.from === "string" ?
+                  relation.from
+                : relation.from.kind,
+              to:
+                typeof relation.to === "string" ?
+                  relation.to
+                : relation.to.kind,
+            }));
+            return validateOntologyRelations(namedRelations).length === 0;
           })
       : fc.constant([]);
 
@@ -463,6 +490,101 @@ const graphDefArb = fc
         });
       });
   });
+
+type GraphUnderTest = Parameters<typeof serializeSchema>[0];
+
+function buildsRegistry(graph: GraphUnderTest): boolean {
+  try {
+    buildKindRegistry(graph);
+    return true;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return false;
+    throw error;
+  }
+}
+type DeclaredRelation = GraphUnderTest["ontology"][number];
+
+/** A symmetric relation's factory, keyed by meta-edge name. */
+const SYMMETRIC_RELATION_FACTORIES: Readonly<
+  Record<
+    string,
+    (
+      left: ReturnType<typeof defineNode>,
+      right: ReturnType<typeof defineNode>,
+    ) => DeclaredRelation
+  >
+> = {
+  disjointWith: (left, right) => disjointWith(left, right),
+  relatedTo: (left, right) => relatedTo(left, right),
+  equivalentTo: (left, right) => equivalentTo(left, right),
+};
+
+function withSwappedArguments(relation: DeclaredRelation): DeclaredRelation {
+  const factory = SYMMETRIC_RELATION_FACTORIES[relation.metaEdge.name];
+  if (
+    factory === undefined ||
+    typeof relation.from === "string" ||
+    typeof relation.to === "string"
+  ) {
+    return relation;
+  }
+  return factory(
+    relation.to as ReturnType<typeof defineNode>,
+    relation.from as ReturnType<typeof defineNode>,
+  );
+}
+
+/**
+ * `graph` declared again with its node, edge and relation order shuffled
+ * and some symmetric relations' arguments swapped.
+ */
+function restatedGraphArb(
+  graph: GraphUnderTest,
+): fc.Arbitrary<
+  Readonly<{ graph: GraphUnderTest; kindsOnly: GraphUnderTest }>
+> {
+  const nodeEntries = Object.entries(graph.nodes);
+  const edgeEntries = Object.entries(graph.edges);
+  const relations = graph.ontology;
+  const declare = (
+    nodes: typeof nodeEntries,
+    edges: typeof edgeEntries,
+    ontology: readonly DeclaredRelation[],
+  ) =>
+    defineGraph({
+      id: graph.id,
+      nodes: Object.fromEntries(nodes),
+      edges: Object.fromEntries(edges),
+      ontology,
+      defaults: graph.defaults,
+    }) as unknown as GraphUnderTest;
+  return fc
+    .record({
+      nodeOrder: fc.shuffledSubarray(nodeEntries, {
+        minLength: nodeEntries.length,
+      }),
+      edgeOrder: fc.shuffledSubarray(edgeEntries, {
+        minLength: edgeEntries.length,
+      }),
+      relationOrder: fc.shuffledSubarray([...relations], {
+        minLength: relations.length,
+      }),
+      swaps: fc.array(fc.boolean(), {
+        minLength: relations.length,
+        maxLength: relations.length,
+      }),
+    })
+    .map(({ nodeOrder, edgeOrder, relationOrder, swaps }) => ({
+      graph: declare(
+        nodeOrder,
+        edgeOrder,
+        relationOrder.map((relation, index) =>
+          swaps[index] === true ? withSwappedArguments(relation) : relation,
+        ),
+      ),
+      kindsOnly: declare(nodeOrder, edgeOrder, relations),
+    }));
+}
 
 /**
  * Generate a version number.
@@ -539,12 +661,24 @@ describe("Schema Serialization Properties", () => {
       );
     });
 
-    it("serialize -> JSON -> Zod parse -> JSON is byte-identical", () => {
+    it("JSON -> Zod parse -> JSON is stable under a second round-trip", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
 
-          const canonicalBefore = JSON.stringify(serialized, sortedReplacer);
+          // The FIRST parse is deliberately not compared against the raw
+          // `serialized` object's own JSON: `targetCardinality` (see
+          // `SerializedEdgeDef`) is omitted at serialize time when it's the
+          // default `"many"`, and the zod schema backfills it with
+          // `.default("many")` on read — the same asymmetry a document
+          // stored before the option existed relies on to keep loading as
+          // unconstrained. That first parse is where the one intentional
+          // rewrite happens; what this test actually guards is that parsing
+          // is otherwise idempotent — a document already round-tripped once
+          // (as every document read back from storage has been) must not
+          // keep drifting on every subsequent parse.
+          const onceParsed = serializedSchemaZod.parse(serialized);
+          const canonicalBefore = JSON.stringify(onceParsed, sortedReplacer);
           const reparsed = serializedSchemaZod.parse(
             JSON.parse(canonicalBefore),
           );
@@ -558,18 +692,35 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("hash properties", () => {
-    it("hash is deterministic (same input produces same hash)", async () => {
+    it("declaration order and a symmetric relation's argument order change nothing", async () => {
       await fc.assert(
-        fc.asyncProperty(graphDefArb, versionArb, async (graph, version) => {
-          const serialized1 = serializeSchema(graph, version);
-          const serialized2 = serializeSchema(graph, version);
+        fc.asyncProperty(
+          graphDefArb.chain((graph) =>
+            restatedGraphArb(graph).map(
+              (restated) => [graph, restated] as const,
+            ),
+          ),
+          async ([graph, restated]) => {
+            // A fuzzed subClassOf whose schemas do not nest is refused by the
+            // registry the diff builds; that refusal is covered below.
+            fc.pre(buildsRegistry(graph));
+            const before = serializeSchema(graph, 1);
+            const after = serializeSchema(restated.graph, 2);
 
-          const hash1 = await computeSchemaHash(serialized1);
-          const hash2 = await computeSchemaHash(serialized2);
-
-          expect(hash1).toBe(hash2);
-        }),
-        { numRuns: 50 },
+            expect(computeSchemaDiff(before, after)).toMatchObject({
+              hasChanges: false,
+              nodes: [],
+              edges: [],
+              ontology: [],
+            });
+            // Kind declaration order is not part of the document's content;
+            // relation order is, so only the kinds' reordering keeps the hash.
+            expect(
+              await computeSchemaHash(serializeSchema(restated.kindsOnly, 1)),
+            ).toBe(await computeSchemaHash(before));
+          },
+        ),
+        { numRuns: propertyRuns({ ci: 100, local: 200 }) },
       );
     });
 
@@ -1069,6 +1220,115 @@ describe("Schema Serialization Properties", () => {
       expect(reSerialized).toBe(json);
     });
 
+    it("ordered node keys emit and round-trip in canonical serialization", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const newest = defineNodeIndex(Person, {
+        keys: [
+          { system: "created_at", direction: "desc" },
+          { field: "name", direction: "asc" },
+          { system: "id", direction: "asc" },
+        ],
+      });
+      const graph = defineGraph({
+        id: "ordered_keys_emit",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [newest],
+      });
+
+      const serialized = serializeSchema(graph, 1);
+      const serializedIndex = serialized.indexes?.[0];
+      expect(serializedIndex?.entity).toBe("node");
+      expect(
+        serializedIndex?.entity === "node" ? serializedIndex.keys : undefined,
+      ).toEqual(newest.keys);
+      const json = JSON.stringify(serialized, sortedReplacer);
+      expect(
+        JSON.stringify(
+          serializedSchemaZod.parse(JSON.parse(json)),
+          sortedReplacer,
+        ),
+      ).toBe(json);
+    });
+
+    it("rejects malformed ordered node keys at the serialized schema boundary", () => {
+      const Person = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const newest = defineNodeIndex(Person, {
+        keys: [{ system: "created_at", direction: "desc" }],
+      });
+      const graph = defineGraph({
+        id: "ordered_keys_reject",
+        nodes: { Person: { type: Person } },
+        edges: {},
+        indexes: [newest],
+      });
+      const serialized = serializeSchema(graph, 1);
+      const replaceKeys = (keys: readonly unknown[]) => ({
+        ...serialized,
+        indexes: serialized.indexes?.map((index) =>
+          index.entity === "node" ? { ...index, keys } : index,
+        ),
+      });
+
+      expect(serializedSchemaZod.safeParse(replaceKeys([])).success).toBe(
+        false,
+      );
+      expect(
+        serializedSchemaZod.safeParse(
+          replaceKeys([
+            { type: "system", column: "from_id", direction: "asc" },
+          ]),
+        ).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse(
+          replaceKeys([
+            { type: "system", column: "id", direction: "sideways" },
+          ]),
+        ).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...serialized,
+          indexes: serialized.indexes?.map((index) =>
+            index.entity === "node" ?
+              {
+                ...index,
+                scope: "graph",
+                keys: [
+                  { type: "system", column: "graph_id", direction: "asc" },
+                ],
+              }
+            : index,
+          ),
+        }).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...replaceKeys([
+            { type: "system", column: "created_at", direction: "desc" },
+          ]),
+          indexes: serialized.indexes?.map((index) =>
+            index.entity === "node" ? { ...index, method: "trigram" } : index,
+          ),
+        }).success,
+      ).toBe(false);
+      expect(
+        serializedSchemaZod.safeParse({
+          ...serialized,
+          indexes: serialized.indexes?.map((index) => ({
+            ...index,
+            entity: "edge",
+            direction: "none",
+          })),
+        }).success,
+      ).toBe(false);
+    });
+
     // Regression: `keySystemColumns` previously had no entry in
     // `nodeIndexDeclarationZod`, so `.loose()` let any value ride through the
     // persisted-schema parse boundary unchecked — a malformed value would
@@ -1193,7 +1453,13 @@ describe("Schema Serialization Properties", () => {
       });
 
       const serialized = serializeSchema(graph, 1);
-      const json = JSON.stringify(serialized, sortedReplacer);
+      // Parsed once before taking the baseline — see the comment on
+      // "JSON -> Zod parse -> JSON is stable under a second round-trip"
+      // above: `targetCardinality` is omitted at serialize time and
+      // backfilled by the zod default on the first parse, so the baseline
+      // here is the already-parsed form, not the raw serializer output.
+      const onceParsed = serializedSchemaZod.parse(serialized);
+      const json = JSON.stringify(onceParsed, sortedReplacer);
       const parsed = serializedSchemaZod.parse(JSON.parse(json));
       const reSerialized = JSON.stringify(parsed, sortedReplacer);
 
@@ -1363,20 +1629,180 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("registry building", () => {
-    it("buildRegistry produces valid KindRegistry", () => {
+    it("buildRegistry produces a valid KindRegistry, or refuses a fuzzed structural mismatch by name", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
           const deserialized = deserializeSchema(serialized);
 
-          // Should not throw
-          const registry = deserialized.buildRegistry();
+          // `graphDefArb` picks a fuzzed `subClassOf`/`equivalentTo` pair
+          // with no regard for schema compatibility, so a genuinely
+          // incompatible pair is a REACHABLE, correct outcome here
+          // — the property is that buildRegistry() only ever fails with
+          // this one typed, well-formed refusal, never an unrelated crash.
+          const ALLOWED_STRUCTURAL_REFUSAL_CODES = new Set([
+            "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+            "ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE",
+          ]);
 
-          // Registry should exist
-          expect(registry).toBeDefined();
+          function buildRegistryOrAllowedRefusalCode(): unknown {
+            try {
+              return deserialized.buildRegistry();
+            } catch (error) {
+              if (
+                error instanceof ConfigurationError &&
+                ALLOWED_STRUCTURAL_REFUSAL_CODES.has(
+                  error.details["code"] as string,
+                )
+              ) {
+                return error.details["code"];
+              }
+              throw error;
+            }
+          }
+
+          expect(buildRegistryOrAllowedRefusalCode()).toBeDefined();
         }),
         { numRuns: 30 },
       );
     });
+  });
+});
+
+/**
+ * A focused round-trip property over a fixed composition shape.
+ *
+ * `partOf`/`hasPart` are deliberately excluded from the generic
+ * `ontologyArb` above (see its comment): a fuzzed `via` edge cannot be
+ * guaranteed endpoint-compatible or cardinality-constrained enough to
+ * build. This property fuzzes what two always-valid composition shapes can
+ * safely vary — the node/edge kind names, the declaration form (`partOf`
+ * vs. the mirrored `hasPart`), and the whole-side population:
+ *
+ *  - a cross-kind pair, where orientation is unambiguous and `partSide` is
+ *    INFERRED (never present on the wire) — this is what exercises `via`
+ *    surviving the round trip;
+ *  - a reflexive pair, where the edge admits both orientations and
+ *    `partSide` is REQUIRED and DECLARED — this is what exercises
+ *    `partSide` itself, the one field that cannot be re-derived on load
+ *    A property that only ever generated the unambiguous shape
+ *    would never put a `partSide` on the wire to lose.
+ */
+describe("composition relation round-trip", () => {
+  it("serializes and deserializes a fuzzed cross-kind partOf/hasPart pair's via and inferred orientation", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.boolean(),
+        versionArb,
+        (
+          partKindName,
+          wholeKindName,
+          edgeKindName,
+          population,
+          declareAsHasPart,
+          version,
+        ) => {
+          fc.pre(partKindName !== wholeKindName);
+
+          const Part = defineNode(partKindName, { schema: z.object({}) });
+          const Whole = defineNode(wholeKindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-property",
+            nodes: {
+              [partKindName]: { type: Part },
+              [wholeKindName]: { type: Whole },
+            },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Part],
+                to: [Whole],
+                cardinality: population,
+              },
+            },
+            ontology: [
+              declareAsHasPart ?
+                hasPart(Whole, Part, { via: viaEdge })
+              : partOf(Part, Whole, { via: viaEdge }),
+            ],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe("from");
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: partKindName,
+              wholeKind: wholeKindName,
+              viaEdgeKind: edgeKindName,
+              partSide: "from",
+              population,
+              existence: "optional",
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
+  });
+
+  it("serializes and deserializes a fuzzed reflexive pair's declared partSide", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.constantFrom<"from" | "to">("from", "to"),
+        versionArb,
+        (kindName, edgeKindName, population, partSide, version) => {
+          const Kind = defineNode(kindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-reflexive-property",
+            nodes: { [kindName]: { type: Kind } },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Kind],
+                to: [Kind],
+                // Set on both sides: the whole-side fence reads
+                // `cardinality` when `partSide` is "from" and
+                // `targetCardinality` when it is "to", and this property
+                // fuzzes `partSide` itself.
+                cardinality: population,
+                targetCardinality: population,
+              },
+            },
+            ontology: [partOf(Kind, Kind, { via: viaEdge, partSide })],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe(partSide);
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: kindName,
+              wholeKind: kindName,
+              viaEdgeKind: edgeKindName,
+              partSide,
+              population,
+              existence: "optional",
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
   });
 });

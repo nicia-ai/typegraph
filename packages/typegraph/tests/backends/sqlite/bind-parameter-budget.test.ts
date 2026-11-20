@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../../../src";
+import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import {
   computeSqliteBatchChunkSizes,
   createSqliteBackend,
@@ -22,7 +23,6 @@ import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import {
   DURABLE_OBJECT_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
-  wrapWithManagedClose,
 } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
@@ -121,12 +121,16 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(999)).toEqual({
       checkUniqueBatchChunkSize: 996,
       embeddingUpsertBatchSize: 199,
-      edgeInsertBatchSize: 83,
+      edgeInsertBatchSize: 71,
+      edgeSchemaFencedInsertBatchSize: 71,
       fulltextUpsertBatchSize: 166,
+      findEdgesEndpointChunkSize: 993,
       fulltextDeleteChunkSize: 997,
       getEdgesChunkSize: 998,
       getNodesChunkSize: 997,
       nodeInsertBatchSize: 111,
+      nodeSchemaFencedInsertBatchSize: 110,
+      uniqueDeleteChunkSize: 997,
       uniqueInsertBatchSize: 166,
     });
   });
@@ -135,12 +139,16 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(MODERN_BETTER_SQLITE3_BUDGET)).toEqual({
       checkUniqueBatchChunkSize: 32_763,
       embeddingUpsertBatchSize: 6553,
-      edgeInsertBatchSize: 2730,
+      edgeInsertBatchSize: 2340,
+      edgeSchemaFencedInsertBatchSize: 2340,
       fulltextUpsertBatchSize: 5461,
+      findEdgesEndpointChunkSize: 32_760,
       fulltextDeleteChunkSize: 32_764,
       getEdgesChunkSize: 32_765,
       getNodesChunkSize: 32_764,
       nodeInsertBatchSize: 3640,
+      nodeSchemaFencedInsertBatchSize: 3640,
+      uniqueDeleteChunkSize: 32_764,
       uniqueInsertBatchSize: 5461,
     });
   });
@@ -150,6 +158,10 @@ describe("computeSqliteBatchChunkSizes", () => {
     // 6 binds per fulltext row: 16 rows/statement fits, 17 would not.
     expect(sizes.fulltextUpsertBatchSize).toBe(16);
     expect(sizes.fulltextDeleteChunkSize).toBe(98);
+    expect(sizes.nodeSchemaFencedInsertBatchSize).toBe(10);
+    expect(
+      computeSqliteBatchChunkSizes(101).nodeSchemaFencedInsertBatchSize,
+    ).toBe(11);
   });
 
   it("never returns a chunk size below one", () => {
@@ -157,11 +169,15 @@ describe("computeSqliteBatchChunkSizes", () => {
       checkUniqueBatchChunkSize: 1,
       embeddingUpsertBatchSize: 1,
       edgeInsertBatchSize: 1,
+      edgeSchemaFencedInsertBatchSize: 1,
       fulltextUpsertBatchSize: 1,
+      findEdgesEndpointChunkSize: 1,
       fulltextDeleteChunkSize: 1,
       getEdgesChunkSize: 1,
       getNodesChunkSize: 1,
       nodeInsertBatchSize: 1,
+      nodeSchemaFencedInsertBatchSize: 1,
+      uniqueDeleteChunkSize: 1,
       uniqueInsertBatchSize: 1,
     });
   });

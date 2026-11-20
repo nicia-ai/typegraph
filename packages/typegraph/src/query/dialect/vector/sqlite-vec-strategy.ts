@@ -100,6 +100,17 @@ const SQLITE_VEC_CAPABILITIES: VectorCapabilities = {
     mode: "filter-pushdown",
     guaranteesFullPage: true,
   },
+  // A vec0 KNN query is `WHERE embedding MATCH ? AND k = ?` — `k` is the only
+  // knob, and it IS the page size, not a frontier around it. sqlite-vec
+  // exposes no session setting, no query parameter, and no index option that
+  // widens the candidate list (verified against v0.1.9's vec0 query surface),
+  // so a per-search `efSearch` has nothing to bind to and is refused rather
+  // than accepted and dropped.
+  searchFrontierTuning: {
+    tunable: false,
+    reason:
+      "a vec0 KNN takes only `k` (the page size); sqlite-vec exposes no ANN frontier parameter",
+  },
 };
 
 /** Whether a slot's declared index type maps to vec0's `MATCH … k =` KNN. */
@@ -193,6 +204,7 @@ export const sqliteVecStrategy: VectorStrategy = {
     // virtual table *is* the index — no separate CREATE INDEX is emitted.
     return [
       {
+        scope: "graph",
         logicalName: `${VECTOR_CONTRIBUTION_PREFIX}:${slot.nodeKind}.${slot.fieldPath}`,
         owner: "sqlite-vec",
         tableName: table,
@@ -276,6 +288,23 @@ export const sqliteVecStrategy: VectorStrategy = {
         DELETE FROM ${table}
         WHERE "node_id" = ${params.nodeId} AND "graph_id" = ${params.graphId}
       `,
+    ];
+  },
+
+  buildDeleteBatch(
+    slot,
+    params: Omit<DeleteEmbeddingParams, "nodeId"> &
+      Readonly<{ nodeIds: readonly string[] }>,
+  ): readonly SqlFragment[] {
+    if (params.nodeIds.length === 0) return [];
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    return [
+      sql`DELETE FROM ${table} WHERE "graph_id" = ${params.graphId} AND "node_id" IN (${sql.join(
+        params.nodeIds.map((nodeId) => sql`${nodeId}`),
+        sql`, `,
+      )})`,
     ];
   },
 

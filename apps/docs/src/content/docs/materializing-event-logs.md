@@ -40,23 +40,46 @@ async function projectChange(
   tx: TransactionContext<typeof graph>,
   change: Change,
 ) {
-  const issue = await tx.nodes.Issue.upsertById(change.issueId, {
-    title: change.title,
-    state: change.state,
-  });
+  const issue = await tx.nodes.Issue.upsertById(
+    change.issueId,
+    {
+      title: change.title,
+      state: change.state,
+    },
+    {
+      validFrom: change.issueValidFrom,
+      onImmutableLowerBound: "preserve",
+    },
+  );
 
   const actor = await tx.nodes.Actor.upsertById(change.actorId, {
     name: change.actorName,
   });
 
-  await tx.edges.changedBy.getOrCreateByEndpoints(issue, actor, {
-    action: change.action,
-  });
+  await tx.edges.changedBy.getOrCreateByEndpoints(
+    issue,
+    actor,
+    { action: change.action },
+    {
+      ifExists: "update",
+      validFrom: change.relationshipValidFrom,
+      validTo: change.relationshipValidTo,
+      onImmutableLowerBound: "preserve",
+    },
+  );
 }
 ```
 
 The important rule is that the second delivery of the same change takes the same
 code path and reaches the same row identities.
+
+The `"preserve"` policy makes `validFrom` create/resurrection-only input for
+both node and edge writes: a later revision updates props and `validTo` without
+trying to rewrite the live row's start. Without it, the default `"refuse"`
+policy raises `IMMUTABLE_VALIDITY_LOWER_BOUND` when a revision states a
+different start. The edge also explicitly selects `ifExists: "update"`; the
+default is `"return"`, which is right for create-once relationships but writes
+neither revised props nor a closing `validTo` when the edge already exists.
 
 ### `matchOn` widens the identity key — don't reach for it by default
 
@@ -73,6 +96,12 @@ several parallel edges between one pair (say, one `changedBy` edge per distinct
 value in a matched field, it no longer matches the earlier edge and you get a
 **second** edge instead of convergence. Reach for `matchOn` when the domain
 needs the extra edges, not as a reflex.
+
+Validity timestamps do not become part of this identity key. If the same
+endpoints can have multiple application-time periods, include a stable period
+or source-event identifier in the edge schema and in `matchOn`. This keeps a
+re-delivery of one period convergent without collapsing a later period into the
+same edge.
 
 ## Cursor Bookkeeping
 
@@ -173,18 +202,22 @@ to recognize a history-store guard when you catch one.
 ### At-least-once with a separate cursor store
 
 When the runtime already owns checkpointing, or the backend cannot provide atomic
-transactions (`backend.capabilities.transactions === false` — Cloudflare D1,
+transactions (`backend.capabilities.execution.interactiveTransactions === false` — Cloudflare D1,
 `drizzle-orm/neon-http`), keep the cursor outside the graph transaction. The
 pattern is at-least-once plus idempotence: a crash after the graph writes but
 before the cursor write replays the batch, which is safe precisely because the
 projector converges.
 
+This fallback requires a raw Store. A schema-managed Store refuses writes on a
+non-transactional backend because it cannot hold the schema-version fence. Use a
+transactional driver, or deliberately construct a raw Store and own schema/write
+coordination yourself.
+
 ```typescript
-await store.transaction(async (tx) => {
-  for (const change of batch.changes) {
-    await projectChange(tx, change);
-  }
-});
+for (const change of batch.changes) {
+  // Each successful projection may commit before a later projection or cursor write fails.
+  await projectChange(store, change);
+}
 
 await cursorStore.save({
   sourceId: batch.sourceId,
@@ -197,11 +230,28 @@ built for. It is also the one that churns recorded history the hardest: every
 re-delivery of a byte-identical change rewrites its row, allocating a fresh
 recorded instant and a new history row per delivery. Enable
 [`coalesceUnchangedUpserts: true`](/schemas-stores/#createstoregraph-backend-options)
-on the store to suppress that: an `upsertById` whose validated props already
-equal the live row performs no write, no history row, and no revision advance,
-and resolves with the existing node. See
+on the store to suppress that. A node `upsertById` and an edge endpoint
+get-or-create update perform no write, history row, or revision advance when
+its validated props and requested window already equal the live row. Their bulk
+forms have the same behavior. See
 [Transaction Receipts](#transaction-receipts) for how a coalesced upsert reads on
 a receipt.
+
+Every captured transaction receives one versioned recorded instant: a strict
+per-graph logical revision paired with a non-decreasing physical wall-time
+high-water mark. High commit rates consume revisions without pushing the
+timestamp beyond observed wall time. A backward clock correction holds the
+physical component at its prior value until the clock catches up, preserving
+cumulative diagonal checkpoint replay. Group changes by their durable
+replay/checkpoint boundary so one addressable source position consumes one
+recorded instant where practical. Cap transaction size independently: a source
+may expose one coarse checkpoint for a very large initial sync, but that does
+not make an unbounded transaction safe.
+
+Recorded clocks are independent per graph, and there is no cross-graph
+`recordedNow()` snapshot. See
+[Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time)
+for the anchor encoding and replay semantics.
 
 **Coalescing eliminates *re-delivery* churn, not replay cost.** The win is
 scoped to re-delivery of the current value — the realistic at-least-once case,
@@ -216,6 +266,15 @@ supersede each other. It also leaves a spurious `a=2 → a=1 → a=2` band in th
 live store's recorded history, stamped at replay time. To rebuild without
 either cost, replay into a **fresh store** and publish it, rather than
 re-applying the log over the current state.
+
+**Historical ends need a historical start on the creating event.** When a fresh
+store creates a row without a stated `validFrom`, TypeGraph uses the ingest
+instant. A later replayed event whose historical `validTo` precedes that ingest
+instant is therefore an `INVERTED_VALIDITY_WINDOW`, even if the source timeline
+itself was ordered. An event-time decoder must emit `validFrom` on the event
+that first creates each node or edge; `onImmutableLowerBound: "preserve"` then
+lets later revisions carry their source bound without trying to move the stored
+start.
 
 ### In-graph cursors and the receipt
 
@@ -258,7 +317,8 @@ The receipt carries **two signals that deliberately disagree**, and a
 materializer needs both. `receipt.writes.total` counts completed write intents at
 the collection surface; `receipt.recorded` (on a `{ history: true }` store) is
 the recorded commit instant this transaction allocated, or `undefined` when
-nothing was captured. The common, load-bearing case is where they diverge:
+nothing was captured or explicitly requested. The common, load-bearing case is
+where they diverge:
 
 | case                                          | `writes.total` | `recorded`      |
 | --------------------------------------------- | -------------- | --------------- |
@@ -266,6 +326,7 @@ nothing was captured. The common, load-bearing case is where they diverge:
 | no-op delete of an absent key (a real intent) | `1`            | **`undefined`** |
 | coalesced upsert (value-identical, opt-in)    | `1`            | **`undefined`** |
 | projector dropped the change                  | `0`            | `undefined`     |
+| explicit recorded revision request            | `0`            | defined         |
 
 A no-op delete completes a write *intent* but captures nothing; a
 [coalesced upsert](/schemas-stores/#createstoregraph-backend-options) is the same
@@ -273,6 +334,8 @@ shape by design. In both, `writes.total` counts (the method resolved) but
 `recorded` is `undefined`. **An offset whose transaction reports
 `recorded === undefined` must carry the prior anchor forward** — otherwise
 replay-by-offset breaks at exactly the offsets where nothing changed.
+Call `requestRecordedRevision()` when that offset must instead receive its own
+anchor despite making no entity change.
 
 Two counting rules bite materializers specifically, both worth internalizing
 before you read `writes.total` as "the projector did work":
@@ -304,6 +367,25 @@ anchor after the commit — as a separate step — would reopen the exactly-once
 the adopted transaction exists to close: a crash between the commit and the
 anchor write leaves the cursor advanced with no anchor, and that offset can never
 be replayed.
+
+If an accepted source position must be addressable even when the projector makes
+no entity changes, request an explicit revision in the callback. Await the
+`withRecordedTransaction` outcome, then insert the application-owned cursor and
+returned anchor through the still-open native transaction before its commit:
+
+```typescript
+await db.transaction(async (dbTx) => {
+  const { receipt } = await store.withRecordedTransaction(dbTx, async (tx) => {
+    tx.requestRecordedRevision();
+    await projectBatch(tx, batch);
+  });
+  await dbTx.insert(cursors).values({
+    source: batch.source,
+    offset: batch.offset,
+    recorded: receipt.recorded,
+  });
+});
+```
 
 ```typescript
 let lastAnchor: RecordedInstant | undefined = await loadLastAnchor(); // on resume
@@ -379,13 +461,18 @@ plain string — re-brand it with `asRecordedInstant` on the way back before
 passing it to `asOfRecorded`:
 
 ```typescript
-import { asRecordedInstant } from "@nicia-ai/typegraph";
+import { asRecordedInstant } from "@nicia-ai/typegraph/core";
 
 const stored = await offsetAnchors.anchorFor(offset); // plain string from storage
 const anchor = asRecordedInstant(stored); // validates + re-brands
 const graphAtOffset = store.asOfRecorded(anchor);
 const issue = await graphAtOffset.nodes.Issue.getById(issueId);
 ```
+
+If the cursor table contains timestamp-only anchors from the recorded-time
+preview, migrate the TypeGraph relations first and remap those cursor values
+with `migrateRecordedAnchor({ backend, graphId, anchor: stored })`. See
+[Migrating preview recorded time](/schema-management#migrating-preview-recorded-time).
 
 That answers "what did the materialized graph know after offset X?" even if
 later corrections changed or deleted rows. See

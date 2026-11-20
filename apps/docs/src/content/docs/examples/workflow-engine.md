@@ -15,7 +15,17 @@ This example builds a workflow engine with:
 
 ```typescript
 import { z } from "zod";
-import { defineNode, defineEdge, defineGraph, implies } from "@nicia-ai/typegraph";
+import {
+  defineNode,
+  defineEdge,
+  defineGraph,
+  implies,
+  asEdgeId,
+  type Node,
+  type NodeId,
+  type NodeProps,
+  type TransactionContext,
+} from "@nicia-ai/typegraph";
 
 // Workflow definition (template)
 const WorkflowDefinition = defineNode("WorkflowDefinition", {
@@ -32,7 +42,7 @@ const State = defineNode("State", {
   schema: z.object({
     name: z.string(),
     type: z.enum(["initial", "intermediate", "terminal", "approval"]),
-    config: z.record(z.unknown()).optional(), // State-specific config
+    config: z.record(z.string(), z.unknown()).optional(), // State-specific config
   }),
 });
 
@@ -51,7 +61,7 @@ const WorkflowInstance = defineNode("WorkflowInstance", {
     referenceId: z.string(), // ID of the entity being processed
     referenceType: z.string(), // Type of entity (e.g., "PurchaseOrder")
     status: z.enum(["active", "completed", "cancelled", "failed"]).default("active"),
-    data: z.record(z.unknown()).optional(), // Instance-specific data
+    data: z.record(z.string(), z.unknown()).optional(), // Instance-specific data
     createdAt: z.string().datetime(),
     completedAt: z.string().datetime().optional(),
   }),
@@ -66,7 +76,7 @@ const Task = defineNode("Task", {
     status: z.enum(["pending", "in_progress", "completed", "rejected", "escalated"]).default("pending"),
     dueDate: z.string().datetime().optional(),
     priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
-    result: z.record(z.unknown()).optional(),
+    result: z.record(z.string(), z.unknown()).optional(),
     completedAt: z.string().datetime().optional(),
   }),
 });
@@ -269,7 +279,7 @@ interface StartWorkflowInput {
   referenceId: string;
   referenceType: string;
   data?: Record<string, unknown>;
-  createdByUserId: string;
+  createdByUserId: NodeId<typeof User>;
 }
 
 async function startWorkflow(input: StartWorkflowInput): Promise<Node<typeof WorkflowInstance>> {
@@ -336,9 +346,9 @@ interface AvailableTransition {
 }
 
 async function getAvailableTransitions(
-  instanceId: string,
-  userId: string
-): Promise<AvailableTransition[]> {
+  instanceId: NodeId<typeof WorkflowInstance>,
+  userId: NodeId<typeof User>
+): Promise<readonly AvailableTransition[]> {
   // Get user's role
   const user = await store.nodes.User.getById(userId);
   if (!user) throw new Error(`User not found: ${userId}`);
@@ -387,9 +397,9 @@ async function getAvailableTransitions(
 
 ```typescript
 async function executeTransition(
-  instanceId: string,
+  instanceId: NodeId<typeof WorkflowInstance>,
   transitionId: string,
-  userId: string,
+  userId: NodeId<typeof User>,
   result?: Record<string, unknown>
 ): Promise<void> {
   await store.transaction(async (tx) => {
@@ -418,7 +428,8 @@ async function executeTransition(
       .select((ctx) => ctx.s)
       .first();
 
-    // Remove current state edge
+    // End the current state edge. Ending it, rather than deleting it, keeps it
+    // readable under includeEnded, which the instance timeline below relies on.
     const currentStateEdge = await tx
       .query()
       .from("WorkflowInstance", "i")
@@ -428,16 +439,21 @@ async function executeTransition(
       .select((ctx) => ctx.e.id)
       .first();
 
+    const transitionedAt = new Date().toISOString();
     if (currentStateEdge) {
-      await tx.edges.currentState.delete(currentStateEdge);
+      await tx.edges.currentState.update(
+        asEdgeId<typeof currentState>(currentStateEdge),
+        {},
+        { validTo: transitionedAt },
+      );
     }
 
-    // Add new state edge
-    await tx.edges.currentState.create(instance, targetState!, {});
+    // Add new state edge, valid from the instant the old one ended
+    await tx.edges.currentState.create(instance, targetState!, {}, { validFrom: transitionedAt });
 
     // Update instance data
     const updatedData = { ...instance.data, lastTransition: transition.name, ...result };
-    const updates: Partial<WorkflowInstanceProps> = { data: updatedData };
+    const updates: Partial<NodeProps<typeof WorkflowInstance>> = { data: updatedData };
 
     // Check if terminal state
     if (targetState!.type === "terminal") {
@@ -479,8 +495,8 @@ async function executeTransition(
 
 ```typescript
 async function createApprovalTask(
-  tx: Transaction,
-  instanceId: string,
+  tx: TransactionContext<typeof graph>,
+  instanceId: NodeId<typeof WorkflowInstance>,
   state: Node<typeof State>,
   requesterId: string
 ): Promise<void> {
@@ -507,10 +523,9 @@ async function createApprovalTask(
       .recursive({ depth: "depth" })
       .to("User", "manager")
       .whereNode("manager", (u) => u.role.eq(config.approverRole))
-      .orderBy("depth", "asc")
-      .select((ctx) => ctx.manager)
+      .select((ctx) => ({ manager: ctx.manager, depth: ctx.depth }))
       .execute();
-    approver = candidates[0];
+    approver = candidates.toSorted((a, b) => a.depth - b.depth)[0]?.manager;
   }
 
   if (!approver) {
@@ -570,9 +585,9 @@ interface TaskWithContext {
 }
 
 async function getUserTasks(
-  userId: string,
+  userId: NodeId<typeof User>,
   status?: "pending" | "in_progress"
-): Promise<TaskWithContext[]> {
+): Promise<readonly TaskWithContext[]> {
   let query = store
     .query()
     .from("User", "u")
@@ -591,6 +606,7 @@ async function getUserTasks(
     .to("WorkflowInstance", "i")
     .traverse("usesDefinition", "e3")
     .to("WorkflowDefinition", "w")
+    .orderBy("t", "dueDate", "asc")
     .select((ctx) => ({
       id: ctx.t.id,
       title: ctx.t.title,
@@ -602,7 +618,6 @@ async function getUserTasks(
       referenceId: ctx.i.referenceId,
       referenceType: ctx.i.referenceType,
     }))
-    .orderBy((ctx) => ctx.t.dueDate, "asc")
     .execute();
 }
 ```
@@ -611,8 +626,8 @@ async function getUserTasks(
 
 ```typescript
 async function completeTask(
-  taskId: string,
-  userId: string,
+  taskId: NodeId<typeof Task>,
+  userId: NodeId<typeof User>,
   decision: "approve" | "reject",
   comment?: string
 ): Promise<void> {
@@ -682,7 +697,7 @@ async function completeTask(
 ### Check Overdue Tasks
 
 ```typescript
-async function getOverdueTasks(): Promise<Array<{ task: TaskProps; assignee: UserProps }>> {
+async function getOverdueTasks(): Promise<ReadonlyArray<{ task: Node<typeof Task>; assignee: Node<typeof User> }>> {
   const now = new Date().toISOString();
 
   return store
@@ -707,7 +722,7 @@ async function getOverdueTasks(): Promise<Array<{ task: TaskProps; assignee: Use
 ### Escalate Task
 
 ```typescript
-async function escalateTask(taskId: string): Promise<void> {
+async function escalateTask(taskId: NodeId<typeof Task>): Promise<void> {
   await store.transaction(async (tx) => {
     // Get current assignee
     const currentAssignment = await tx
@@ -744,7 +759,7 @@ async function escalateTask(taskId: string): Promise<void> {
     });
 
     // Reassign to manager
-    await tx.edges.assignedTo.delete(currentAssignment.edgeId);
+    await tx.edges.assignedTo.delete(asEdgeId<typeof assignedTo>(currentAssignment.edgeId));
     const task = await tx.nodes.Task.getById(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     await tx.edges.assignedTo.create(task, manager, {});
@@ -791,11 +806,12 @@ interface TimelineEvent {
   actor?: string;
 }
 
-async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]> {
+async function getInstanceTimeline(instanceId: NodeId<typeof WorkflowInstance>): Promise<readonly TimelineEvent[]> {
   const events: TimelineEvent[] = [];
 
-  // Run both history reads snapshot-consistent on a single connection so the
-  // state-change and task views can't observe interleaved writes.
+  // Run both history reads in sequence. Two statements, not one, and
+  // not a snapshot — under read-committed isolation the task view can observe
+  // a write the state-change view did not.
   const [stateHistory, tasks] = await store.batch(
     store
       .query()
@@ -804,10 +820,10 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       .whereNode("i", (i) => i.id.eq(instanceId))
       .traverse("currentState", "e")
       .to("State", "s")
-      .orderBy("e", "validFrom", "asc")
+      .orderBy("e", "meta.validFrom", "asc")
       .select((ctx) => ({
         stateName: ctx.s.name,
-        timestamp: ctx.e.validFrom,
+        timestamp: ctx.e.meta.validFrom,
       })),
     store
       .query()
@@ -820,7 +836,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
       .select((ctx) => ({
         title: ctx.t.title,
         status: ctx.t.status,
-        createdAt: ctx.t.createdAt,
+        createdAt: ctx.t.meta.createdAt,
         completedAt: ctx.t.completedAt,
         assignee: ctx.u?.name,
       })),
@@ -828,7 +844,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
 
   for (const state of stateHistory) {
     events.push({
-      timestamp: state.timestamp,
+      timestamp: state.timestamp ?? "",
       type: "state_change",
       description: `Entered state: ${state.stateName}`,
     });
@@ -836,7 +852,7 @@ async function getInstanceTimeline(instanceId: string): Promise<TimelineEvent[]>
 
   for (const task of tasks) {
     events.push({
-      timestamp: task.createdAt.toISOString(),
+      timestamp: task.createdAt,
       type: "task_created",
       description: `Task created: ${task.title}`,
       actor: task.assignee,

@@ -1,17 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  asRecordedInstant,
-  createSqlSchema,
-  createStore,
-  type NodeId,
-  type RecordedInstant,
-  recordedRelation,
-} from "../../../src";
+import { createStore, type NodeId } from "../../../src";
+import { asRecordedInstant, type RecordedInstant } from "../../../src/core";
 import {
   resolveReadCoordinate,
   withRecordedCoordinate,
 } from "../../../src/core/temporal";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
+import { createSqlSchema, recordedRelation } from "../../../src/query-entry";
 import { STORE_RUNTIME } from "../../../src/store/runtime-port";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -170,6 +167,121 @@ export function registerRecordedReadBindingIntegrationTests(
       expect(recordedAfterUncapturedWrite?.since).toBe("2021");
     });
 
+    it("binds externally populated recorded identity assertions", async () => {
+      const backend = context.getStore().backend;
+      const historyStore = await createHistoryStore(context);
+      const person = await historyStore.nodes.Person.create({ name: "Alice" });
+      const company = await historyStore.nodes.Company.create({ name: "Acme" });
+      const assertion = await historyStore.identity.assertSame(person, company);
+      const assertedAt = requireRecordedInstant(
+        await historyStore.recordedNow(),
+        "expected recorded instant after identity assertion",
+      );
+      await historyStore.identity.retractAssertion(assertion.assertion.id);
+
+      const readStore = createStore(integrationTestGraph, backend, {
+        recordedRead: recordedRelation({
+          schema: createSqlSchema(backend.tableNames),
+        }),
+      });
+
+      expect(
+        await readStore
+          .asOfRecorded(assertedAt)
+          .identity.areSame(person, company),
+      ).toBe(true);
+      expect(await readStore.identity.areSame(person, company)).toBe(false);
+    });
+
+    it("routes recorded identity reads through the binding's DIVERGENT table names", async () => {
+      // Regression guard for the recorded-read binding bypass: identity reads
+      // at a recorded coordinate must reconstruct from the SAME recorded
+      // relation node reads use — the binding's tables — not TypeGraph's
+      // default-named recorded identity table. The sibling test above binds a
+      // relation whose names are identical to the live schema, so it cannot
+      // observe the bypass. Here the recorded identity assertions live under a
+      // DIVERGENT table name while the default-named table is emptied, so a
+      // store that read the default names would see no assertion and wrongly
+      // report the pair as distinct.
+      const backend = context.getStore().backend;
+      const executeStatement = backend.executeStatement;
+      if (executeStatement === undefined) {
+        throw new Error(
+          "Operational Identity requires a backend with statement execution.",
+        );
+      }
+
+      const historyStore = await createHistoryStore(context);
+      const person = await historyStore.nodes.Person.create({ name: "Alice" });
+      const company = await historyStore.nodes.Company.create({ name: "Acme" });
+      const assertion = await historyStore.identity.assertSame(person, company);
+      const assertedAt = requireRecordedInstant(
+        await historyStore.recordedNow(),
+        "expected recorded instant after identity assertion",
+      );
+      await historyStore.identity.retractAssertion(assertion.assertion.id);
+
+      // Move the captured recorded identity assertions to a divergent table
+      // name and empty the default-named one, so only the divergent table
+      // holds the recorded truth.
+      const defaultRecordedIdentity =
+        backend.tableNames?.recordedIdentityAssertions ??
+        "typegraph_recorded_identity_assertions";
+      const divergentRecordedIdentity =
+        "divergent_recorded_identity_assertions";
+      // Server-Postgres lanes share one database across backend variants, so
+      // a previous lane's divergent table may still exist.
+      await executeStatement(
+        asCompiledStatementSql(
+          sql`DROP TABLE IF EXISTS ${sql.raw(divergentRecordedIdentity)}`,
+        ),
+      );
+      await executeStatement(
+        asCompiledStatementSql(
+          sql`CREATE TABLE ${sql.raw(divergentRecordedIdentity)} AS SELECT * FROM ${sql.raw(defaultRecordedIdentity)}`,
+        ),
+      );
+      await executeStatement(
+        asCompiledStatementSql(
+          sql`DELETE FROM ${sql.raw(defaultRecordedIdentity)}`,
+        ),
+      );
+
+      // The read store keeps default names for its own schema; only the bound
+      // recorded relation points identity assertions at the divergent table.
+      const readStore = createStore(integrationTestGraph, backend, {
+        recordedRead: recordedRelation({
+          schema: createSqlSchema({
+            ...backend.tableNames,
+            recordedIdentityAssertions: divergentRecordedIdentity,
+          }),
+        }),
+      });
+
+      // Node reads at the coordinate still see real rows (they already route
+      // through the binding), proving identity must read the same relation.
+      const recordedPerson = await readStore
+        .asOfRecorded(assertedAt)
+        .nodes.Person.getById(person.id);
+      expect(recordedPerson?.name).toBe("Alice");
+
+      const members = await readStore
+        .asOfRecorded(assertedAt)
+        .identity.membersOf(person);
+      expect(members).toEqual(
+        expect.arrayContaining([
+          { kind: "Person", id: person.id },
+          { kind: "Company", id: company.id },
+        ]),
+      );
+      expect(members).toHaveLength(2);
+      expect(
+        await readStore
+          .asOfRecorded(assertedAt)
+          .identity.areSame(person, company),
+      ).toBe(true);
+    });
+
     it("recordedNow() refuses on a store without history capture", async () => {
       await expect(context.getStore().recordedNow()).rejects.toThrow(
         "recordedNow() requires a store created with { history: true }",
@@ -180,7 +292,9 @@ export function registerRecordedReadBindingIntegrationTests(
       expect(() =>
         context
           .getStore()
-          .asOfRecorded(asRecordedInstant("2026-01-01T00:00:00.000Z")),
+          .asOfRecorded(
+            asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
+          ),
       ).toThrow("asOfRecorded() requires a recorded read relation");
     });
 
@@ -189,7 +303,9 @@ export function registerRecordedReadBindingIntegrationTests(
         context
           .getStore()
           .asOf("2026-01-01T00:00:00.000Z")
-          .asOfRecorded(asRecordedInstant("2026-01-01T00:00:00.000Z")),
+          .asOfRecorded(
+            asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
+          ),
       ).toThrow("asOfRecorded() requires a recorded read relation");
     });
 
@@ -198,7 +314,7 @@ export function registerRecordedReadBindingIntegrationTests(
         (typeof integrationTestGraph)["nodes"]["Person"]["type"];
       const coordinate = withRecordedCoordinate(
         resolveReadCoordinate("asOf", "2026-01-01T00:00:00.000Z"),
-        asRecordedInstant("2026-01-01T00:00:00.000Z"),
+        asRecordedInstant("r1:0000000000000001:2026-01-01T00:00:00.000Z"),
       );
 
       await expect(

@@ -1,11 +1,48 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  expr,
+  inverseOf,
+} from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   seedKnowsChain,
   seedPeopleForRecursiveDepthTracking,
 } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
+
+const QpPerson = defineNode("QpPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const qpParentOf = defineEdge("qpParentOf", {
+  schema: z.object({ weight: z.number() }),
+});
+const qpChildOf = defineEdge("qpChildOf", {
+  schema: z.object({ weight: z.number() }),
+});
+const qpSibling = defineEdge("qpSibling", {
+  schema: z.object({ weight: z.number() }),
+});
+
+/**
+ * Inverse and symmetric edge kinds, so the default `expand: "inverse"`
+ * compiles a mixed-orientation traversal: `qpParentOf` walked as stored and
+ * `qpChildOf` walked reversed, or `qpSibling` walked both ways.
+ */
+const qualifiedInverseGraph = defineGraph({
+  id: "qualified_inverse_paths",
+  nodes: { QpPerson: { type: QpPerson } },
+  edges: {
+    qpParentOf: { type: qpParentOf, from: [QpPerson], to: [QpPerson] },
+    qpChildOf: { type: qpChildOf, from: [QpPerson], to: [QpPerson] },
+    qpSibling: { type: qpSibling, from: [QpPerson], to: [QpPerson] },
+  },
+  ontology: [inverseOf(qpParentOf, qpChildOf), inverseOf(qpSibling, qpSibling)],
+});
 
 export function registerRecursiveIntegrationTests(
   context: IntegrationTestContext,
@@ -372,6 +409,316 @@ export function registerRecursiveIntegrationTests(
       expect(vp).toBeDefined();
       expect(vp.level).toBe(1);
       expect(vp.route.length).toBe(2);
+    });
+  });
+
+  describe("Qualified recursive paths", () => {
+    it("honors explicit projection names and refuses recursive output collisions and scalar edges", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({ name: "Projection root" });
+      const target = await store.nodes.Person.create({
+        name: "Projection target",
+      });
+      await store.edges.knows.create(root, target, {});
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({
+          maxHops: 2,
+          path: { format: "qualified", alias: "route" },
+        })
+        .to("Person", "target");
+      expect(
+        await query
+          .project((fields) => ({
+            root_id: expr.literal("selected"),
+            name: fields.target.name,
+            found: fields.$exists((subquery, outer) =>
+              subquery
+                .from("Person", "candidate")
+                .whereNode("candidate", (_person, inner) =>
+                  expr.eq(inner.candidate.id, outer.target.id),
+                )
+                .project((inner) => ({ id: inner.candidate.id })),
+            ),
+          }))
+          .execute(),
+      ).toEqual([
+        { root_id: "selected", name: "Projection target", found: true },
+      ]);
+      expect(() =>
+        query.project((fields) => ({ route: fields.target.name })).compile(),
+      ).toThrow(/collides with another result column/);
+      await expect(
+        query.select((row) => row.edge.id).execute(),
+      ).rejects.toThrow(/does not support alias/);
+      expect(() =>
+        query.project((fields) => ({ edgeId: fields.edge.id })).compile(),
+      ).toThrow(/Scalar recursive-edge projection/);
+    });
+
+    it("returns ordered node and edge references through execution, preparation, and batching", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({ name: "Qualified root" });
+      const middle = await store.nodes.Person.create({
+        name: "Qualified middle",
+      });
+      const leaf = await store.nodes.Person.create({ name: "Qualified leaf" });
+      const first = await store.edges.knows.create(root, middle, {});
+      const second = await store.edges.knows.create(middle, leaf, {});
+      await store.edges.knows.create(leaf, root, {});
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({
+          maxHops: 3,
+          path: { format: "qualified", alias: "route" },
+          depth: true,
+        })
+        .to("Person", "target")
+        .orderBy("target", "name", "asc")
+        .select((row) => ({
+          name: row.target.name,
+          depth: row.target_depth,
+          route: row.route,
+        }));
+      const expectedLeaf = {
+        name: "Qualified leaf",
+        depth: 2,
+        route: [
+          { type: "node", kind: "Person", id: root.id },
+          { type: "edge", kind: "knows", id: first.id, direction: "out" },
+          { type: "node", kind: "Person", id: middle.id },
+          { type: "edge", kind: "knows", id: second.id, direction: "out" },
+          { type: "node", kind: "Person", id: leaf.id },
+        ],
+      };
+      const direct = await query.execute();
+      expect(direct).toHaveLength(2);
+      expect(direct[0]).toEqual(expectedLeaf);
+      expect(await query.prepare().execute({})).toEqual(direct);
+      expect(await store.batchOnce(() => [query, query])).toEqual([
+        direct,
+        direct,
+      ]);
+    });
+
+    it("preserves polymorphic endpoints and incoming direction with delimiter-bearing IDs", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create(
+        { name: "Qualified employee" },
+        { id: 'person|,"id' },
+      );
+      const company = await store.nodes.Company.create(
+        { name: "Qualified employer" },
+        { id: 'company|,"id' },
+      );
+      const edge = await store.edges.worksAt.create(
+        person,
+        company,
+        { role: "Engineer" },
+        { id: 'edge|,"id' },
+      );
+      const rows = await store
+        .query()
+        .from("Company", "company")
+        .whereNode("company", (value) => value.id.eq(company.id))
+        .traverse("worksAt", "employment", { direction: "in", expand: "none" })
+        .recursive({
+          minHops: 1,
+          maxHops: 1,
+          cyclePolicy: "allow",
+          path: { format: "qualified" },
+        })
+        .to("Person", "employee")
+        .select((row) => row.employee_path)
+        .execute();
+      expect(rows).toEqual([
+        [
+          { type: "node", kind: "Company", id: company.id },
+          { type: "edge", kind: "worksAt", id: edge.id, direction: "in" },
+          { type: "node", kind: "Person", id: person.id },
+        ],
+      ]);
+    });
+
+    it("labels each hop's direction across an inverse-expanded traversal", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const grandparent = await store.nodes.QpPerson.create({
+        name: "grandparent",
+      });
+      const parent = await store.nodes.QpPerson.create({ name: "parent" });
+      const child = await store.nodes.QpPerson.create({ name: "child" });
+      const parentEdge = await store.edges.qpParentOf.create(
+        grandparent,
+        parent,
+        { weight: 1 },
+      );
+      const childEdge = await store.edges.qpChildOf.create(child, parent, {
+        weight: 2,
+      });
+      const expectedRoute = [
+        { type: "node", kind: "QpPerson", id: grandparent.id },
+        {
+          type: "edge",
+          kind: "qpParentOf",
+          id: parentEdge.id,
+          direction: "out",
+        },
+        { type: "node", kind: "QpPerson", id: parent.id },
+        { type: "edge", kind: "qpChildOf", id: childEdge.id, direction: "in" },
+        { type: "node", kind: "QpPerson", id: child.id },
+      ];
+
+      const unfiltered = await store
+        .query()
+        .from("QpPerson", "root")
+        .whereNode("root", (person) => person.id.eq(grandparent.id))
+        .traverse("qpParentOf", "edge", { expand: "inverse" })
+        .recursive({ maxHops: 2, path: { format: "qualified" } })
+        .to("QpPerson", "descendant")
+        .orderBy("descendant", "name", "asc")
+        .select((row) => row.descendant_path)
+        .execute();
+      expect(unfiltered).toEqual([expectedRoute, expectedRoute.slice(0, 3)]);
+
+      const filtered = await store
+        .query()
+        .from("QpPerson", "root")
+        .whereNode("root", (person) => person.id.eq(grandparent.id))
+        .traverse("qpParentOf", "edge", { expand: "inverse" })
+        .whereEdge("edge", (edge) => edge.weight.gte(1))
+        .recursive({ maxHops: 2, path: { format: "qualified" } })
+        .to("QpPerson", "descendant")
+        .orderBy("descendant", "name", "asc")
+        .select((row) => row.descendant_path)
+        .execute();
+      expect(filtered).toEqual([expectedRoute, expectedRoute.slice(0, 3)]);
+    });
+
+    it("labels both directions of a symmetric edge kind", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const middle = await store.nodes.QpPerson.create({ name: "middle" });
+      const outgoing = await store.nodes.QpPerson.create({ name: "outgoing" });
+      const incoming = await store.nodes.QpPerson.create({ name: "incoming" });
+      const outgoingEdge = await store.edges.qpSibling.create(
+        middle,
+        outgoing,
+        { weight: 1 },
+      );
+      const incomingEdge = await store.edges.qpSibling.create(
+        incoming,
+        middle,
+        { weight: 1 },
+      );
+      const expectedRoutes = [
+        [
+          { type: "node", kind: "QpPerson", id: middle.id },
+          {
+            type: "edge",
+            kind: "qpSibling",
+            id: incomingEdge.id,
+            direction: "in",
+          },
+          { type: "node", kind: "QpPerson", id: incoming.id },
+        ],
+        [
+          { type: "node", kind: "QpPerson", id: middle.id },
+          {
+            type: "edge",
+            kind: "qpSibling",
+            id: outgoingEdge.id,
+            direction: "out",
+          },
+          { type: "node", kind: "QpPerson", id: outgoing.id },
+        ],
+      ];
+
+      for (const withEdgePredicate of [false, true]) {
+        const traversal = store
+          .query()
+          .from("QpPerson", "root")
+          .whereNode("root", (person) => person.id.eq(middle.id))
+          .traverse("qpSibling", "edge", { expand: "inverse" });
+        const rows = await (
+          withEdgePredicate ?
+            traversal.whereEdge("edge", (edge) => edge.weight.eq(1))
+          : traversal)
+          .recursive({
+            minHops: 1,
+            maxHops: 1,
+            path: { format: "qualified" },
+          })
+          .to("QpPerson", "peer")
+          .orderBy("peer", "name", "asc")
+          .select((row) => row.peer_path)
+          .execute();
+        expect(rows).toEqual(expectedRoutes);
+      }
+    });
+
+    it("returns a self-loop of a symmetric edge kind once, though both orientations read it", async () => {
+      const store = await context.createStore(qualifiedInverseGraph);
+      const middle = await store.nodes.QpPerson.create({ name: "middle" });
+      const outgoing = await store.nodes.QpPerson.create({ name: "outgoing" });
+      await store.edges.qpSibling.create(middle, middle, { weight: 1 });
+      await store.edges.qpSibling.create(middle, outgoing, { weight: 1 });
+
+      // `qpSibling` is its own inverse, so it sits in both the direct and the
+      // inverse arm of the walk's directed-edge relation, and a self-loop
+      // reads identically through either. `cyclePolicy: "allow"` keeps the
+      // revisit of the start node, so a duplicate would surface as a row;
+      // `maxHops: 2` keeps the walk on the recursive CTE (one hop compiles to
+      // a plain join).
+      //
+      // Walks, one per physical edge and orientation: middle -loop-> middle,
+      // middle -> outgoing; then from middle again the same two, and from
+      // outgoing back to middle.
+      for (const withEdgePredicate of [false, true]) {
+        const traversal = store
+          .query()
+          .from("QpPerson", "root")
+          .whereNode("root", (person) => person.id.eq(middle.id))
+          .traverse("qpSibling", "edge", { expand: "inverse" });
+        const rows = await (
+          withEdgePredicate ?
+            traversal.whereEdge("edge", (edge) => edge.weight.eq(1))
+          : traversal)
+          .recursive({ minHops: 1, maxHops: 2, cyclePolicy: "allow" })
+          .to("QpPerson", "peer")
+          .select((row) => row.peer.name)
+          .execute();
+        expect(
+          rows.toSorted(),
+          `withEdgePredicate: ${withEdgePredicate}`,
+        ).toEqual(["middle", "middle", "middle", "outgoing", "outgoing"]);
+      }
+    });
+
+    it("includes only the seed when expansion stops at depth zero", async () => {
+      const store = context.getStore();
+      const root = await store.nodes.Person.create({
+        name: "Qualified stop root",
+      });
+      const query = store
+        .query()
+        .from("Person", "root")
+        .whereNode("root", (person) => person.id.eq(root.id))
+        .traverse("knows", "edge", { expand: "none" })
+        .recursive({ minHops: 0, maxHops: 2, path: { format: "qualified" } })
+        .to("Person", "target")
+        .stopExpansion("target", (person) => person.id.eq(root.id))
+        .select((row) => ({ node: row.target, route: row.target_path }));
+      const rows = await query.execute();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.node.id).toBe(root.id);
+      expect(rows[0]?.route).toEqual([
+        { type: "node", kind: "Person", id: root.id },
+      ]);
     });
   });
 }

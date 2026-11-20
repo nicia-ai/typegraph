@@ -39,9 +39,42 @@ const results = await store
 // results: readonly { name: string; email: string | undefined }[]
 ```
 
+## executeChecked(expectedSchemaVersion)
+
+Check a cached reconciled schema while reading data in one SQL statement:
+
+```typescript
+const rows = await store.query()
+  .from("Person", "person")
+  .select((ctx) => ctx.person)
+  .executeChecked(store.reconciledSchema.version);
+```
+
+The active schema version and data come from the same statement snapshot. A mismatch throws
+`SchemaChangedError` with `details.graphId`, `details.expected`, and `details.actual` before
+calling the selector, even when the data query matches no rows. `undefined` means no active
+schema; it is distinct from version zero. On mismatch, reload the reconciled schema, rebuild
+the query against the reopened store, and retry. Retry in a new transaction if the old one
+holds a repeatable-read snapshot.
+
+This is an explicit alternative to a standalone `getCommittedSchemaVersion` probe on the first
+relational query. It checks that statement only; subsequent request reads can observe later
+commits. It neither locks the schema nor replaces write fences, and does not alter store-open
+or application cache policies.
+
+Checked reads fetch full rows and support relational traversals, ordering, offsets, and limits.
+Recursive and relevance-ranked queries are refused with `ConfigurationError`; use a separate
+probe for those. Named parameters must be bound as ordinary values before building the query.
+Bundled SQLite and PostgreSQL backends provide the required `tableNames.schemaVersions` binding.
+A custom backend without it is refused before executing SQL. A custom binding must name a
+relation with the standard `graph_id`, `version`, and `is_active` columns and one active row
+per graph, consistent with `getActiveSchema`.
+
 ## first()
 
-Get the first result or `undefined`:
+Get the first selected result or `undefined`. An existing `limit(0)` remains empty;
+`offset()` is preserved. Add `orderBy()` when the choice of first row must be deterministic.
+Only the returned row is passed to the selector:
 
 ```typescript
 const alice = await store
@@ -58,7 +91,12 @@ if (alice) {
 
 ## count()
 
-Count matching results without fetching data:
+Count matching SQL rows without fetching their data or running a `select()` callback.
+`count()` and `exists()` are available before and after `select()`. They preserve
+`groupBy()`, `having()`, `limit()`, and `offset()`: a grouped query counts groups,
+and `limit(0).count()` returns zero. Traversals count match rows, so multiple
+relationships can count the same node more than once. Bind named parameters as
+concrete values before using these terminals:
 
 ```typescript
 const activeCount = await store
@@ -86,10 +124,21 @@ const hasActiveUsers = await store
 
 ## Cursor Pagination
 
+Use `first`/`after` for forward pages or `last`/`before` for backward pages.
+Page sizes must be positive safe integers. Do not combine directions or add
+query-level `limit()`/`offset()` to a paginated or streamed query; those bounds
+are refused rather than silently discarded. Use `limit()`/`offset()` with
+`execute()` for offset pagination.
+
 For large datasets, cursor-based pagination is more efficient than `limit`/`offset`. It uses keyset
 pagination which doesn't degrade as you go deeper.
 
 ### paginate()
+
+Nullable sort values follow the same ordering across page boundaries as in `execute()`:
+ascending order places missing values last, and descending order places them first. Forward and
+backward cursors retain rows in both the missing-value and non-missing-value groups. Sort fields
+do not have to appear in the selected result; pagination retains them internally for its cursors.
 
 ```typescript
 const firstPage = await store
@@ -149,6 +198,33 @@ if (lastPage.hasPrevPage && lastPage.prevCursor) {
 }
 ```
 
+### Batch cursor pages with `page()`
+
+`paginate()` executes immediately. Use `page()` to build the same cursor-bounded read without
+executing it, so the page can compose with other independent reads in one `batchOnce()` statement:
+
+```typescript
+const people = store
+  .query()
+  .from("Person", "person")
+  .orderBy("person", "name")
+  .select((fields) => fields.person);
+
+const [page, companies] = await store.batchOnce(() => [
+  people.page({ first: 20, after: cursor }),
+  store
+    .query()
+    .from("Company", "company")
+    .orderBy("company", "name")
+    .select((fields) => fields.company),
+]);
+```
+
+The returned page has the same `PaginatedResult` shape as `paginate()`. A page read also has an
+`execute()` method for independent execution. As with every `batchOnce()` member, all reads must
+belong to the same graph and execution target, and the combined statement must fit the backend's
+bind-parameter budget.
+
 ### Pagination Parameters
 
 | Parameter | Type     | Description                                  |
@@ -160,7 +236,8 @@ if (lastPage.hasPrevPage && lastPage.prevCursor) {
 
 ### Pagination with Traversals
 
-Pagination works with graph traversals:
+Pagination works with graph traversals. Each matched row is one page entry, and the order may name
+the traversed alias:
 
 ```typescript
 const employeesPage = await store
@@ -178,6 +255,55 @@ const employeesPage = await store
   .paginate({ first: 50 });
 ```
 
+### Recursive traversals are not paginated
+
+`paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
+`parts()` or `wholes()`) with a `ConfigurationError` whose `details.code` is
+`RECURSIVE_PAGINATION_UNSUPPORTED`. The refusal is the same on every backend and happens before
+any statement runs, including for `recursive({ maxHops: 1 })`. `parts()` and `wholes()` with
+`maxHops: 1` and neither `depth` nor `path` are the exception: they compile to a fixed one-hop step,
+not a recursive one, so they page and stream like `traverse()`. See
+[Paging direct parts](/queries/recursive#paging-direct-parts).
+
+A recursive traversal fans one start node out into rows that have no single edge to extend the
+start node's keys with, so a cursor can only name the start node. The next page would resume after
+that node and lose the rows of it not yet returned. Paging one start node at a time does not avoid
+this, because a single start node's rows are exactly the ones that straddle a page boundary.
+
+To read a recursive walk in bounded pieces, either:
+
+- Read it with `execute()` and a bound you choose: `.limit(n)` on the query, or
+  `recursive({ maxHops })` to bound the walk itself.
+- Page the start nodes in a query without the recursive traversal, then run the recursive walk for
+  each page of start nodes:
+
+```typescript
+const startNodes = store
+  .query()
+  .from("Person", "p")
+  .orderBy("p", "name", "asc")
+  .select((ctx) => ctx.p.id);
+
+let after: string | undefined;
+do {
+  const page = await startNodes.paginate({
+    first: 50,
+    ...(after === undefined ? {} : { after }),
+  });
+  const reachable = await store
+    .query()
+    .from("Person", "p")
+    .whereNode("p", (p) => p.id.in(page.data))
+    .traverse("knows", "e")
+    .recursive({ maxHops: 3 })
+    .to("Person", "friend")
+    .select((ctx) => ({ from: ctx.p.id, friend: ctx.friend.name }))
+    .execute();
+  // handle `reachable`
+  after = page.nextCursor;
+} while (after !== undefined);
+```
+
 ## Streaming
 
 For very large datasets, use streaming to process results without loading everything into memory.
@@ -189,7 +315,7 @@ const stream = store
   .query()
   .from("Event", "e")
   .select((ctx) => ctx.e)
-  .orderBy("e", "createdAt", "desc") // ORDER BY required
+  .orderBy("e", "meta.createdAt", "desc") // ORDER BY required
   .stream({ batchSize: 1000 });
 
 // Process results as they arrive
@@ -244,8 +370,145 @@ async function exportAllUsers(): Promise<void> {
 
 ## Batch Execution
 
-When you need multiple independent queries with different result types, use `store.batch()` to
-execute them over a single connection with snapshot consistency.
+When independent reads must share one database round trip, use `store.batchOnce()`.
+It embeds each read as a CTE and returns the independently typed results in input order. Fluent
+queries preserve explicit ordering even when the sort field is not selected. The callback's scoped
+builder creates batch-scoped composable graph reads without adding parallel `*Query` methods to the
+executing Store API:
+
+```typescript
+const [people, neighbors, neighborhood] = await store.batchOnce((read) => [
+  store.query().from("Person", "p").select((ctx) => ctx.p),
+  read.neighbors(person, { edges: ["knows"], limit: 5 }),
+  read.subgraph(person, { edges: ["knows"], maxDepth: 2 }),
+]);
+```
+
+The callback can also return `roots.map(...)`, a singleton, or an empty array. A nonempty batch is
+one statement with no sequential fallback; an empty batch executes no SQL. At most 500 reads may be
+planned, and the combined statement must fit the backend's bind-parameter budget. Every response is
+materialized as JSON rather than streamed, so bound each member's result explicitly. Response size
+is data-dependent; TypeGraph neither estimates it nor imposes a response-byte cap before execution.
+
+For several independent subgraphs, use the runtime-array form to collapse their database round
+trips into one statement:
+
+```typescript
+const subgraphs = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: ["name"] } },
+    }),
+  ),
+);
+```
+
+When compatible subgraphs have substantially overlapping neighborhoods and project meaningful payloads,
+opt into deduplicated entity payloads:
+
+```typescript
+const subgraphs = await store.batchOnce(
+  (read) =>
+    roots.map((root) =>
+      read.subgraph(root, {
+        edges: ["knows"],
+        maxDepth: 2,
+        project: { nodes: { Person: ["name", "profile"] } },
+      }),
+    ),
+  { shareSubgraphs: true },
+);
+```
+
+The option groups only compatible subgraph reads and hydrates a shared entity once while preserving
+an independent result object for every request. The default remains independent subgraph plans in
+the same one statement. Sharing adds membership and reconstruction overhead, so enable it for
+measured overlap and payload shapes rather than assuming it is universally faster. See
+[shared subgraph examples](/performance/overview#choosing-shared-subgraphs) for overlapping
+biographies, disjoint neighborhoods, and identity-only results with different tradeoffs.
+
+Tuple members may use different roots, edge sets, depths, windows, and projections when a page
+needs heterogeneous neighborhoods:
+
+```typescript
+const [social, employment] = await store.batchOnce((read) => [
+  read.subgraph(person, {
+    edges: ["knows"],
+    maxDepth: 2,
+    edgeWindows: { knows: { limit: 20 } },
+  }),
+  read.subgraph(person, {
+    edges: ["worksAt"],
+    maxDepth: 1,
+    project: {
+      nodes: { Company: ["name", "industry"] },
+      edges: { worksAt: ["role"] },
+    },
+  }),
+]);
+```
+
+The one-statement guarantee reduces round trips, which is often valuable for remote databases.
+Compatible subgraph reads use one origin-keyed recursive traversal in either payload mode,
+keeping planner overhead bounded as the root count grows. By default each request carries its own
+entity payloads. The explicit `shareSubgraphs` option sends overlapping entities once with request
+memberships. Incompatible options still require separate plans.
+The default mode aggregates JSON separately for each request, preserving the per-request JSON
+value size limit. Shared payloads aggregate each compatible group into one JSON value.
+
+On PostgreSQL, a batch may contain at most 25 independent recursive plans in total. Each emitted
+fluent `.traverse(...).recursive()` stage consumes one slot, including stages inside chained
+traversals, set operations, projections, and relations. Each compatible subgraph group consumes
+one slot after its roots are combined. Historical identity expansion (`includeIdentityMembers`
+with `asOf` or `recordedAsOf`) also consumes one slot per emitted ledger reconstruction, even in
+an otherwise nonrecursive traversal. A recursive stage with historical identity expansion
+therefore consumes two slots. Current identity expansion uses the maintained closure and consumes
+no extra slots. Reads without emitted recursion, including single-hop recursion lowered to a
+fixed traversal, consume no slots.
+
+A batch over this budget throws `ConfigurationError` before issuing SQL. The error details report
+`recursivePlans`, `subgraphPlans`, `queryPlans`, and `maxRecursivePlans`. `queryPlans` counts
+recursive plans emitted by relational reads, including historical identity reconstruction. Use
+matching subgraph options or split reads into explicit `batchOnce()` calls. If one composed read
+alone exceeds the budget, simplify it or run it directly with `.execute()`; splitting the batch
+cannot reduce that read's count. Standalone `.execute()` does not impose this batch budget.
+`shareSubgraphs: true` does not combine incompatible subgraphs or fluent recursive queries. This
+planner budget is PostgreSQL-specific; the portable 500-read cap and each backend's bind budget
+still apply. `batchOnce()` never silently chunks a batch or executes it sequentially.
+
+Use `store.batch()` when the batch includes queued edge collection `batchFind*` reads or when
+sequential execution is the intended connection profile.
+
+`batch()` does not batch round trips. The portable guarantee is that at most one query is in flight
+at a time — at least one statement each, and two for a query whose selective-field mapping falls
+back after its statement has already run. On a SQL backend with transactions it frames them with
+`begin`/`commit`, putting a networked one at N+2 round trips **at best**; Durable Objects use an
+ambient storage transaction with no framing, and without transactions there is no framing at all.
+Connection reuse is the adapter's business either way.
+
+Whole-node, whole-edge, and spread selections detected during planning use a full fetch from
+the start. A selector branch that depends on actual row values can still trigger the fallback.
+
+It will not merge arbitrary promises or collection calls. Use fluent queries or the callback's
+`read.neighbors()`, `read.countNeighbors()`, and `read.subgraph()` methods when independent result
+shapes must share its one statement. Other alternatives are a `.traverse()` chain,
+`store.neighbors()` or `store.countNeighbors()` (one statement each), `store.subgraph()` (2
+statements on SQLite, 3 on PostgreSQL), or `getByIds()` /
+`bulkFindByIndex()`, which are chunked rather than fixed-cost.
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share validation, traversal,
+projection, and result semantics. The call context selects the physical execution contract: the
+direct read uses backend-tuned hydration, while the batch-scoped read is embedded into the batch's
+single statement.
+
+It is also **not** a snapshot: PostgreSQL defaults to read-committed isolation, so a later query can
+observe a commit the earlier ones did not. When several reads need one stable snapshot, run
+`tx.query()`, `tx.neighbors()`, `tx.countNeighbors()`, `tx.subgraph()`, or `tx.batchOnce()` inside
+`store.transaction(fn, { isolationLevel: "repeatable_read" })`. These reads are bound to the open
+transaction and see its earlier uncommitted writes. Transactions require a backend with interactive
+transaction support; a history-enabled store on PostgreSQL additionally requires
+`accessMode: "read_only"` for a read-only transaction.
 
 ```typescript
 const [people, companies] = await store.batch(
@@ -268,7 +531,8 @@ const [people, companies] = await store.batch(
 Each query preserves its own projection, filtering, sorting, and pagination. Results are returned
 as a typed tuple matching the input order.
 
-Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with fluent queries:
+Edge collection `batchFind*` methods also return `BatchableQuery` and can be mixed freely with
+fluent queries — each still costs its own statement:
 
 ```typescript
 const [skills, employer] = await store.batch(
@@ -277,8 +541,15 @@ const [skills, employer] = await store.batch(
 );
 ```
 
-**vs `Promise.all`**: `batch()` uses 1 connection instead of N and guarantees snapshot consistency.
-**vs `transaction()`**: Same consistency, but cleaner API — no callback, typed tuple return.
+**vs `Promise.all`**: workload- and adapter-dependent in both directions. `Promise.all` overlaps its
+queries against a pool with idle capacity, but it does not necessarily hold N connections, and
+against a single client or a saturated pool it queues. `batch()` keeps at most one query in flight,
+so it pays the sum of their latencies — but it can still come out ahead where connection
+acquisition dominates. Measure rather than assume.
+**vs `transaction()`**: `batch()` may open an internal transaction only to serialize its statements.
+Use `transaction()` when reads must share an explicit isolation level or see writes made earlier in
+the callback. Its context supports fluent and set-oriented reads; `tx.batchOnce()` still emits
+exactly one statement.
 
 See [Batch Query Execution](/schemas-stores#batch-query-execution) for full API reference.
 
@@ -299,9 +570,9 @@ import { param } from "@nicia-ai/typegraph";
 ### `prepare()`
 
 Call `.prepare()` on an executable query to build and validate the AST once. Returns a
-`PreparedQuery<R>` that can be executed with different bindings; SQL text is compiled fresh on each
-`.execute()` call (see [Prepared query SQL compilation](#prepared-query-sql-compilation) below for
-why).
+`PreparedQuery<R>` that can be executed with different bindings. The statement is compiled once into
+a cached template and reused by every `.execute()` call — see
+[Prepared query SQL compilation](#prepared-query-sql-compilation) below for how that stays fresh.
 
 ```typescript
 const findByName = store
@@ -348,24 +619,59 @@ provided, and unknown binding keys are rejected.
 | `startsWith` / `endsWith`   | `p.name.startsWith(param("prefix"))`      |
 | `like` / `ilike`            | `p.email.like(param("pattern"))`          |
 
+`in()` and `notIn()` take a list-valued parameter — the **whole** list, not individual elements:
+
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] });
+```
+
+The list is bound as a single parameter that the database unpacks, so the compiled SQL text does
+not depend on the list's length: one statement serves every arity, and a list of ten thousand ids
+still costs one bound parameter rather than blowing past the engine's bind limit. An empty list is
+valid — `in([])` matches nothing, `notIn([])` matches everything.
+
+Every element must be the field's type, and numbers must be finite. A mixed list — `[1, "a"]` bound
+against a number field — is rejected with a `ConfigurationError` before it reaches the database, on
+every backend, as is `NaN` or `Infinity`. This matches the literal form, which already refuses a
+mixed list, and it is what keeps the two backends in step: left unchecked, PostgreSQL would fail
+casting while SQLite silently matched nothing.
+
 :::caution
-`param()` is **not** supported in `in()` / `notIn()` — the array length must be known at compile time.
+A `param()` sitting among the **elements** of a literal list — `p.name.in(["Alice", param("other")])` —
+is rejected with an `UnsupportedPredicateError`. Bind the whole list instead.
 :::
 
 ### Prepared Query SQL Compilation
 
-`.prepare()` builds and validates the AST once, but does **not** cache compiled SQL text across
-`.execute()` calls — each call recompiles fresh. This is deliberate: a "current" (live) read binds
-its temporal-validity filter to the instant it's compiled at. Caching the compiled text from
-`.prepare()` time would freeze that instant for the prepared query's entire lifetime, silently
-hiding any row created after `.prepare()` ran from every subsequent `.execute()` call — exactly the
-bug this behavior was fixed to avoid. Recompiling is pure, in-memory string-building with no I/O, so
-the cost is negligible next to the query's actual database round-trip.
+`.prepare()` builds and validates the AST once. On a backend that can compile and run raw SQL text
+(both the SQLite and PostgreSQL backends can), the statement is then compiled **once** into a cached
+template and reused by every `.execute()` call.
 
-When the backend supports `executeRaw` (both SQLite and PostgreSQL backends do), the freshly
-compiled SQL text is sent directly to the database driver with substituted parameter values. When
-`executeRaw` is unavailable, the prepared query substitutes parameters into the AST and compiles
-through the standard path instead — same freshness guarantee, different code path.
+The subtlety a cache like that has to survive is freshness: a "current" (live) read filters on
+temporal validity as of the instant it runs, so caching a compiled statement that had a concrete
+"now" baked into it would freeze that instant for the prepared query's entire lifetime — hiding
+every row created after `.prepare()` from every subsequent call. The template therefore reserves the
+read instant as a **placeholder** rather than a value, and each `.execute()` fills it with a fresh
+instant alongside the call's own bindings. Nothing about the statement's text depends on either.
+
+Two cases fall back to substituting parameters into the AST and compiling through the standard path
+on every call — same results and the same freshness guarantee, without the cached-template fast
+path:
+
+- `executeRaw` is unavailable (a custom or async backend).
+- The statement's execution semantics ride on the compiled SQL object rather than its text, which no
+  amount of `executeRaw` support changes. **Approximate vector search**
+  (`similarTo(..., { approximate: true })`) carries the engine's iterative-scan wrapper, and
+  `store.subgraph()` on PostgreSQL forces a custom plan for its (kind, id)-array fetches. Flattening either
+  to cacheable text would drop the behavior it depends on, so both are excluded deliberately.
 
 ## Query Debugging
 
@@ -416,13 +722,25 @@ Both `paginate()` and `stream()` require an `orderBy()` clause:
 .paginate({ first: 20 });
 
 // Required for streaming
-.orderBy("e", "createdAt", "desc")
+.orderBy("e", "meta.createdAt", "desc")
 .stream();
 ```
 
 ### Stable Ordering
 
-For deterministic pagination, include a unique field in your ordering:
+Cursor pagination and streaming automatically append the keys that identify one result row, so a
+sort that ties never skips or repeats a row at a page boundary. For the start node that is
+`id ASC`, or `kind ASC` and `id ASC` for a multi-kind source. Each traversal then adds the `id` of
+the edge it matched: one start node that fans out into several rows, two parallel edges
+between the same pair of nodes, and several rows that reach one intermediate node of a multi-hop
+traversal, page as distinct rows. Existing caller-specified identity ordering
+is preserved, and order keys may read any alias in the query: the start node, a traversed node, or
+an edge. Offset pagination needs an explicit total ordering.
+
+A cursor encodes the full key list, so a cursor saved from a traversal query before these edge keys
+were appended is refused; restart that pagination from the first page.
+
+For deterministic offset pagination of one kind, include `id` in your ordering:
 
 ```typescript
 .orderBy("p", "name", "asc")
@@ -444,7 +762,7 @@ async function listUsers(cursor?: string, limit = 20) {
       name: ctx.u.name,
       email: ctx.u.email,
     }))
-    .orderBy("u", "createdAt", "desc")
+    .orderBy("u", "meta.createdAt", "desc")
     .orderBy("u", "id", "desc");
 
   const result = cursor
@@ -468,13 +786,13 @@ async function processAllOrders() {
     .from("Order", "o")
     .whereNode("o", (o) => o.status.eq("pending"))
     .select((ctx) => ctx.o)
-    .orderBy("o", "createdAt", "asc")
+    .orderBy("o", "meta.createdAt", "asc")
     .stream({ batchSize: 100 });
 
   for await (const order of stream) {
     try {
       await fulfillOrder(order);
-      await store.update("Order", order.id, { status: "fulfilled" });
+      await store.nodes.Order.update(order.id, { status: "fulfilled" });
     } catch (error) {
       console.error(`Failed to process order ${order.id}:`, error);
     }
@@ -496,7 +814,10 @@ function useInfiniteUsers() {
       .from("User", "u")
       .select((ctx) => ctx.u)
       .orderBy("u", "name", "asc")
-      .paginate({ first: 20, after: cursor });
+      .paginate({
+        first: 20,
+        ...(cursor === undefined ? {} : { after: cursor }),
+      });
 
     setUsers((prev) => [...prev, ...result.data]);
     setCursor(result.nextCursor);

@@ -5,9 +5,15 @@
  */
 import { type z } from "zod";
 
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
   type GraphBackend,
+  type NodeRow as BackendNodeRow,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
@@ -16,31 +22,96 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  ENTITY_ALREADY_EXISTS_CODE,
+  NodeNotFoundError,
+  ValidationError,
+} from "../../errors";
+import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
+import { type Predicate } from "../../query/predicates";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
+import {
+  asCompiledSelectSql,
+  type CompiledSelectSql,
+} from "../../query/sql-intent";
+import type { CompositionViaRef } from "../../registry/composition-relation";
+import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import {
+  readNodeDeleteOptions,
+  refuseNodeDeleteArguments,
+} from "../operations/node-delete-expectation";
+import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
+import {
+  type ResolvedMutationSetAttempt,
+  runResolvedMutationSetConverging,
+} from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
   type NodeBulkFindByIndexOptions,
+  type NodeBulkGetOrCreateByConstraintItem,
+  type NodeBulkGetOrCreateByConstraintOptions,
   type NodeCollection,
+  type NodeCreateOptions,
+  type NodeDeleteOptions,
+  type NodeDeletePlan,
   type NodeGetOrCreateByConstraintOptions,
   type NodeGetOrCreateByConstraintResult,
+  type NodeReparentOptions,
+  type NodeReparentResult,
   type QueryOptions,
   type UpdateNodeInput,
+  type ValidityEndMutation,
 } from "../types";
 import {
+  assertClearValidToSupported,
+  assertValidityEndMutation,
+} from "../validity-end";
+import {
+  findRepeatedUpsertIds,
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
   type UpsertDirtyCheckFunction,
+  type UpsertWindow,
+  upsertWindowChanges,
+  windowAfterUpsertCreate,
+  windowAfterUpsertUpdate,
 } from "./coalesce";
 import {
   resolveTemporalReadParams,
   type TemporalReadParams,
 } from "./temporal-read-params";
+
+function isNodeReplacementPartitionMovement(error: unknown): boolean {
+  return (
+    error instanceof NodeNotFoundError ||
+    (error instanceof ValidationError &&
+      error.details.issues.some(
+        (issue) => issue.code === ENTITY_ALREADY_EXISTS_CODE,
+      ))
+  );
+}
+
+type OnImmutableLowerBound = "preserve" | "refuse";
+
+type NodeUpsertOptions = Readonly<{
+  validFrom?: string | null;
+  onImmutableLowerBound?: OnImmutableLowerBound;
+}> &
+  ValidityEndMutation;
+
+export type NodeSetUpdateRequest =
+  | Readonly<{ operation: "updateWhere" }>
+  | Readonly<{
+      operation: "compareAndSet";
+      expected: Record<string, unknown>;
+    }>;
 
 /**
  * Narrows unparameterized Node to Node<N>.
@@ -57,6 +128,111 @@ function narrowNodes<N extends NodeType>(nodes: readonly Node[]): Node<N>[] {
   return nodes as Node<N>[];
 }
 
+/** Adapts a schema-shaped typed callback to the runtime dynamic accessor. */
+type NodeCollectionPredicateAccessor<N extends NodeType> =
+  string extends N["kind"] ? DynamicNodeAccessor : NodeAccessor<N>;
+
+/** Supports both dynamic `.field(name)` and a typed property named `field`. */
+function createFieldMember(
+  accessor: DynamicNodeAccessor,
+): DynamicNodeAccessor["field"] {
+  const selectField = (name: string) => accessor.field(name);
+  return new Proxy(selectField, {
+    get(target, property, receiver) {
+      if (Reflect.has(target, property)) {
+        const ownProperty: unknown = Reflect.get(target, property, receiver);
+        return ownProperty;
+      }
+      return (
+        accessor.field("field") as unknown as Readonly<
+          Record<PropertyKey, unknown>
+        >
+      )[property];
+    },
+  });
+}
+
+function evaluateNodePredicate<N extends NodeType>(
+  accessor: DynamicNodeAccessor,
+  predicate: (accessor: NodeCollectionPredicateAccessor<N>) => Predicate,
+): Predicate {
+  const collectionAccessor = new Proxy(
+    {} as NodeCollectionPredicateAccessor<N>,
+    {
+      get(_target, property) {
+        if (typeof property === "symbol") return;
+        // No interop exemption for `then` / `toJSON`. This accessor's contract
+        // is that EVERY name is a field — the typed signature offers the
+        // schema's fields, including ones legally named after a protocol hook,
+        // and refusing those names made a declared field unaddressable. The
+        // exemption is also unnecessary here: a field builder is an object,
+        // never a function, so `await` sees a non-callable `then` and
+        // `JSON.stringify` a non-callable `toJSON`, and neither is invoked.
+        if (
+          property === "id" ||
+          property === "kind" ||
+          property === "$fulltext" ||
+          property === "$meta"
+        ) {
+          return accessor[property];
+        }
+        if (property === "field") return createFieldMember(accessor);
+        return accessor.field(property);
+      },
+    },
+  );
+  return predicate(collectionAccessor);
+}
+
+/**
+ * Update input for the internal upsert path, which owns the WHOLE validity
+ * window: a resurrecting upsert rewrites both endpoints, so it must be able to
+ * carry `validFrom` as well as `validTo`. Dropping `validFrom` here would leave
+ * a stated lower bound unreachable by the only node write that stores one: a
+ * resurrection rewrites `valid_from` whether or not the caller named it, so the
+ * caller's bound would be replaced by the instant that write stamps rather than
+ * honored. It would no longer INVERT the window — a resurrection stating only a
+ * historical `validTo` stores no lower bound at all — which is why the sibling
+ * note on `UpsertUpdateEdgeInput` still reads in terms of inversion and this one
+ * does not: an edge resurrection RETAINS its stored bound.
+ *
+ * The public `update()` API cannot reach this member: its options type exposes
+ * `validTo` only, and it builds its input through {@link buildUpdateInput}. Only
+ * `upsertById` / `bulkUpsertById`, which accept `validFrom` by contract, route
+ * through {@link buildUpsertUpdateInput}.
+ */
+export type UpsertUpdateNodeInput = UpdateNodeInput &
+  Readonly<{
+    validFrom?: string | null;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  }>;
+
+export type NodeUpsertUpdateBatchEntry = Readonly<{
+  input: UpsertUpdateNodeInput;
+  clearDeleted: boolean;
+  existing?: BackendNodeRow;
+  /** Complete props already validated by the replacement API owner. */
+  replacementProps?: Record<string, unknown>;
+}>;
+
+/**
+ * What a batch create states beyond its own rows.
+ */
+export type NodeCreateBatchOptions = Readonly<{
+  /** Every input's `props` is already the output of its kind's schema. */
+  propsPreValidated?: true;
+  /**
+   * The updates the caller writes right after this batch, inside the same
+   * transaction. Every one of them is decided before this batch's first
+   * write, against the state the creates leave — merged props, the window
+   * verdict, uniqueness counting this batch's keys, the composition and
+   * identity verdicts of a restore — so a refusal any of them reaches
+   * precedes every write of the combined set, instead of surfacing after
+   * this batch's rows are stored.
+   */
+  pairedUpdates?: readonly NodeUpsertUpdateBatchEntry[];
+}>;
+
 /**
  * Config for creating a NodeCollection.
  */
@@ -64,6 +240,8 @@ export type NodeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
   backend: GraphBackend | TransactionBackend;
+  /** Threaded `batchPointRead` verdict — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
   rowToNode: (row: NodeRow) => Node;
   /** See NodeOperations.maybeRefreshStatisticsAfterBulk. */
@@ -80,22 +258,68 @@ export type NodeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
-    input: UpdateNodeInput,
+    input: UpsertUpdateNodeInput,
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
-  executeUpsertUpdate: (
-    input: UpdateNodeInput,
+  executeNodeSetUpdate: (
+    kind: string,
+    patch: Record<string, unknown>,
+    candidateIds: CompiledSelectSql,
+    candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Node>;
+    request: NodeSetUpdateRequest,
+  ) => Promise<Readonly<{ affectedCount: number }>>;
+  executeUpsertUpdateBatch: (
+    entries: readonly NodeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly Node[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateNodeInput[],
+    updates: readonly NodeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
+    >
+  >;
+  prepareReplacement: (
+    kind: string,
+    props: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  executeReplacementBatch: (
+    kind: string,
+    items: readonly Readonly<{
+      id: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
+  executeReparent: (
+    kind: string,
+    id: string,
+    options: NodeReparentOptions,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeReparentResult>;
+  executeReparentBatch: (
+    kind: string,
+    items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
+    backend: GraphBackend | TransactionBackend,
+    expect: NodeDeletePlan | undefined,
+  ) => Promise<void>;
+  executeDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
   executeHardDelete: (
@@ -103,6 +327,16 @@ export type NodeCollectionConfig = Readonly<{
     id: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<void>;
+  executeHardDeleteBatch: (
+    kind: string,
+    ids: readonly string[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<void>;
+  executeDeletePlan: (
+    kind: string,
+    id: string,
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
   executeGetOrCreateByConstraint: (
@@ -115,9 +349,11 @@ export type NodeCollectionConfig = Readonly<{
   executeBulkGetOrCreateByConstraint: (
     kind: string,
     constraintName: string,
-    items: readonly Readonly<{ props: Record<string, unknown> }>[],
+    items: readonly NodeBulkGetOrCreateByConstraintItem<
+      Record<string, unknown>
+    >[],
     backend: GraphBackend | TransactionBackend,
-    options?: NodeGetOrCreateByConstraintOptions,
+    options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
     kind: string,
@@ -143,45 +379,70 @@ export type NodeCollectionConfig = Readonly<{
 function buildCreateInput(
   kind: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+  options?: NodeCreateOptions,
 ): CreateNodeInput {
-  const input: {
-    kind: string;
-    id?: string;
-    props: Record<string, unknown>;
-    validFrom?: string;
-    validTo?: string;
-  } = { kind, props };
-  if (options?.id !== undefined) input.id = options.id;
-  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
-  if (options?.validTo !== undefined) input.validTo = options.validTo;
-  return input;
+  return {
+    kind,
+    props,
+    ...(options?.id !== undefined && { id: options.id }),
+    ...(options?.validFrom !== undefined && { validFrom: options.validFrom }),
+    ...(options?.validTo !== undefined && { validTo: options.validTo }),
+    ...(options?.partOf !== undefined && { partOf: options.partOf }),
+  };
 }
 
 function buildUpdateInput(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ validTo?: string }>,
+  options?: ValidityEndMutation,
 ): UpdateNodeInput {
   const input: {
     kind: string;
     id: string;
     props: Partial<Record<string, unknown>>;
     validTo?: string;
+    clearValidTo?: true;
   } = { kind, id, props };
   if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
   return input as UpdateNodeInput;
+}
+
+/** Builds an {@link UpsertUpdateNodeInput} — see that type for why upsert alone carries `validFrom`. */
+function buildUpsertUpdateInput(
+  kind: string,
+  id: string,
+  props: Record<string, unknown>,
+  options?: Readonly<{
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  }>,
+): UpsertUpdateNodeInput {
+  const input: {
+    kind: string;
+    id: string;
+    props: Partial<Record<string, unknown>>;
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: OnImmutableLowerBound;
+  } = { kind, id, props };
+  if (options?.validFrom !== undefined) input.validFrom = options.validFrom;
+  if (options?.validTo !== undefined) input.validTo = options.validTo;
+  if (options?.clearValidTo === true) input.clearValidTo = true;
+  if (options?.onImmutableLowerBound !== undefined) {
+    input.onImmutableLowerBound = options.onImmutableLowerBound;
+  }
+  return input as UpsertUpdateNodeInput;
 }
 
 function mapBulkNodeInputs(
   kind: string,
-  items: readonly Readonly<{
-    props: Record<string, unknown>;
-    id?: string;
-    validFrom?: string;
-    validTo?: string;
-  }>[],
+  items: readonly (Readonly<{ props: Record<string, unknown> }> &
+    NodeCreateOptions)[],
 ): CreateNodeInput[] {
   return items.map((item) => buildCreateInput(kind, item.props, item));
 }
@@ -199,15 +460,25 @@ export function createNodeCollection<
     graphId,
     kind,
     backend,
+    batchPointRead,
     defaultTemporalMode,
     rowToNode,
     executeCreate: executeNodeCreate,
     executeCreateNoReturnBatch: executeNodeCreateNoReturnBatch,
     executeCreateBatch: executeNodeCreateBatch,
     executeUpdate: executeNodeUpdate,
-    executeUpsertUpdate: executeNodeUpsertUpdate,
+    executeNodeSetUpdate,
+    executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
+    executeResolvedMutationSet: executeNodeResolvedMutationSet,
+    prepareReplacement,
+    executeReplacementBatch: executeNodeReplacementBatch,
+    executeReparent: executeNodeReparent,
+    executeReparentBatch: executeNodeReparentBatch,
     executeDelete: executeNodeDelete,
+    executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
+    executeHardDeleteBatch: executeNodeHardDeleteBatch,
+    executeDeletePlan: executeNodeDeletePlan,
     temporalRowMatcher,
     createQuery,
     executeGetOrCreateByConstraint,
@@ -220,14 +491,14 @@ export function createNodeCollection<
   return {
     async create(
       props: z.input<N["schema"]>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: NodeCreateOptions,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
@@ -252,7 +523,13 @@ export function createNodeCollection<
     ): Promise<readonly (Node<N> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+      const rowsById = await getNodeRowsByIds(
+        backend,
+        batchPointRead,
+        graphId,
+        kind,
+        ids,
+      );
       // Resolve the coordinate once so the whole batch observes one instant.
       const matches = temporalRowMatcher(options);
       return ids.map((id) => {
@@ -266,7 +543,7 @@ export function createNodeCollection<
     async update(
       id: NodeId<N>,
       props: Partial<z.input<N["schema"]>>,
-      options?: Readonly<{ validTo?: string }>,
+      options?: ValidityEndMutation,
     ): Promise<Node<N>> {
       const result = await executeNodeUpdate(
         buildUpdateInput(kind, id, props, options),
@@ -275,12 +552,243 @@ export function createNodeCollection<
       return narrowNode<N>(result);
     },
 
-    async delete(id: NodeId<N>): Promise<void> {
-      await executeNodeDelete(kind, id, backend);
+    async compareAndSet(id, params): Promise<boolean> {
+      if (createQuery === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.compareAndSet() requires a query-capable store`,
+          { kind, operation: "compareAndSet" },
+        );
+      }
+      const rootAlias = "compare_and_set_candidate";
+      const candidateIdColumn = `${rootAlias}_id`;
+      // Root pins to exact kind (here and in updateWhere) are redundant with
+      // `executeNodeSetUpdate`'s `WHERE nodes.kind = <kind>` filter, which
+      // re-filters whatever these candidate subqueries widen to.
+      const candidateIds = createQuery()
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
+        .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
+        .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
+        .compile();
+      const result = await executeNodeSetUpdate(
+        kind,
+        params.patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+        { operation: "compareAndSet", expected: params.expected },
+      );
+      return result.affectedCount === 1;
     },
 
-    async hardDelete(id: NodeId<N>): Promise<void> {
+    async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {
+      if (createQuery === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.updateWhere() requires a query-capable store`,
+          { kind, operation: "updateWhere" },
+        );
+      }
+      const exists = params.exists ?? [];
+      if (
+        params.where === undefined &&
+        exists.length === 0 &&
+        params.candidates === undefined &&
+        !params.all
+      ) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.updateWhere() requires candidates, where, exists, or explicit all: true`,
+          { kind, operation: "updateWhere" },
+        );
+      }
+
+      const rootAlias = "update_candidate";
+      const readInstant = nowIso();
+      const candidateIdColumn = `${rootAlias}_id`;
+      const compiledBranches: CompiledSelectSql[] = [];
+
+      const candidateQuery = params.candidates;
+      if (candidateQuery !== undefined) {
+        const selection = candidateQuery.toNodeCandidateSelection();
+        const expectedTarget = backendDerivationRoot(backend);
+        if (selection.graphId !== graphId) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must belong to the same graph as the collection.",
+            {
+              kind,
+              operation: "updateWhere",
+              expectedGraphId: graphId,
+              receivedGraphId: selection.graphId,
+            },
+          );
+        }
+        if (
+          selection.executionTarget === undefined ||
+          selection.executionTarget !== expectedTarget
+        ) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must be created by this Store or transaction.",
+            { kind, operation: "updateWhere" },
+          );
+        }
+        if (selection.kind !== kind) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must select the collection's node kind.",
+            {
+              kind,
+              operation: "updateWhere",
+              candidateKind: selection.kind,
+            },
+          );
+        }
+        if (
+          selection.temporalMode !== "current" ||
+          selection.recordedAsOf !== undefined
+        ) {
+          throw new ConfigurationError(
+            "updateWhere() candidates must use the current temporal coordinate.",
+            { kind, operation: "updateWhere" },
+          );
+        }
+        const compiledCandidateQuery =
+          candidateQuery.compileNodeCandidateIds(readInstant);
+        compiledBranches.push(
+          asCompiledSelectSql(
+            sql`SELECT ${sql.identifier(selection.idColumn)} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+          ),
+        );
+      }
+
+      let base = createQuery()
+        .fromDynamic(kind, rootAlias, { expansion: "exact" })
+        .temporal("asOf", readInstant);
+      const where = params.where;
+      if (where !== undefined) {
+        base = base.whereNode(rootAlias, (accessor) =>
+          evaluateNodePredicate<N>(accessor, where),
+        );
+      }
+      for (const [index, relation] of exists.entries()) {
+        const edgeAlias = `update_edge_${index}`;
+        const relatedAlias = `update_related_${index}`;
+        const relationRoot = createQuery()
+          .fromDynamic(kind, rootAlias, { expansion: "exact" })
+          .temporal("asOf", readInstant);
+        let traversal = relationRoot.traverseDynamic(
+          relation.edgeKind,
+          edgeAlias,
+          {
+            direction: relation.direction,
+            expand: "none",
+          },
+        );
+        if (relation.whereEdge !== undefined) {
+          traversal = traversal.whereEdge(edgeAlias, relation.whereEdge);
+        }
+        // Pinned exact-kind, load-bearing (unlike the root pins): this alias's kind gates whether the `exists` predicate is
+        // satisfied at all, and only `rootAlias`'s id is projected — the
+        // outer `WHERE nodes.kind = <kind>` fence never sees `relatedAlias`,
+        // so widening it here would let a subclass-only related row
+        // satisfy an `exists` check the caller declared against the exact
+        // parent kind.
+        let related = traversal.toDynamic(relation.relatedKind, relatedAlias, {
+          expansion: "exact",
+        });
+        if (relation.whereRelated !== undefined) {
+          related = related.whereNode(relatedAlias, relation.whereRelated);
+        }
+        compiledBranches.push(
+          related
+            .select(
+              (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
+            )
+            .compile(),
+        );
+      }
+      // A candidate selection is already constrained to this collection's
+      // kind and the current temporal coordinate (validated above). When it is
+      // the only selection predicate, adding the unfiltered kind scan and
+      // intersecting it back in is redundant. The candidate branch remains the
+      // first branch so relation predicates still intersect with it below.
+      if (candidateQuery === undefined || where !== undefined) {
+        compiledBranches.unshift(
+          base
+            .select(
+              (ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id,
+            )
+            .compile(),
+        );
+      }
+      const projectCandidateId = (
+        branch: CompiledSelectSql,
+        index: number,
+      ): SqlFragment => sql`
+        SELECT ${sql.identifier(candidateIdColumn)}
+        FROM (${branch}) AS ${sql.identifier(`update_branch_${index}`)}
+      `;
+      let combinedCandidates = projectCandidateId(
+        requireDefined(compiledBranches[0]),
+        0,
+      );
+      for (let index = 1; index < compiledBranches.length; index++) {
+        combinedCandidates = sql`${combinedCandidates} INTERSECT ${projectCandidateId(
+          requireDefined(compiledBranches[index]),
+          index,
+        )}`;
+      }
+      const compiledCandidates = asCompiledSelectSql(combinedCandidates);
+
+      const result = await executeNodeSetUpdate(
+        kind,
+        params.patch,
+        compiledCandidates,
+        candidateIdColumn,
+        backend,
+        { operation: "updateWhere" },
+      );
+      await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
+      return result;
+    },
+
+    async reparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      id: NodeId<N>,
+      options: NodeReparentOptions<Via>,
+    ): Promise<NodeReparentResult<Via>> {
+      return executeNodeReparent(kind, id, options, backend) as Promise<
+        NodeReparentResult<Via>
+      >;
+    },
+
+    async bulkReparent<
+      const Via extends CompositionViaRef | undefined =
+        CompositionViaRef | undefined,
+    >(
+      items: readonly Readonly<{
+        id: NodeId<N>;
+        options: NodeReparentOptions<Via>;
+      }>[],
+    ): Promise<readonly NodeReparentResult<Via>[]> {
+      return executeNodeReparentBatch(kind, items, backend) as Promise<
+        readonly NodeReparentResult<Via>[]
+      >;
+    },
+
+    async delete(id: NodeId<N>, options?: NodeDeleteOptions): Promise<void> {
+      const expect = readNodeDeleteOptions(options, { kind, id });
+      await executeNodeDelete(kind, id, backend, expect);
+    },
+
+    async hardDelete(
+      id: NodeId<N>,
+      ...extraArguments: readonly unknown[]
+    ): Promise<void> {
+      refuseNodeDeleteArguments(extraArguments, { kind, id }, "hardDelete");
       await executeNodeHardDelete(kind, id, backend);
+    },
+
+    async planDelete(id: NodeId<N>): Promise<NodeDeletePlan | undefined> {
+      return executeNodeDeletePlan(kind, id, backend);
     },
 
     async find(
@@ -310,8 +818,12 @@ export function createNodeCollection<
           temporal,
           defaultTemporalMode,
         );
+        // Pinned exact-kind: the no-`where` branch just below goes straight
+        // to the backend find path, which is exact-kind by construction —
+        // this branch must return the identical row set (see the comment
+        // there), not a polymorphic-by-default one.
         let query = createQuery()
-          .from(kind, "_n")
+          .from(kind, "_n", { expansion: "exact" })
           .temporal(asOf === undefined ? temporalMode : "asOf", asOf)
           .whereNode("_n", filter.where as never)
           .select((ctx: Record<string, unknown>) => ctx["_n"]);
@@ -353,7 +865,7 @@ export function createNodeCollection<
     async upsertById(
       id: string,
       props: z.input<N["schema"]>,
-      options?: Readonly<{ validFrom?: string; validTo?: string }>,
+      options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
       return this.upsertByIdFromRecord(id, props, options);
     },
@@ -361,31 +873,91 @@ export function createNodeCollection<
     async upsertByIdFromRecord(
       id: string,
       data: Record<string, unknown>,
-      options?: Readonly<{ validFrom?: string; validTo?: string }>,
+      options?: NodeUpsertOptions,
     ): Promise<Node<N>> {
+      assertValidityEndMutation(options ?? {}, {
+        entityType: "node",
+        kind,
+        id,
+      });
+      if (options?.clearValidTo === true) {
+        assertClearValidToSupported(backend, "node");
+      }
       const existing = await backend.getNode(graphId, kind, id);
 
-      if (existing) {
-        // Coalesce a value-identical replay: skip the write entirely (no
-        // updateNode, no recorded capture, no revision advance, no hooks) and
-        // resolve with the existing node. See
-        // BaseStoreOptions.coalesceUnchangedUpserts.
+      // Coalesce a value-identical replay: skip the write entirely (no
+      // updateNode, no recorded capture, no revision advance, no hooks) and
+      // resolve with the existing node. See
+      // BaseStoreOptions.coalesceUnchangedUpserts.
+      const coalesces = (row: NonNullable<typeof existing>): boolean => {
         const runDirtyCheck =
           config.upsertDirtyCheck &&
           (() =>
             requireDefined(config.upsertDirtyCheck)(
               kind,
               id,
-              rowPropsToObject(existing.props),
+              rowPropsToObject(row.props),
               data,
             ));
-        if (shouldCoalesceUpsert(existing, options, runDirtyCheck)) {
-          return narrowNode<N>(rowToNode(existing));
-        }
+        return shouldCoalesceUpsert(row, options, runDirtyCheck);
+      };
+
+      // INVARIANT: a coalescing upsert's decision to SKIP is both taken and
+      // executed inside one transaction. The read that justifies the skip and
+      // the skip itself are the same transaction; the skip IS that
+      // transaction's empty commit, and nothing after the commit writes, so
+      // there is no window between deciding and acting for a competitor to
+      // occupy.
+      //
+      // Coalescing must be an optimization, never a semantic: with the flag
+      // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
+      // caller's props over whatever it finds, so a writer that commits between
+      // the autocommit read above and the write still has the caller's props
+      // applied on top. Deciding "skip" from that earlier read gave a DIFFERENT
+      // answer — the caller was told its props were stored while the store held
+      // the other writer's — so the flag changed the outcome instead of the
+      // cost. Deciding inside the transaction restores the equivalence: a
+      // "write" verdict falls through to the ordinary path, whose own
+      // in-transaction re-read merges over the current row.
+      //
+      // Note the shape difference from a plain re-read: the verdict is computed
+      // where `target` is live, not after the transaction closed. Committing
+      // and THEN deciding would narrow the window rather than close it, which
+      // is what the bulk paths avoid by deciding inside `upsertAll`.
+      //
+      // Only a coalescing store that is ABOUT to skip pays the second read; a
+      // store without the flag, or one whose props differ, keeps the single
+      // read and the single write it always had. On SQLite the transaction is
+      // `BEGIN IMMEDIATE`, which excludes every other writer for its duration;
+      // on a backend without transactions there is nothing to open and the
+      // decision is as fenced as that backend's writes are — which is to say
+      // not at all, matching the atomicity it already cannot offer.
+      type UpsertVerdict =
+        | Readonly<{ verdict: "skip"; row: NodeRow }>
+        | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
+
+      const decision: UpsertVerdict =
+        existing !== undefined && coalesces(existing) ?
+          await runOptionallyInTransaction(
+            backend,
+            async (target): Promise<UpsertVerdict> => {
+              const confirmed = await target.getNode(graphId, kind, id);
+              return confirmed !== undefined && coalesces(confirmed) ?
+                  { verdict: "skip", row: confirmed }
+                : { verdict: "write", row: confirmed };
+            },
+          )
+        : { verdict: "write", row: existing };
+
+      if (decision.verdict === "skip") {
+        return narrowNode<N>(rowToNode(decision.row));
+      }
+
+      if (decision.row !== undefined) {
         const result = await executeNodeUpdate(
-          buildUpdateInput(kind, id, data, options),
+          buildUpsertUpdateInput(kind, id, data, options),
           backend,
-          { clearDeleted: existing.deleted_at !== undefined },
+          { clearDeleted: decision.row.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
       }
@@ -398,36 +970,125 @@ export function createNodeCollection<
     },
 
     async bulkCreate(
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-        id?: string;
-        validFrom?: string;
-        validTo?: string;
-      }>[],
+      items: readonly (Readonly<{ props: z.input<N["schema"]> }> &
+        NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        const results = await backend.transaction(async (txBackend) =>
-          executeNodeCreateBatch(batchInputs, txBackend),
-        );
-        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-        return narrowNodes<N>(results);
-      }
       const results = await executeNodeCreateBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowNodes<N>(results);
+    },
+
+    async bulkReplaceById(
+      items: readonly Readonly<{
+        id: string;
+        props: z.input<N["schema"]>;
+      }>[],
+    ): Promise<Node<N>[]> {
+      if (items.length === 0) return [];
+      const seenIds = new Set<string>();
+      for (const item of items) {
+        if (seenIds.has(item.id)) {
+          throw new ValidationError(
+            `bulkReplaceById requires distinct node ids; received "${item.id}" more than once.`,
+            {
+              entityType: "node",
+              kind,
+              operation: "update",
+              id: item.id,
+              issues: [],
+            },
+          );
+        }
+        seenIds.add(item.id);
+      }
+      const prepared = items.map((item) => ({
+        id: item.id,
+        props: prepareReplacement(kind, item.props),
+      }));
+      const attempt = await executeNodeReplacementBatch(
+        kind,
+        prepared,
+        backend,
+      );
+      if (attempt.outcome === "applied") {
+        await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
+        return narrowNodes<N>(attempt.value);
+      }
+      const results = await runResolvedMutationSetConverging(
+        "node",
+        backend,
+        () =>
+          runOwnedMutationSetTransaction(backend, async (target) => {
+            const rows = await getNodeRowsByIds(
+              target,
+              batchPointRead,
+              graphId,
+              kind,
+              prepared.map((item) => item.id),
+            );
+            const results = new Map<string, Node<N>>();
+            const creates = prepared.filter((item) => !rows.has(item.id));
+            const updateEntries = prepared
+              .filter((item) => rows.has(item.id))
+              .map((item) => {
+                const existing = requireDefined(rows.get(item.id));
+                return {
+                  input: buildUpsertUpdateInput(kind, item.id, item.props),
+                  clearDeleted: existing.deleted_at !== undefined,
+                  existing,
+                  replacementProps: item.props,
+                };
+              });
+            if (creates.length > 0) {
+              const created = await executeNodeCreateBatch(
+                creates.map((item) =>
+                  buildCreateInput(kind, item.props, { id: item.id }),
+                ),
+                target,
+                { propsPreValidated: true, pairedUpdates: updateEntries },
+              );
+              for (const row of created)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            if (updateEntries.length > 0) {
+              const updated = await executeNodeUpsertUpdateBatch(
+                updateEntries,
+                target,
+              );
+              for (const row of updated)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            return prepared.map((item) => requireDefined(results.get(item.id)));
+          }),
+        { isMovement: isNodeReplacementPartitionMovement },
+      );
+      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      return results;
     },
 
     async bulkUpsertById(
       items: readonly Readonly<{
         id: string;
         props: z.input<N["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
+        clearValidTo?: true;
+        onImmutableLowerBound?: OnImmutableLowerBound;
       }>[],
     ): Promise<Node<N>[]> {
       if (items.length === 0) return [];
+
+      for (const item of items) {
+        assertValidityEndMutation(item, {
+          entityType: "node",
+          kind,
+          id: item.id,
+        });
+        if (item.clearValidTo === true) {
+          assertClearValidToSupported(backend, "node");
+        }
+      }
 
       const upsertAll = async (
         target: GraphBackend | TransactionBackend,
@@ -435,9 +1096,14 @@ export function createNodeCollection<
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored
         // props, not just deleted_at.
-        const existingMap = new Map<string, NodeRow>();
+        const existingMap = new Map<string, BackendNodeRow>();
 
-        if (target.getNodes === undefined) {
+        const boundGetNodes = bindExtraIfReachable(
+          target,
+          batchPointRead.extras.getNodes,
+          BATCH_POINT_READ.id,
+        );
+        if (boundGetNodes === undefined) {
           const rows = await Promise.all(
             ids.map((id) => target.getNode(graphId, kind, id)),
           );
@@ -445,7 +1111,7 @@ export function createNodeCollection<
             if (row !== undefined) existingMap.set(row.id, row);
           }
         } else {
-          const rows = await target.getNodes(graphId, kind, ids);
+          const rows = await boundGetNodes.getNodes(graphId, kind, ids);
           for (const row of rows) {
             existingMap.set(row.id, row);
           }
@@ -460,23 +1126,71 @@ export function createNodeCollection<
         const toCreate: { index: number; input: CreateNodeInput }[] = [];
         const toUpdate: {
           index: number;
-          input: UpdateNodeInput;
+          input: UpsertUpdateNodeInput;
           clearDeleted: boolean;
+          existing?: BackendNodeRow;
         }[] = [];
 
-        // Batch-local running state per id: the props the row would hold after
-        // the writes queued so far, and the item index that queued that write.
-        // A later same-id item coalesces against this running value, not the
-        // once-prefetched row — otherwise [{x:B},{x:A}] on a row holding A would
-        // coalesce the second item against the stale prefetched A and drop the
-        // first item's write, breaking last-write-wins.
+        // Batch-local running state per id: the props AND validity window the
+        // row would hold after the writes queued so far, and the item index that
+        // queued that write. A later same-id item coalesces against this running
+        // value, not the once-prefetched row — otherwise [{x:B},{x:A}] on a row
+        // holding A would coalesce the second item against the stale prefetched
+        // A and drop the first item's write, breaking last-write-wins. The same
+        // staleness applies to the window: a copy re-stating the bound the
+        // prefetched row held, after an earlier copy already moved it, must
+        // write it back rather than coalesce.
+        //
+        // A QUEUED CREATE is registered here too. Leaving it out queued a SECOND
+        // create for a repeated id whose row does not exist yet, and the create
+        // batch rejected it as "already exists". Registered, the later copy
+        // takes the update path against the queued create — creates run before
+        // updates, so the row is there by then — producing exactly the row that
+        // sequential `upsertById` calls produce.
+        //
+        // `props` is the running value the dirty check compares against. It is
+        // undefined when no value could be computed (coalescing off, or the
+        // check rejected the input): presence of the ENTRY is what routes a
+        // later copy away from a second create, while the props only decide
+        // coalescing, and an unknown running value simply never coalesces.
+        // `window` is always computed — unlike the props it costs no Zod parse.
         const pending = new Map<
           string,
-          { props: Record<string, unknown>; sourceIndex: number }
+          {
+            props: Record<string, unknown> | undefined;
+            window: UpsertWindow;
+            sourceIndex: number;
+          }
         >();
         // A coalesced item that matched an in-batch write resolves to that
         // write's result (filled once the writes run), not a fabricated row.
         const deferred: { index: number; sourceIndex: number }[] = [];
+
+        // A running value exists only to be dirty-checked, so a store without
+        // coalescing never needs to know which ids repeat.
+        const repeatedIds =
+          config.upsertDirtyCheck === undefined ?
+            new Set<string>()
+          : findRepeatedUpsertIds(items);
+
+        /**
+         * The dirty check for one item, or undefined when coalescing is off or
+         * the check rejected the input — a validation error must surface from
+         * the hooked write path, which re-validates and rejects the batch
+         * (matching flag-off), not from here.
+         */
+        function runDirtyCheck(
+          id: string,
+          currentProps: Record<string, unknown>,
+          inputProps: Record<string, unknown>,
+        ): UpsertDirtyCheck | undefined {
+          if (config.upsertDirtyCheck === undefined) return undefined;
+          try {
+            return config.upsertDirtyCheck(kind, id, currentProps, inputProps);
+          } catch {
+            return undefined;
+          }
+        }
 
         let itemIndex = 0;
         for (const item of items) {
@@ -487,6 +1201,18 @@ export function createNodeCollection<
             toCreate.push({
               index: itemIndex,
               input: buildCreateInput(kind, item.props, item),
+            });
+            // A create merges over nothing, so the dirty check run against an
+            // EMPTY base is exactly the validated props the insert will store —
+            // the running value a later copy of this id compares against, and
+            // needed only when there IS a later copy.
+            pending.set(item.id, {
+              props:
+                repeatedIds.has(item.id) ?
+                  runDirtyCheck(item.id, {}, item.props)?.validatedProps
+                : undefined,
+              window: windowAfterUpsertCreate(item),
+              sourceIndex: itemIndex,
             });
             itemIndex++;
             continue;
@@ -499,30 +1225,35 @@ export function createNodeCollection<
               requireDefined(original).deleted_at
             : undefined;
 
-          let dirty: UpsertDirtyCheck | undefined;
-          if (config.upsertDirtyCheck !== undefined) {
-            const currentProps =
-              pendingEntry?.props ??
-              rowPropsToObject(requireDefined(original).props);
-            try {
-              dirty = config.upsertDirtyCheck(
-                kind,
-                item.id,
-                currentProps,
-                item.props,
-              );
-            } catch {
-              // Validation error → fall through to the write path, which
-              // re-validates and rejects the batch (matching flag-off).
-              dirty = undefined;
-            }
-          }
+          const currentProps =
+            pendingEntry === undefined ?
+              rowPropsToObject(requireDefined(original).props)
+            : pendingEntry.props;
+          const dirty =
+            currentProps === undefined ? undefined : (
+              runDirtyCheck(item.id, currentProps, item.props)
+            );
 
+          // The window the row holds going into this item: the prefetched row's,
+          // or the one the batch's last queued write for this id leaves behind.
+          const currentWindow: UpsertWindow =
+            pendingEntry === undefined ?
+              {
+                valid_from: requireDefined(original).valid_from,
+                valid_to: requireDefined(original).valid_to,
+              }
+            : pendingEntry.window;
+
+          // An explicit window blocks coalescing ONLY when it would change the
+          // window already held — the same rule, through the same comparison,
+          // that shouldCoalesceUpsert applies to a single upsert. Blocking on the
+          // mere PRESENCE of a bound (what this path used to do) rewrote version,
+          // history, and revision state for every re-stated row a caller happened
+          // to hand its own current window.
           const coalesce =
             dirty?.unchanged === true &&
             deletedAt === undefined &&
-            item.validFrom === undefined &&
-            item.validTo === undefined;
+            !upsertWindowChanges(item, currentWindow);
 
           if (coalesce) {
             if (pendingEntry === undefined) {
@@ -538,39 +1269,77 @@ export function createNodeCollection<
           } else {
             toUpdate.push({
               index: itemIndex,
-              input: buildUpdateInput(kind, item.id, item.props, item),
+              input: buildUpsertUpdateInput(kind, item.id, item.props, item),
               clearDeleted: deletedAt !== undefined,
+              ...(pendingEntry === undefined && original !== undefined ?
+                { existing: original }
+              : {}),
             });
-            if (dirty !== undefined) {
-              pending.set(item.id, {
-                props: dirty.validatedProps,
-                sourceIndex: itemIndex,
-              });
-            }
+            pending.set(item.id, {
+              props: dirty?.validatedProps,
+              // A resurrecting update rewrites BOTH bounds (buildUpdateNode's
+              // clearDeleted leg stamps `valid_from` and reopens `valid_to`);
+              // a live-row update moves only `valid_to`.
+              window:
+                deletedAt === undefined ?
+                  windowAfterUpsertUpdate(currentWindow, item)
+                : windowAfterUpsertCreate(item),
+              sourceIndex: itemIndex,
+            });
           }
           itemIndex++;
         }
 
-        if (toCreate.length > 0) {
-          const createInputs = toCreate.map((entry) => entry.input);
-          const created = await executeNodeCreateBatch(createInputs, target);
+        const createInputs = toCreate.map((entry) => entry.input);
+        const updateEntries = toUpdate.map((entry) => ({
+          input: entry.input,
+          clearDeleted: entry.clearDeleted,
+          ...(entry.existing === undefined ? {} : { existing: entry.existing }),
+        }));
+        const mutationAttempt = await executeNodeResolvedMutationSet(
+          createInputs,
+          updateEntries,
+          target,
+        );
+        if (mutationAttempt.outcome === "unsupported") {
+          if (toCreate.length > 0) {
+            const created = await executeNodeCreateBatch(createInputs, target, {
+              pairedUpdates: updateEntries,
+            });
+            for (const [index, entry] of toCreate.entries()) {
+              results[entry.index] = narrowNode<N>(
+                requireDefined(created[index]),
+              );
+            }
+          }
+
+          if (toUpdate.length > 0) {
+            const updated = await executeNodeUpsertUpdateBatch(
+              updateEntries,
+              target,
+            );
+            for (const [updateIndex, entry] of toUpdate.entries()) {
+              const result = requireDefined(updated[updateIndex]);
+              results[entry.index] = narrowNode<N>(result);
+            }
+          }
+        } else {
+          const mutationSet = mutationAttempt.value;
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowNode<N>(
-              requireDefined(created[index]),
+              requireDefined(mutationSet.created[index]),
+            );
+          }
+          for (const [index, entry] of toUpdate.entries()) {
+            results[entry.index] = narrowNode<N>(
+              requireDefined(mutationSet.updated[index]),
             );
           }
         }
 
-        // Hookless individual updates
-        for (const entry of toUpdate) {
-          const result = await executeNodeUpsertUpdate(entry.input, target, {
-            clearDeleted: entry.clearDeleted,
-          });
-          results[entry.index] = narrowNode<N>(result);
-        }
-
         // Items that coalesced against an in-batch write take that write's
-        // result (now filled). Its sourceIndex is always a write slot.
+        // result (now filled). Its sourceIndex is always a write slot — a
+        // queued create or a queued update, both filled above.
         for (const { index, sourceIndex } of deferred) {
           results[index] = requireDefined(results[sourceIndex]);
         }
@@ -578,10 +1347,14 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } =
-        backend.capabilities.transactions && "transaction" in backend ?
-          await backend.transaction(async (txBackend) => upsertAll(txBackend))
-        : await upsertAll(backend);
+      const { results, mutations } = await runResolvedMutationSetConverging(
+        "node",
+        backend,
+        () =>
+          runOwnedMutationSetTransaction(backend, (target) =>
+            upsertAll(target),
+          ),
+      );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real
       // mutations count toward the threshold. A no-op inside a caller
@@ -594,38 +1367,32 @@ export function createNodeCollection<
       items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<void> {
       const batchInputs = mapBulkNodeInputs(kind, items);
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => {
-          await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
-        });
-        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
-        return;
-      }
-
       await executeNodeCreateNoReturnBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
-    async bulkDelete(ids: readonly NodeId<N>[]): Promise<void> {
+    async bulkDelete(
+      ids: readonly NodeId<N>[],
+      ...extraArguments: readonly unknown[]
+    ): Promise<void> {
+      refuseNodeDeleteArguments(extraArguments, { kind }, "bulkDelete");
       if (ids.length === 0) return;
-      const deleteAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<void> => {
-        for (const id of ids) {
-          await executeNodeDelete(kind, id, target);
-        }
-      };
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => deleteAll(txBackend));
-        return;
-      }
-      await deleteAll(backend);
+      await executeNodeDeleteBatch(kind, ids, backend);
+    },
+
+    async bulkHardDelete(
+      ids: readonly NodeId<N>[],
+      ...extraArguments: readonly unknown[]
+    ): Promise<void> {
+      refuseNodeDeleteArguments(extraArguments, { kind }, "bulkHardDelete");
+      if (ids.length === 0) return;
+      await executeNodeHardDeleteBatch(kind, ids, backend);
     },
 
     async findByConstraint(
@@ -709,36 +1476,28 @@ export function createNodeCollection<
 
     async bulkGetOrCreateByConstraint(
       constraintName: string,
-      items: readonly Readonly<{
-        props: z.input<N["schema"]>;
-      }>[],
-      options?: NodeGetOrCreateByConstraintOptions,
+      items: readonly NodeBulkGetOrCreateByConstraintItem<
+        z.input<N["schema"]>
+      >[],
+      options?: NodeBulkGetOrCreateByConstraintOptions,
     ): Promise<NodeGetOrCreateByConstraintResult<N>[]> {
       if (items.length === 0) return [];
 
       const mappedItems = items.map((item) => ({
         props: item.props,
+        ...(item.partOf === undefined ? {} : { partOf: item.partOf }),
       }));
 
-      const getOrCreateAll = async (
-        target: GraphBackend | TransactionBackend,
-      ): Promise<NodeGetOrCreateByConstraintResult<N>[]> => {
-        const results = await executeBulkGetOrCreateByConstraint(
-          kind,
-          constraintName,
-          mappedItems,
-          target,
-          options,
-        );
-        return results as NodeGetOrCreateByConstraintResult<N>[];
-      };
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
-      return getOrCreateAll(backend);
+      // The operation owns its transaction boundary, which its convergence
+      // retry reads: see `executeNodeBulkGetOrCreateByConstraint`.
+      const results = await executeBulkGetOrCreateByConstraint(
+        kind,
+        constraintName,
+        mappedItems,
+        backend,
+        options,
+      );
+      return results as NodeGetOrCreateByConstraintResult<N>[];
     },
   };
 }

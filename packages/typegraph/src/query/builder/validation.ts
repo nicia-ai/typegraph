@@ -3,8 +3,13 @@
  *
  * Validates aliases and identifiers to prevent SQL injection.
  */
-import { ValidationError } from "../../errors";
-import { type HybridFusionOptions, type PredicateExpression } from "../ast";
+import { ConfigurationError, ValidationError } from "../../errors";
+import {
+  type HybridFusionOptions,
+  type PredicateExpression,
+  type SortDirection,
+} from "../ast";
+import type { PaginateOptions, QueryBuilderState } from "./types";
 
 /**
  * Pattern for valid SQL identifiers (aliases).
@@ -183,11 +188,13 @@ function validateStructuralPredicatePlacement(
       return;
     }
     case "comparison":
+    case "tuple_comparison":
     case "string_op":
     case "null_check":
     case "between":
     case "array_op":
     case "object_op":
+    case "database_expression_predicate":
     case "aggregate_comparison":
     case "exists":
     case "in_subquery":
@@ -314,4 +321,227 @@ export function validateHybridFusionOptions(
       }
     }
   }
+}
+
+/** One owner for non-negative SQL result bounds on every builder. */
+export function validateQueryRange(
+  value: number,
+  option: "limit" | "offset",
+): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ValidationError(`${option} must be a non-negative safe integer`, {
+      issues: [
+        { path: option, message: `Invalid ${option}: ${String(value)}` },
+      ],
+    });
+  }
+}
+
+/**
+ * Whether a builder has a source. An unstarted builder carries `""` as its
+ * source alias and no source kinds; that placeholder names no alias.
+ */
+export function hasQuerySource(state: QueryBuilderState): boolean {
+  return state.startAlias !== "";
+}
+
+/** Validates the alias namespace and references once for every builder stage. */
+export function validateQueryState(state: QueryBuilderState): void {
+  if (!hasQuerySource(state)) return;
+  const aliases = new Set<string>();
+  const nodes = new Set<string>();
+  const edges = new Set<string>();
+  function addAlias(alias: string): void {
+    validateSqlIdentifier(alias);
+    if (aliases.has(alias))
+      throw new ValidationError(`Query alias "${alias}" is already in use`, {
+        issues: [
+          {
+            path: "alias",
+            message: "Aliases must be unique across nodes, edges, and paths",
+          },
+        ],
+      });
+    aliases.add(alias);
+  }
+  addAlias(state.startAlias);
+  nodes.add(state.startAlias);
+  for (const traversal of state.traversals) {
+    if (!nodes.has(traversal.joinFromAlias))
+      throw new ValidationError(
+        `Unknown traversal source alias "${traversal.joinFromAlias}"`,
+        {
+          issues: [
+            { path: "from", message: "Expected an existing node alias" },
+          ],
+        },
+      );
+    addAlias(traversal.edgeAlias);
+    edges.add(traversal.edgeAlias);
+    addAlias(traversal.nodeAlias);
+    nodes.add(traversal.nodeAlias);
+    for (const alias of [
+      traversal.variableLength?.depthAlias,
+      traversal.variableLength?.pathAlias,
+    ]) {
+      if (alias !== undefined) addAlias(alias);
+    }
+  }
+  for (const predicate of state.predicates) {
+    const expected = predicate.targetType === "edge" ? edges : nodes;
+    if (!expected.has(predicate.targetAlias))
+      throw new ValidationError(
+        `Unknown predicate alias "${predicate.targetAlias}"`,
+        {
+          issues: [
+            {
+              path: "alias",
+              message:
+                "Expected an existing alias of the requested entity type",
+            },
+          ],
+        },
+      );
+  }
+  for (const order of state.orderBy) {
+    if (order.field.__type === "database_expression") continue;
+    if (!nodes.has(order.field.alias) && !edges.has(order.field.alias))
+      throw new ValidationError(`Unknown order alias "${order.field.alias}"`, {
+        issues: [
+          {
+            path: "orderBy",
+            message: "Expected an existing node or edge alias",
+          },
+        ],
+      });
+  }
+}
+
+export function validateQuerySource(
+  state: QueryBuilderState,
+  starting: boolean,
+): void {
+  if (starting === hasQuerySource(state)) {
+    throw new ValidationError(
+      starting ?
+        "A query can have only one source; start a new query instead."
+      : "Start the query with from() or fromDynamic() first.",
+      {
+        issues: [
+          {
+            path: "from",
+            message: starting ? "Source already defined" : "Source required",
+          },
+        ],
+      },
+    );
+  }
+}
+
+export function validateTraversalOptions(
+  direction: string,
+  expansion: string,
+): void {
+  if (direction !== "in" && direction !== "out")
+    throw new ValidationError(`Invalid traversal direction: ${direction}`, {
+      issues: [{ path: "direction", message: "Use in or out" }],
+    });
+  if (!["none", "implying", "inverse", "all"].includes(expansion))
+    throw new ValidationError(`Invalid traversal expansion: ${expansion}`, {
+      issues: [
+        { path: "expand", message: "Use none, implying, inverse, or all" },
+      ],
+    });
+}
+
+/** The surfaces that page a query with a keyset cursor. */
+export type CursorPaginationSurface = "paginate" | "page" | "stream";
+
+/**
+ * Refuses keyset pagination over a query with a recursive traversal.
+ *
+ * A keyset cursor must identify the row it follows. A recursive traversal
+ * fans one start node out into rows that have no single edge to extend the
+ * start node's keys with, so the cursor can only name the start node. The next
+ * page then resumes strictly after that node and loses every row of it not yet
+ * returned. A `recursive({ maxHops: 1 })` step is refused too: the compiler's
+ * lowering of that shape to a fixed hop is an engine detail the cursor does
+ * not see. `parts()` / `wholes()` with `maxHops: 1` and neither `depth` nor
+ * `path` are different: the builder emits a fixed step, never a recursive one,
+ * so this refusal does not apply and the cursor carries that step's edge key
+ * like any `traverse()`.
+ *
+ * Every pagination surface calls this before building or executing anything, so
+ * the refusal is the same on every backend and costs no statement.
+ */
+export function refuseRecursivePagination(
+  state: QueryBuilderState,
+  surface: CursorPaginationSurface,
+): void {
+  if (
+    !state.traversals.some(
+      (traversal) => traversal.variableLength !== undefined,
+    )
+  )
+    return;
+  throw new ConfigurationError(
+    `${surface}() cannot page a query with a recursive traversal (recursive(), parts() or wholes()): ` +
+      "a cursor cannot position itself inside the rows one start node fans out into, " +
+      "so the rows past a page boundary would be silently dropped.",
+    { code: "RECURSIVE_PAGINATION_UNSUPPORTED", operation: surface },
+    {
+      suggestion:
+        "Read the walk with execute() and an explicit limit() or recursive({ maxHops }), " +
+        "or page the start nodes in a query without the recursive traversal and run the recursive walk for each page.",
+    },
+  );
+}
+
+/** Cursor pagination owns its bounds; conflicting or invalid options must not be ignored. */
+export function validatePaginationOptions(
+  state: QueryBuilderState,
+  options: PaginateOptions,
+  surface: Exclude<CursorPaginationSurface, "stream">,
+): void {
+  refuseRecursivePagination(state, surface);
+  if (state.limit !== undefined || state.offset !== undefined) {
+    throw new ValidationError(
+      "Cursor pagination cannot honor query limit/offset; use first/after or last/before instead.",
+      { issues: [{ path: "paginate", message: "Conflicting result bounds" }] },
+    );
+  }
+  const forward = options.first !== undefined || options.after !== undefined;
+  const backward = options.last !== undefined || options.before !== undefined;
+  if (forward && backward)
+    throw new ValidationError(
+      "Use either first/after or last/before, not both pagination directions.",
+      { issues: [{ path: "paginate", message: "Conflicting directions" }] },
+    );
+  for (const key of ["first", "last"] as const) {
+    const value = options[key];
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) ||
+        value < 1 ||
+        value >= Number.MAX_SAFE_INTEGER)
+    ) {
+      throw new ValidationError(
+        `${key} must be a positive safe integer with room for a lookahead row`,
+        { issues: [{ path: key, message: "Invalid page size" }] },
+      );
+    }
+  }
+  for (const key of ["after", "before"] as const) {
+    if (options[key]?.length === 0)
+      throw new ValidationError("Pagination cursors must not be empty", {
+        issues: [{ path: key, message: "Empty cursor" }],
+      });
+  }
+}
+
+export function validateSortDirection(
+  value: unknown,
+): asserts value is SortDirection {
+  if (value !== "asc" && value !== "desc")
+    throw new ConfigurationError("Invalid order direction.");
 }

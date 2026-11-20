@@ -49,32 +49,59 @@ export type {
 // Builder types users need
 export type {
   AliasMap,
+  AliasOrderField,
+  AssignableNodeKinds,
   BatchableQuery,
   BatchResults,
+  CommonPropertyKeys,
+  CompiledOneStatementRead,
+  CompositionNavigationOptions,
+  CompositionWholeKinds,
   DynamicEdgeAccessor,
   DynamicEdgeType,
   DynamicFieldBuilder,
   DynamicNodeAccessor,
+  DynamicNodeKind,
   DynamicNodeType,
   DynamicSelectableEdge,
   DynamicSelectableNode,
   EdgeAccessor,
+  EdgeMetadataAccessor,
+  EdgeOrderField,
+  EmbeddableOneStatementRead,
   EmptyAliasMap,
   EmptyEdgeAliasMap,
   EmptyRecursiveAliasMap,
+  ExecutableOneStatementRead,
+  ExpansionAliasNodeType,
   FieldAccessor,
+  ForwardedExpansionAxes,
+  IdentityTraversalOption,
   InitialQueryBuilder,
   NodeAccessor,
   NodeAlias,
+  NodeCandidateQuery,
+  NodeCandidateSelection,
+  NodeMetadataAccessor,
+  NodeOrderField,
+  NodePropsFor,
+  OneStatementBatchableQuery,
+  OneStatementBatchResults,
   PaginatedResult,
   PaginateOptions,
   PropsAccessor,
+  QualifiedRecursivePath,
+  QualifiedRecursivePathEdge,
+  QualifiedRecursivePathElement,
+  QualifiedRecursivePathNode,
+  QualifiedRecursivePathOption,
   QueryCoordinateState,
   RecursiveTraversalOptions,
   SelectableEdge,
   SelectableNode,
   SelectContext,
   StreamOptions,
+  SubsumedNodeType,
   TraversalExpansion,
 } from "./builder";
 
@@ -110,7 +137,26 @@ export { createQueryBuilder } from "./builder";
 export { type AggregateResult, ExecutableAggregateQuery } from "./builder";
 export { ExecutableQuery } from "./builder";
 export { QueryBuilder } from "./builder";
+export {
+  type AliasExpansionAxis,
+  type AliasExpansionOptions,
+  DEFAULT_ALIAS_EXPANSION_AXIS,
+  type DefaultAliasExpansionAxis,
+  SEARCH_EXPANSION_DEFAULT,
+} from "./builder/alias-expansion";
+export type {
+  PreparedBindings,
+  PreparedParameterDeclaration,
+} from "./builder/prepared-bindings";
 export { PreparedQuery } from "./builder/prepared-query";
+export {
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationProjection,
+  type RelationProjectionResult,
+  type TopPerPartitionOptions,
+  type TopPerPartitionOrder,
+} from "./builder/relation";
 export { UnionableQuery } from "./builder/unionable-query";
 
 // Aggregate functions
@@ -138,11 +184,15 @@ export {
 export {
   composeFragments,
   createFragment,
-  type FlexibleQueryFragment,
+  type FragmentRequiredAliases,
+  type FragmentRequirements,
+  type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
   type QueryFragment,
+  type QueryFragmentBody,
+  type QueryFragmentFactory,
   type TraversalFragment,
 } from "./builder/fragment";
 
@@ -157,9 +207,29 @@ export {
 
 // SQL schema configuration
 export {
+  type DatabaseProjection,
+  ExecutableProjectionQuery,
+  type ProjectionResult,
+} from "./builder/executable-projection-query";
+export type {
+  ExpressionAliasContext,
+  ExpressionValue,
+  QueryExpressionContext,
+} from "./builder/expression-context";
+export type { BatchOnceOptions } from "./builder/one-statement-batch";
+export {
   createSqlSchema,
   DEFAULT_SQL_SCHEMA,
   type ResolvedSqlTableNames,
   type SqlSchema,
   type SqlTableNames,
 } from "./compiler/schema";
+export {
+  type CollectedRecord,
+  type CollectOptions,
+  type CollectOrder,
+  type CollectRecordFields,
+  type CollectRecordOperand,
+  type DatabaseExpression,
+  expr,
+} from "./expressions";

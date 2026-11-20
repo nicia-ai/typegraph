@@ -3,22 +3,33 @@ import {
   defineGraph,
   defineNode,
   type EdgeId,
-  getEdgeKinds,
-  getNodeKinds,
   type NodeId,
-  type NodeIdentifier,
   type NodeRef,
-  type PathNode,
-  type ReachableNode,
   type Store,
-  type TemporalAlgorithmOptions,
 } from "@nicia-ai/typegraph";
+import { getEdgeKinds, getNodeKinds } from "@nicia-ai/typegraph/core";
 import type {
+  NodeIdentifier,
+  PathNode,
+  ReachableNode,
+  TemporalAlgorithmOptions,
+} from "@nicia-ai/typegraph/store";
+import type {
+  CandidateDiagnostics,
+  EntityResolution,
   GraphBranch,
   MakeBackend,
+  MatchEvidence,
+  MergePlanArtifact,
   MergeOptions,
 } from "@nicia-ai/typegraph/graph-merge";
-import { branch, merge } from "@nicia-ai/typegraph/graph-merge";
+import {
+  applyMergePlan,
+  branch,
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "@nicia-ai/typegraph/graph-merge";
 import type { SqliteTables } from "@nicia-ai/typegraph/adapters/drizzle/sqlite";
 import { z } from "zod";
 
@@ -86,6 +97,9 @@ declare const worksAtId: EdgeId<typeof worksAt>;
 declare const sqliteTables: SqliteTables;
 declare const makeBackend: MakeBackend;
 declare const branches: readonly GraphBranch<typeof graph>[];
+declare const mergePlan: MergePlanArtifact;
+declare const entityResolution: EntityResolution;
+declare const candidateDiagnostics: CandidateDiagnostics;
 
 const nodeKinds = getNodeKinds(graph);
 const edgeKinds = getEdgeKinds(graph);
@@ -110,10 +124,24 @@ const mergeOptions: MergeOptions<typeof graph> = {
       threshold: 0.8,
     },
   },
+  candidateDiagnostics: { limit: 100 },
 };
 
 void branch(store, makeBackend);
 void merge(store, branches, mergeOptions);
+void planMerge(store, branches, mergeOptions);
+void planMergeIncremental({
+  forkPoint: store,
+  target: store,
+  branches,
+  options: mergeOptions,
+});
+void applyMergePlan(store, mergePlan);
+
+const decisiveEdges: readonly MatchEvidence[] = entityResolution.decisiveEdges;
+const diagnosticLimit: number = candidateDiagnostics.limit;
+void decisiveEdges;
+void diagnosticLimit;
 
 // @ts-expect-error - edge id brands cannot be mixed across edge kinds
 void store.edges.knows.getById(worksAtId);
@@ -200,11 +228,14 @@ void store.algorithms.personalizedPageRank({
 });
 void store.algorithms.labelPropagation({ edges: ["knows"], ...temporal });
 
-// Subgraph also accepts the temporal options (requires a branded NodeId).
-void store.subgraph(aliceNodeId, {
-  edges: ["knows"],
-  temporalMode: "includeEnded",
-});
+// Subgraph also accepts the temporal options (takes a kind and branded id reference).
+void store.subgraph(
+  { kind: "Person", id: aliceNodeId },
+  {
+    edges: ["knows"],
+    temporalMode: "includeEnded",
+  },
+);
 
 // --- Negative cases (must fail compile) ---
 
@@ -244,5 +275,11 @@ void store.algorithms.reachable(aliceId, {
   temporalMode: "bogus_mode",
 });
 
-// @ts-expect-error - subgraph edge kind must be registered on the graph
-void store.subgraph(aliceNodeId, { edges: ["not_a_kind"] });
+void store.subgraph(
+  { kind: "Person", id: aliceNodeId },
+  // @ts-expect-error - subgraph edge kind must be registered on the graph
+  { edges: ["not_a_kind"] },
+);
+
+// @ts-expect-error - a bare node id is not a subgraph root
+void store.subgraph(aliceNodeId, { edges: ["knows"] });

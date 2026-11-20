@@ -7,6 +7,11 @@ import { type FulltextQueryMode } from "../backend/types";
 import { type NullCheckOp } from "../core/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../errors";
 import {
+  CANONICAL_DATE_OPERAND_EXPECTATION,
+  canonicalDateOperandText,
+  describeDateOperand,
+} from "../utils/date";
+import {
   type ArrayOp,
   type ArrayPredicate,
   type BetweenPredicate,
@@ -30,6 +35,7 @@ import {
   type VectorSimilarityPredicate,
 } from "./ast";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "./compiler/temporal";
+import { likePatternHasTrailingEscape } from "./dialect/like-escape";
 import { resolveFieldTypeInfoAtJsonPointer } from "./field-type-info";
 import {
   joinJsonPointers,
@@ -38,6 +44,7 @@ import {
   type JsonPointerInput,
   type JsonPointerSegment,
   normalizeJsonPointer,
+  parseJsonPointer,
   type ResolveJsonPointer,
   type ResolveJsonPointerSegments,
 } from "./json-pointer";
@@ -95,8 +102,10 @@ function predicate(expr: PredicateExpression): Predicate {
  * Creates a named parameter reference for prepared queries.
  *
  * Use with `query.prepare()` to create reusable parameterized queries.
- * Only supported in scalar comparison positions (eq, neq, gt, etc.),
- * string operations, and between bounds. Not supported in `in()`/`notIn()`.
+ * Supported in scalar comparison positions (eq, neq, gt, etc.), string
+ * operations, between bounds, and as the WHOLE list of `in()`/`notIn()` —
+ * `field.in(param("ids"))` bound to an array at execute time. A `param()`
+ * among the individual elements of a literal list is rejected.
  *
  * @example
  * ```typescript
@@ -107,6 +116,18 @@ function predicate(expr: PredicateExpression): Predicate {
  *   .prepare();
  *
  * const results = await prepared.execute({ name: "Alice" });
+ * ```
+ *
+ * @example List-valued parameter — one compiled statement, any list length.
+ * ```typescript
+ * const byIds = store.query()
+ *   .from("Person", "p")
+ *   .whereNode("p", (p) => p.id.in(param("ids")))
+ *   .select((ctx) => ctx.p)
+ *   .prepare();
+ *
+ * await byIds.execute({ ids: ["a", "b"] });
+ * await byIds.execute({ ids: ["c"] });
  * ```
  */
 // eslint-disable-next-line unicorn/name-replacements -- concise public API
@@ -140,24 +161,32 @@ export function isParameterRef(value: unknown): value is ParameterRef {
  * A typed field builder for creating predicates.
  */
 type FieldBuilder<T> =
-  [T] extends [string] ? StringFieldBuilder
-  : [T] extends [number] ? NumberFieldBuilder
-  : [T] extends [boolean] ? BooleanFieldBuilder
-  : [T] extends [Date] ? DateFieldBuilder
+  [T] extends [string] ? StringFieldBuilder<T>
+  : [T] extends [number] ? NumberFieldBuilder<T>
+  : [T] extends [boolean] ? BooleanFieldBuilder<T>
+  : [T] extends [Date] ? DateFieldBuilder<T>
   : [T] extends [readonly (infer U)[]] ? ArrayFieldBuilder<U>
   : [T] extends [Record<string, unknown>] ? ObjectFieldBuilder<T>
-  : BaseFieldBuilder;
+  : BaseFieldBuilder<T>;
+
+type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
+type MembershipOperand<T> = readonly T[] | ParameterRef;
+
+type NullFieldBuilder = Readonly<{
+  isNull: () => Predicate;
+  isNotNull: () => Predicate;
+}>;
 
 /**
  * Base field operations available on all types.
  */
-type BaseFieldBuilder = Readonly<{
-  eq: (value: unknown) => Predicate;
-  neq: (value: unknown) => Predicate;
+type BaseFieldBuilder<T = unknown> = Readonly<{
+  eq: (value: EqualityOperand<T>) => Predicate;
+  neq: (value: EqualityOperand<T>) => Predicate;
   isNull: () => Predicate;
   isNotNull: () => Predicate;
-  in: (values: readonly unknown[]) => Predicate;
-  notIn: (values: readonly unknown[]) => Predicate;
+  in: (values: MembershipOperand<T>) => Predicate;
+  notIn: (values: MembershipOperand<T>) => Predicate;
 }>;
 
 /**
@@ -200,7 +229,7 @@ type MatchesOptions = Readonly<{
  * level (gated by `searchable()` declarations in the schema), not on
  * individual string fields.
  */
-type StringFieldBuilder = BaseFieldBuilder &
+type StringFieldBuilder<T extends string = string> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: string | ParameterRef) => Predicate;
     gte: (value: string | ParameterRef) => Predicate;
@@ -216,7 +245,7 @@ type StringFieldBuilder = BaseFieldBuilder &
 /**
  * Number-specific field operations.
  */
-type NumberFieldBuilder = BaseFieldBuilder &
+type NumberFieldBuilder<T extends number = number> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: number | ParameterRef) => Predicate;
     gte: (value: number | ParameterRef) => Predicate;
@@ -231,12 +260,12 @@ type NumberFieldBuilder = BaseFieldBuilder &
 /**
  * Boolean-specific field operations.
  */
-type BooleanFieldBuilder = BaseFieldBuilder;
+type BooleanFieldBuilder<T extends boolean = boolean> = BaseFieldBuilder<T>;
 
 /**
  * Date-specific field operations.
  */
-type DateFieldBuilder = BaseFieldBuilder &
+type DateFieldBuilder<T extends Date = Date> = BaseFieldBuilder<T> &
   Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
     gte: (value: Date | string | ParameterRef) => Predicate;
@@ -265,7 +294,7 @@ type ArrayPredicateOps<T> =
 /**
  * Array-specific field operations.
  */
-type ArrayFieldBuilder<T = unknown> = BaseFieldBuilder &
+type ArrayFieldBuilder<T = unknown> = NullFieldBuilder &
   Readonly<{
     /** Check if array is empty */
     isEmpty: () => Predicate;
@@ -304,7 +333,7 @@ type NestedFieldBuilder<T, K extends keyof T> =
 
 type ObjectFieldBuilder<
   T extends Record<string, unknown> = Record<string, unknown>,
-> = BaseFieldBuilder &
+> = NullFieldBuilder &
   Readonly<{
     /** Access a nested field by key for fluent chaining */
     get: <K extends keyof T & string>(key: K) => NestedFieldBuilder<T, K>;
@@ -352,8 +381,21 @@ export type SimilarToOptions = Readonly<{
    * distance scan. This is a SEMANTIC change — results are subject to the
    * index's recall, and predicates composed alongside constrain the ANN
    * candidate set (exact on pgvector/vec0; bounded by over-fetch on
-   * libSQL). A slot declared with `indexType: "none"` falls back to the
-   * exact scan. Default: exact.
+   * libSQL). Default: exact.
+   *
+   * Two states cannot serve it, and they are handled differently on purpose:
+   *
+   * - **A slot declared `indexType: "none"`** has no ANN structure, so the
+   *   opt-in compiles to the exact scan and results are unchanged. A
+   *   DECLARED degradation: the query is still exactly what was asked for,
+   *   only faster or slower.
+   * - **A `metric` override that differs from the field's declared metric**
+   *   is REFUSED with a `ConfigurationError` naming both metrics. An ANN
+   *   structure retrieves only under the metric it was built for, so the two
+   *   options state something that cannot both hold — and serving the exact
+   *   scan instead would silently drop one of them. Omit `metric` (or pass
+   *   the declared one) to keep approximate retrieval, or drop `approximate`
+   *   to scan exactly under the overriding metric.
    */
   approximate?: boolean;
 }>;
@@ -361,7 +403,7 @@ export type SimilarToOptions = Readonly<{
 /**
  * Embedding-specific field operations for vector similarity search.
  */
-type EmbeddingFieldBuilder = BaseFieldBuilder &
+type EmbeddingFieldBuilder = NullFieldBuilder &
   Readonly<{
     /**
      * Find nodes with similar embeddings.
@@ -400,13 +442,14 @@ type FieldRefOptions = Readonly<{
   jsonPointer?: JsonPointer | undefined;
   valueType?: ValueType | undefined;
   elementType?: ValueType | undefined;
+  nullable?: boolean | undefined;
 }>;
 
-export function fieldRef(
+export function fieldRef<Value = unknown>(
   alias: string,
   path: readonly string[],
   options?: FieldRefOptions,
-): FieldRef {
+): FieldRef<Value> {
   return {
     __type: "field_ref",
     alias,
@@ -418,7 +461,185 @@ export function fieldRef(
     ...(options?.elementType !== undefined && {
       elementType: options.elementType,
     }),
+    ...(options?.nullable !== undefined && { nullable: options.nullable }),
   };
+}
+
+function isFieldRef(value: unknown): value is FieldRef {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Readonly<{ __type?: unknown }>).__type === "field_ref"
+  );
+}
+
+/**
+ * A field reference as an error message names it: `alias.property` for a
+ * property (`d.publishedAt`, `d.metadata.publishedAt` for a nested one),
+ * not the `props` column every property is stored in.
+ */
+function describeFieldRef(field: FieldRef): string {
+  const pointerSegments =
+    field.jsonPointer === undefined ? [] : parseJsonPointer(field.jsonPointer);
+  const columnSegments =
+    (
+      field.path[0] === "props" &&
+      (field.path.length > 1 || pointerSegments.length > 0)
+    ) ?
+      field.path.slice(1)
+    : field.path;
+  return [field.alias, ...columnSegments, ...pointerSegments].join(".");
+}
+
+/**
+ * Whether a comparison against a value of `valueType` is a date comparison:
+ * one SQLite decides on the stored text and PostgreSQL on the parsed
+ * `timestamptz`. The one place that decision is made. A date-typed property
+ * (`FieldRef.valueType`), a `$meta` timestamp, and a composed expression
+ * whose value is a date (`expr.coalesce(d.publishedAt, …)`,
+ * `DatabaseExpression.valueType`) all reach it, so a literal and a binding
+ * compared with any of them are held to the same operand contract.
+ */
+function isDateComparison(valueType: ValueType | undefined): boolean {
+  return valueType === "date";
+}
+
+/** The side of a comparison an operand is compared with, as a refusal names it. */
+export type DateComparedSide = Readonly<{
+  valueType: ValueType | undefined;
+  /** `date field "d.publishedAt"`, or `a date expression`. */
+  description: string;
+  /** The property path an error's details name, when the side is one. */
+  field?: string;
+}>;
+
+/**
+ * The canonical text an operand compared with `compared` binds as, when the
+ * comparison is a date comparison ({@link isDateComparison}); `undefined` for
+ * any other comparison. Refuses an operand of a date comparison unless every
+ * backend compares it the same way — the decision `canonicalDateOperandText`
+ * owns for `$meta` timestamps too. SQLite compares the stored text and
+ * PostgreSQL the parsed `timestamptz`, so `gte("2024-01-01")` matched on one
+ * and not the other, and PostgreSQL refused a year-0000 operand that SQLite
+ * compared. The store writes a date property as its canonical `toISOString()`
+ * text, so an accepted operand compares identically on both.
+ *
+ * The one check for a predicate-builder literal, an expression-context
+ * literal, and a `param()` binding, so each refuses before any SQL runs.
+ */
+export function dateComparisonOperandText(
+  compared: DateComparedSide,
+  operand: unknown,
+): string | undefined {
+  if (!isDateComparison(compared.valueType)) return undefined;
+  const text = canonicalDateOperandText(operand);
+  if (text !== undefined) return text;
+  throw new UnsupportedPredicateError(
+    `Invalid operand compared with ${compared.description}: expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(operand)}.`,
+    {
+      ...(compared.field === undefined ? {} : { field: compared.field }),
+      receivedValueType: typeof operand,
+    },
+    {
+      suggestion:
+        "Pass a Date, or convert the string with new Date(value).toISOString() after deciding which time zone it names.",
+    },
+  );
+}
+
+/** A field reference as the side of a date comparison. */
+function fieldComparedSide(field: FieldRef): DateComparedSide {
+  const name = describeFieldRef(field);
+  return {
+    valueType: field.valueType,
+    description: `date field "${name}"`,
+    field: name,
+  };
+}
+
+/**
+ * Refuses an operand compared with a date-typed field reference unless every
+ * backend compares it the same way ({@link dateComparisonOperandText}). A
+ * reference that is not date-typed is not checked here.
+ */
+export function assertDateFieldOperand(
+  field: FieldRef,
+  operand: unknown,
+): void {
+  dateComparisonOperandText(fieldComparedSide(field), operand);
+}
+
+/**
+ * The literal a scalar operand compared with `field` compiles as, after the
+ * field's date contract has accepted it. An operand of a date comparison is a
+ * `date` literal of its canonical text whether it was given as a `Date` or a
+ * string, so a list or `between` mixing the two resolves one literal type —
+ * the same one on a literal predicate and a prepared query's bound fallback.
+ */
+export function comparedOperandLiteral(
+  field: FieldRef,
+  value: string | number | boolean | Date,
+): LiteralValue {
+  const dateText = dateComparisonOperandText(fieldComparedSide(field), value);
+  if (dateText === undefined) return literal(value);
+  return { __type: "literal", value: dateText, valueType: "date" };
+}
+
+function assertCompatibleFieldReferences(
+  left: FieldRef,
+  right: FieldRef,
+): void {
+  const leftType = left.valueType;
+  const rightType = right.valueType;
+  if (
+    leftType !== undefined &&
+    leftType !== "unknown" &&
+    rightType !== undefined &&
+    rightType !== "unknown" &&
+    leftType !== rightType
+  ) {
+    throw new UnsupportedPredicateError(
+      `Cannot compare ${leftType} field "${describeFieldRef(left)}" with ${rightType} field "${describeFieldRef(right)}".`,
+      { leftType, rightType },
+    );
+  }
+}
+
+function assertLiteralMatchesField(
+  field: FieldRef,
+  value: unknown,
+  allowDateString = false,
+): void {
+  const valueType = field.valueType;
+  if (valueType === undefined || valueType === "unknown") return;
+
+  const matches =
+    (valueType === "string" && typeof value === "string") ||
+    (valueType === "number" && typeof value === "number") ||
+    (valueType === "boolean" && typeof value === "boolean") ||
+    (valueType === "date" &&
+      (value instanceof Date ||
+        (allowDateString && typeof value === "string")));
+  if (matches) return;
+
+  throw new UnsupportedPredicateError(
+    `Expected a ${valueType} literal for field "${describeFieldRef(field)}", got ${value instanceof Date ? "date" : typeof value}.`,
+    { expectedValueType: valueType, receivedValueType: typeof value },
+  );
+}
+
+function assertComparisonSupported(field: FieldRef): void {
+  const valueType = field.valueType;
+  if (
+    valueType === "array" ||
+    valueType === "object" ||
+    valueType === "embedding"
+  ) {
+    throw new UnsupportedPredicateError(
+      `Comparison predicates are not supported for ${valueType} field "${describeFieldRef(field)}".`,
+      { valueType },
+    );
+  }
 }
 
 function coerceLiteralValue(value: unknown): string | number | boolean | Date {
@@ -468,6 +689,7 @@ function comparison(
   field: FieldRef,
   value: unknown,
 ): Predicate {
+  assertComparisonSupported(field);
   if (isParameterRef(value)) {
     const expr: ComparisonPredicate = {
       __type: "comparison",
@@ -477,25 +699,62 @@ function comparison(
     };
     return predicate(expr);
   }
-  const coercedValue = coerceLiteralValue(value);
+  if (isFieldRef(value)) {
+    assertCompatibleFieldReferences(field, value);
+    return predicate({
+      __type: "comparison",
+      op,
+      left: field,
+      right: value,
+    } satisfies ComparisonPredicate);
+  }
+  assertLiteralMatchesField(field, value, op !== "eq" && op !== "neq");
   const expr: ComparisonPredicate = {
     __type: "comparison",
     op,
     left: field,
-    right: literal(coercedValue),
+    right: comparedOperandLiteral(field, coerceLiteralValue(value)),
   };
   return predicate(expr);
 }
 
 /**
  * Creates an IN comparison predicate.
+ *
+ * The whole list may be a single `param()` — bound at
+ * `.prepare().execute({ ids: [...] })` and compiled to one placeholder, so
+ * varying list lengths reuse one cached statement. A `param()` sitting among
+ * literal *elements* has no such representation (a placeholder cannot be one
+ * item of a list the compiler already inlined), so it is rejected rather than
+ * silently bound as a literal.
  */
 function inComparison(
   op: "in" | "notIn",
   field: FieldRef,
-  values: readonly unknown[],
+  values: readonly unknown[] | ParameterRef,
 ): Predicate {
-  const literals = values.map((value) => literal(coerceLiteralValue(value)));
+  assertComparisonSupported(field);
+  if (isParameterRef(values)) {
+    return predicate({
+      __type: "comparison",
+      op,
+      left: field,
+      right: values,
+    } satisfies ComparisonPredicate);
+  }
+  const literals = values.map((value) => {
+    if (isParameterRef(value)) {
+      throw new UnsupportedPredicateError(
+        `param("${value.name}") is not supported as an element of the ${op}() list`,
+        { parameterName: value.name },
+        {
+          suggestion: `Bind the whole list instead: .${op}(param("${value.name}")) and execute({ ${value.name}: [...] }).`,
+        },
+      );
+    }
+    assertLiteralMatchesField(field, value);
+    return comparedOperandLiteral(field, coerceLiteralValue(value));
+  });
   const expr: ComparisonPredicate = {
     __type: "comparison",
     op,
@@ -513,6 +772,19 @@ function stringOp(
   field: FieldRef,
   pattern: string | ParameterRef,
 ): Predicate {
+  if (
+    (op === "like" || op === "ilike") &&
+    typeof pattern === "string" &&
+    likePatternHasTrailingEscape(pattern)
+  ) {
+    throw new ConfigurationError(
+      `${op}() pattern ${JSON.stringify(pattern)} ends with an escape character that escapes nothing.`,
+      { code: "LIKE_PATTERN_TRAILING_ESCAPE", operator: op, pattern },
+      {
+        suggestion: String.raw`Remove the trailing "\", or double it to match a literal backslash.`,
+      },
+    );
+  }
   if (isParameterRef(pattern)) {
     const expr: StringPredicate = {
       __type: "string_op",
@@ -543,6 +815,13 @@ function nullCheck(op: NullCheckOp, field: FieldRef): Predicate {
   return predicate(expr);
 }
 
+function nullFieldBuilder(field: FieldRef): NullFieldBuilder {
+  return {
+    isNull: () => nullCheck("isNull", field),
+    isNotNull: () => nullCheck("isNotNull", field),
+  };
+}
+
 /**
  * Creates a between predicate.
  */
@@ -554,8 +833,8 @@ function between(
   const expr: BetweenPredicate = {
     __type: "between",
     field,
-    lower: isParameterRef(lower) ? lower : literal(lower),
-    upper: isParameterRef(upper) ? upper : literal(upper),
+    lower: isParameterRef(lower) ? lower : comparedOperandLiteral(field, lower),
+    upper: isParameterRef(upper) ? upper : comparedOperandLiteral(field, upper),
   };
   return predicate(expr);
 }
@@ -563,7 +842,7 @@ function between(
 /**
  * Creates a base field builder with common operations.
  */
-function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
+function baseFieldBuilder<T = unknown>(field: FieldRef): BaseFieldBuilder<T> {
   return {
     eq: (value) => comparison("eq", field, value),
     neq: (value) => comparison("neq", field, value),
@@ -571,6 +850,16 @@ function baseFieldBuilder(field: FieldRef): BaseFieldBuilder {
     isNotNull: () => nullCheck("isNotNull", field),
     in: (values) => inComparison("in", field, values),
     notIn: (values) => inComparison("notIn", field, values),
+  };
+}
+
+function unsupportedComparisonFieldBuilder(field: FieldRef): BaseFieldBuilder {
+  return {
+    eq: (value) => comparison("eq", field, value),
+    neq: (value) => comparison("neq", field, value),
+    in: (values) => inComparison("in", field, values),
+    notIn: (values) => inComparison("notIn", field, values),
+    ...nullFieldBuilder(field),
   };
 }
 
@@ -617,20 +906,35 @@ export type FulltextAccessor = Readonly<{
 
 /**
  * Creates a node-level fulltext accessor. The runtime check throws for
- * aliases whose node kind has no `searchable()` content, catching the
- * case where the field tag was dropped (e.g. by a schema refactor)
- * after the query was written.
+ * aliases with no `searchable()` content, catching the case where the field
+ * tag was dropped (e.g. by a schema refactor) after the query was written.
+ *
+ * `kindsWithoutSearchableField` names the kinds that leave the alias without
+ * searchable content; empty means `$fulltext` is available. It is absent for
+ * an alias that resolves to no node kind.
  */
 export function createFulltextAccessor(
   alias: string,
-  hasSearchableField: () => boolean,
+  kindsWithoutSearchableField: (() => readonly string[]) | undefined,
 ): FulltextAccessor {
   return {
     matches: (query, k, options) => {
-      if (!hasSearchableField()) {
+      if (kindsWithoutSearchableField === undefined) {
         throw new UnsupportedPredicateError(
-          `Cannot call .$fulltext.matches() on alias "${alias}" — its ` +
-            `node kind has no fields declared with searchable(). Add at ` +
+          `Cannot call .$fulltext.matches() on alias "${alias}" — the alias ` +
+            `resolves to no node kind in this query.`,
+        );
+      }
+      const lackingKinds = kindsWithoutSearchableField();
+      if (lackingKinds.length > 0) {
+        const kindList = lackingKinds
+          .map((kindName) => `"${kindName}"`)
+          .join(", ");
+        throw new UnsupportedPredicateError(
+          `Cannot call .$fulltext.matches() on alias "${alias}" — ` +
+            `${lackingKinds.length === 1 ? "kind" : "kinds"} ${kindList} ` +
+            `${lackingKinds.length === 1 ? "has" : "have"} no fields ` +
+            `declared with searchable(). Add at ` +
             `least one: \`title: searchable({ language: "english" })\`.`,
         );
       }
@@ -702,7 +1006,9 @@ export function dateField(field: FieldRef): DateFieldBuilder {
  * Creates a base field builder (for booleans, enums, and unknown types).
  * Only provides the fundamental operations: eq, neq, isNull, isNotNull, in, notIn.
  */
-export function baseField(field: FieldRef): BaseFieldBuilder {
+export function baseField<T = unknown>(
+  field: FieldRef<T>,
+): BaseFieldBuilder<T> {
   return baseFieldBuilder(field);
 }
 
@@ -735,7 +1041,7 @@ export function arrayField<T = unknown>(field: FieldRef): ArrayFieldBuilder<T> {
   // contains/containsAll/containsAny based on whether T extends ScalarValue.
   // At runtime we always provide them - they just won't type-check if T isn't scalar.
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     contains: (value: T) => arrayOp("contains", field, [value]),
     containsAll: (values: readonly T[]) =>
       arrayOp("containsAll", field, values),
@@ -784,7 +1090,7 @@ function vectorSimilarity(
  */
 export function embeddingField(field: FieldRef): EmbeddingFieldBuilder {
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     similarTo: (queryEmbedding, k, options) =>
       vectorSimilarity(field, queryEmbedding, k, options),
   };
@@ -800,25 +1106,34 @@ export function buildFieldBuilderForTypeInfo(
 
   switch (typeInfo.valueType) {
     case "string": {
-      return stringField(field);
+      return stringField(field) as unknown as BaseFieldBuilder;
     }
     case "number": {
-      return numberField(field);
+      return numberField(field) as unknown as BaseFieldBuilder;
     }
     case "boolean": {
       return baseField(field);
     }
     case "date": {
-      return dateField(field);
+      return dateField(field) as unknown as BaseFieldBuilder;
     }
     case "array": {
-      return arrayField(field);
+      return {
+        ...arrayField(field),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "object": {
-      return objectField(field, { typeInfo });
+      return {
+        ...objectField(field, { typeInfo }),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "embedding": {
-      return embeddingField(field);
+      return {
+        ...embeddingField(field),
+        ...unsupportedComparisonFieldBuilder(field),
+      };
     }
     case "unknown": {
       return baseField(field);
@@ -877,7 +1192,7 @@ export function objectField<
   const basePointer = field.jsonPointer;
 
   return {
-    ...baseFieldBuilder(field),
+    ...nullFieldBuilder(field),
     get: <K extends keyof T & string>(key: K) => {
       const pointer = jsonPointer([key]);
       const nestedPointer = joinJsonPointers(basePointer, pointer);

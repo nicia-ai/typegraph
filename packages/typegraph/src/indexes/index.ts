@@ -12,7 +12,8 @@
  *
  * @example Indexes via defineGraph
  * ```ts
- * import { defineGraph, defineNode, defineNodeIndex } from "@nicia-ai/typegraph";
+ * import { defineGraph, defineNode } from "@nicia-ai/typegraph";
+ * import { defineNodeIndex } from "@nicia-ai/typegraph/indexes";
  * import { z } from "zod";
  *
  * const Person = defineNode("Person", {
@@ -53,6 +54,7 @@ export {
   generateSystemIndexDDL,
   SYSTEM_INDEX_DECLARATIONS,
   type SystemIndexDeclaration,
+  type SystemIndexPredicate,
   type SystemIndexTable,
 } from "./system";
 export type {
@@ -61,19 +63,28 @@ export type {
   EdgeIndexDirection,
   EdgeIndexWhereBuilder,
   IndexDeclaration,
+  IndexDeclarationBase,
   IndexOrigin,
   IndexScope,
   IndexWhereExpression,
   IndexWhereFieldBuilder,
   IndexWhereInput,
+  IndexWhereLiteral,
+  IndexWhereOp,
+  IndexWhereOperand,
   NodeIndexConfig,
   NodeIndexDeclaration,
+  NodeIndexKey,
+  NodeIndexKeyInput,
   NodeIndexWhereBuilder,
+  NodeSystemColumnName,
   RelationalIndexDeclaration,
+  RelationalIndexMethod,
   SystemColumnName,
   VectorIndexDeclaration,
   VectorIndexImplementation,
   VectorIndexMetric,
   VectorIndexParams,
 } from "./types";
+export { NODE_SYSTEM_COLUMN_NAMES } from "./types";
 export { andWhere, notWhere, orWhere } from "./where";

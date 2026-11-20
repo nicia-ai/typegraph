@@ -12,15 +12,15 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { migrateLegacyEmbeddings } from "../../../src/backend/migrate-vectors";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { type GraphBackend } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { isMissingTableError } from "../../../src/utils/sql-errors";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const LEGACY_TABLE = "typegraph_node_embeddings";
 
@@ -43,7 +43,12 @@ beforeAll(async () => {
   });
   try {
     await pool.query("SELECT 1");
-    await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+    // This suite owns its database, so it creates the base graph tables
+    // itself rather than inheriting them from whichever suite ran first:
+    // `seedLegacy` inserts live `typegraph_nodes` rows, and the migration
+    // SQL also enables pgvector for the legacy table's native `vector`
+    // column.
+    await pool.query(generatePostgresMigrationSQL());
     sharedPool = pool;
     isPostgresAvailable = true;
   } catch {
@@ -68,9 +73,9 @@ beforeEach(async () => {
   // Drop the durable contribution markers (#135) in lockstep with the per-
   // field tables above: `migrateLegacyEmbeddings` now provisions each slot via
   // `ensureVectorSlotContribution`, which trusts the marker and skips the
-  // CREATE when one already exists. On this shared, long-lived database a
-  // marker left over from a prior run would outlive the dropped table and the
-  // migration's first write would hit a missing relation.
+  // CREATE when one already exists. The database outlives each test, so a
+  // marker left over from an earlier one would outlive the dropped table and
+  // the migration's first write would hit a missing relation.
   await sharedPool.query(
     `DROP TABLE IF EXISTS "typegraph_contribution_materializations" CASCADE`,
   );

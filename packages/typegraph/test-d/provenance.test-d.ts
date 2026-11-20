@@ -3,19 +3,27 @@ import { z } from "zod";
 
 import {
   createStore,
-  type AdapterHistoryStore,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
   type Store,
 } from "..";
+import type { AdapterHistoryStore } from "../dist/store-entry";
 import {
   createRetractionCapability,
+  FactNotHoldingError,
+  type FactNotHoldingFailure,
+  type FactNotHoldingJustification,
+  type FactNotHoldingPremise,
+  type FactNotHoldingPremiseReason,
+  type FactNotHoldingReason,
+  type ProvenanceFactInput,
   type ProvenanceFactRef,
   type ProvenanceNodeRef,
   type RetractionCapability,
   type RetractionReport,
+  type SurvivedVia,
 } from "../dist/provenance";
 
 const Source = defineNode("Source", {
@@ -167,3 +175,95 @@ expectType<
     readonly ProvenanceFactRef<typeof terminalGraph, "Fact" | "Decision">[]
   >
 >(terminalProvenance.holding());
+
+// assertHolds: facts are restricted to the configured fact kinds, and the
+// result narrows fact and justification kinds from the configuration.
+void liveStore.transaction(async (tx) => {
+  expectType<
+    Promise<readonly SurvivedVia<typeof graph, "Fact", "Justification">[]>
+  >(provenance.assertHolds(tx, [{ kind: "Fact", id: sourceId }]));
+  expectType<
+    Promise<readonly SurvivedVia<typeof graph, "Fact", "Justification">[]>
+  >(provenance.assertHolds(tx, []));
+  expectType<Promise<readonly ProvenanceFactRef<typeof graph, "Fact">[]>>(
+    provenance.holding(tx),
+  );
+  expectType<Promise<readonly ProvenanceFactRef<typeof graph, "Fact">[]>>(
+    provenance.holding(),
+  );
+
+  const created = await tx.nodes.Fact.create({ label: "derived" });
+  expectAssignable<ProvenanceFactInput<typeof graph, "Fact">>(created);
+  await provenance.assertHolds(tx, [created]);
+
+  const [held] = await provenance.assertHolds(tx, [created]);
+  expectType<"Fact" | undefined>(held?.fact.kind);
+  expectType<"Justification" | undefined>(held?.via[0]?.kind);
+  expectType<ProvenanceFactRef<typeof graph, "Fact"> | undefined>(held?.fact);
+
+  expectError(provenance.assertHolds(tx, [{ kind: "Source", id: sourceId }]));
+  expectError(
+    provenance.assertHolds(tx, [{ kind: "Justification", id: sourceId }]),
+  );
+  expectError(provenance.assertHolds(tx, [{ kind: "Missing", id: sourceId }]));
+  expectError(provenance.assertHolds(tx, [sourceId]));
+  expectError(provenance.assertHolds([{ kind: "Fact", id: sourceId }]));
+  expectError(
+    provenance.assertHolds(liveStore, [{ kind: "Fact", id: sourceId }]),
+  );
+  expectError(provenance.holding(liveStore));
+});
+
+const terminalStore: Store<typeof terminalGraph> = createStore(
+  terminalGraph,
+  backend,
+);
+void terminalStore.transaction(async (tx) => {
+  expectType<
+    Promise<
+      readonly SurvivedVia<
+        typeof terminalGraph,
+        "Fact" | "Decision",
+        "Justification"
+      >[]
+    >
+  >(
+    terminalProvenance.assertHolds(tx, [
+      { kind: "Fact", id: sourceId },
+      { kind: "Decision", id: sourceId },
+    ]),
+  );
+  expectError(
+    terminalProvenance.assertHolds(tx, [{ kind: "Source", id: sourceId }]),
+  );
+  // A transaction of another graph's store is not accepted.
+  expectError(provenance.assertHolds(tx, [{ kind: "Fact", id: sourceId }]));
+});
+
+// FactNotHoldingError exposes the exact failure and reason unions.
+declare const notHolding: FactNotHoldingError;
+expectType<readonly FactNotHoldingFailure[]>(notHolding.failures);
+expectType<string>(notHolding.failures[0]!.fact.id);
+expectType<FactNotHoldingReason>(notHolding.failures[0]!.reason);
+expectType<readonly FactNotHoldingJustification[]>(
+  notHolding.failures[0]!.justifications,
+);
+expectType<readonly FactNotHoldingPremise[]>(
+  notHolding.failures[0]!.justifications[0]!.premises,
+);
+expectType<FactNotHoldingPremiseReason>(
+  notHolding.failures[0]!.justifications[0]!.premises[0]!.reason,
+);
+
+expectType<
+  | "not-current"
+  | "tombstoned"
+  | "no-justification"
+  | "no-firing-justification"
+  | "composition-whole-unsupported"
+>({} as FactNotHoldingReason);
+expectType<"retracted" | "not-current" | "unsupported">(
+  {} as FactNotHoldingPremiseReason,
+);
+expectError<FactNotHoldingReason>("unknown-reason");
+expectError<FactNotHoldingPremiseReason>("tombstoned");

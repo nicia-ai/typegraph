@@ -1,7 +1,9 @@
 /**
  * SQLite Backend Integration Tests
  *
- * Tests the SQLite adapter with a real in-memory database.
+ * Tests the SQLite adapter with a real in-memory database. The shared
+ * cross-backend integration suite runs from this lane's
+ * `sqlite-integration-slice-*.test.ts` files.
  * Follows Better Auth's pattern: users provide a configured Drizzle instance
  * and run migrations to create TypeGraph tables.
  */
@@ -19,13 +21,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  BackendDisposedError,
-  defineEdge,
-  defineGraph,
-  defineNode,
-  subClassOf,
-} from "../../../src";
+import { defineEdge, defineGraph, defineNode, subClassOf } from "../../../src";
+import { BackendDisposedError } from "../../../src/errors-entry";
 import { sql as portableSql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
@@ -49,7 +46,7 @@ import { asCompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { createIntegrationTestSuite } from "../integration-test-suite";
+import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 
 // ============================================================
 // Shared Adapter Test Suite
@@ -59,14 +56,30 @@ import { createIntegrationTestSuite } from "../integration-test-suite";
 createAdapterTestSuite("SQLite", () => createTestBackend());
 
 // ============================================================
-// Shared Integration Test Suite
+// createSerializedBackend capability-override refusal
 // ============================================================
 
-// Run the shared integration test suite for SQLite
-createIntegrationTestSuite("SQLite", () => {
-  const db = createTestDatabase();
-  // SQLite uses in-memory databases, no cleanup needed
-  return { backend: createSqliteBackend(db) };
+// One predicate (`refuseUnsupportedSerializedBackendCapabilities`) backs both
+// SQLite lanes' `createSerializedBackend`; this exercises it directly rather
+// than duplicating the assertion per lane the way `write-fence-conformance.ts`
+// duplicates its PostgreSQL-only assertions.
+describe("createSerializedBackend refuses an unsupported capabilities override", () => {
+  it("throws, naming the lane, when overrides.capabilities is supplied to a lane with no construction-time override to apply it to", () => {
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", {
+        capabilities: { writeFence: { mechanism: "engine-serialized" } },
+      });
+    }).toThrow(/SQLite/);
+  });
+
+  it("does not throw when overrides is omitted or capabilities is absent", () => {
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", undefined);
+    }).not.toThrow();
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", {});
+    }).not.toThrow();
+  });
 });
 
 // ============================================================
@@ -85,7 +98,8 @@ describe("SQLite Backend - Adapter Specific", () => {
       const backend = createSqliteBackend(db);
 
       expect(backend.dialect).toBe("sqlite");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+      expect(backend.capabilities.execution.atomicBatch).toBe("none");
       expect(backend.capabilities.graphAnalytics).toEqual({
         supported: true,
         mathFunctions: false,
@@ -195,8 +209,11 @@ describe("SQLite Backend - Adapter Specific", () => {
       const sql = ddl.join("\n");
 
       expect(sql).toContain("CREATE INDEX IF NOT EXISTS");
-      expect(sql).toContain("typegraph_nodes_kind_idx");
       expect(sql).toContain("typegraph_nodes_kind_created_idx");
+      // `(graph_id, kind)` is a prefix of kind_created_idx and the primary
+      // key, so base schema v9 no longer creates a separate kind_idx.
+      expect(sql).not.toContain('"typegraph_nodes_kind_idx"');
+      expect(sql).not.toContain('"typegraph_edges_kind_idx"');
       // Bare-id node lookup (kind resolved by id) — see typegraph#280.
       expect(sql).toContain('"typegraph_nodes" ("graph_id", "id")');
       expect(sql).toContain('"typegraph_recorded_nodes" ("graph_id", "id")');
@@ -512,14 +529,16 @@ describe("SQLite Backend - Transaction Modes", () => {
 
   it("defaults to 'raw' transaction mode for better-sqlite3", () => {
     const backend = createSqliteBackend(db);
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
   });
 
   it("throws ConfigurationError when transactionMode is 'none'", async () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "none" },
     });
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
 
     await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
@@ -541,7 +560,7 @@ describe("SQLite Backend - Transaction Modes", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "sql" },
     });
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
 
     const store = createStore(testGraph, backend);
     const person = await store.transaction(async (tx) => {
@@ -557,7 +576,7 @@ describe("SQLite Backend - Transaction Modes", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "drizzle" },
     });
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
 
     // better-sqlite3 rejects async callbacks in db.transaction(), so this
     // verifies the "drizzle" path is reached (not the "sql" BEGIN/COMMIT path).

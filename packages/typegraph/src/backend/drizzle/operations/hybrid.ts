@@ -23,6 +23,7 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import { type SqlDialect } from "../../../query/dialect/types";
+import { sql as fragmentSql } from "../../../query/sql-fragment";
 import { coerceNumericScore } from "../../row-mappers";
 import { type HybridSearchRow, type NodeRow } from "../../types";
 import { codePointOrderKey, quotedColumn, type Tables } from "./shared";
@@ -35,7 +36,7 @@ import { codePointOrderKey, quotedColumn, type Tables } from "./shared";
  * it matches the multi-statement fallback's JS fusion row for row.
  */
 function nodeIdOrderKey(dialect: SqlDialect): SQL {
-  return codePointOrderKey(sql.raw("node_id"), dialect);
+  return codePointOrderKey(fragmentSql.raw("node_id"), dialect);
 }
 
 export type HybridStatementInput = Readonly<{

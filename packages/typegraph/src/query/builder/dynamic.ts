@@ -32,7 +32,9 @@ import {
   type ArrayFieldAccessor,
   type BaseFieldAccessor,
   type DateFieldAccessor,
+  type EdgeMetadataAccessor,
   type EmbeddingFieldAccessor,
+  type NodeMetadataAccessor,
   type NumberFieldAccessor,
   type ObjectFieldAccessor,
   type SelectableEdgeMeta,
@@ -43,7 +45,13 @@ import {
 declare const DYNAMIC_NODE_BRAND: unique symbol;
 declare const DYNAMIC_EDGE_BRAND: unique symbol;
 
-export type DynamicNodeType = NodeType &
+/** A runtime-registered node kind whose collection lookup preserved `K`. */
+export type DynamicNodeKind<K extends string = string> = K &
+  Readonly<{ [DYNAMIC_NODE_BRAND]: true }>;
+
+export type DynamicNodeType<K extends string = string> = NodeType<
+  DynamicNodeKind<K>
+> &
   Readonly<{ [DYNAMIC_NODE_BRAND]: true }>;
 
 export type DynamicEdgeType = AnyEdgeType &
@@ -84,7 +92,7 @@ export type DynamicFieldBuilder = BaseFieldAccessor &
 /**
  * Predicate accessor for a runtime-kind alias.
  *
- * System fields keep their narrow types. Schema properties are reached
+ * System fields and `$meta` keep their narrow types. Schema properties are reached
  * through `.field(name)` — `.field()` validates the property exists on
  * the registered Zod schema and throws if it doesn't.
  */
@@ -92,6 +100,7 @@ export type DynamicNodeAccessor = Readonly<{
   id: StringFieldAccessor;
   kind: StringFieldAccessor;
   $fulltext: FulltextAccessor;
+  $meta: NodeMetadataAccessor;
   field: (name: string) => DynamicFieldBuilder;
 }>;
 
@@ -100,6 +109,7 @@ export type DynamicEdgeAccessor = Readonly<{
   kind: StringFieldAccessor;
   fromId: StringFieldAccessor;
   toId: StringFieldAccessor;
+  $meta: EdgeMetadataAccessor;
   field: (name: string) => DynamicFieldBuilder;
 }>;
 

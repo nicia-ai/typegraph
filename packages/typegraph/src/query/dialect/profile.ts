@@ -44,6 +44,18 @@ export function bindSqlValue(value: unknown, dialect: SqlDialect): unknown {
   return getSqlDialectProfile(dialect).bindValue(value);
 }
 
+/**
+ * Packs a scalar list into the single JSON-text value that a list-valued `IN`
+ * parameter binds to. Every element is bound exactly as the literal form would
+ * bind it, so `field.in([...])` and `field.in(param(...))` agree row for row.
+ */
+export function packSqlListValue(
+  values: readonly unknown[],
+  dialect: SqlDialect,
+): string {
+  return JSON.stringify(values.map((value) => bindSqlValue(value, dialect)));
+}
+
 /** Renders one SQL string literal using the dialect's escaping rules. */
 export function inlineSqlStringLiteral(
   value: string,

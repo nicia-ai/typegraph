@@ -1,0 +1,342 @@
+import {
+  type AllNodeTypes,
+  type GraphDef,
+  type NodeKinds,
+} from "../core/define-graph";
+import { ValidationError } from "../errors";
+import {
+  type DynamicNode,
+  type DynamicNodeReference,
+  type GraphNodeReference,
+  type Node,
+  type NodeRef,
+  type PolymorphicNodeReference,
+} from "../store/types";
+import {
+  type IdentityReplay,
+  type IdentityReplayOptions,
+  type IdentityTransitionHistory,
+} from "./replay";
+
+/**
+ * The accepted *input* form for every identity facade method: a whole node or
+ * a `{ kind, id }` pair for any compile-time graph kind, the
+ * {@link PolymorphicNodeReference} a polymorphic query row or widened edge
+ * endpoint carries, plus a proof-bearing node or reference produced through
+ * the runtime collection lane. Widened and runtime values stay nominal through
+ * their `NodeId` brand, so accepting them does not make an arbitrary
+ * `{ kind: string, id: string }` object type-safe.
+ *
+ * Identity results use {@link IdentityNodeReference}, which honestly includes
+ * runtime kinds because an evolved kind can belong to a class reached from a
+ * compile-time node.
+ */
+export type IdentityNodeRefInput<G extends GraphDef> =
+  | NodeRef<AllNodeTypes<G>>
+  | PolymorphicNodeReference<AllNodeTypes<G>>
+  | DynamicNode
+  | DynamicNodeReference;
+
+/**
+ * A node reference returned by Operational Identity.
+ *
+ * Identity classes can contain runtime-evolved kinds even when a read starts
+ * from a compile-time node, so results honestly include both lanes.
+ */
+export type IdentityNodeReference<G extends GraphDef> =
+  GraphNodeReference<G> | DynamicNodeReference;
+
+/** A hydrated compile-time or runtime identity member. */
+export type IdentityNode<G extends GraphDef> =
+  | {
+      [K in NodeKinds<G>]: Node<G["nodes"][K]["type"]>;
+    }[NodeKinds<G>]
+  | DynamicNode;
+
+declare const __identityAssertionId: unique symbol;
+
+export type IdentityAssertionId = string &
+  Readonly<{ [__identityAssertionId]: true }>;
+
+/**
+ * Brands a non-empty string as an {@link IdentityAssertionId}.
+ *
+ * Use this when a persisted identity assertion id has round-tripped through
+ * untyped storage or an external boundary and must be passed back to a
+ * retraction surface such as `retractAssertion` or `bulkRetractAssertions`.
+ * Mirrors the `asNodeId` / `asEdgeId` precedent.
+ *
+ * @throws {ValidationError} when `value` is empty.
+ */
+export function asIdentityAssertionId(value: string): IdentityAssertionId {
+  if (value.length === 0) {
+    throw new ValidationError(
+      "asIdentityAssertionId must be a non-empty string.",
+      {
+        issues: [
+          {
+            path: "asIdentityAssertionId",
+            message: "Expected a non-empty string.",
+          },
+        ],
+      },
+      {
+        suggestion: "Use a persisted identity assertion id value.",
+      },
+    );
+  }
+  return value as IdentityAssertionId;
+}
+
+/**
+ * What one assertion claims about a pair of nodes: `"same"` merges them into
+ * one equivalence set, `"different"` records a disjointness that a later
+ * `"same"` claim must not contradict.
+ */
+export type IdentityRelation = "same" | "different";
+
+/**
+ * One persisted identity claim about an ordered pair of nodes. Returned by the
+ * assertion writers and by `identity.assertionsOf(...)`; `validTo` is set when
+ * the assertion has been retracted, so a historical read can still see it.
+ */
+export type IdentityAssertion<G extends GraphDef> = Readonly<{
+  id: IdentityAssertionId;
+  relation: IdentityRelation;
+  a: IdentityNodeReference<G>;
+  b: IdentityNodeReference<G>;
+  validFrom: string;
+  validTo?: string;
+}>;
+
+/** Result of an idempotent assertion write. */
+export type IdentityAssertionResult<G extends GraphDef> = Readonly<{
+  assertion: IdentityAssertion<G>;
+  action: "created" | "existing";
+}>;
+
+/** The half-open effective-time window of an identity assertion. */
+export type IdentityValidityWindow = Readonly<{
+  validFrom?: string;
+  validTo?: string;
+}>;
+
+/** One edge in a proof that two references belong to the same identity class. */
+export type IdentitySamePathStep<G extends GraphDef> = Readonly<{
+  from: IdentityNodeReference<G>;
+  to: IdentityNodeReference<G>;
+  via:
+    | Readonly<{ type: "assertion"; assertion: IdentityAssertion<G> }>
+    | Readonly<{ type: "same-id-fold" }>;
+}>;
+
+/** A page of visible identity classes, ordered by their stable representative. */
+export type IdentityClassPageOptions = Readonly<{
+  /** Restrict classes to those containing a visible member of one of these kinds. */
+  kinds?: readonly string[];
+  /** Opaque exclusive cursor returned by the preceding page. */
+  cursor?: string;
+  /** Maximum number of classes to return. */
+  limit: number;
+}>;
+
+/** One visible class with its stable representative and every visible member. */
+export type IdentityClass<G extends GraphDef> = Readonly<{
+  /** The current coordinate's code-point-smallest visible member. */
+  representative: IdentityNodeReference<G>;
+  members: readonly IdentityNodeReference<G>[];
+}>;
+
+/** One page of identity classes and an exclusive cursor for the next page. */
+export type IdentityClassPage<G extends GraphDef> = Readonly<{
+  classes: readonly IdentityClass<G>[];
+  nextCursor?: string;
+}>;
+
+/** One ordered node pair handed to `bulkAssertSame` / `bulkAssertDifferent`. */
+export type IdentityPair<G extends GraphDef> = Readonly<{
+  a: IdentityNodeRefInput<G>;
+  b: IdentityNodeRefInput<G>;
+}> &
+  IdentityValidityWindow;
+
+/**
+ * The read half of the identity surface: equivalence-set membership,
+ * representative selection, and the assertions behind them.
+ *
+ * Obtained from a read-only lens — `store.asOf(...).identity`,
+ * `store.snapshot().identity` — where it answers at that view's coordinate.
+ * The full read+write surface is {@link IdentityFacade}.
+ */
+export type IdentityReadFacade<G extends GraphDef> = Readonly<{
+  representativeOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<IdentityNodeReference<G> | undefined>;
+  membersOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentityNodeReference<G>[]>;
+  nodesOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentityNode<G>[]>;
+  areSame: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<boolean>;
+  areDifferent: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<boolean>;
+  assertionsOf: (
+    ref: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentityAssertion<G>[]>;
+  classes: (options: IdentityClassPageOptions) => Promise<IdentityClassPage<G>>;
+  /** Returns a shortest proof at this facade's read coordinate, or undefined if distinct. */
+  explainSame: (
+    a: IdentityNodeRefInput<G>,
+    b: IdentityNodeRefInput<G>,
+  ) => Promise<readonly IdentitySamePathStep<G>[] | undefined>;
+}>;
+
+/**
+ * The full TypeGraph Identity Profile surface: {@link IdentityReadFacade} plus
+ * the assertion writers and retractions.
+ *
+ * Obtained from `store.identity` or `tx.identity`, and present only on graphs
+ * that declared `identity: { ... }` in `defineGraph`. Every writer is
+ * idempotent — re-asserting an existing claim returns it with
+ * `action: "existing"` rather than duplicating it.
+ */
+export type IdentityFacade<G extends GraphDef> = IdentityReadFacade<G> &
+  Readonly<{
+    assertSame: (
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
+    ) => Promise<IdentityAssertionResult<G>>;
+    assertDifferent: (
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
+      window?: IdentityValidityWindow,
+    ) => Promise<IdentityAssertionResult<G>>;
+    bulkAssertSame: (
+      pairs: readonly IdentityPair<G>[],
+    ) => Promise<readonly IdentityAssertionResult<G>[]>;
+    bulkAssertDifferent: (
+      pairs: readonly IdentityPair<G>[],
+    ) => Promise<readonly IdentityAssertionResult<G>[]>;
+    retractAssertion: (
+      id: IdentityAssertionId,
+    ) => Promise<IdentityAssertion<G> | undefined>;
+    retractSameAssertion: (
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
+    ) => Promise<IdentityAssertion<G> | undefined>;
+    retractDifferentAssertion: (
+      a: IdentityNodeRefInput<G>,
+      b: IdentityNodeRefInput<G>,
+    ) => Promise<IdentityAssertion<G> | undefined>;
+    bulkRetractAssertions: (
+      ids: readonly IdentityAssertionId[],
+    ) => Promise<readonly IdentityAssertion<G>[]>;
+    /**
+     * Every transition (assertion, retraction, fold, deletion, restore,
+     * window end, kind drop, or reconciliation decision) that changed
+     * `ref`'s identity class — recorded while `ref` was a member of the
+     * class it names, never the later history of a class `ref` has left —
+     * ascending by recorded revision, in pages of at most `options.limit`
+     * boundaries (default 200, maximum 2000). A capped page carries
+     * `nextCursor`, naming the first boundary it stopped short of: pass it
+     * back as `options.cursor` for the next page of the same `ref`.
+     * `options.fromRecorded` / `toRecorded` and the cursor must each come
+     * from this graph: another graph's instant, a legacy unowned one, and a
+     * restored transition's `recorded` are refused by the same ownership
+     * check `asOfRecorded` applies. Requires the store to be opened with
+     * `history: true`.
+     *
+     * On `tx.identity` specifically: reads the transition log itself, which
+     * — unlike every other read on this facade — is NOT read-your-writes
+     * inside an open transaction. A transition a write earlier in the SAME
+     * transaction notes is buffered in the capture session and only reaches
+     * this table when the transaction commits, so `tx.identity.transitionsOf`
+     * can undercount relative to `tx.identity.assertionsOf` on the identical
+     * pending write until the transaction flushes; call it again on
+     * `store.identity` after commit for the complete answer. Such a page's
+     * `completeness` carries the `pending-transaction-notes` reason.
+     *
+     * `completeness` is the one place to check whether a page is the whole
+     * answer the log can give: more pages, this graph's own retention cut, a
+     * cut an archival restore carried in from its source, restored
+     * transitions discovery could not attribute, and current class members
+     * that arrived through writes history capture never saw (for example
+     * before `history: true` was enabled) are all reported there. It
+     * describes one page; it is not a loop condition — page on `nextCursor`.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    transitionsOf: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<IdentityTransitionHistory<G>>;
+    /**
+     * Pairs every transition {@link IdentityFacade.transitionsOf} reports —
+     * those recorded while `ref` was a member of the class they name — with
+     * the class membership immediately before and after it, reconstructed through
+     * the same historical reader `asOf` / `asOfRecorded` reads use. Pages by
+     * boundary exactly as {@link IdentityFacade.transitionsOf} does, through
+     * the same `nextCursor` / `cursor` pair. Requires the store to be opened with
+     * `history: true`.
+     *
+     * On `tx.identity`: carries the same pending-notes caveat as
+     * {@link IdentityFacade.transitionsOf} — a transition noted earlier in
+     * the SAME open transaction is not yet in the log this reads, so it is
+     * absent from `steps` until the transaction commits, and `completeness`
+     * says so. `completeness` also counts the restored transitions of the
+     * page that are not `steps`.
+     *
+     * Deliberately absent from {@link IdentityReadFacade}: it answers across
+     * every recorded coordinate, not the one a read-only lens is pinned to.
+     */
+    replay: (
+      ref: IdentityNodeRefInput<G>,
+      options?: IdentityReplayOptions,
+    ) => Promise<IdentityReplay<G>>;
+  }>;
+
+/**
+ * The assertion-only write surface of the TypeGraph Identity Profile.
+ *
+ * This deliberately excludes reads and retractions so constrained staging
+ * handles can accept incoming identity claims without exposing the broader
+ * operational identity surface.
+ */
+export type IdentityAssertionWriteFacade<G extends GraphDef> = Pick<
+  IdentityFacade<G>,
+  "assertSame" | "assertDifferent" | "bulkAssertSame" | "bulkAssertDifferent"
+>;
+
+/**
+ * Per-transaction identity write counts carried by a transaction receipt.
+ * `total` is the sum of the three preceding counters.
+ */
+export type IdentityWriteSummary = Readonly<{
+  sameAssertions: number;
+  differentAssertions: number;
+  retractions: number;
+  /**
+   * Identity transition-log notes flushed for this graph during the
+   * transaction. An ANNOTATION of the writes above, not a fourth kind of
+   * write — deliberately excluded from `total`, which stays the count of
+   * ledger truth rows the transaction produced. Always `0` when identity is
+   * disabled or opened without `history: true`.
+   *
+   * Counted at commit-flush time, not at the collection surface `nodes`/
+   * `edges`/the assertion counters above are: a `tx.measure(fn)` scoped
+   * receipt (see `TransactionReceipt`) therefore always reports `0` here even
+   * when `fn` made identity writes that go on to note real transitions —
+   * those notes are attributed to the transaction's own flush, which happens
+   * once, after every scope has already returned.
+   */
+  transitions: number;
+  total: number;
+}>;

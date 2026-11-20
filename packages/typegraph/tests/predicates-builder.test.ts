@@ -5,11 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { UnsupportedPredicateError } from "../src/errors";
 import { type QueryAst } from "../src/query/ast";
 import { jsonPointer } from "../src/query/json-pointer";
 import {
   arrayField,
   baseField,
+  buildFieldBuilderForTypeInfo,
   dateField,
   embeddingField,
   exists,
@@ -263,8 +265,8 @@ describe("dateField", () => {
     expect(expr.op).toBe("gt");
   });
 
-  it("creates gt predicate with string", () => {
-    const pred = dateField(field).gt("2024-01-01T00:00:00Z");
+  it("creates gt predicate with a canonical string", () => {
+    const pred = dateField(field).gt("2024-01-01T00:00:00.000Z");
 
     expect(pred.__expr.__type).toBe("comparison");
     const expr = pred.__expr as { op: string };
@@ -285,13 +287,26 @@ describe("dateField", () => {
     expect(expr.upper.valueType).toBe("date");
   });
 
-  it("creates between predicate with string dates", () => {
+  it("creates between predicate with canonical string dates", () => {
     const pred = dateField(field).between(
-      "2024-01-01T00:00:00Z",
-      "2024-12-31T23:59:59Z",
+      "2024-01-01T00:00:00.000Z",
+      "2024-12-31T23:59:59.999Z",
     );
 
     expect(pred.__expr.__type).toBe("between");
+  });
+
+  it("refuses a non-canonical string or a non-date bound", () => {
+    expect(() => dateField(field).gt("2024-01-01T00:00:00Z")).toThrow(
+      UnsupportedPredicateError,
+    );
+    expect(() =>
+      dateField(field).between("2024-01-01", "2024-12-31T23:59:59.999Z"),
+    ).toThrow(UnsupportedPredicateError);
+    expect(() =>
+      // @ts-expect-error -- a date bound is a Date or a string
+      dateField(field).between(1, 2),
+    ).toThrow(UnsupportedPredicateError);
   });
 });
 
@@ -308,6 +323,27 @@ describe("arrayField", () => {
     expect(pred.__expr.__type).toBe("array_op");
     const expr = pred.__expr as { op: string };
     expect(expr.op).toBe("isEmpty");
+  });
+
+  it("keeps specialized array operations in the schema-aware factory", () => {
+    const arrayBuilder = buildFieldBuilderForTypeInfo(field, {
+      valueType: "array",
+      elementType: "string",
+    }) as unknown as Readonly<{ contains: (value: string) => unknown }>;
+    const objectBuilder = buildFieldBuilderForTypeInfo(
+      fieldRef("p", ["props", "metadata"], { valueType: "object" }),
+      { valueType: "object", shape: { author: { valueType: "string" } } },
+    ) as unknown as Readonly<{ get: (key: string) => unknown }>;
+    const embeddingBuilder = buildFieldBuilderForTypeInfo(
+      fieldRef("p", ["props", "embedding"], { valueType: "embedding" }),
+      { valueType: "embedding", dimensions: 3 },
+    ) as unknown as Readonly<{
+      similarTo: (vector: readonly number[], k: number) => unknown;
+    }>;
+
+    expect(typeof arrayBuilder.contains).toBe("function");
+    expect(typeof objectBuilder.get).toBe("function");
+    expect(typeof embeddingBuilder.similarTo).toBe("function");
   });
 
   it("creates isNotEmpty predicate", () => {
@@ -471,10 +507,10 @@ describe("embeddingField", () => {
     valueType: "embedding",
   });
 
-  it("inherits base operations", () => {
+  it("provides null checks without scalar comparison operations", () => {
     const builder = embeddingField(field);
 
-    expect(typeof builder.eq).toBe("function");
+    expect("eq" in builder).toBe(false);
     expect(typeof builder.isNull).toBe("function");
   });
 
@@ -551,7 +587,7 @@ describe("subquery predicates", () => {
     start: {
       alias: "u",
       kinds: ["User"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],

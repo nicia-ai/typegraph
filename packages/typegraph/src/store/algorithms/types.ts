@@ -280,8 +280,17 @@ export type WeaklyConnectedComponentsOptions<G extends GraphDef> =
     Readonly<{
       /** Edge kinds whose undirected projection defines connectivity. */
       edges: readonly EdgeKinds<G>[];
-      /** Optional node kinds defining the induced subgraph to analyze. */
+      /**
+       * Optional node kinds defining the induced subgraph to analyze. Each
+       * kind is matched exactly: its `subClassOf` and `equivalentTo` kinds
+       * are not included unless listed.
+       */
       nodeKinds?: readonly NodeKinds<G>[];
+      /**
+       * Return only components containing at least this many nodes. Must be a
+       * positive safe integer.
+       */
+      minComponentSize?: number;
       /** Maximum label-propagation rounds before throwing. Defaults to 1000. */
       maxIterations?: number;
     }>;
@@ -317,7 +326,11 @@ export type LabelPropagationOptions<G extends GraphDef> =
     Readonly<{
       /** Edge kinds whose undirected projection supplies neighbor votes. */
       edges: readonly EdgeKinds<G>[];
-      /** Optional node kinds defining the induced subgraph to analyze. */
+      /**
+       * Optional node kinds defining the induced subgraph to analyze. Each
+       * kind is matched exactly: its `subClassOf` and `equivalentTo` kinds
+       * are not included unless listed.
+       */
       nodeKinds?: readonly NodeKinds<G>[];
       /** Maximum synchronous rounds. Defaults to `1000`. */
       maxIterations?: number;
@@ -353,7 +366,11 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
   Readonly<{
     /** Edge kinds defining the transition graph. */
     edges: readonly EdgeKinds<G>[];
-    /** Optional node kinds defining the induced subgraph to rank. */
+    /**
+     * Optional node kinds defining the induced subgraph to rank. Each kind is
+     * matched exactly: its `subClassOf` and `equivalentTo` kinds are not
+     * included unless listed.
+     */
     nodeKinds?: readonly NodeKinds<G>[];
     /** Transition direction. Defaults to `"out"`. */
     direction?: TraversalDirection;
@@ -363,6 +380,11 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
     tolerance?: number;
     /** Maximum power-iteration rounds before throwing. Defaults to `1000`. */
     maxIterations?: number;
+    /**
+     * Return only the first this many scores after deterministic ordering.
+     * Must be a positive safe integer.
+     */
+    topK?: number;
   }>;
 
 export type InternalPageRankOptions<G extends GraphDef> =

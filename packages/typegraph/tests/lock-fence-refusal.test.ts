@@ -1,0 +1,217 @@
+/**
+ * T16 (I9) — the two construction gates refuse at `createStore`, never
+ * mid-flush, and the refusal message is the migration guide (OQ-B).
+ *
+ * `writeFence` has no mechanism that means "no fence" the way the deleted
+ * legacy `pessimisticLocks` all-false shape once did, so every row below
+ * that needs an `unfenced` backend reaches it by overlaying a normal
+ * backend's capabilities (`unfencedLoggedBackend`) rather than by a factory
+ * override — the same "undeclared, non-first-party target" M-5 always
+ * described, now the ONLY way to reach that plan.
+ *
+ * Rows:
+ *
+ *  (a) `history: true` on an `unfenced` backend refuses at `createStore`,
+ *      zero statements.
+ *  (b) an identity graph on an `unfenced` backend refuses, zero statements.
+ *  (d) an undeclared non-factory backend refuses (a) and (b) via M-5's
+ *      `unfenced` default.
+ *  (e) the refusal message contains the LITERAL declaration line for the
+ *      backend's dialect, not a substring like "writeFence".
+ *  (f) `{ revisionTracking: true }` alone (no `history`) on an `unfenced`
+ *      backend refuses, zero statements (ruling F3) — repeated through
+ *      `cloneWorkingCopyStrategy`, which propagates the base store's
+ *      `revisionTrackingEnabled` into a fresh store without the caller
+ *      naming the option.
+ *  (g) the quiescent drain and the caller-serialized mechanism construct
+ *      successfully at both gates.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { createStore, defineGraph, defineNode } from "../src";
+import { writeFenceDeclarationLine } from "../src/backend/capabilities/write-fence";
+import {
+  cloneWorkingCopyStrategy,
+  computeBaseVersion,
+} from "../src/graph-merge";
+import {
+  createLoggedPostgresBackend,
+  createLoggedSqliteBackend,
+  unfencedLoggedBackend,
+} from "./lock-fence-test-utils";
+
+const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
+const plainGraph = defineGraph({
+  id: "lock-fence-refusal-plain",
+  nodes: { Person: { type: Person } },
+  edges: {},
+});
+const identityGraph = defineGraph({
+  id: "lock-fence-refusal-identity",
+  nodes: { Person: { type: Person } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+function writeFenceRefusal(code: string): unknown {
+  return expect.objectContaining({
+    details: expect.objectContaining({ code }) as unknown,
+  });
+}
+
+describe("T16 — (a) history: true on unfenced refuses, zero statements", () => {
+  it("SQLite unfenced", () => {
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
+    // Factory construction itself probes the driver (a `PRAGMA
+    // compile_options` sync-detection read) — reset AFTER the backend
+    // exists so only `createStore`'s own statements (there must be none)
+    // are counted.
+    logged.reset();
+    expect(() =>
+      createStore(plainGraph, logged.backend, { history: true }),
+    ).toThrow(writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"));
+    expect(logged.statements).toHaveLength(0);
+  });
+});
+
+describe("T16 — (b) identity graph on unfenced refuses, zero statements", () => {
+  it("SQLite unfenced", () => {
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
+    logged.reset();
+    expect(() => createStore(identityGraph, logged.backend)).toThrow(
+      writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"),
+    );
+    expect(logged.statements).toHaveLength(0);
+  });
+});
+
+describe("T16 — (d) undeclared non-factory refuses (a) and (b)", () => {
+  it("history: true", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      const target = unfencedLoggedBackend(logged).backend;
+      expect(() => createStore(plainGraph, target, { history: true })).toThrow(
+        writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
+      );
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("identity graph", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      const target = unfencedLoggedBackend(logged).backend;
+      expect(() => createStore(identityGraph, target)).toThrow(
+        writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"),
+      );
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
+describe("T16 — (e) the refusal message carries the literal declaration line", () => {
+  it('names the exact string, and indents it, not a bare mention of "writeFence"', () => {
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
+    let caught: unknown;
+    try {
+      createStore(identityGraph, logged.backend);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toContain(`  ${writeFenceDeclarationLine("sqlite")}`);
+    // The exact string, not merely the word "writeFence" in isolation: a
+    // pointer like "declare writeFence on this backend" would still contain
+    // the bare word without carrying the migration guide's line.
+    expect(message).not.toBe("writeFence");
+  });
+});
+
+describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero statements", () => {
+  it("direct construction", () => {
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
+    logged.reset();
+    expect(() =>
+      createStore(plainGraph, logged.backend, { revisionTracking: true }),
+    ).toThrow(writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"));
+    expect(logged.statements).toHaveLength(0);
+  });
+
+  it("through cloneWorkingCopyStrategy, which propagates the base store's revisionTrackingEnabled", async () => {
+    const base = createLoggedSqliteBackend();
+    const baseStore = createStore(plainGraph, base.backend, {
+      revisionTracking: true,
+    });
+    expect(baseStore.revisionTrackingEnabled).toBe(true);
+
+    const fresh = unfencedLoggedBackend(createLoggedSqliteBackend());
+    const strategy = cloneWorkingCopyStrategy<typeof plainGraph>(() =>
+      Promise.resolve(fresh.backend),
+    );
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toThrow(writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"));
+  });
+});
+
+/**
+ * T16 — the two store gates recognize the new postures as fenced.
+ *
+ * Neither gate refuses under `kind !== "unfenced"`, so a `writeFence`
+ * declaration using either of the two postures this stage adds —
+ * `{advisory, quiescent}` and `{caller-serialized}` — must
+ * construct successfully, exactly like an ordinary fenced declaration.
+ */
+describe("T16 — (g) the quiescent drain and the caller-serialized mechanism construct successfully at both gates", () => {
+  it("identity graph: {advisory, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "advisory", drain: "quiescent" },
+    });
+    try {
+      expect(() => createStore(identityGraph, logged.backend)).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("identity graph: {caller-serialized}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "caller-serialized" },
+    });
+    try {
+      expect(() => createStore(identityGraph, logged.backend)).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("history: true: {advisory, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "advisory", drain: "quiescent" },
+    });
+    try {
+      expect(() =>
+        createStore(plainGraph, logged.backend, { history: true }),
+      ).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("history: true: {caller-serialized}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "caller-serialized" },
+    });
+    try {
+      expect(() =>
+        createStore(plainGraph, logged.backend, { history: true }),
+      ).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+});

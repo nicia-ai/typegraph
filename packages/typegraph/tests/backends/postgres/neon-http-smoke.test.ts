@@ -18,7 +18,7 @@
  *
  *   1. Driver detection identifies neon-http (callable + `.transaction`,
  *      no `.begin`) and skips the broken pg fast path.
- *   2. `capabilities.transactions` is auto-set to `false` so callers'
+ *   2. `capabilities.execution.interactiveTransactions` is auto-set to `false` so callers'
  *      transaction-aware code paths fall through to non-transactional
  *      execution rather than throwing.
  *   3. The explicit `capabilities` override option still wins over the
@@ -27,10 +27,17 @@
 import { neon } from "@neondatabase/serverless";
 import { drizzle as drizzleNeonHttp } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ConfigurationError } from "../../../src";
+import {
+  ConfigurationError,
+  createStore,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import type { SerializedSchema } from "../../../src/schema/types";
+import { matchingObject } from "../../test-utils";
 
 const STUB_SCHEMA_DOC: SerializedSchema = {
   graphId: "neon_http_refusal",
@@ -59,6 +66,14 @@ const STUB_SCHEMA_DOC: SerializedSchema = {
   defaults: { onNodeDelete: "restrict", temporalMode: "current" },
 };
 
+const Entity = defineNode("Entity", { schema: z.object({ name: z.string() }) });
+const identityGraph = defineGraph({
+  id: "neon_http_identity_refusal",
+  nodes: { Entity: { type: Entity } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
 describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
   it("auto-disables transactions when neon-http is detected", () => {
     // `neon()` doesn't validate the URL until the first request, so we
@@ -70,16 +85,30 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
     const backend = createPostgresBackend(db);
 
     expect(backend.dialect).toBe("postgres");
-    // The headline behavior: HTTP can't hold a session, so transactions
-    // are off. Callers like `store.transaction` check this capability
-    // and fall through to sequential execution when it's false.
-    // `commitSchemaVersion` is the exception — it requires atomicity
-    // and refuses with a typed ConfigurationError on this backend.
-    expect(backend.capabilities.transactions).toBe(false);
+    // HTTP cannot hold an interactive session, but Neon certifies its
+    // closed transaction(query[]) transport as one root atomic batch.
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.windowFunctions).toBe(true);
     expect(backend.capabilities.vector?.supported).toBe(true);
+  });
+
+  it("refuses Operational Identity with the stable driver capability code", () => {
+    const sql = neon("postgresql://test:test@invalid.neon.tech/test");
+    const db = drizzleNeonHttp({ client: sql });
+    const backend = createPostgresBackend(db);
+
+    expect(() => createStore(identityGraph, backend)).toThrow(
+      expect.objectContaining({
+        name: "ConfigurationError",
+        details: matchingObject({
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          interactiveTransactions: false,
+        }),
+      }),
+    );
   });
 
   it("does not expose the executeRaw fast path for neon-http", () => {
@@ -135,16 +164,19 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
   });
 
   it("respects an explicit capabilities override", () => {
-    // The auto-detection sets `transactions: false`, but if the user
+    // The auto-detection sets interactive transactions to false, but if the user
     // explicitly opts back in (e.g. via a wsproxy that does support
     // sessions, or for testing), the override wins.
     const sql = neon("postgresql://test:test@invalid.neon.tech/test");
     const db = drizzleNeonHttp({ client: sql });
     const backend = createPostgresBackend(db, {
-      capabilities: { transactions: true, windowFunctions: false },
+      capabilities: {
+        execution: { interactiveTransactions: true },
+        windowFunctions: false,
+      },
     });
 
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
     expect(backend.capabilities.windowFunctions).toBe(false);
   });
 });

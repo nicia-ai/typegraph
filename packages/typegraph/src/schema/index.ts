@@ -19,11 +19,42 @@
  * ```
  */
 
+export { installRevisionChangesJournal } from "../backend/revision-journal";
+export type {
+  CompositionClaimScope,
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionProbeContribution,
+  ContributionProbeEntry,
+  ContributionProbeResult,
+  ContributionProbeState,
+  ContributionRebuildResult,
+  ContributionRebuildScope,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+  EdgeCardinalityDeclaration,
+  SchemaVersionRow,
+} from "../backend/types";
+
 // ============================================================
 // Serialization
 // ============================================================
 
 export { type DeserializedSchema, deserializeSchema } from "./deserializer";
+export type {
+  EvolutionPlan,
+  EvolutionRequirement,
+  EvolutionRequirements,
+} from "./evolution-plan";
+export type {
+  GraphTemplate,
+  InstantiateGraphTemplateResult,
+} from "./graph-templates";
+export {
+  instantiateGraph,
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "./graph-templates";
 export {
   computeSchemaHash,
   deserializeWherePredicate,
@@ -39,14 +70,17 @@ export {
   assertSchemaCurrent,
   ensureSchema,
   getActiveSchema,
+  getCommittedSchemaVersion,
   getSchemaChanges,
   initializeSchema,
   isSchemaInitialized,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   migrateSchema,
+  type MigrateSchemaOptions,
   type MigrationHookContext,
   parseSerializedSchema,
+  requiresMigration,
   rollbackSchema,
   type SchemaManagerOptions,
   type SchemaValidationResult,
@@ -59,17 +93,46 @@ export {
 export {
   type ChangeSeverity,
   type ChangeType,
+  classifySchemaChanges,
   computeSchemaDiff,
   type DeprecatedKindsChange,
   type EdgeChange,
   type ExtensionChange,
   getMigrationActions,
+  type GraphAnnotationsChange,
+  type IdentityChange,
   type IndexChange,
   isBackwardsCompatible,
   type NodeChange,
   type OntologyChange,
+  type SchemaChangeClassification,
   type SchemaDiff,
 } from "./migration";
+export type { UniquenessClaimGate } from "./uniqueness-claim-gate";
+
+// ============================================================
+// Structural Subtyping
+// ============================================================
+
+export {
+  isStructuralSubtype,
+  isTypeLevelSubtype,
+  type StructuralSubsumptionVerdict,
+} from "./structural-subsumption";
+export {
+  type StructuralIncomparableReason,
+  type StructuralSubtypeReason,
+  type StructuralSubtypeResult,
+} from "./structural-subtype";
+
+// ============================================================
+// Ontology change classification (data-validated tightening)
+// ============================================================
+
+export {
+  classifyOntologyChanges,
+  type OntologySnapshot,
+} from "./ontology-change";
 
 // ============================================================
 // Validation Utilities
@@ -88,9 +151,11 @@ export {
 // Types
 // ============================================================
 
+export type { GraphIdentityConfig } from "../core/define-graph";
 export type {
   JsonSchema,
   SchemaHash,
+  SchemaIdentity,
   SerializedClosures,
   SerializedEdgeDef,
   SerializedMetaEdge,
@@ -100,3 +165,11 @@ export type {
   SerializedSchema,
   SerializedUniqueConstraint,
 } from "./types";
+
+// Verify-only store factories: open a store and refuse when the committed
+// schema differs, for deployments whose migrations run elsewhere
+export {
+  createVerifiedAdapterStore,
+  createVerifiedStore,
+  type ReconciledSchema,
+} from "../store/store";

@@ -23,8 +23,25 @@ export {
   ExecutableAggregateQuery,
 } from "./executable-aggregate-query";
 export { ExecutableQuery } from "./executable-query";
+export { executeOneStatementBatch } from "./one-statement-batch";
 export { PreparedQuery } from "./prepared-query";
-export { QueryBuilder } from "./query-builder";
+export {
+  type CompositionNavigationOptions,
+  type IdentityTraversalOption,
+  QueryBuilder,
+} from "./query-builder";
+export {
+  createExecutableRelation,
+  createProjectionRelation,
+  ExecutableRelationQuery,
+  type RelationColumnContext,
+  type RelationDefinition,
+  type RelationProjection,
+  type RelationProjectionResult,
+  type RelationProvenance,
+  type TopPerPartitionOptions,
+  type TopPerPartitionOrder,
+} from "./relation";
 export { TraversalBuilder } from "./traversal-builder";
 export { UnionableQuery } from "./unionable-query";
 
@@ -51,11 +68,15 @@ export {
 export {
   composeFragments,
   createFragment,
-  type FlexibleQueryFragment,
+  type FragmentRequiredAliases,
+  type FragmentRequirements,
+  type GraphOrderField,
   limitFragment,
   offsetFragment,
   orderByFragment,
   type QueryFragment,
+  type QueryFragmentBody,
+  type QueryFragmentFactory,
   type TraversalFragment,
 } from "./fragment";
 
@@ -65,26 +86,50 @@ export { buildQueryAst } from "./ast-builder";
 // Types
 export {
   type AliasMap,
+  type AliasOrderField,
   type ArrayFieldAccessor,
+  type AssignableNodeKinds,
   type BaseFieldAccessor,
   type BatchableQuery,
   type BatchResults,
   type BooleanFieldAccessor,
+  type CommonPropertyKeys,
+  type CompiledOneStatementRead,
+  type CompositionWholeKinds,
   type CreateQueryBuilderOptions,
   type DateFieldAccessor,
   type EdgeAccessor,
+  type EdgeMetadataAccessor,
+  type EdgeOrderField,
+  type EmbeddableOneStatementRead,
   type EmbeddingFieldAccessor,
   type EmptyAliasMap,
   type EmptyEdgeAliasMap,
   type EmptyRecursiveAliasMap,
+  type ExecutableOneStatementRead,
+  type ExpansionAliasNodeType,
   type FieldAccessor,
+  type ForwardedExpansionAxes,
   type NodeAccessor,
   type NodeAlias,
+  type NodeCandidateQuery,
+  type NodeCandidateSelection,
+  type NodeMetadataAccessor,
+  type NodeOrderField,
+  type NodePropsFor,
   type NumberFieldAccessor,
   type ObjectFieldAccessor,
+  type OneStatementBatchableQuery,
+  type OneStatementBatchReads,
+  type OneStatementBatchResults,
   type PaginatedResult,
   type PaginateOptions,
   type PropsAccessor,
+  type QualifiedRecursivePath,
+  type QualifiedRecursivePathEdge,
+  type QualifiedRecursivePathElement,
+  type QualifiedRecursivePathNode,
+  type QualifiedRecursivePathOption,
   type QueryBuilderConfig,
   type QueryBuilderState,
   type QueryCoordinateState,
@@ -99,6 +144,7 @@ export {
   type SelectContext,
   type StreamOptions,
   type StringFieldAccessor,
+  type SubsumedNodeType,
   type TraversalExpansion,
   type UniqueAlias,
   type ValidEdgeTargets,
@@ -110,10 +156,12 @@ export {
   type DynamicEdgeType,
   type DynamicFieldBuilder,
   type DynamicNodeAccessor,
+  type DynamicNodeKind,
   type DynamicNodeType,
   type DynamicSelectableEdge,
   type DynamicSelectableNode,
 } from "./dynamic";
 
 // Validation utilities
+export type { BatchOnceOptions } from "./one-statement-batch";
 export { validateSqlIdentifier } from "./validation";

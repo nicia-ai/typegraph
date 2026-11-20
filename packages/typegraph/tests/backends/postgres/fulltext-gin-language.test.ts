@@ -50,10 +50,9 @@ import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import { type GraphBackend } from "../../../src/backend/types";
 import { tsvectorStrategy } from "../../../src/query/dialect";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let pool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -225,9 +224,12 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     const backend = createPostgresBackend(drizzle(activePool));
     const [store] = await createStoreWithSchema(graph, backend);
 
+    // Supertype queries are polymorphic by default, so the single-language
+    // alias must narrow to the base kind explicitly; the mixed case below is
+    // what the default now produces.
     const single = store
       .query()
-      .from("GinArticle", "d")
+      .from("GinArticle", "d", { expansion: "exact" })
       .whereNode("d", (document) => document.$fulltext.matches("signal", 10))
       .select((sel) => ({ id: sel.d.id }))
       .toSQL();
@@ -238,7 +240,7 @@ describe("fulltext GIN index usage (constant declared language)", () => {
     // to the per-row column — a constant would mis-parse one kind.
     const mixed = store
       .query()
-      .from("GinArticle", "d", { includeSubClasses: true })
+      .from("GinArticle", "d", { expansion: "subclasses" })
       .whereNode("d", (document) => document.$fulltext.matches("signal", 10))
       .select((sel) => ({ id: sel.d.id }))
       .toSQL();

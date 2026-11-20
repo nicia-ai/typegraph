@@ -8,14 +8,25 @@ import {
   type SqlFragment,
   throwUnsupportedSqlChunk,
 } from "../../../query/sql-fragment";
+import type {
+  AtomicSqlBatchExecutor,
+  CompiledAtomicSqlStatement,
+} from "../../capabilities/atomic-sql-program";
 
 export type ExecutableSql = DrizzleSql | SqlFragment;
 
-export type CompiledSqlQuery = Readonly<{
-  params: readonly unknown[];
-  sql: string;
-}>;
+export type CompiledSqlQuery = CompiledAtomicSqlStatement;
 
+/**
+ * A driver-native, all-or-nothing group of compiled statements.
+ *
+ * This is intentionally an optional execution surface. Most SQL drivers only
+ * expose one-statement execution through Drizzle; drivers with a native batch
+ * primitive can provide it without making callers guess whether a sequence is
+ * actually transactional. The static name is deliberate: this hook submits a
+ * complete batch to a native primitive and is not an interactive transaction
+ * runner.
+ */
 export type PreparedSqlStatement = Readonly<{
   execute: <TRow>(params: readonly unknown[]) => Promise<readonly TRow[]>;
 }>;
@@ -26,6 +37,8 @@ export type SqlExecutionAdapter = Readonly<{
   executeCompiled?: <TRow>(
     compiledQuery: CompiledSqlQuery,
   ) => Promise<readonly TRow[]>;
+  /** Executes all statements atomically when the native driver supports it. */
+  executeAtomicBatch?: AtomicSqlBatchExecutor;
   prepare?: (sqlText: string) => PreparedSqlStatement;
   /**
    * Runs `critical` with exclusive use of the connection: no statement from
@@ -45,6 +58,16 @@ export type SqlExecutionAdapter = Readonly<{
   runExclusive?: <T>(
     critical: (connection: SqlExecutionAdapter) => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Recognizes this engine's own commit-conflict shape when it is not
+   * PostgreSQL's `40001`/`40P01` SQLSTATE (or the fixed message fallback for
+   * a driver that drops the code). `createSqlBackend` registers this
+   * classifier against the exact backend object it returns; `isSerializationFailure`
+   * (`src/utils/sql-errors.ts`) consults it before falling back to its own
+   * SQLSTATE/message rules, so there remains ONE predicate every retry owner
+   * calls, never a second inline check for engines this covers.
+   */
+  serializationFailure?: (error: unknown) => boolean;
 }>;
 
 type SqlCompiler = Readonly<{

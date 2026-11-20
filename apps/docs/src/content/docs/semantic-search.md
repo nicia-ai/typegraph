@@ -20,6 +20,16 @@ even without those exact words.
 - Combine semantic similarity with graph traversals and standard predicates
 - Automatic vector indexing for fast approximate nearest neighbor search
 
+## Vector fields and fulltext fields
+
+Vector search selects the embedding field named by `fieldPath`. Fulltext search
+instead addresses all of a kind's declared `searchable()` fields as one indexed
+document. In a hybrid request, `vector.fieldPath` selects only the vector leg;
+the fulltext leg remains kind-wide. Neither facade exposes a field-restricted
+fulltext selector. See [search field scope](/fulltext-search#search-field-scope)
+for the ranking and paging implications and why post-filtering is insufficient.
+Historical views refuse current-only fulltext, vector, and hybrid search.
+
 ## Use Cases
 
 ### Retrieval-Augmented Generation (RAG)
@@ -316,10 +326,10 @@ one-time, idempotent `migrateLegacyEmbeddings()` utility to copy it into the new
 per-field tables (new deployments need no action):
 
 ```typescript
-import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph";
+import { migrateLegacyEmbeddings } from "@nicia-ai/typegraph/maintenance";
 
 const result = await migrateLegacyEmbeddings({ backend });
-// → { migrated, perField, skippedDimensionMismatch, legacyTablePresent }
+// → { migrated, perField, skippedDimensionMismatch, skippedDecodeError, legacyTablePresent }
 ```
 
 ## Schema Design
@@ -509,15 +519,62 @@ This is a semantic change, never applied silently: results are subject to
 the index's recall. Composed predicates constrain the ANN candidate set —
 exactly on pgvector and sqlite-vec, bounded by over-fetch on libSQL
 DiskANN. A kind declared with `indexType: "none"` keeps the exact scan even
-with the opt-in.
+with the opt-in — a declared degradation, since there is no ANN structure
+for `approximate` to opt into and the results are exactly what was asked
+for.
+
+**A `metric` override that differs from the field's declared metric is
+refused when `approximate: true` is stated.** Every engine materializes
+metric-specific ANN structures — `vec0` bakes `distance_metric` into the
+virtual table, libSQL's DiskANN index is built with `metric=…`, pgvector's
+index carries a per-metric operator class — so an ANN structure only
+retrieves under the metric it was built for. Retrieving by the declared
+metric and re-scoring under the override returns the declared metric's
+neighbors wearing the override's scores: the wrong rows, silently. The two
+options state something that cannot both hold, so the call throws a
+`ConfigurationError` naming both metrics rather than quietly serving the
+exact scan:
+
+```typescript
+// Refused: the HNSW index is built for cosine.
+d.embedding.similarTo(queryEmbedding, 10, {
+  approximate: true,
+  metric: "l2",
+});
+```
+
+`details` carries `nodeKind`, `fieldPath`, `requestedMetric`,
+`declaredMetric`, and `indexType`. Omit `metric` (or pass the declared one)
+to keep approximate retrieval, or drop `approximate` to scan exactly under
+the overriding metric. A slot declared `indexType: "none"` is not refused:
+there is no ANN structure to be bound to a metric.
+
+Note the deliberate asymmetry with the facade. `store.search.vector` and
+`store.search.hybrid` refuse **every** metric override that differs from
+the declared one, whether or not `approximate` was stated — their rule is
+broader because vector storage is built for the declared metric and the
+facade is the guided surface. The query builder's *exact* path stays wider
+on purpose: an exact scan computes any metric over the stored vectors
+correctly, and nothing was stated there that the engine cannot honor. Only
+the silent half — the combination that cannot be served — is closed here.
 
 ### Scoped facade search: filters, pagination, subclasses
 
 `store.search.vector` (and `fulltext` / `hybrid`) accept a `where`
-predicate, an `offset`, and `includeSubClasses` — all compiled into the
+predicate, an `offset`, and `expansion` — all compiled into the
 search statement itself, so the engine ranks only eligible rows. A filter
 never costs you results: you get `limit` hits whenever `limit` matching
 nodes exist (on libSQL DiskANN, subject to the over-fetch bound above).
+
+`expansion` on the facade stays **opt-in** and defaults to
+`"exact"` — a deliberate asymmetry with the query builder's `from()`/`to()`,
+which default to `expansion: "subclasses"`. Searching across kinds skips a
+kind that omits the embedding field, but refuses one that redeclares it with
+a different `embedding()` tag and kinds that declare different metrics (see
+below), so an expanding default would let a new subclass turn a working
+search into a refusal; see
+[Fulltext Search ▸ Options reference](/fulltext-search#options-reference)
+for the full rationale, which applies identically here.
 
 ```typescript
 // Top 10 most similar *published* documents, second page.
@@ -530,21 +587,31 @@ const hits = await store.search.vector("Document", {
 });
 
 // Search a kind and all of its subClassOf descendants; per-kind results
-// merge into one globally ordered ranking. Kinds that don't declare the
-// embedding field are skipped.
+// merge into one globally ordered ranking. Kinds that omit the embedding
+// field hold no vector there and are skipped; a kind that declares it with
+// an embedding() tag that differs from its parent's is refused
+// (SEARCH_EXPANSION_KIND_UNINDEXED), because its vectors are not indexed
+// with the rest and the search would silently miss them.
 const acrossKinds = await store.search.vector("Content", {
   fieldPath: "embedding",
   queryEmbedding,
   limit: 10,
-  includeSubClasses: true,
+  expansion: "subclasses",
 });
 ```
+
+An expanded search types its hits like the `from()` alias it expands to:
+`acrossKinds[0].node` keeps `Content`'s properties, while its `kind` is
+`string` and its `NodeId` brand widens, whatever the compile-time ontology
+declares, because a persisted extension can still subclass the kind. Resolve a
+hit as one concrete kind with `store.getNodeByRef` after narrowing its kind;
+see [Fulltext Search ▸ Options reference](/fulltext-search#options-reference).
 
 The `where` predicate is compiled by the same query compiler as
 `store.query()` — property predicates behave identically, use the same
 declared indexes, and apply the same current-read semantics (tombstoned
 nodes and nodes outside their validity window never rank). Kinds expanded
-via `includeSubClasses` must share one declared metric: scores from
+via `expansion: "subclasses"` must share one declared metric: scores from
 different metrics cannot merge into one ranking (and a per-call `metric`
 cannot bridge the gap — each kind's storage is validated against its
 declared metric), so mixed-metric expansions throw; search those kinds
@@ -614,7 +681,7 @@ const filteredSearch = await store
     d.embedding
       .similarTo(queryEmbedding, 20)
       .and(d.category.eq("technology"))
-      .and(d.publishedAt.gte("2024-01-01"))
+      .and(d.publishedAt.gte("2024-01-01T00:00:00.000Z"))
       .and(d.status.eq("published"))
   )
   .select((ctx) => ctx.d)
@@ -823,14 +890,21 @@ leaks to the next query on a pooled connection. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 
-- **sqlite-vec** has no equivalent frontier knob and ignores `efSearch`
-  (no-op).
+- **SQLite backends refuse it.** Neither `sqlite-vec` — whose `vec0` KNN
+  takes only `k`, the page size — nor `libsql-native`, whose DiskANN
+  `vector_top_k` fixes `search_l` at index-creation time, has a per-search
+  frontier to set. Supplying `efSearch` to either, on the vector path or
+  the hybrid path, is refused with `UnsupportedBackendCapabilityError`
+  (`details.capability` `vector.searchFrontierTuning`, `details.reason`
+  naming the engine's limitation) rather than searching as if the option
+  had not been passed.
 - **Transaction-less Postgres drivers** (`drizzle-orm/neon-http`) can't
-  scope `SET LOCAL`, so `efSearch` is ignored with a one-time warning —
-  use a transactional driver (`node-postgres` / `neon-serverless` /
-  `postgres-js`) to apply it.
-- It tunes HNSW only; IVFFlat's analogous knob (`ivfflat.probes`) is not
-  yet exposed.
+  scope `SET LOCAL`, so a search that supplies `efSearch` is refused with
+  `UnsupportedBackendCapabilityError`. Use a transactional driver
+  (`node-postgres` / `neon-serverless` / `postgres-js`) to apply it.
+- It tunes HNSW only. Supplying it for IVFFlat is refused with a
+  `ConfigurationError`; IVFFlat's analogous knob (`ivfflat.probes`) is not yet
+  exposed.
 
 ## Troubleshooting
 

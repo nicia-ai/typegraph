@@ -5,8 +5,10 @@ type TypeGraphGlobalSymbolName =
   | "internal-temporary-writes-v1"
   | "external-recorded-read-source-v1"
   | "sql-schema-v1"
+  | "compare-and-set-absent-v1"
   | "store-runtime-v1"
   | "typegraph-recorded-read-source-v1"
+  | "engine-recorded-read-source-v1"
   | "transaction-runtime-v1";
 
 /** Returns a process-wide symbol shared across ESM/CJS package instances. */

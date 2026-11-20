@@ -4,23 +4,39 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  subClassOf,
 } from "@nicia-ai/typegraph";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { rowPropsToObject } from "../../src/backend/types";
+import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  type EngineRevision,
+  type LineageDelta,
+  type LineageMembers,
+  rowPropsToObject,
+} from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
-import { merge } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import {
   enumerateAllEdges,
   enumerateAllNodes,
 } from "../../src/graph-merge/state-diff";
 import { asBranchId } from "../../src/graph-merge/types";
-import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
+import {
+  cloneIngestionWorkingCopyStrategy,
+  cloneWorkingCopyStrategy,
+} from "../../src/graph-merge/working-copy";
 import { exportGraph, importGraph } from "../../src/interchange";
 import {
   backendMatrix,
+  createSqliteMergeBackend,
   getBackendProperty,
   getStoreBackend,
 } from "./test-utils";
@@ -42,6 +58,17 @@ const graph = defineGraph({
 });
 
 type G = typeof graph;
+
+const Media = defineNode("Media", { schema: z.object({ title: z.string() }) });
+const Podcast = defineNode("Podcast", {
+  schema: z.object({ title: z.string(), rssUrl: z.string() }),
+});
+const catalogGraph = defineGraph({
+  id: "branch-query-defaults-test",
+  nodes: { Media: { type: Media }, Podcast: { type: Podcast } },
+  edges: {},
+  ontology: [subClassOf(Podcast, Media)],
+});
 
 const WorkItem = defineNode("WorkItem", {
   schema: z.object({
@@ -228,7 +255,7 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(isOk(fork)).toBe(true);
     if (!isOk(fork)) throw fork.error;
     const forkBranch = unwrap(fork);
-    expect(forkBranch.base).toContain("\0revision:");
+    expect(forkBranch.base).toContain("|revision:");
     expect(forkBranch.store.revisionTrackingEnabled).toBe(true);
 
     await forkBranch.store.nodes.Person.create({ name: "From fork" });
@@ -254,7 +281,7 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(isOk(forkResult)).toBe(true);
     if (!isOk(forkResult)) throw forkResult.error;
     const fork = unwrap(forkResult);
-    expect(fork.base).toContain("\0revision:");
+    expect(fork.base).toContain("|revision:");
 
     await fork.store.nodes.Person.create({ name: "History fork" });
     const result = await merge(baseStore, [fork], {});
@@ -314,6 +341,110 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(forkedLegacy?.meta.validFrom).toBeUndefined();
   });
 
+  it("clones undeclared properties that validateStore reports as healthy", async () => {
+    const [baseStore] = await createStoreWithSchema(graph, await makeBackend());
+    await getStoreBackend(baseStore).insertNode({
+      graphId: baseStore.graphId,
+      kind: "Person",
+      id: "legacy-extra",
+      props: { name: "Legacy", legacyFlag: true },
+    });
+    const validation = await baseStore.validateStore({
+      entity: "node",
+      kind: "Person",
+    });
+    expect(validation.violations).toEqual([]);
+
+    const result = await branch<G>(baseStore, () => makeBackend());
+    expect(isOk(result)).toBe(true);
+    const forkStore = unwrap(result).store;
+
+    const cloned = (
+      await enumerateAllNodes(
+        getStoreBackend(forkStore),
+        forkStore.graphId,
+        "Person",
+      )
+    ).find((row) => row.id === "legacy-extra");
+    expect(cloned && rowPropsToObject(cloned.props)).toMatchObject({
+      name: "Legacy",
+      legacyFlag: true,
+    });
+  });
+
+  it.each(["direct", "plan", "incremental"] as const)(
+    "preserves open-left staged nodes and edges when merging through %s",
+    async (mode) => {
+      const [baseStore] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const fork = unwrap(await branch<G>(baseStore, () => makeBackend()));
+      const backend = getStoreBackend(fork.store);
+      for (const id of ["open-a", "open-b"]) {
+        await backend.insertNode({
+          graphId: fork.store.graphId,
+          kind: "Person",
+          id,
+          props: { name: id },
+          validFrom: null,
+        });
+      }
+      await backend.insertEdge({
+        graphId: fork.store.graphId,
+        kind: "knows",
+        id: "open-edge",
+        fromKind: "Person",
+        fromId: "open-a",
+        toKind: "Person",
+        toId: "open-b",
+        props: { since: "unknown" },
+        validFrom: null,
+      });
+      if (mode === "direct") {
+        const result = await merge(baseStore, [fork], {});
+        if (isErr(result)) throw result.error;
+      } else {
+        const planned =
+          mode === "plan" ?
+            await planMerge(baseStore, [fork])
+          : await planMergeIncremental({
+              forkPoint: baseStore,
+              target: baseStore,
+              branches: [fork],
+            });
+        const artifact = unwrap(planned);
+        expect(
+          artifact.writes.nodeUpserts.map((node) => node.validFrom),
+        ).toEqual([null, null]);
+        expect(artifact.writes.edgeUpserts[0]?.validFrom).toBeNull();
+        const applied = await applyMergePlan(
+          baseStore,
+          JSON.parse(JSON.stringify(artifact)) as typeof artifact,
+        );
+        if (isErr(applied)) throw applied.error;
+      }
+      const nodes = await enumerateAllNodes(
+        getStoreBackend(baseStore),
+        baseStore.graphId,
+        "Person",
+      );
+      const edges = await enumerateAllEdges(
+        getStoreBackend(baseStore),
+        baseStore.graphId,
+        "knows",
+      );
+      expect(nodes).toHaveLength(2);
+      expect(edges).toHaveLength(1);
+      expect(nodes.map((node) => node.valid_from)).toEqual([
+        undefined,
+        undefined,
+      ]);
+      expect(edges[0]?.valid_from).toBeUndefined();
+    },
+  );
+
   it("honors an explicit branch id from options", async () => {
     const { baseStore } = await seedBase();
     const explicitId = asBranchId("branch-explicit-id");
@@ -368,6 +499,187 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
       expect(second.error.name).toBe("BranchError");
     }
     expect(closeCount).toBe(closesBefore + 1);
+  });
+
+  it("closes the working copy when the post-clone schema-anchor read fails", async () => {
+    const { baseStore } = await seedBase();
+    const fixture = await entry.make();
+    cleanups.push(fixture.cleanup);
+
+    // The clone SUCCEEDS, so the strategy's own cleanup is out of the picture
+    // and the working copy's backend belongs to `branch()` from that moment on
+    // ("only the success path hands the backend to the caller, who then owns
+    // its lifecycle"). The very next step — reading the clone's active schema
+    // row for the drift anchor — then fails. `branch()` reports failures as
+    // `err(...)`, so the caller never receives the store and has no handle to
+    // close: anything `branch()` does not close here leaks a live engine (a
+    // PGlite instance, a file handle, a pool) for the rest of the process.
+    let closeCount = 0;
+    let anchorReadFails = false;
+    const failure = new Error("schema anchor read boom");
+    const tracked: GraphBackend = new Proxy(fixture.backend, {
+      get(target, property, _receiver) {
+        if (property === "close") {
+          return async () => {
+            closeCount += 1;
+            await target.close();
+          };
+        }
+        if (property === "getActiveSchema" && anchorReadFails) {
+          return () => Promise.reject(failure);
+        }
+        return getBackendProperty(target, property);
+      },
+    });
+
+    const result = await branch<G>(
+      baseStore,
+      () => Promise.reject(new Error("makeBackend must not be called")),
+      undefined,
+      {
+        create: async (source) => {
+          const [store] = await createStoreWithSchema(source.graph, tracked);
+          // `create()` resolving IS the ownership transfer, so arm the failure
+          // exactly there — the clone's own reads must succeed.
+          anchorReadFails = true;
+          return store;
+        },
+      },
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error.name).toBe("BranchError");
+      expect(result.error.cause).toBe(failure);
+    }
+    expect(closeCount).toBe(1);
+  });
+
+  it("closes the working copy when the post-clone lineage revision read rejects", async () => {
+    const { baseStore } = await seedBase();
+    const fixture = await entry.make();
+    cleanups.push(fixture.cleanup);
+
+    // Same shape as the schema-anchor-read failure above, for the OTHER
+    // half of `captureBranchForkState`: the clone succeeds, so `branch()`
+    // owns the backend from that point on, and the very next read —
+    // `resolveLineage(store).revision()` for `forkRevision` — fails.
+    let closeCount = 0;
+    const failure = new Error("engine revision read boom");
+    const rejectingLineage: LineageMembers = {
+      revision: () => Promise.reject(failure),
+      changesSince: () => Promise.reject(failure),
+    };
+    const tracked: GraphBackend = new Proxy(fixture.backend, {
+      get(target, property, _receiver) {
+        if (property === "close") {
+          return async () => {
+            closeCount += 1;
+            await target.close();
+          };
+        }
+        if (property === "lineage") return rejectingLineage;
+        return getBackendProperty(target, property);
+      },
+    });
+
+    const result = await branch<G>(
+      baseStore,
+      () => Promise.reject(new Error("makeBackend must not be called")),
+      undefined,
+      {
+        create: (source) =>
+          createStoreWithSchema(source.graph, tracked).then(([store]) => store),
+      },
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error.name).toBe("BranchError");
+      expect(result.error.cause).toBe(failure);
+    }
+    expect(closeCount).toBe(1);
+  });
+
+  describe("query defaults", () => {
+    const QUERY_DEFAULTS = {
+      expansion: "exact",
+      traversalExpansion: "none",
+    } as const;
+
+    async function seedCatalog() {
+      const [baseStore] = await createStoreWithSchema(
+        catalogGraph,
+        await makeBackend(),
+        { queryDefaults: QUERY_DEFAULTS },
+      );
+      await baseStore.nodes.Media.create({ title: "plain" });
+      await baseStore.nodes.Podcast.create({ title: "cast", rssUrl: "u" });
+      return baseStore;
+    }
+
+    async function mediaKinds(
+      store: Store<typeof catalogGraph>,
+    ): Promise<readonly string[]> {
+      const kinds = await store
+        .query()
+        .from("Media", "media")
+        .select((ctx) => ctx.media.kind)
+        .execute();
+      return kinds.toSorted();
+    }
+
+    it("answers a supertype query on the clone as the base store does", async () => {
+      const baseStore = await seedCatalog();
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      const baseKinds = await mediaKinds(baseStore);
+      const cloneKinds = await mediaKinds(created.store);
+      console.log("supertype query kinds", { baseKinds, cloneKinds });
+
+      expect(baseKinds).toEqual(["Media"]);
+      expect(cloneKinds).toEqual(baseKinds);
+      expect(created.store.workingCopyOptions.queryDefaults).toEqual(
+        QUERY_DEFAULTS,
+      );
+    });
+
+    it("carries them onto an ingestion working copy", async () => {
+      const baseStore = await seedCatalog();
+      const created = unwrap(
+        await branch<typeof catalogGraph>(
+          baseStore,
+          () => Promise.reject(new Error("default factory must not run")),
+          undefined,
+          cloneIngestionWorkingCopyStrategy(() => makeBackend()),
+        ),
+      );
+
+      expect(await mediaKinds(created.store)).toEqual(["Media"]);
+      expect(created.store.workingCopyOptions.queryDefaults).toEqual(
+        QUERY_DEFAULTS,
+      );
+    });
+
+    it("leaves the clone on the library defaults when the base states none", async () => {
+      const { baseStore } = await seedBase();
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      expect(created.store.workingCopyOptions).not.toHaveProperty(
+        "queryDefaults",
+      );
+    });
+
+    it("does not carry the base's hooks or upsert coalescing", async () => {
+      const [baseStore] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { coalesceUnchangedUpserts: true, hooks: {} },
+      );
+      const created = unwrap(await branch(baseStore, () => makeBackend()));
+
+      expect(created.store.workingCopyOptions).toEqual({});
+    });
   });
 
   it("accepts an explicit working-copy strategy override", async () => {
@@ -469,5 +781,71 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(copiedRelationship?.fromId).toBe(sourceWork.id);
     expect(copiedRelationship?.toId).toBe(dependency.id);
     expect(copiedRelationship?.reason).toBe("waiting on import");
+  });
+});
+
+/** A `lineage` that always answers the same fixed revision. */
+function fixedRevisionLineage(revision: EngineRevision): LineageMembers {
+  const delta: LineageDelta = { kind: "keys", nodes: [], edges: [] };
+  return {
+    revision: () => Promise.resolve(revision),
+    changesSince: () => Promise.resolve(delta),
+  };
+}
+
+describe("branch(): forkRevision capture", () => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) {
+      await cleanup();
+    }
+  });
+
+  it("captures the working copy's own lineage revision right after the clone, before any write", async () => {
+    const { backend: baseBackend, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+
+    const forkRevision = "engine-r7" as EngineRevision;
+    const result = await branch<G>(baseStore, () => {
+      const { backend, cleanup } = createSqliteMergeBackend();
+      cleanups.push(cleanup);
+      return Promise.resolve(
+        deriveBackend(backend, {
+          lineage: fixedRevisionLineage(forkRevision),
+        }),
+      );
+    });
+
+    const forked = unwrap(result);
+    expect(forked.forkRevision).toBe(forkRevision);
+  });
+
+  it("leaves forkRevision absent when the working copy resolves no lineage", async () => {
+    const { backend: baseBackend, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+
+    const result = await branch<G>(baseStore, () => {
+      const { backend, cleanup } = createSqliteMergeBackend();
+      cleanups.push(cleanup);
+      return Promise.resolve(backend);
+    });
+
+    const forked = unwrap(result);
+    expect(forked.forkRevision).toBeUndefined();
+    // Not merely `undefined`-valued: the key itself is absent, matching
+    // `branch()`'s conditional spread (`exactOptionalPropertyTypes`) — a
+    // caller that spreads `forked` or serializes it must not see a
+    // `forkRevision: undefined` entry appear out of nowhere.
+    expect("forkRevision" in forked).toBe(false);
   });
 });

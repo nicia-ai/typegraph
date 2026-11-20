@@ -1,3 +1,4 @@
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Node-level delete/modify conflict resolution (design §6.2, T8a).
@@ -7,6 +8,12 @@ import { requireDefined } from "../utils/presence";
  * is a delete/modify conflict whose outcome is governed by the
  * {@link DeleteModifyPolicy} (`"deleteWins"` | `"modifyWins"` | `"flag"`) and
  * surfaced in the {@link MergeReport}.
+ *
+ * A branch that REOPENS the node's ended validity window (`clearValidTo`)
+ * modifies it for this purpose (issue #789): a reopen says the fact is true
+ * again, the opposite of a deletion, so absorbing it would silently discard the
+ * only branch still asserting the row. An ENDING is not a modification — a
+ * deletion is the stronger form of the same statement and absorbs it.
  *
  * This module is a PURE decision function over the staging set (T7) plus the
  * captured stable branch order (T8). It runs BEFORE clustering/canonicalize feed
@@ -39,7 +46,7 @@ import type {
   StagedModifiedNode,
   StagingSet,
 } from "./staging";
-import type { DeletedEdge, DeletedNode } from "./state-diff";
+import type { DeletedEdge, ValidWindow } from "./state-diff";
 import type {
   EdgeId,
   GraphDef,
@@ -55,10 +62,41 @@ import type {
   PropertyConflict,
   PropertyConflictPolicy,
 } from "./types";
+import { reopensValidity } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
+/** The `(kind, id)` of a node the delete/modify resolution finally deletes. */
+type DeletedNodeRef = Readonly<{ id: AnyNodeId; kind: string }>;
 type BranchTagged = Readonly<{ branchId: BranchId }>;
+/** One branch's reopen of an inherited entity's ended validity window. */
+type ReopenClaim<Id extends AnyNodeId | EdgeId> = BranchTagged &
+  Readonly<{ id: Id; kind: string }>;
+
+/**
+ * The reopens among a population's staged window deltas, decided by the window
+ * phase's own {@link reopensValidity} so the two phases cannot disagree on what
+ * a reopen is.
+ */
+function reopenClaims<Id extends AnyNodeId | EdgeId>(
+  windowed: readonly Readonly<{
+    branchId: BranchId;
+    entity: Readonly<{
+      id: Id;
+      kind: string;
+      base: ValidWindow;
+      fork: ValidWindow;
+    }>;
+  }>[],
+): readonly ReopenClaim<Id>[] {
+  return windowed
+    .filter((item) => reopensValidity(item.entity.base, item.entity.fork))
+    .map((item) => ({
+      branchId: item.branchId,
+      id: item.entity.id,
+      kind: item.entity.kind,
+    }));
+}
 
 /** Reason recorded on a {@link DroppedItem} for a finally-deleted node. */
 export const DELETED_NODE_DROP_REASON = "delete-modify:deleteWins" as const;
@@ -74,6 +112,9 @@ export const DELETED_NODE_DROP_REASON = "delete-modify:deleteWins" as const;
  * - `nodeDeletions`: the AUTHORITATIVE set of inherited nodes that are finally
  *   deleted — pure deletions (no branch modified them) plus delete/modify
  *   conflicts resolved `"deleteWins"`. T9 reads this as the endpoint liveness.
+ *   Entries are the surviving deletion's `(kind, id)` only: a staged deletion
+ *   additionally records WHEN its branch removed the node, which is per-branch
+ *   evidence rather than a merge outcome.
  * - `conflicts`: one {@link DeleteModifyConflict} per inherited node that was
  *   both deleted and modified.
  * - `dropped`: a `{ kind: "node" }` {@link DroppedItem} for every finally-deleted
@@ -81,7 +122,7 @@ export const DELETED_NODE_DROP_REASON = "delete-modify:deleteWins" as const;
  */
 export type DeleteModifyResolution = Readonly<{
   survivingModifications: readonly StagedModifiedNode[];
-  nodeDeletions: readonly DeletedNode[];
+  nodeDeletions: readonly DeletedNodeRef[];
   conflicts: readonly DeleteModifyConflict[];
   dropped: readonly DroppedItem[];
 }>;
@@ -164,9 +205,12 @@ function groupByEntity<T>(
  * The shared node/edge DELETE-MODIFY resolver — the single control flow behind
  * {@link resolveDeleteModify} (nodes) and {@link resolveEdgeDeleteModify} (edges).
  * `modifiedEntity`/`deletedEntity` extract each staged item's `(id, kind)` (its
- * `.node` or `.edge`), and `droppedKind` tags the {@link DroppedItem}; everything
- * else — conflict detection, policy application, pure-deletion/pure-modification
- * passthrough, and the canonical output sort — is identical for both.
+ * `.node` or `.edge`), and `dropDeleted` builds the {@link DroppedItem} for a
+ * finally-deleted entity — a factory rather than a `"node" | "edge"` tag because
+ * `DroppedItem` is discriminated on `kind`, so only the caller can pair the right
+ * discriminant with its own id type. Everything else — conflict detection, policy
+ * application, pure-deletion/pure-modification passthrough, and the canonical
+ * output sort — is identical for both.
  */
 function resolveDeleteModifyOver<
   ModifiedItem extends BranchTagged,
@@ -174,10 +218,11 @@ function resolveDeleteModifyOver<
   Id extends AnyNodeId | EdgeId,
 >(
   modified: readonly ModifiedItem[],
+  reopened: readonly ReopenClaim<Id>[],
   deleted: readonly DeletedItem[],
   modifiedEntity: (item: ModifiedItem) => Readonly<{ id: Id; kind: string }>,
   deletedEntity: (item: DeletedItem) => Readonly<{ id: Id; kind: string }>,
-  droppedKind: "node" | "edge",
+  dropDeleted: (id: Id) => DroppedItem,
   policy: DeleteModifyPolicy,
   branchRank: ReadonlyMap<BranchId, number>,
   preferredBranchId: BranchId | undefined,
@@ -188,72 +233,65 @@ function resolveDeleteModifyOver<
   dropped: readonly DroppedItem[];
 }> {
   const modifiedByKey = groupByEntity(modified, modifiedEntity);
+  const reopenedByKey = groupByEntity(reopened, (claim) => claim);
   const deletedByKey = groupByEntity(deleted, deletedEntity);
 
   const survivingModifications: ModifiedItem[] = [];
   const deletions: Readonly<{ id: Id; kind: string }>[] = [];
   const conflicts: DeleteModifyConflict[] = [];
   const dropped: DroppedItem[] = [];
+  const deleteWinsKeys = new Set<MergeKey>();
 
-  const conflictedKeys = new Set<MergeKey>();
-  for (const key of deletedByKey.keys()) {
-    if (modifiedByKey.has(key)) {
-      conflictedKeys.add(key);
+  for (const [key, deletionsForKey] of deletedByKey) {
+    const { id, kind } = deletedEntity(requireDefined(deletionsForKey[0]));
+    // A reopen contends with a deletion exactly as a props edit does: both say
+    // the row still holds. It contributes no surviving modification — the
+    // window phase carries the clear once the row is kept.
+    const contenders: readonly BranchTagged[] = [
+      ...(modifiedByKey.get(key) ?? []),
+      ...(reopenedByKey.get(key) ?? []),
+    ];
+    if (contenders.length === 0) {
+      deletions.push({ id, kind });
+      continue;
+    }
+
+    const effectivePolicy = effectiveDeleteModifyPolicy(
+      policy,
+      deletionsForKey,
+      contenders,
+      preferredBranchId,
+    );
+    conflicts.push({
+      entityId: id,
+      kind,
+      deletedBy: pickHighestPriorityBranch(
+        deletionsForKey.map((deletion) => deletion.branchId),
+        branchRank,
+      ),
+      modifiedBy: pickHighestPriorityBranch(
+        contenders.map((contender) => contender.branchId),
+        branchRank,
+      ),
+      resolution: effectivePolicy,
+    });
+
+    // "modifyWins" and "flag" both KEEP the entity; "flag" additionally leaves
+    // the recorded conflict unresolved for review.
+    if (effectivePolicy === "deleteWins") {
+      deleteWinsKeys.add(key);
+      deletions.push({ id, kind });
+      dropped.push(dropDeleted(id));
     }
   }
 
   for (const [key, modifications] of modifiedByKey) {
-    if (!conflictedKeys.has(key)) {
-      for (const modification of modifications) {
-        survivingModifications.push(modification);
-      }
+    if (deleteWinsKeys.has(key)) {
       continue;
     }
-
-    const deletionsForKey = requireDefined(deletedByKey.get(key));
-    const { id, kind } = modifiedEntity(requireDefined(modifications[0]));
-    const deletedBy = pickHighestPriorityBranch(
-      deletionsForKey.map((deletion) => deletion.branchId),
-      branchRank,
-    );
-    const modifiedBy = pickHighestPriorityBranch(
-      modifications.map((modification) => modification.branchId),
-      branchRank,
-    );
-    const effectivePolicy = effectiveDeleteModifyPolicy(
-      policy,
-      deletionsForKey,
-      modifications,
-      preferredBranchId,
-    );
-
-    conflicts.push({
-      entityId: id,
-      kind,
-      deletedBy,
-      modifiedBy,
-      resolution: effectivePolicy,
-    });
-
-    if (effectivePolicy === "deleteWins") {
-      deletions.push({ id, kind });
-      dropped.push({ kind: droppedKind, id, reason: DELETED_NODE_DROP_REASON });
-      continue;
-    }
-
-    // "modifyWins" and "flag" both KEEP the modification (resurrect the entity);
-    // "flag" additionally leaves the recorded conflict unresolved for review.
     for (const modification of modifications) {
       survivingModifications.push(modification);
     }
-  }
-
-  for (const [key, deletionsForKey] of deletedByKey) {
-    if (conflictedKeys.has(key)) {
-      continue;
-    }
-    const { id, kind } = deletedEntity(requireDefined(deletionsForKey[0]));
-    deletions.push({ id, kind });
   }
 
   return {
@@ -375,10 +413,15 @@ function reconcileOver<Item extends BranchTagged>(
  *   - `"flag"` → the modifications survive (as with `"modifyWins"`) but the
  *     conflict is recorded UNRESOLVED (`resolution: "flag"`) for human review.
  *
- * Pure deletions (no branch modified the node) pass straight through to
- * {@link nodeDeletions}; pure modifications (no branch deleted the node) pass
- * straight through to {@link survivingModifications}. Both unconflicted paths
- * carry NO {@link DeleteModifyConflict}.
+ * A branch that reopened the node's ended window counts as a modifying branch:
+ * it can raise the conflict and is eligible as `modifiedBy`, but it adds no
+ * surviving modification, since the window phase carries the reopen of a kept
+ * node.
+ *
+ * Pure deletions (no branch modified or reopened the node) pass straight
+ * through to {@link nodeDeletions}; pure modifications (no branch deleted the
+ * node) pass straight through to {@link survivingModifications}. Both
+ * unconflicted paths carry NO {@link DeleteModifyConflict}.
  *
  * The result is order-independent: the keep-vs-delete decision depends only on
  * the policy and the contributing branch SET; `branchRank` is consulted solely to
@@ -398,10 +441,16 @@ export function resolveDeleteModify(
 ): DeleteModifyResolution {
   const resolved = resolveDeleteModifyOver(
     staging.modifiedNodes,
+    reopenClaims(
+      staging.windowedNodes.map((item) => ({
+        branchId: item.branchId,
+        entity: item.node,
+      })),
+    ),
     staging.deletedNodes,
     (item) => item.node,
     (item) => item.node,
-    "node",
+    (id) => ({ kind: "node", id, reason: DELETED_NODE_DROP_REASON }),
     policy,
     branchRank,
     preferredBranchId,
@@ -459,7 +508,7 @@ function threeWayMergeProps(
   props: Record<string, JsonValue>;
   conflicts: PropertyConflict[];
 }> {
-  const merged: Record<string, JsonValue> = {};
+  const merged = createDataKeyedBag<JsonValue>();
   const conflicts: PropertyConflict[] = [];
 
   // Every property the base OR any fork carries. Base keys are included so a key
@@ -473,7 +522,7 @@ function threeWayMergeProps(
   }
 
   for (const property of [...propertyNames].sort(compareStrings)) {
-    const baseHas = property in baseProps;
+    const baseHas = hasOwnKey(baseProps, property);
     const baseKey =
       baseHas ?
         canonicalValueKey(requireDefined(baseProps[property]))
@@ -485,7 +534,7 @@ function threeWayMergeProps(
     // of conflict gathering, with the canonical NUL-separated dedupe key.
     const changed = contributions
       .filter((contribution) => {
-        if (!(property in contribution.forkProps)) {
+        if (!hasOwnKey(contribution.forkProps, property)) {
           return false; // absent — a deletion (handled below), never a change
         }
         const value = contribution.forkProps[property] as JsonValue;
@@ -504,7 +553,7 @@ function threeWayMergeProps(
       const deletedByFork =
         baseHas &&
         contributions.some(
-          (contribution) => !(property in contribution.forkProps),
+          (contribution) => !hasOwnKey(contribution.forkProps, property),
         );
       if (baseHas && !deletedByFork) {
         merged[property] = requireDefined(baseProps[property]);
@@ -619,7 +668,8 @@ export type EdgeDeleteModifyResolution = Readonly<{
  * edge analogue of {@link resolveDeleteModify}. Pure deletions flow to
  * `edgeDeletions`; pure modifications flow to `survivingModifications`. Without
  * this, inherited edge deletions were staged but never applied, so a branch's
- * edge deletion was silently dropped and the edge stayed live. Shares
+ * edge deletion was silently dropped and the edge stayed live. A reopen of the
+ * edge's ended window contends with a deletion as the node path describes. Shares
  * {@link resolveDeleteModifyOver} with the node path so the two can never drift.
  */
 export function resolveEdgeDeleteModify(
@@ -630,10 +680,16 @@ export function resolveEdgeDeleteModify(
 ): EdgeDeleteModifyResolution {
   const resolved = resolveDeleteModifyOver(
     staging.modifiedEdges,
+    reopenClaims(
+      staging.windowedEdges.map((item) => ({
+        branchId: item.branchId,
+        entity: item.edge,
+      })),
+    ),
     staging.deletedEdges,
     (item) => item.edge,
     (item) => item.edge,
-    "edge",
+    (id) => ({ kind: "edge", id, reason: DELETED_NODE_DROP_REASON }),
     policy,
     branchRank,
     preferredBranchId,

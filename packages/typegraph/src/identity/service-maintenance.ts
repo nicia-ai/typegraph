@@ -1,0 +1,1331 @@
+import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import { type GraphDef } from "../core/define-graph";
+import {
+  ConfigurationError,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+} from "../errors";
+import { type SqlSchema } from "../query/compiler/schema";
+import { sql } from "../query/sql-fragment";
+import { asCompiledRowsSql } from "../query/sql-intent";
+import { type KindRegistry } from "../registry/kind-registry";
+import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../store/operations/write-transaction";
+import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
+import { chunk, groupBy } from "../utils/array";
+import { nowIso } from "../utils/date";
+import { requireDefined } from "../utils/presence";
+import { IDENTITY_ASSERTION_COLUMNS } from "./historical-sql";
+import {
+  normalizeIdentityAssertionRow,
+  optionalIdentityTimestamp,
+  type RawIdentityAssertionRow,
+} from "./row-codec";
+import {
+  assertSeparationMatchesProjection,
+  buildSeparationProjection,
+  readSeparationForGraph,
+} from "./separation";
+import {
+  assertClosureMatchesComponents,
+  classHasDisjointKinds,
+  closureMismatchError,
+  identityActiveKinds,
+  loadLiveReferences,
+  loadSnapshot,
+  readClosureRowsForGraph,
+  validateSnapshotIntegrity,
+} from "./service-components";
+import { runIdentityMutation } from "./service-facade";
+import {
+  noteClassTransitions,
+  replaceAffectedClosure,
+  replaceClosure,
+  snapshotClassKey,
+  validateCurrentRelation,
+} from "./service-mutation";
+import type { Backend, RawClosureClassRow } from "./service-read";
+import {
+  clampValidTo,
+  compareReferences,
+  loadAssertionsTouching,
+  loadCurrentStructuralClassComponents,
+  loadCurrentStructuralClasses,
+  lockIdentityGraph,
+  refKey,
+} from "./service-read";
+import { type IdentityServiceContext } from "./service-types";
+import {
+  executeIdentityStatement,
+  identityChunkSize,
+  MAX_REFERENCE_CHUNK_SIZE,
+  type PlainNodeRef,
+} from "./sql-target";
+import { type IdentityAssertionStorageRow } from "./storage-types";
+import {
+  type ClosureTransitionRecord,
+  diffClosureTransitions,
+} from "./transition-log";
+
+/**
+ * The context slice a closure rebuild reads. Narrower than the full
+ * {@link IdentityServiceContext} so a schema-transition preflight — which runs
+ * below the Store layer and has no node loader or write-transaction settings to
+ * offer — can drive the same rebuild the Store drives.
+ */
+export type IdentityRebuildContext<G extends GraphDef> = Pick<
+  IdentityServiceContext<G>,
+  "backend" | "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
+>;
+
+/**
+ * Defense-in-depth: `Store`'s constructor (`store.ts`) already refuses
+ * Operational Identity at construction whenever
+ * `!capabilities.execution.interactiveTransactions`, so no public path
+ * reaches this gate against a batch-tier backend today — identity
+ * maintenance never runs once construction has refused it. It stays here,
+ * re-checked, because {@link rebuildIdentityClosureForContext} and
+ * {@link validateIdentityForContext} are also called by lower-level
+ * preflights that do not go through `Store`'s constructor.
+ */
+function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
+  if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "identity" });
+    throw new ConfigurationError(
+      "Operational Identity requires atomic transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        ...batchRefusalDetails(verdict),
+      },
+    );
+  }
+}
+
+/**
+ * Runs `fn` against a transactional target. A top-level `GraphBackend` opens
+ * one; a `TransactionBackend` is already inside the caller's transaction and
+ * has no `transaction` method to nest with, so it runs as-is.
+ */
+async function runOnTransactionIfSupported(
+  backend: GraphBackend | TransactionBackend,
+  fn: (target: Backend) => Promise<void>,
+): Promise<void> {
+  if ("transaction" in backend) {
+    await backend.transaction(async (target) => fn(target));
+    return;
+  }
+  await fn(backend);
+}
+
+/**
+ * Caller owns schema-version coherence: Store maintenance/startup repair fence
+ * the observed version, and schema preflights already hold the commit fence.
+ * This helper acquires only identity and never acquires an earlier lock after
+ * it. See docs/IDENTITY_LOCK_ORDER.md for the complete caller audit.
+ */
+export async function rebuildIdentityClosureForContext<G extends GraphDef>(
+  ctx: IdentityRebuildContext<G>,
+): Promise<void> {
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
+
+  async function rebuildAtTarget(target: Backend): Promise<void> {
+    await lockIdentityGraph(target, ctx.graphId);
+    await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+      const activeKinds = identityActiveKinds(ctx.registry);
+      const snapshot = await loadSnapshot(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        undefined,
+        activeKinds,
+        ctx.sameIdAcrossKinds,
+      );
+      validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
+      await replaceClosure(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        activeKinds,
+        ctx.sameIdAcrossKinds,
+      );
+    });
+  }
+
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    rebuildAtTarget(target),
+  );
+}
+
+export async function validateIdentityForContext<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+): Promise<void> {
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
+
+  async function validateAtTarget(target: Backend): Promise<void> {
+    await lockIdentityGraph(target, ctx.graphId);
+    const activeKinds = identityActiveKinds(ctx.registry);
+    const snapshot = await loadSnapshot(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      undefined,
+      activeKinds,
+      ctx.sameIdAcrossKinds,
+    );
+    validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
+    await assertClosureMatchesComponents(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      snapshot.components,
+    );
+    assertSeparationMatchesProjection(
+      ctx.graphId,
+      await readSeparationForGraph(target, ctx.schema, ctx.graphId),
+      buildSeparationProjection(snapshot.assertions, (ref) =>
+        snapshotClassKey(snapshot, ref),
+      ),
+    );
+  }
+
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    validateAtTarget(target),
+  );
+}
+
+/**
+ * The context slice the affected-class assertion reads. Narrower than the full
+ * {@link IdentityServiceContext} because the assertion runs inside a
+ * caller-owned write transaction and therefore takes its target explicitly
+ * instead of opening one from `backend`.
+ */
+export type IdentityConsistencyContext<G extends GraphDef> = Pick<
+  IdentityServiceContext<G>,
+  "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
+>;
+
+/** The affected identity classes, indexed for the assertion's three scans. */
+type AffectedIdentityClasses = Readonly<{
+  /** Each distinct affected class, keyed by its code-point-least member. */
+  byClassKey: ReadonlyMap<string, readonly PlainNodeRef[]>;
+  /** The class key of every affected member, for endpoint lookups. */
+  classKeyByMember: ReadonlyMap<string, string>;
+  /** Every member of every affected class, deduplicated. */
+  members: readonly PlainNodeRef[];
+}>;
+
+/**
+ * The identity classes the seeds belong to, read through the SAME materialized
+ * closure every current identity read resolves through
+ * ({@link loadCurrentStructuralClasses}), so the assertion judges the state
+ * readers will actually see rather than a private reconstruction of it.
+ */
+async function loadAffectedIdentityClasses<G extends GraphDef>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<AffectedIdentityClasses> {
+  const classes = await loadCurrentStructuralClassComponents(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    seeds,
+  );
+  const byClassKey = new Map<string, readonly PlainNodeRef[]>();
+  const classKeyByMember = new Map<string, string>();
+  const members = new Map<string, PlainNodeRef>();
+  for (const classMembers of classes.values()) {
+    // Members come back in {@link compareReferences} order, so the first is
+    // the class's code-point-least member — the same canonical label
+    // {@link insertClosureComponents} writes, which makes two seeds of one
+    // class collapse onto one entry here.
+    const classKey = refKey(requireDefined(classMembers[0]));
+    byClassKey.set(classKey, classMembers);
+    for (const member of classMembers) {
+      const memberKey = refKey(member);
+      classKeyByMember.set(memberKey, classKey);
+      members.set(memberKey, member);
+    }
+  }
+  return { byClassKey, classKeyByMember, members: [...members.values()] };
+}
+
+/**
+ * What an affected-class scan found: a genuine identity contradiction, or
+ * evidence that the materialized closure lags the ledger it is derived from.
+ * The two are indistinguishable to a caller reading a stale closure, which is
+ * why {@link assertAffectedIdentityClassesConsistent} rebuilds before it
+ * believes either.
+ */
+type AffectedClassInconsistency =
+  | Readonly<{ kind: "contradiction"; error: IdentityContradictionError }>
+  | Readonly<{
+      kind: "stale-closure";
+      detail: Readonly<Record<string, unknown>>;
+    }>;
+
+function firstMemberOfKind(
+  members: readonly PlainNodeRef[],
+  kind: string,
+): PlainNodeRef {
+  return requireDefined(
+    members.find((member) => member.kind === kind),
+    `Identity class carries no ${kind} member`,
+  );
+}
+
+/**
+ * The first inconsistency in the affected classes, or `undefined` when they
+ * are consistent. Three scans, all scoped to the affected members:
+ *
+ *  - a class whose member kinds the ontology declares disjoint;
+ *  - a CURRENT `different` assertion whose endpoints share one class;
+ *  - closure lag, as a current `same` assertion (or, under `"fold"`, a live
+ *    same-id row) whose endpoints the closure has NOT merged — the one shape
+ *    that could hide a contradiction from the two scans above, because both
+ *    resolve classes through that same closure.
+ */
+async function findAffectedClassInconsistency<G extends GraphDef>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<AffectedClassInconsistency | undefined> {
+  const classes = await loadAffectedIdentityClasses(ctx, target, seeds);
+  for (const members of classes.byClassKey.values()) {
+    // Self-pairs are safe: `areDisjoint(kind, kind)` is false by construction.
+    const conflictingKinds = classHasDisjointKinds(
+      ctx.registry,
+      members,
+      members,
+    );
+    if (conflictingKinds === undefined) continue;
+    const [leftKind, rightKind] = conflictingKinds;
+    return {
+      kind: "contradiction",
+      error: new IdentityContradictionError({
+        operation: "merge",
+        a: firstMemberOfKind(members, leftKind),
+        b: firstMemberOfKind(members, rightKind),
+        reason: "disjoint-kinds",
+        conflictingKinds,
+      }),
+    };
+  }
+
+  const assertions = await loadAssertionsTouching(
+    target,
+    ctx.schema,
+    ctx.graphId,
+    classes.members,
+    undefined,
+  );
+  // Current `same` rows the closure has NOT merged into one class. An endpoint
+  // outside every affected class is only evidence of lag when its node is
+  // live — a class legitimately excludes a deleted member — so the liveness of
+  // those endpoints is read once, after the scan, instead of per row.
+  const unmerged: Readonly<{
+    assertionId: string;
+    a: PlainNodeRef;
+    b: PlainNodeRef;
+    outside: PlainNodeRef;
+  }>[] = [];
+  for (const assertion of assertions) {
+    const a = { kind: assertion.a_kind, id: assertion.a_id };
+    const b = { kind: assertion.b_kind, id: assertion.b_id };
+    const aClassKey = classes.classKeyByMember.get(refKey(a));
+    const bClassKey = classes.classKeyByMember.get(refKey(b));
+    if (assertion.rel === "different") {
+      if (aClassKey === undefined || aClassKey !== bClassKey) continue;
+      return {
+        kind: "contradiction",
+        error: new IdentityContradictionError({
+          operation: "merge",
+          a,
+          b,
+          reason: "same-class",
+          conflictingAssertionId: assertion.id,
+        }),
+      };
+    }
+    if (aClassKey !== undefined && bClassKey !== undefined) {
+      if (aClassKey === bClassKey) continue;
+      return {
+        kind: "stale-closure",
+        detail: { assertionId: assertion.id, a, b },
+      };
+    }
+    // The row reached this scan by touching an affected member, so exactly one
+    // endpoint can be outside the affected classes.
+    unmerged.push({
+      assertionId: assertion.id,
+      a,
+      b,
+      outside: aClassKey === undefined ? a : b,
+    });
+  }
+  if (unmerged.length > 0) {
+    const liveOutside = await loadLiveReferences(
+      target,
+      ctx.schema,
+      ctx.graphId,
+      unmerged.map((row) => row.outside),
+    );
+    const liveKeys = new Set(liveOutside.map((ref) => refKey(ref)));
+    const lagging = unmerged.find((row) => liveKeys.has(refKey(row.outside)));
+    if (lagging !== undefined) {
+      return {
+        kind: "stale-closure",
+        detail: {
+          assertionId: lagging.assertionId,
+          a: lagging.a,
+          b: lagging.b,
+        },
+      };
+    }
+  }
+
+  if (ctx.sameIdAcrossKinds !== "fold") return undefined;
+  // The structural half of closure truth: under `"fold"` every live row
+  // sharing an affected member's id belongs to that member's class. A row the
+  // closure never folded reads as `undefined` here, which is the lag this
+  // scan exists to catch.
+  const liveKindsById = await liveNodeKindsSharingIds(
+    ctx,
+    target,
+    classes.members.map((member) => member.id),
+  );
+  for (const [id, kinds] of liveKindsById) {
+    const classKeys = new Set<string | undefined>();
+    for (const kind of kinds) {
+      classKeys.add(classes.classKeyByMember.get(refKey({ kind, id })));
+    }
+    if (classKeys.size > 1) {
+      return {
+        kind: "stale-closure",
+        detail: { sharedId: id, kinds: [...kinds] },
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Asserts that the identity classes a write TOUCHED are contradiction-free, in
+ * the caller's write transaction and against the state the write just left
+ * behind. Scoped to the affected classes — the seeds plus everything the
+ * closure links them to — so the cost is O(affected classes), not O(graph).
+ *
+ * This is the applier-owned half of identity correctness: unlike a caller's
+ * plan-time simulation, it reads the post-write database, so a plan validated
+ * against state that has since moved cannot commit a contradictory ledger. Any
+ * refusal propagates out of the caller's transaction, which rolls the whole
+ * write back — there is no partial commit.
+ *
+ * Both failure kinds go through ONE rebuild-and-recheck: the scans resolve
+ * classes through the materialized closure, so a lagging closure can invent a
+ * contradiction as easily as it can hide one. On any inconsistency the closure
+ * is rebuilt from the base relations INSIDE the caller's transaction and the
+ * scans re-run against it. A clean second pass means the closure was stale and
+ * is now repaired (atomically with the caller's write); a repeated
+ * contradiction is real and aborts; a repeated lag means the closure and the
+ * ledger disagree in a way a rebuild cannot fix, which is corruption.
+ */
+export async function assertAffectedIdentityClassesConsistent<
+  G extends GraphDef,
+>(
+  ctx: IdentityConsistencyContext<G>,
+  target: Backend,
+  seeds: readonly PlainNodeRef[],
+): Promise<void> {
+  if (seeds.length === 0) return;
+  await lockIdentityGraph(target, ctx.graphId);
+  const observed = await findAffectedClassInconsistency(ctx, target, seeds);
+  if (observed === undefined) return;
+  await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+    await replaceClosure(
+      rawTarget,
+      ctx.schema,
+      ctx.graphId,
+      identityActiveKinds(ctx.registry),
+      ctx.sameIdAcrossKinds,
+    );
+  });
+  const rebuilt = await findAffectedClassInconsistency(ctx, target, seeds);
+  if (rebuilt === undefined) return;
+  if (rebuilt.kind === "contradiction") throw rebuilt.error;
+  throw closureMismatchError(ctx.graphId, rebuilt.detail);
+}
+
+/**
+ * Hard-deletes every assertion row (current AND ended) touching any of the
+ * given node kinds, touching each removed row for recorded capture. Shared by
+ * {@link removeIdentityKindsForContext} (Store.removeKinds) and the schema
+ * commit preflight for kind-dropping migrations — the closure rebuild those
+ * paths run afterwards silently FILTERS rows with unregistered kinds, so
+ * without this cascade a dropped kind's assertions would survive as current
+ * orphans: invisible to closure and live-endpoint interchange reads, yet
+ * still present to raw ledger reads and merge staging.
+ *
+ * Returns the ids of the assertions it removed, so a kind-drop cause note can
+ * name exactly which ledger rows the cascade attributes its class changes to.
+ *
+ * @internal
+ */
+export async function deleteAssertionsTouchingKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  kinds: readonly string[],
+  touch: (graphId: string, id: string) => void,
+): Promise<readonly IdentityAssertionStorageRow[]> {
+  const removedKinds = [...new Set(kinds)];
+  if (removedKinds.length === 0) return [];
+  const matched = new Map<string, IdentityAssertionStorageRow>();
+  const kindChunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  for (const kindChunk of chunk(removedKinds, kindChunkSize)) {
+    const kindList = sql.join(
+      kindChunk.map((kind) => sql`${kind}`),
+      sql`, `,
+    );
+    const rows = await target.execute<RawIdentityAssertionRow>(
+      asCompiledRowsSql(sql`
+        SELECT ${IDENTITY_ASSERTION_COLUMNS}
+        FROM ${schema.identityAssertionsTable}
+        WHERE graph_id = ${graphId}
+          AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
+      `),
+    );
+    for (const rawRow of rows) {
+      matched.set(rawRow.id, normalizeIdentityAssertionRow(rawRow));
+    }
+  }
+  const ids = [...matched.keys()];
+  if (ids.length > 0) {
+    const idChunkSize = identityChunkSize(target, {
+      fixedParameters: 1,
+      maxItems: MAX_REFERENCE_CHUNK_SIZE,
+      parametersPerItem: 1,
+    });
+    for (const idChunk of chunk(ids, idChunkSize)) {
+      const idList = sql.join(
+        idChunk.map((id) => sql`${id}`),
+        sql`, `,
+      );
+      await executeIdentityStatement(
+        target,
+        sql`
+          DELETE FROM ${schema.identityAssertionsTable}
+          WHERE graph_id = ${graphId} AND id IN (${idList})
+        `,
+      );
+    }
+  }
+  const removed = [...matched.values()];
+  for (const row of removed) touch(graphId, row.id);
+  return removed;
+}
+
+/**
+ * Whether the ledger holds any assertion — current or ended — touching one of
+ * the given node kinds. Lets a caller decide whether a cascade is needed at all
+ * before it commits to a code path that can run one.
+ *
+ * @internal
+ */
+export async function hasAssertionsTouchingKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  kinds: readonly string[],
+): Promise<boolean> {
+  const probedKinds = [...new Set(kinds)];
+  if (probedKinds.length === 0) return false;
+  const kindChunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 2,
+  });
+  for (const kindChunk of chunk(probedKinds, kindChunkSize)) {
+    const kindList = sql.join(
+      kindChunk.map((kind) => sql`${kind}`),
+      sql`, `,
+    );
+    const rows = await target.execute<Readonly<{ id: string }>>(
+      asCompiledRowsSql(sql`
+        SELECT id
+        FROM ${schema.identityAssertionsTable}
+        WHERE graph_id = ${graphId}
+          AND (a_kind IN (${kindList}) OR b_kind IN (${kindList}))
+        LIMIT 1
+      `),
+    );
+    if (rows.length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Hard-deletes every assertion row touching a node kind that is not registered
+ * on the graph, so a first enablement (or a profile re-enablement) never adopts
+ * orphans it cannot see. The closure rebuild that follows FILTERS unregistered
+ * kinds, which would leave such rows current but invisible — the same stranding
+ * {@link deleteAssertionsTouchingKinds} prevents on the drop path, arriving
+ * instead from a database that already contained strays.
+ *
+ * @internal
+ */
+export async function purgeAssertionsWithUnregisteredKinds(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  registeredKinds: ReadonlySet<string>,
+  touch: (graphId: string, id: string) => void,
+): Promise<void> {
+  const pairs = await target.execute<
+    Readonly<{ a_kind: string; b_kind: string }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT DISTINCT a_kind, b_kind
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${graphId}
+    `),
+  );
+  const unregistered = new Set<string>();
+  for (const pair of pairs) {
+    if (!registeredKinds.has(pair.a_kind)) unregistered.add(pair.a_kind);
+    if (!registeredKinds.has(pair.b_kind)) unregistered.add(pair.b_kind);
+  }
+  if (unregistered.size === 0) return;
+  await deleteAssertionsTouchingKinds(
+    target,
+    schema,
+    graphId,
+    [...unregistered],
+    touch,
+  );
+}
+
+/**
+ * A full graph-wide snapshot of the materialized closure, keyed by member —
+ * the "before" and "after" `diffClosureTransitions` needs around a FULL
+ * rebuild (`replaceClosure`), which — unlike `replaceAffectedClosure` —
+ * recomputes every class at once rather than handing back which ones it
+ * touched. Used only around the kind-drop / schema-transition rebuilds, never
+ * on a hot write path.
+ */
+export async function snapshotIdentityClosureClasses(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<ReadonlyMap<string, readonly PlainNodeRef[]>> {
+  const rows = await readClosureRowsForGraph(target, schema, graphId);
+  const rowsByClass = groupBy(rows, (row) =>
+    refKey({ kind: row.class_kind, id: row.class_id }),
+  );
+  const groups = [...rowsByClass.values()].map((classRows) => ({
+    classRef: {
+      kind: requireDefined(classRows[0]).class_kind,
+      id: requireDefined(classRows[0]).class_id,
+    },
+    members: classRows.map((row) => ({
+      kind: row.member_kind,
+      id: row.member_id,
+    })),
+  }));
+  const byMember = new Map<string, readonly PlainNodeRef[]>();
+  for (const { classRef, members } of groups) {
+    // The class's canonical is the row's OWN `class_kind`/`class_id` — what
+    // the closure table already recorded — never re-derived by sorting the
+    // member set. `insertClosureComponents` and `mergeCurrentClasses` both
+    // happen to label a class by its code-point-least member today, but a
+    // consumer of this snapshot (the kind-drop / schema-transition diff) must
+    // agree with whatever the table actually stored, including a partially
+    // repaired closure or a future relabelling rule that breaks that
+    // coincidence.
+    const canonicalKey = refKey(classRef);
+    const rest = members
+      .filter((member) => refKey(member) !== canonicalKey)
+      .toSorted((left, right) => compareReferences(left, right));
+    const ordered = [classRef, ...rest];
+    for (const member of ordered) byMember.set(refKey(member), ordered);
+  }
+  return byMember;
+}
+
+/** The union of two closure snapshots' members, for `diffClosureTransitions`'s `affected` argument. */
+function combineSnapshotMembers(
+  ...snapshots: readonly ReadonlyMap<string, readonly PlainNodeRef[]>[]
+): readonly PlainNodeRef[] {
+  const byKey = new Map<string, PlainNodeRef>();
+  for (const snapshot of snapshots) {
+    for (const members of snapshot.values()) {
+      for (const member of members) byKey.set(refKey(member), member);
+    }
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * `snapshotIdentityClosureClasses` reads the closure TABLE, which — unlike
+ * `buildComponents`' UnionFind — carries no row for a singleton, so it cannot
+ * tell "this member is alive but now a class of one" apart from "this member
+ * no longer exists". `diffClosureTransitions` treats absence as the latter
+ * (a hard-deleted or kind-dropped member, whose departure another surviving
+ * member's record explains) and would otherwise silently skip a LIVE
+ * singleton's own genuine membership change. This fills every `affected`
+ * member missing from `snapshot` with its own trivial `[member]` class when
+ * the registry still has its kind, leaving a truly dead member
+ * absent (unchanged behavior).
+ */
+function fillLiveSingletons(
+  snapshot: ReadonlyMap<string, readonly PlainNodeRef[]>,
+  affected: readonly PlainNodeRef[],
+  registry: KindRegistry,
+): ReadonlyMap<string, readonly PlainNodeRef[]> {
+  const filled = new Map(snapshot);
+  for (const member of affected) {
+    const key = refKey(member);
+    if (filled.has(key)) continue;
+    if (registry.nodeKinds.has(member.kind)) filled.set(key, [member]);
+  }
+  return filled;
+}
+
+/**
+ * Diffs the closure around a FULL rebuild: reads the post-rebuild snapshot and
+ * returns the class transitions between it and the `before` snapshot taken
+ * ahead of the rebuild.
+ *
+ * `fillBefore` gives `before` the same singleton fill `after` gets. A member
+ * that was a live singleton (no closure ROW — `fillLiveSingletons`' own doc
+ * explains why that is not "gone") before the rebuild would otherwise read as
+ * "no longer exists" to `diffClosureTransitions`, silently skipping first
+ * enablement folding two previously-untouched singletons.
+ */
+export async function diffFullRebuildTransitions(
+  target: Backend,
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "schema"
+  >,
+  before: ReadonlyMap<string, readonly PlainNodeRef[]>,
+  fillBefore: boolean,
+): Promise<readonly ClosureTransitionRecord[]> {
+  const afterRows = await snapshotIdentityClosureClasses(
+    target,
+    ctx.schema,
+    ctx.graphId,
+  );
+  const affected = combineSnapshotMembers(before, afterRows);
+  return diffClosureTransitions(
+    affected,
+    fillBefore ? fillLiveSingletons(before, affected, ctx.registry) : before,
+    fillLiveSingletons(afterRows, affected, ctx.registry),
+  );
+}
+
+/**
+ * Cascades removed node kinds through the assertion ledger.
+ *
+ * `repairClosure: false` is for a graph whose identity profile is absent while
+ * the ledger storage still exists (identity was disabled without dropping the
+ * rows). There is no closure contract to restore without a profile, so the
+ * cascade runs alone — the ledger must not keep rows for a kind the schema no
+ * longer registers, whether or not identity is currently switched on.
+ */
+export async function removeIdentityKindsForContext<G extends GraphDef>(
+  ctx: IdentityServiceContext<G>,
+  kinds: readonly string[],
+  options?: Readonly<{ repairClosure?: boolean }>,
+): Promise<void> {
+  if (kinds.length === 0) return;
+  const removedKinds = [...new Set(kinds)];
+  await runIdentityMutation(
+    ctx,
+    async (target, touch, _markWritten, noteTransition) => {
+      const repairClosure = options?.repairClosure !== false;
+      const before =
+        repairClosure ?
+          await snapshotIdentityClosureClasses(target, ctx.schema, ctx.graphId)
+        : undefined;
+      const removedAssertions = await deleteAssertionsTouchingKinds(
+        target,
+        ctx.schema,
+        ctx.graphId,
+        removedKinds,
+        touch,
+      );
+      if (before === undefined) return;
+      await replaceClosure(
+        target,
+        ctx.schema,
+        ctx.graphId,
+        identityActiveKinds(ctx.registry),
+        ctx.sameIdAcrossKinds,
+      );
+      // `before` does NOT need the singleton fill the schema-commit preflight
+      // gives its own pre-commit snapshot: that fill exists to catch a live
+      // singleton folding into a class for the FIRST time, which can only
+      // happen when the closure is built from a state where identity had not
+      // yet run at all (first enablement). On an already-enabled graph, every
+      // node creation folds in the write frame that creates it, so no live
+      // member can reach this cascade as an untouched singleton that is about
+      // to be folded for the first time — `replaceClosure`'s active-kinds
+      // rebuild can only ever shrink or remove existing classes, never mint a
+      // genuinely new one.
+      const transitions = await diffFullRebuildTransitions(
+        target,
+        ctx,
+        before,
+        false,
+      );
+      noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+        cause: "kind-drop",
+        assertions: removedAssertions,
+        validAt: nowIso(),
+      });
+    },
+  );
+}
+
+/**
+ * One chunked bare-id SELECT over ALL requested ids, not one per node kind:
+ * `typegraph_nodes_id_idx (graph_id, id)` makes the kind-free probe an indexed
+ * seek, so the whole cross-kind live peer set comes back in a single round
+ * trip. Rows whose kind is outside the registry are dropped — they never
+ * participate in identity.
+ */
+export async function liveNodeKindsSharingIds(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "registry" | "schema"
+  >,
+  target: Backend,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  const uniqueIds = [...new Set(ids)];
+  const liveKindsById = new Map<string, Set<string>>();
+  if (uniqueIds.length === 0) return liveKindsById;
+  const chunkSize = identityChunkSize(target, {
+    fixedParameters: 1,
+    maxItems: MAX_REFERENCE_CHUNK_SIZE,
+    parametersPerItem: 1,
+  });
+  for (const idChunk of chunk(uniqueIds, chunkSize)) {
+    const idList = sql.join(
+      idChunk.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const rows = await target.execute<Readonly<{ kind: string; id: string }>>(
+      asCompiledRowsSql(sql`
+        SELECT kind, id
+        FROM ${ctx.schema.nodesTable}
+        WHERE graph_id = ${ctx.graphId}
+          AND id IN (${idList})
+          AND deleted_at IS NULL
+      `),
+    );
+    for (const row of rows) {
+      if (!ctx.registry.nodeKinds.has(row.kind)) continue;
+      const kinds = liveKindsById.get(row.id) ?? new Set<string>();
+      kinds.add(row.kind);
+      liveKindsById.set(row.id, kinds);
+    }
+  }
+  return liveKindsById;
+}
+
+type FoldContext = Pick<
+  IdentityServiceContext<GraphDef>,
+  "graphId" | "registry" | "sameIdAcrossKinds" | "schema"
+>;
+
+/**
+ * The READ half of folding created nodes into identity: for each reference, the
+ * live nodes of other kinds sharing its id, each validated as `same` against
+ * it ({@link validateCurrentRelation}) — the contradictions a fold can raise.
+ * Returns the references the fold materializes a closure over (each reference
+ * with its peers); nothing is written.
+ *
+ * One owner of that verdict, read by the fold itself and by
+ * {@link assertIdentityFoldable}, so the answer a batch reaches before its
+ * first write is the answer the fold gives when the write lands.
+ */
+async function validateFoldPeers(
+  ctx: FoldContext,
+  rawTarget: Backend,
+  references: readonly PlainNodeRef[],
+): Promise<readonly PlainNodeRef[]> {
+  const liveKindsById = await liveNodeKindsSharingIds(
+    ctx,
+    rawTarget,
+    references.map((ref) => ref.id),
+  );
+  const closureReferences: PlainNodeRef[] = [];
+  for (const ref of references) {
+    // Registry order, not row-arrival order: which conflicting peer
+    // `validateCurrentRelation` reports first must not depend on how the
+    // engine happened to return rows. Iterating the registry also drops
+    // rows whose kind is outside it — those never participate in identity.
+    const liveKinds = liveKindsById.get(ref.id);
+    const peers: PlainNodeRef[] = [];
+    if (liveKinds !== undefined) {
+      for (const kind of ctx.registry.nodeKinds.keys()) {
+        if (kind === ref.kind || !liveKinds.has(kind)) continue;
+        peers.push({ kind, id: ref.id });
+      }
+    }
+    if (peers.length === 0) continue;
+    for (const peer of peers) {
+      await validateCurrentRelation(ctx, rawTarget, "same", "fold", ref, peer);
+    }
+    closureReferences.push(ref, ...peers);
+  }
+  return closureReferences;
+}
+
+/**
+ * The fold a set of created or restored node references owes, as
+ * {@link assertIdentityFoldable} decided it: the references the closure is
+ * materialized over, each folding reference with its live same-id peers.
+ * Empty when nothing folds.
+ */
+export type IdentityFoldPlan = Readonly<{
+  closureReferences: readonly PlainNodeRef[];
+}>;
+
+const NO_IDENTITY_FOLD: IdentityFoldPlan = { closureReferences: [] };
+
+/**
+ * Whether folding `references` into identity would be refused, answered by
+ * reading alone: raises the `IdentityContradictionError` the fold would, and
+ * writes nothing. A frame that creates or restores rows calls it before its
+ * first statement, so a refusal the fold can only reach after a row is written
+ * is not left to the write. The references are judged against the identity
+ * state as stored, with the frame's own earlier restores not yet folded.
+ *
+ * Returns the fold it decided. {@link applyIdentityFold} writes that plan once
+ * the rows have landed, without reading the verdict a second time: the
+ * created row's own write changes neither its live same-id peers nor any
+ * class, so the plan still holds while the frame keeps the identity lock it
+ * was decided under.
+ */
+export async function assertIdentityFoldable(
+  ctx: FoldContext,
+  target: Backend,
+  references: readonly PlainNodeRef[],
+): Promise<IdentityFoldPlan> {
+  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") {
+    return NO_IDENTITY_FOLD;
+  }
+  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
+    closureReferences: await validateFoldPeers(ctx, rawTarget, references),
+  }));
+}
+
+/**
+ * Writes the fold {@link assertIdentityFoldable} decided, after the rows it
+ * folds have been written.
+ */
+export async function applyIdentityFold(
+  ctx: FoldContext,
+  target: Backend,
+  plan: IdentityFoldPlan,
+  // See {@link foldIdentityForCreatedNodes} for how the call site decides it.
+  cause: "fold" | "restore",
+): Promise<void> {
+  if (plan.closureReferences.length === 0) return;
+  await lockIdentityGraph(target, ctx.graphId);
+  await writeIdentityFold(ctx, target, plan, cause);
+}
+
+export async function foldIdentityForCreatedNodes(
+  ctx: FoldContext,
+  target: Backend,
+  references: readonly PlainNodeRef[],
+  // `restore` (a node resurrection re-running the fold) vs. `fold` (an
+  // ordinary create) is decided by NODE STATE, at the call site, which
+  // already knows the answer: every write path that can resurrect a
+  // soft-deleted id (the tombstone-resurrection leg of `create`, and
+  // `update({ clearDeleted: true })`) routes through this parameter, rather
+  // than through the same write path a fresh create takes. The transition
+  // log cannot answer this reliably instead — a departing member's OWN
+  // `detach` record names only the SURVIVING class-mate (see
+  // `diffClosureTransitions`'s "absent from the new state" branch), so a
+  // probe for `references` themselves as `class` or `priorClass` finds
+  // nothing for exactly the member being resurrected, and would silently
+  // misclassify a restore as a fold once its history aged past any bounded
+  // probe window.
+  cause: "fold" | "restore",
+): Promise<void> {
+  if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
+  await lockIdentityGraph(target, ctx.graphId);
+  const plan = await assertIdentityFoldable(ctx, target, references);
+  await writeIdentityFold(ctx, target, plan, cause);
+}
+
+async function writeIdentityFold(
+  ctx: FoldContext,
+  target: Backend,
+  plan: IdentityFoldPlan,
+  cause: "fold" | "restore",
+): Promise<void> {
+  if (plan.closureReferences.length === 0) return;
+  await withRecordedIdentityMutationTarget(
+    target,
+    async (rawTarget, _touch, noteTransition) => {
+      const transitions = await replaceAffectedClosure(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        plan.closureReferences,
+        ctx.sameIdAcrossKinds,
+      );
+      noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+        cause,
+        assertions: [],
+        validAt: nowIso(),
+      });
+    },
+  );
+}
+
+/**
+ * Reports whether the node carries a materialized identity class row.
+ *
+ * {@link insertClosureComponents} emits rows only for components with two or
+ * more members, and every current-class read resolves through that table
+ * ({@link loadCurrentStructuralClasses} anchors on it and coalesces a missing
+ * row to the node itself), so no row means the node is a singleton under every
+ * source of identity — assertions AND the same-id structural fold, which
+ * a created node's own fold materializes at create time.
+ */
+async function hasMaterializedIdentityClass(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<boolean> {
+  const rows = await target.execute<RawClosureClassRow>(
+    asCompiledRowsSql(sql`
+      SELECT member_kind, member_id
+      FROM ${schema.identityClosureTable}
+      WHERE graph_id = ${graphId}
+        AND member_kind = ${ref.kind}
+        AND member_id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Reads the instant a node was soft-deleted, as stored on its own row.
+ *
+ * The soft-delete cascade ends the node's open assertions AT THIS INSTANT
+ * rather than at a second wall-clock read, so the assertion stops holding at
+ * exactly the moment its endpoint stopped existing: a valid-time read at any
+ * instant sees the node and its assertions agree. Two `nowIso()` reads inside
+ * one transaction can straddle a millisecond boundary, so the instant has to
+ * come from the stored value, not from a fresh clock read.
+ *
+ * Returns `undefined` when the row is gone or still live; callers fall back to
+ * their own instant.
+ */
+async function readNodeDeletionInstant(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<string | undefined> {
+  const rows = await target.execute<Readonly<{ deleted_at: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT deleted_at
+      FROM ${schema.nodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${ref.kind}
+        AND id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  return row === undefined ? undefined : (
+      optionalIdentityTimestamp(row.deleted_at)
+    );
+}
+
+/** Reads a node's currently stored `valid_to`, as it stands BEFORE the write in progress applies it. */
+async function readNodeValidTo(
+  target: Backend,
+  schema: SqlSchema,
+  graphId: string,
+  ref: PlainNodeRef,
+): Promise<string | undefined> {
+  const rows = await target.execute<Readonly<{ valid_to: unknown }>>(
+    asCompiledRowsSql(sql`
+      SELECT valid_to
+      FROM ${schema.nodesTable}
+      WHERE graph_id = ${graphId}
+        AND kind = ${ref.kind}
+        AND id = ${ref.id}
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  return row === undefined ? undefined : (
+      optionalIdentityTimestamp(row.valid_to)
+    );
+}
+
+/** Refuses a finite node window end that an open or later-ending identity assertion touching `ref` would outlive. */
+async function refuseStrandedAssertionHistory(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  rawTarget: Backend,
+  ref: PlainNodeRef,
+  validTo: string,
+): Promise<void> {
+  const rows = await rawTarget.execute<RawIdentityAssertionRow>(
+    asCompiledRowsSql(sql`
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
+      FROM ${ctx.schema.identityAssertionsTable}
+      WHERE graph_id = ${ctx.graphId}
+        AND deleted_at IS NULL
+        AND (valid_to IS NULL OR valid_to > ${validTo})
+        AND (
+          (a_kind = ${ref.kind} AND a_id = ${ref.id})
+          OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+        )
+      ORDER BY id
+      LIMIT 1
+    `),
+  );
+  const row = rows.at(0);
+  if (row !== undefined) {
+    const assertion = normalizeIdentityAssertionRow(row);
+    throw new IdentityEndpointValidityError({
+      endpoint: ref,
+      assertionWindow: {
+        validFrom: assertion.valid_from,
+        ...(assertion.valid_to === undefined ?
+          {}
+        : { validTo: assertion.valid_to }),
+      },
+      endpointWindow: { validTo },
+    });
+  }
+}
+
+/**
+ * Refuses a finite node window that would strand identity assertion history,
+ * then — once the move is confirmed safe AND confirmed to actually MOVE the
+ * window — notes the `window-end` transition when `ref` currently belongs to
+ * a real (>=2 member) identity class: moving its own valid-time window end
+ * changes what a valid-time `membersOf` read returns after the old or new end
+ * even though nothing in the ledger or the closure table is written.
+ * Self-referential (`classRef === priorClassRef`) because the class's LABEL
+ * does not change, only its coordinate-visible membership.
+ *
+ * `validTo: undefined` is a CLEARED end (`clearValidTo`): the window reopens,
+ * which strands no assertion — there is nothing to refuse — but it moves the
+ * boundary back exactly as a narrowing moved it, so it is noted under the same
+ * cause whenever the stored end was finite.
+ *
+ * A repeat update that restates the SAME `validTo` moves nothing — a
+ * transition boundary is only recorded where membership actually changed, so
+ * this compares against the node's own stored `valid_to` and takes no note
+ * when they already agree. `validAt` is the canonical operation instant,
+ * never `validTo` itself, which can be a future-scheduled window
+ * boundary rather than "when this happened".
+ */
+export async function requireNodeValidityEndCompatible(
+  ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  target: Backend,
+  ref: PlainNodeRef,
+  validTo: string | undefined,
+): Promise<void> {
+  await withRecordedIdentityMutationTarget(
+    target,
+    async (rawTarget, _touch, noteTransition) => {
+      if (validTo !== undefined) {
+        await refuseStrandedAssertionHistory(ctx, rawTarget, ref, validTo);
+      }
+      // A node in no real (>= 2 member) class can produce no `window-end`
+      // transition at all: no closure row means a singleton under every source
+      // of identity, which is exactly the `currentClass.length < 2` return
+      // below. One indexed seek on the closure primary key therefore replaces
+      // the node seek AND the closure join in the steady state — the same gate
+      // `detachIdentityForNode` takes, for the same reason.
+      if (
+        !(await hasMaterializedIdentityClass(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          ref,
+        ))
+      ) {
+        return;
+      }
+      const currentValidTo = await readNodeValidTo(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        ref,
+      );
+      if (currentValidTo === validTo) return;
+      const classes = await loadCurrentStructuralClasses(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        [ref],
+      );
+      const currentClass = requireDefined(classes.get(refKey(ref)));
+      if (currentClass.length < 2) return;
+      const canonical = requireDefined(currentClass[0]);
+      noteTransition(ctx.graphId, {
+        cause: "window-end",
+        classRef: canonical,
+        priorClassRef: canonical,
+        assertionIds: [],
+        validAt: nowIso(),
+      });
+    },
+  );
+}
+
+export async function detachIdentityForNode(
+  ctx: Pick<
+    IdentityServiceContext<GraphDef>,
+    "graphId" | "sameIdAcrossKinds" | "schema"
+  >,
+  target: Backend,
+  ref: PlainNodeRef,
+  mode: "soft" | "hard",
+  assertionEnds?: ReadonlyMap<string, string>,
+): Promise<void> {
+  await lockIdentityGraph(target, ctx.graphId);
+  await withRecordedIdentityMutationTarget(
+    target,
+    async (rawTarget, touch, noteTransition) => {
+      const touchesNode = sql`
+        (
+              (a_kind = ${ref.kind} AND a_id = ${ref.id})
+              OR (b_kind = ${ref.kind} AND b_id = ${ref.id})
+            )
+      `;
+      // Hard delete physically removes the node, so EVERY assertion touching it —
+      // including already-ended and previously soft-deleted rows — must be
+      // removed, or a node soft-deleted before its hard delete would leave
+      // archival assertions referencing a row that no longer exists. Soft delete
+      // only ends the currently-open rows.
+      const scope =
+        mode === "hard" ?
+          sql``
+        : sql`AND valid_to IS NULL AND deleted_at IS NULL`;
+      const rows = await rawTarget.execute<RawIdentityAssertionRow>(
+        asCompiledRowsSql(sql`
+          SELECT ${IDENTITY_ASSERTION_COLUMNS}
+          FROM ${ctx.schema.identityAssertionsTable}
+          WHERE graph_id = ${ctx.graphId}
+            ${scope}
+            AND ${touchesNode}
+        `),
+      );
+      // Most deletes are of nodes that never participated in identity. Such a
+      // node has no assertion rows in scope and no materialized class row, so its
+      // component is itself and the closure repair below would delete and
+      // reinsert nothing — one indexed lookup replaces its five statements.
+      if (
+        rows.length === 0 &&
+        !(await hasMaterializedIdentityClass(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          ref,
+        ))
+      ) {
+        return;
+      }
+      const now = nowIso();
+      // A soft delete ends its node's open assertions at the node's OWN deletion
+      // instant (see readNodeDeletionInstant): the caller has already written
+      // `deleted_at` inside this transaction, and reusing it keeps the node and
+      // its assertions agreeing at every valid-time instant. The read is skipped
+      // when there is nothing to end.
+      const cascadeInstant =
+        mode === "hard" || rows.length === 0 ?
+          now
+        : ((await readNodeDeletionInstant(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            ref,
+          )) ?? now);
+      const endedAssertions: IdentityAssertionStorageRow[] = [];
+      for (const rawRow of rows) {
+        const row = normalizeIdentityAssertionRow(rawRow);
+        endedAssertions.push(row);
+        if (mode === "hard") {
+          await executeIdentityStatement(
+            rawTarget,
+            sql`
+              DELETE FROM ${ctx.schema.identityAssertionsTable}
+              WHERE graph_id = ${ctx.graphId} AND id = ${row.id}
+            `,
+          );
+          touch(ctx.graphId, row.id);
+        } else {
+          const validTo = clampValidTo(
+            assertionEnds?.get(row.id) ?? cascadeInstant,
+            row.valid_from,
+          );
+          // Stamp the CAUSE of the ending alongside it, in the same statement:
+          // this row stopped holding because `ref` was deleted, not because
+          // anyone retracted it. Downstream (graph-merge's state-diff) reads the
+          // stamp instead of trying to infer the cause from timestamps, which
+          // cannot separate a retraction issued in the delete's own millisecond
+          // from the cascade itself.
+          const ended = {
+            ...row,
+            valid_to: validTo,
+            updated_at: now,
+            ended_by_kind: ref.kind,
+            ended_by_id: ref.id,
+          };
+          await executeIdentityStatement(
+            rawTarget,
+            sql`
+              UPDATE ${ctx.schema.identityAssertionsTable}
+              SET valid_to = ${validTo},
+                  updated_at = ${now},
+                  ended_by_kind = ${ref.kind},
+                  ended_by_id = ${ref.id}
+              WHERE graph_id = ${ctx.graphId} AND id = ${row.id}
+            `,
+          );
+          touch(ctx.graphId, row.id, ended);
+        }
+      }
+      const transitions = await replaceAffectedClosure(
+        rawTarget,
+        ctx.schema,
+        ctx.graphId,
+        [ref],
+        ctx.sameIdAcrossKinds,
+      );
+      noteClassTransitions(ctx.graphId, noteTransition, transitions, {
+        cause: "detach",
+        assertions: endedAssertions,
+        validAt: now,
+      });
+    },
+  );
+}

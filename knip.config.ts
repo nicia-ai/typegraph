@@ -5,6 +5,9 @@ const config: KnipConfig = {
     "packages/typegraph": {
       entry: [
         "src/**/index.ts",
+        // Public subpath entries whose source directory's index.ts is an
+        // internal barrel (./store, ./query, ./errors, ./identity).
+        "src/*-entry.ts",
         "examples/*.ts",
         "test-d/**/*.test-d.ts",
         "type-smoke/**/*.ts",

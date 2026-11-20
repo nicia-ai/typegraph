@@ -1,17 +1,54 @@
-import { createGraphBackendProjection } from "../backend/graph-backend-projection";
+import { statementExecutionMembers } from "../backend/capabilities/bind";
 import {
-  createBackendOverlay,
+  type BATCH_POINT_READ,
+  type STATEMENT_EXECUTION,
+} from "../backend/capabilities/bundle-registry";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+} from "../backend/capabilities/resolve";
+import {
+  assertGraphCommandExecutionContext,
+  executeAuthoritativeGraphCommand,
+  type GraphCommandExecutionContext,
+} from "../backend/command-contract";
+import {
+  deriveBackend,
+  isBackendDerivedFrom,
+  projectGraphBackend,
+} from "../backend/derive-backend";
+import {
+  resolveDriverSavepointScope,
+  runSessionSavepoint,
+  type SavepointDecision,
+} from "../backend/session-savepoint";
+import {
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
+  type GraphCommand,
+  type GraphCommandResult,
+  type HardDeleteNodesBatchParams,
+  type HardDeleteNodesBatchResult,
+  type HeterogeneousNodeUpsertParams,
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
   type NodeRow,
+  type SchemaWriteFenceParams,
   type TransactionBackend,
 } from "../backend/types";
-import { ConfigurationError } from "../errors";
+import { CompilerInvariantError, ConfigurationError } from "../errors";
+import { type IdentityTarget } from "../identity/sql-target";
+import { type IdentityAssertionStorageRow } from "../identity/storage-types";
+import {
+  type IdentityDecisionProvenance,
+  type IdentityTransitionDraft,
+  type IdentityTransitionNote,
+} from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
+import { sql as portableSql } from "../query/sql-fragment";
+import { asCompiledStatementSql } from "../query/sql-intent";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import {
@@ -30,10 +67,13 @@ import {
 import {
   entityKey,
   flushEdges,
+  flushIdentityAssertions,
+  flushIdentityTransitions,
   flushNodes,
   queryConnectedEdgeIds,
   type TouchedEdge,
   type TouchedEntity,
+  type TouchedIdentityAssertion,
   type TouchedNode,
 } from "./recorded-capture/flush";
 import {
@@ -45,16 +85,27 @@ import {
   requireRecordedSchema,
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
+import {
+  buildRecordedCommandsPort,
+  buildRecordedWriteMembers,
+  type WriteMemberHooks,
+  type WriteTouchSink,
+} from "./recorded-capture/write-touch";
+import { withSavepointState } from "./savepoint-state";
 
 export {
   advanceRevisionClock,
   ensureRevisionOrigin,
+  ensureRevisionOriginRow,
+  ensureRevisionOriginsRelation,
+  lockRecordedGraphDecision,
   lockRecordedGraphWrite,
+  readNextRecordedRevision,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  toCanonicalIso,
+  resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {
@@ -66,13 +117,26 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  changesInReadSet,
+  changesSinceIncludingIdentity,
+  encodeRecordedLineageRevision,
+  mintsOriginNamespacedAnchor,
+  type ReadSetRegion,
+  type RecordedLineageStore,
+  recordedRelationsLineage,
+  resolveLineage,
+} from "./recorded-capture/lineage";
+export {
+  graphCapturesRecordedHistory,
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,
 } from "./recorded-capture/relations";
+export { assertCurrentRecordedSchema } from "./recorded-capture/schema-version";
 export {
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
 } from "./recorded-capture/write-surface";
+export { createMutationWitness } from "./recorded-capture/write-touch";
 
 type RecordedCaptureSession = Readonly<{
   /**
@@ -90,40 +154,197 @@ type RecordedCaptureSession = Readonly<{
     afterImage?: NodeRow,
   ) => void;
   touchEdge: (graphId: string, id: string, afterImage?: EdgeRow) => void;
+  touchIdentityAssertion: (
+    graphId: string,
+    id: string,
+    afterImage?: IdentityAssertionStorageRow,
+  ) => void;
+  /**
+   * Buffers one identity-transition note, stamping it with the graph id and
+   * the session's current ambient decision (see {@link withIdentityDecision}).
+   * Alongside `touched` in {@link checkpoint} / {@link restore}, and sealed by
+   * `flush` exactly as every other touch is.
+   */
+  noteIdentityTransition: (
+    graphId: string,
+    note: IdentityTransitionDraft,
+  ) => void;
+  /**
+   * Runs `fn` and returns the withdrawal of the notes it buffered: calling it
+   * removes exactly those notes, so a note describing a row write that is
+   * then refused never reaches the flush.
+   */
+  collectIdentityTransitionNotes: (
+    fn: () => Promise<void>,
+  ) => Promise<IdentityTransitionNoteWithdrawal>;
+  /**
+   * Sets the ambient decision provenance every `noteIdentityTransition` call
+   * takes for the duration of `fn`, then restores the PREVIOUS ambient value —
+   * a plain save/restore, not a push/pop stack, so an exception inside `fn`
+   * cannot leak a decision into a later, unrelated write.
+   */
+  withIdentityDecision: <T>(
+    decision: IdentityDecisionProvenance,
+    fn: () => Promise<T>,
+  ) => Promise<T>;
+  forceGraphRevision: (graphId: string) => void;
+  /** Whether identity transition notes for `graphId` are buffered for the flush. */
+  hasIdentityTransitionNotes: (graphId: string) => boolean;
+  checkpoint: () => RecordedCaptureCheckpoint;
+  restore: (checkpoint: RecordedCaptureCheckpoint) => void;
   flush: (
     target: TransactionBackend,
+    batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
     schema: SqlSchema,
     ownsWriteLock: boolean,
   ) => Promise<RecordedFlushInstants>;
 }>;
 
-export type RecordedFlushInstants = ReadonlyMap<string, string>;
+type RecordedCaptureCheckpoint = Readonly<{
+  touched: ReadonlyMap<string, TouchedEntity>;
+  forcedGraphRevisions: ReadonlySet<string>;
+  identityTransitionNotes: readonly IdentityTransitionNote[];
+}>;
+
+/**
+ * One graph's outcome from a recorded-capture flush: the allocated recorded
+ * instant, and how many identity transition notes this flush wrote for that
+ * graph (`0` when identity is disabled, opened without `history: true`, or
+ * nothing in the transaction changed a class) — the count `IdentityWriteSummary
+ * .transitions` is drawn from, so the receipt never re-derives it from a
+ * second reading of the notes buffer.
+ */
+type RecordedGraphFlushResult = Readonly<{
+  recordedAt: string;
+  identityTransitions: number;
+}>;
+
+export type RecordedFlushInstants = ReadonlyMap<
+  string,
+  RecordedGraphFlushResult
+>;
 
 type RecordedFlushObserver = (instants: RecordedFlushInstants) => void;
 
 const RECORDED_FLUSH_OBSERVER = Symbol("typegraph.recordedFlushObserver");
+const TRANSACTION_PRE_COMMIT_HOOK = Symbol(
+  "typegraph.transactionPreCommitHook",
+);
 
-type RecordedFlushObserverOptions = InternalTransactionOptions &
+/**
+ * @internal Work that runs exactly once on the still-open transaction session
+ * after every write-side bookkeeping step — the recorded-time capture flush or
+ * the revision-clock advance — and before COMMIT, so it observes the state the
+ * commit will publish. A throw rolls the whole transaction back.
+ */
+export type TransactionPreCommitHook = (
+  target: TransactionBackend,
+) => Promise<void>;
+
+/**
+ * One transaction attempt's pre-commit hook and which layer answers for firing
+ * it. `pending` hooks are fired by the Store itself; the recorded-capture
+ * backend `claim`s the hook instead when it runs the transaction, because only
+ * it knows when its capture flush has finished. Every attempt fires its hook
+ * exactly once.
+ */
+interface PreCommitHookSlot {
+  readonly hook: TransactionPreCommitHook;
+  state: "pending" | "claimed" | "fired";
+}
+
+type RecordedFlushOptions = InternalTransactionOptions &
   Readonly<{
     [RECORDED_FLUSH_OBSERVER]?: RecordedFlushObserver;
+    [TRANSACTION_PRE_COMMIT_HOOK]?: PreCommitHookSlot;
   }>;
 
 function readRecordedFlushObserver(
   options: InternalTransactionOptions | undefined,
 ): RecordedFlushObserver | undefined {
-  return (options as RecordedFlushObserverOptions | undefined)?.[
+  return (options as RecordedFlushOptions | undefined)?.[
     RECORDED_FLUSH_OBSERVER
   ];
 }
 
-function stripRecordedFlushObserver(
+function readPreCommitHookSlot(
+  options: InternalTransactionOptions | undefined,
+): PreCommitHookSlot | undefined {
+  return (options as RecordedFlushOptions | undefined)?.[
+    TRANSACTION_PRE_COMMIT_HOOK
+  ];
+}
+
+async function firePreCommitHook(
+  slot: PreCommitHookSlot,
+  target: TransactionBackend,
+): Promise<void> {
+  if (slot.state === "fired") {
+    throw new CompilerInvariantError(
+      "A transaction pre-commit hook was fired twice.",
+    );
+  }
+  slot.state = "fired";
+  await slot.hook(target);
+}
+
+/**
+ * @internal Options for ONE transaction attempt: a retried transaction reuses
+ * its options, and each attempt must fire the hook again, so the Store renews
+ * the hook's fired/claimed state per attempt.
+ */
+export function beginPreCommitHookAttempt(
+  options: InternalTransactionOptions | undefined,
+): InternalTransactionOptions | undefined {
+  const slot = readPreCommitHookSlot(options);
+  if (slot === undefined) return options;
+  return {
+    ...options,
+    [TRANSACTION_PRE_COMMIT_HOOK]: { hook: slot.hook, state: "pending" },
+  } as RecordedFlushOptions;
+}
+
+/**
+ * @internal The recorded-capture backend's claim on the transaction's
+ * pre-commit hook: it returns the function that fires the hook once the capture
+ * flush has run, or `undefined` when there is no hook or another layer already
+ * answers for it. A claimed hook is not fired by {@link settleTransactionPreCommitHook}.
+ */
+export function claimTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+): ((target: TransactionBackend) => Promise<void>) | undefined {
+  const slot = readPreCommitHookSlot(options);
+  if (slot?.state !== "pending") return undefined;
+  slot.state = "claimed";
+  return (target) => firePreCommitHook(slot, target);
+}
+
+/**
+ * @internal The Store's end-of-callback step for the transaction's pre-commit
+ * hook, on the still-open transaction session: fires the hook unless a lower
+ * layer claimed it. Whichever layer runs the transaction, the hook therefore
+ * runs exactly once BEFORE COMMIT, so a layer that never sees or never honors
+ * the hook option cannot let the transaction commit without it.
+ */
+export async function settleTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+  target: TransactionBackend,
+): Promise<void> {
+  const slot = readPreCommitHookSlot(options);
+  if (slot?.state === "pending") await firePreCommitHook(slot, target);
+}
+
+function stripRecordedFlushOptions(
   options: InternalTransactionOptions | undefined,
 ): InternalTransactionOptions | undefined {
   if (options === undefined) return undefined;
-  // Omit only the observer symbol; every other (current or future)
+  // Omit only the flush symbols; every other (current or future)
   // TransactionOptions field passes through to the wrapped backend untouched.
-  const { [RECORDED_FLUSH_OBSERVER]: _observer, ...backendOptions } =
-    options as RecordedFlushObserverOptions;
+  const {
+    [RECORDED_FLUSH_OBSERVER]: _observer,
+    [TRANSACTION_PRE_COMMIT_HOOK]: _hook,
+    ...backendOptions
+  } = options as RecordedFlushOptions;
   return backendOptions;
 }
 
@@ -132,56 +353,32 @@ export function withRecordedFlushObserver(
   observer: RecordedFlushObserver,
 ): InternalTransactionOptions {
   return {
-    ...stripRecordedFlushObserver(options),
+    ...options,
     [RECORDED_FLUSH_OBSERVER]: observer,
-  } as RecordedFlushObserverOptions;
+  } as RecordedFlushOptions;
 }
 
-type RecordedTransactionScope = Readonly<{
+/**
+ * @internal Attaches a {@link TransactionPreCommitHook} to transaction options.
+ * It runs once per transaction attempt, after the capture flush for a
+ * recorded-capture Store and after the write-transaction session otherwise (see
+ * {@link claimTransactionPreCommitHook} and
+ * {@link settleTransactionPreCommitHook}).
+ */
+export function withTransactionPreCommitHook(
+  options: InternalTransactionOptions | undefined,
+  hook: TransactionPreCommitHook,
+): InternalTransactionOptions {
+  return {
+    ...options,
+    [TRANSACTION_PRE_COMMIT_HOOK]: { hook, state: "pending" },
+  } as RecordedFlushOptions;
+}
+
+export type RecordedTransactionScope = Readonly<{
   backend: TransactionBackend;
   flush: () => Promise<RecordedFlushInstants>;
 }>;
-
-declare const NODE_IDENTITY_KEY_BRAND: unique symbol;
-declare const EDGE_IDENTITY_KEY_BRAND: unique symbol;
-
-type NodeIdentityKey = string &
-  Readonly<{ [NODE_IDENTITY_KEY_BRAND]: "node-identity-key" }>;
-type EdgeIdentityKey = string &
-  Readonly<{ [EDGE_IDENTITY_KEY_BRAND]: "edge-identity-key" }>;
-
-type NodeIdentityParams = Pick<InsertNodeParams, "graphId" | "kind" | "id">;
-type NodeIdentityRow = Pick<NodeRow, "graph_id" | "kind" | "id">;
-type EdgeIdentityParams = Pick<InsertEdgeParams, "graphId" | "id">;
-type EdgeIdentityRow = Pick<EdgeRow, "graph_id" | "id">;
-
-function nodeIdentityKey(
-  graphId: string,
-  kind: string,
-  id: string,
-): NodeIdentityKey {
-  return `${graphId}\u0000${kind}\u0000${id}` as NodeIdentityKey;
-}
-
-function nodeParamsIdentityKey(params: NodeIdentityParams): NodeIdentityKey {
-  return nodeIdentityKey(params.graphId, params.kind, params.id);
-}
-
-function nodeRowIdentityKey(row: NodeIdentityRow): NodeIdentityKey {
-  return nodeIdentityKey(row.graph_id, row.kind, row.id);
-}
-
-function edgeIdentityKey(graphId: string, id: string): EdgeIdentityKey {
-  return `${graphId}\u0000${id}` as EdgeIdentityKey;
-}
-
-function edgeParamsIdentityKey(params: EdgeIdentityParams): EdgeIdentityKey {
-  return edgeIdentityKey(params.graphId, params.id);
-}
-
-function edgeRowIdentityKey(row: EdgeIdentityRow): EdgeIdentityKey {
-  return edgeIdentityKey(row.graph_id, row.id);
-}
 
 function recordedCaptureSealedError(
   details: Record<string, unknown>,
@@ -198,6 +395,13 @@ function recordedCaptureSealedError(
 
 function createRecordedCaptureSession(): RecordedCaptureSession {
   const touched = new Map<string, TouchedEntity>();
+  const forcedGraphRevisions = new Set<string>();
+  const identityTransitionNotes: IdentityTransitionNote[] = [];
+  // Ambient decision for `noteIdentityTransition`. A plain variable, not a
+  // stack: `withIdentityDecision` always restores it in a `finally`, so
+  // nesting still resolves to whichever call is innermost while it runs, and
+  // an exception cannot leave a stale decision attached to a later write.
+  let currentDecision: IdentityDecisionProvenance | undefined;
   // Sealed by flush(): a scope flushes exactly once, at its terminal point, so
   // any touch afterward means a graph write happened after capture lost its
   // flush window (e.g. a caller reused the withRecordedTransaction context after
@@ -234,8 +438,95 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       touch({ entity: "edge", graphId, id, afterImage });
     },
 
+    touchIdentityAssertion(
+      graphId: string,
+      id: string,
+      afterImage?: IdentityAssertionStorageRow,
+    ): void {
+      touch({ entity: "identity", graphId, id, afterImage });
+    },
+
+    noteIdentityTransition(
+      graphId: string,
+      note: IdentityTransitionDraft,
+    ): void {
+      if (sealed) {
+        throw recordedCaptureSealedError({
+          entity: "identity-transition",
+          graphId,
+        });
+      }
+      identityTransitionNotes.push({
+        ...note,
+        graphId,
+        decision: currentDecision,
+      });
+    },
+
+    async collectIdentityTransitionNotes(
+      fn: () => Promise<void>,
+    ): Promise<IdentityTransitionNoteWithdrawal> {
+      const firstCollected = identityTransitionNotes.length;
+      await fn();
+      const collected = identityTransitionNotes.slice(firstCollected);
+      return () => {
+        if (sealed) {
+          throw recordedCaptureSealedError({ entity: "identity-transition" });
+        }
+        for (const note of collected) {
+          const index = identityTransitionNotes.lastIndexOf(note);
+          if (index !== -1) identityTransitionNotes.splice(index, 1);
+        }
+      };
+    },
+
+    async withIdentityDecision<T>(
+      decision: IdentityDecisionProvenance,
+      fn: () => Promise<T>,
+    ): Promise<T> {
+      const previous = currentDecision;
+      currentDecision = decision;
+      try {
+        return await fn();
+      } finally {
+        currentDecision = previous;
+      }
+    },
+
+    forceGraphRevision(graphId: string): void {
+      if (sealed) throw recordedCaptureSealedError({ graphId });
+      forcedGraphRevisions.add(graphId);
+    },
+
+    hasIdentityTransitionNotes(graphId: string): boolean {
+      if (sealed) throw recordedCaptureSealedError({});
+      return identityTransitionNotes.some((note) => note.graphId === graphId);
+    },
+
+    checkpoint(): RecordedCaptureCheckpoint {
+      if (sealed) throw recordedCaptureSealedError({});
+      return {
+        touched: new Map(touched),
+        forcedGraphRevisions: new Set(forcedGraphRevisions),
+        identityTransitionNotes: [...identityTransitionNotes],
+      };
+    },
+
+    restore(checkpoint: RecordedCaptureCheckpoint): void {
+      if (sealed) throw recordedCaptureSealedError({});
+      touched.clear();
+      for (const [key, entity] of checkpoint.touched) touched.set(key, entity);
+      forcedGraphRevisions.clear();
+      for (const graphId of checkpoint.forcedGraphRevisions) {
+        forcedGraphRevisions.add(graphId);
+      }
+      identityTransitionNotes.length = 0;
+      identityTransitionNotes.push(...checkpoint.identityTransitionNotes);
+    },
+
     async flush(
       target: TransactionBackend,
+      batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
       schema: SqlSchema,
       ownsWriteLock: boolean,
     ): Promise<RecordedFlushInstants> {
@@ -254,30 +545,424 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       // flush() writes recorded rows directly (never via touch), so sealing here
       // does not block its own work.
       sealed = true;
-      if (touched.size === 0) return new Map();
-      const recordedByGraph = new Map<string, string>();
+      if (
+        touched.size === 0 &&
+        forcedGraphRevisions.size === 0 &&
+        identityTransitionNotes.length === 0
+      )
+        return new Map();
+      const recordedByGraph = new Map<string, RecordedGraphFlushResult>();
       const byGraph = groupBy(touched.values(), (entity) => entity.graphId);
+      for (const graphId of forcedGraphRevisions) {
+        if (!byGraph.has(graphId)) byGraph.set(graphId, []);
+      }
+      const notesByGraph = groupBy(
+        identityTransitionNotes,
+        (note) => note.graphId,
+      );
+      for (const graphId of notesByGraph.keys()) {
+        if (!byGraph.has(graphId)) byGraph.set(graphId, []);
+      }
       for (const [graphId, entities] of byGraph) {
         const recordedCommit = await allocateRecordedCommit(
           target,
           schema,
           graphId,
           ownsWriteLock,
+          undefined,
+          true,
         );
-        recordedByGraph.set(graphId, recordedCommit);
+        const graphNotes = notesByGraph.get(graphId) ?? [];
+        recordedByGraph.set(graphId, {
+          recordedAt: recordedCommit.instant,
+          identityTransitions: graphNotes.length,
+        });
         const nodes = entities.filter(
           (entity): entity is TouchedNode => entity.entity === "node",
         );
         const edges = entities.filter(
           (entity): entity is TouchedEdge => entity.entity === "edge",
         );
-        await flushNodes(target, schema, graphId, nodes, recordedCommit);
-        await flushEdges(target, schema, graphId, edges, recordedCommit);
+        const identityAssertions = entities.filter(
+          (entity): entity is TouchedIdentityAssertion =>
+            entity.entity === "identity",
+        );
+        await flushNodes(
+          target,
+          batchPointRead,
+          schema,
+          graphId,
+          nodes,
+          recordedCommit.revision,
+        );
+        await flushEdges(
+          target,
+          batchPointRead,
+          schema,
+          graphId,
+          edges,
+          recordedCommit.revision,
+        );
+        await flushIdentityAssertions(
+          target,
+          schema,
+          graphId,
+          identityAssertions,
+          recordedCommit.revision,
+        );
+        await flushIdentityTransitions(
+          target,
+          schema,
+          graphId,
+          graphNotes,
+          recordedCommit.revision,
+          recordedCommit.recordedAt,
+        );
       }
       touched.clear();
+      forcedGraphRevisions.clear();
+      identityTransitionNotes.length = 0;
       return recordedByGraph;
     },
   };
+}
+
+/**
+ * What `recordedTransactionBindings` maps a transaction object to. Every
+ * binding can answer `withRecordedIdentityMutationTarget`'s question ("is
+ * this identity write touched, and what is the underlying raw target?");
+ * `capture` carries the additional session state only a TypeGraph-owned
+ * transaction has — the engine-native mutation witness registers a binding
+ * with `capture` absent, since its mutation flag is checkpointed separately
+ * through the shared savepoint-state registry and it takes no advisory lock.
+ */
+type RecordedTransactionBinding = Readonly<{
+  target: TransactionBackend;
+  assertOpen: () => void;
+  sink: WriteTouchSink;
+  capture?: Readonly<{
+    session: RecordedCaptureSession;
+    graphLocks: ReturnType<typeof createRecordedGraphLockMemo>;
+  }>;
+}>;
+
+type TransactionControlTarget = Readonly<
+  Pick<TransactionBackend, "executeStatement">
+>;
+
+const recordedTransactionBindings = new WeakMap<
+  object,
+  RecordedTransactionBinding
+>();
+
+const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
+
+/** Carries capture/control state through a lifetime-guarded backend decoration. */
+export function inheritRecordedTransactionBindings(
+  source: TransactionBackend,
+  derived: TransactionBackend,
+  assertScopeOpen: () => void,
+): void {
+  if (!isBackendDerivedFrom(derived, source)) {
+    throw new TypeError("Capture bindings require a derived backend.");
+  }
+  const binding = recordedTransactionBindings.get(source);
+  if (binding !== undefined) {
+    recordedTransactionBindings.set(derived, {
+      ...binding,
+      assertOpen: () => {
+        assertScopeOpen();
+        binding.assertOpen();
+      },
+    });
+    if (binding.capture !== undefined) {
+      registerRecordedGraphLockMemo(derived, binding.capture.graphLocks);
+    }
+  }
+  const session = recordedRevisionBindings.get(source);
+  if (session !== undefined) recordedRevisionBindings.set(derived, session);
+}
+
+/**
+ * Runs one TypeGraph-owned savepoint without letting recorded state drift from
+ * live state. A rollback restores pending capture, graph-lock memos and all
+ * registered transaction state, and reports savepoint-local successes through
+ * their error hooks with the rollback cause.
+ * Callers never receive the raw transaction target, so they cannot roll back
+ * SQL while forgetting the TypeGraph sidecars that mirror it.
+ *
+ * This is deliberately the only supported savepoint seam for recorded writes.
+ * Savepoints issued directly through an adopted backend remain outside the
+ * capture contract because TypeGraph cannot observe their rollback boundary.
+ */
+export async function runRecordedTransactionSavepoint<T>(
+  target: TransactionControlTarget,
+  statementExecution: Extract<
+    BundleVerdictOf<typeof STATEMENT_EXECUTION>,
+    { supported: true }
+  >,
+  savepoint: string,
+  fn: () => Promise<SavepointDecision<T>>,
+): Promise<T> {
+  const binding = recordedTransactionBindings.get(target);
+  binding?.assertOpen();
+  const rawTarget = binding?.target ?? target;
+  const { executeStatement } = statementExecutionMembers(
+    rawTarget,
+    statementExecution,
+  );
+  // Capture owns its touched entities and graph-lock memo. Other transaction
+  // state (revision flags, mutation witnesses, hooks) participates
+  // through withSavepointState below, including targets without capture.
+  const captureCheckpoint = binding?.capture?.session.checkpoint();
+  const graphLockCheckpoint =
+    binding?.capture === undefined ?
+      undefined
+    : new Map(binding.capture.graphLocks);
+  const restoreCapture = (): void => {
+    if (
+      binding?.capture === undefined ||
+      captureCheckpoint === undefined ||
+      graphLockCheckpoint === undefined
+    )
+      return;
+    binding.capture.session.restore(captureCheckpoint);
+    binding.capture.graphLocks.clear();
+    for (const [graphId, lock] of graphLockCheckpoint) {
+      binding.capture.graphLocks.set(graphId, lock);
+    }
+  };
+
+  return withSavepointState(target, (restoreState) =>
+    runSessionSavepoint(
+      {
+        executeControl: (statement) =>
+          executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
+        enterDriverScope: resolveDriverSavepointScope(rawTarget),
+      },
+      savepoint,
+      fn,
+      (cause) => {
+        restoreCapture();
+        restoreState(cause);
+      },
+    ),
+  );
+}
+
+/** Internal fence/control statements bypass row capture but retain its lifetime guard. */
+export function recordedTransactionControlTarget(
+  backend: TransactionBackend,
+): TransactionBackend {
+  const binding = recordedTransactionBindings.get(backend);
+  binding?.assertOpen();
+  return binding?.target ?? backend;
+}
+
+/** Pending capture is not yet visible in the durable revision clock. */
+export function hasPendingRecordedGraphWrites(
+  backend: TransactionBackend,
+  graphId: string,
+): boolean {
+  recordedTransactionBindings.get(backend)?.assertOpen();
+  const session = recordedRevisionBindings.get(backend);
+  if (session === undefined) return false;
+  const checkpoint = session.checkpoint();
+  return (
+    checkpoint.forcedGraphRevisions.has(graphId) ||
+    [...checkpoint.touched.values()].some(
+      (entity) => entity.graphId === graphId,
+    )
+  );
+}
+
+/**
+ * Whether the capture session bound to `target` holds identity transition
+ * notes for `graphId` that its flush has yet to write to the transition log.
+ * Resolved through the same binding `withRecordedIdentityMutationTarget`
+ * buffers those notes through, so it answers for exactly the session a
+ * transaction's identity writes noted into.
+ */
+export function hasPendingIdentityTransitionNotes(
+  target: IdentityTarget,
+  graphId: string,
+): boolean {
+  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  if (session === undefined) return false;
+  return session.hasIdentityTransitionNotes(graphId);
+}
+
+/** Forces one revision allocation when this capture transaction flushes. */
+export function forceRecordedGraphRevision(
+  backend: TransactionBackend,
+  graphId: string,
+): boolean {
+  recordedTransactionBindings.get(backend)?.assertOpen();
+  const session = recordedRevisionBindings.get(backend);
+  if (session === undefined) return false;
+  session.forceGraphRevision(graphId);
+  return true;
+}
+
+function ignoreIdentityTouch(): void {
+  return;
+}
+
+function ignoreIdentityTransitionNote(): void {
+  return;
+}
+
+/**
+ * The callback `withRecordedIdentityMutationTarget` hands its caller for
+ * recording one class-membership transition, scoped to the graph the caller
+ * names — matching the `touch(graphId, id, afterImage)` calling convention.
+ * A no-op capture session (no history, or a non-capturing backend) resolves
+ * to {@link ignoreIdentityTransitionNote}, so every note site can call this
+ * unconditionally.
+ */
+export type IdentityTransitionNoteFunction = (
+  graphId: string,
+  note: IdentityTransitionDraft,
+) => void;
+
+/**
+ * Both sides are {@link IdentityTarget}, not the backend union: what this hands
+ * `fn` is the handle identity STATEMENTS run against, and the recorded binding
+ * it may swap in is a `TransactionBackend`, which satisfies that projection.
+ * Typing it this way is what lets a write frame's row work — whose handle is
+ * the read-only `WriteTarget` — reach the identity fold at all.
+ */
+export async function withRecordedIdentityMutationTarget<T>(
+  target: IdentityTarget,
+  fn: (
+    rawTarget: IdentityTarget,
+    touch: (
+      graphId: string,
+      id: string,
+      afterImage?: IdentityAssertionStorageRow,
+    ) => void,
+    noteTransition: IdentityTransitionNoteFunction,
+  ) => Promise<T>,
+): Promise<T> {
+  const binding = recordedTransactionBindings.get(target);
+  if (binding === undefined) {
+    return fn(target, ignoreIdentityTouch, ignoreIdentityTransitionNote);
+  }
+  binding.assertOpen();
+  return fn(
+    binding.target,
+    (graphId, id, afterImage) => {
+      binding.sink.touchIdentity(graphId, id, afterImage);
+    },
+    (graphId, note) => {
+      binding.capture?.session.noteIdentityTransition(graphId, note);
+    },
+  );
+}
+
+/** Removes the identity-transition notes one collection gathered. */
+export type IdentityTransitionNoteWithdrawal = () => void;
+
+function nothingToWithdraw(): void {
+  // No capture session buffered anything for this target.
+}
+
+/**
+ * Runs `fn` — the identity half of a row write, which notes the transition
+ * that write will cause — and returns the withdrawal of whatever it noted.
+ * The caller invokes the withdrawal when the row write is then refused, so a
+ * refusal caught inside an enclosing transaction that goes on to commit
+ * leaves no transition, and allocates no recorded revision, for a change that
+ * never happened.
+ *
+ * The collection spans `fn` alone, which issues only the identity half's own
+ * reads. A target with no capture session buffers nothing and withdraws
+ * nothing.
+ */
+export async function collectRecordedIdentityTransitionNotes(
+  target: IdentityTarget,
+  fn: () => Promise<void>,
+): Promise<IdentityTransitionNoteWithdrawal> {
+  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  if (session === undefined) {
+    await fn();
+    return nothingToWithdraw;
+  }
+  return session.collectIdentityTransitionNotes(fn);
+}
+
+/**
+ * Runs `fn` with every `noteIdentityTransition` call inside it stamped with
+ * `decision` — the seam `applyIdentityChangesForContext` (reconcile) uses so a
+ * governed merge apply's transitions carry the plan/review digests and branch
+ * ancestry that produced them. A target with no capture session (no history)
+ * simply runs `fn` — there is no ambient decision to attach to a note that
+ * will never be written.
+ */
+export async function withRecordedIdentityDecision<T>(
+  target: IdentityTarget,
+  decision: IdentityDecisionProvenance,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const binding = recordedTransactionBindings.get(target);
+  if (binding === undefined) return fn();
+  const session = binding.capture?.session;
+  if (session === undefined) return fn();
+  return session.withIdentityDecision(decision, fn);
+}
+
+/**
+ * Registers an engine-native mutation witness's sink against `overlay` (the
+ * wrapped committing transaction {@link createMutationWitness}'s `wrap`
+ * returned) and `target` (the raw session it wrapped) through the same
+ * binding seam {@link createRecordedTransactionBackend} registers a
+ * TypeGraph-owned capture session's sink through — so an identity assertion
+ * issued via either object flips the witness's `mutated` flag the same way a
+ * real node or edge write does. There is no session to assert open (the
+ * witness never seals) and no capture-only session/lock state to carry, so
+ * this binding's `capture` stays absent.
+ */
+export function registerRecordedIdentityMutationWitness(
+  overlay: TransactionBackend,
+  target: TransactionBackend,
+  sink: WriteTouchSink,
+): void {
+  const binding: RecordedTransactionBinding = {
+    target,
+    assertOpen: () => {
+      /* An engine-native mutation witness never seals. */
+    },
+    sink,
+  };
+  recordedTransactionBindings.set(overlay, binding);
+  recordedTransactionBindings.set(target, binding);
+}
+
+/**
+ * Runs one opaque node program against the session that owns recorded capture
+ * and publishes its returned after-images to that same session. The closed
+ * heterogeneous CTE cannot pass through per-method write overlays.
+ */
+export async function withRecordedNodeMutationTarget(
+  target: TransactionBackend,
+  graphId: string,
+  run: (target: TransactionBackend) => Promise<readonly NodeRow[]>,
+): Promise<readonly NodeRow[]> {
+  const binding = recordedTransactionBindings.get(target);
+  if (binding === undefined) return run(target);
+  binding.assertOpen();
+  if (binding.capture !== undefined) {
+    await lockRecordedGraphWrite(
+      binding.target,
+      graphId,
+      binding.capture.graphLocks,
+    );
+  }
+  const rows = await run(binding.target);
+  for (const row of rows) {
+    binding.sink.touchNode(row.graph_id, row.kind, row.id, row);
+  }
+  return rows;
 }
 
 function createRecordedTransactionBackend(
@@ -285,9 +970,6 @@ function createRecordedTransactionBackend(
   session: RecordedCaptureSession,
   schema: SqlSchema,
 ): TransactionBackend {
-  const nodeDispatch = nodeInsertDispatch(target);
-  const edgeDispatch = edgeInsertDispatch(target);
-
   // One advisory-lock round trip per graph per transaction: the memo is
   // shared with the returned overlay (see registerRecordedGraphLockMemo),
   // so external lock paths handed this backend dedupe against the same
@@ -314,210 +996,72 @@ function createRecordedTransactionBackend(
     }
   }
 
-  const overlay = createBackendOverlay(target, {
+  // The per-member "did this write actually change a row" decision, and the
+  // member enumeration it covers, live in `write-touch.ts` — shared with the
+  // engine-native mutation witness rather than re-implemented here. Capture's
+  // sink collects the after-image every touched entity needs for its history
+  // row; its hooks are the session-liveness assertion and the advisory lock
+  // this factory always took inline.
+  const sink: WriteTouchSink = {
+    touchNode: session.touchNode,
+    touchEdge: session.touchEdge,
+    touchIdentity: session.touchIdentityAssertion,
+  };
+  const hooks: WriteMemberHooks = {
+    beforeOne: async (graphId) => {
+      session.assertOpen();
+      await lockGraph(graphId);
+    },
+    beforeMany: async (params) => {
+      session.assertOpen();
+      await lockGraphs(params);
+    },
+    connectedEdgeIdsForHardDelete: (params) =>
+      queryConnectedEdgeIds(target, schema, params),
+  };
+
+  const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
-
-    async insertNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.insertNode(params);
-      session.touchNode(params.graphId, params.kind, params.id, row);
-      return row;
-    },
-
-    ...(target.insertNodeNoReturn === undefined ?
-      {}
-    : {
-        async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await runInsertNoReturn(nodeDispatch, params);
-          session.touchNode(params.graphId, params.kind, params.id);
-        },
-      }),
-
-    ...(target.insertNodesBatch === undefined ?
-      {}
-    : {
-        async insertNodesBatch(
-          params: readonly InsertNodeParams[],
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraphs(params);
-          await runInsertBatch(nodeDispatch, params);
-          for (const node of params) {
-            session.touchNode(node.graphId, node.kind, node.id);
-          }
-        },
-      }),
-
-    ...(target.insertNodesBatchReturning === undefined ?
-      {}
-    : {
-        async insertNodesBatchReturning(
-          params: readonly InsertNodeParams[],
-        ): Promise<readonly NodeRow[]> {
-          session.assertOpen();
-          await lockGraphs(params);
-          const rows = await runInsertBatchReturning(nodeDispatch, params);
-          const rowsByIdentity = new Map(
-            rows.map((row) => [nodeRowIdentityKey(row), row] as const),
-          );
-          for (const node of params) {
-            session.touchNode(
-              node.graphId,
-              node.kind,
-              node.id,
-              rowsByIdentity.get(nodeParamsIdentityKey(node)),
-            );
-          }
-          return rows;
-        },
-      }),
-
-    async updateNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.updateNode(params);
-      session.touchNode(params.graphId, params.kind, params.id, row);
-      return row;
-    },
-
-    async deleteNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.deleteNode(params);
-      session.touchNode(params.graphId, params.kind, params.id);
-    },
-
-    async hardDeleteNode(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const connectedEdgeIds = await queryConnectedEdgeIds(
-        target,
-        schema,
-        params,
-      );
-      await target.hardDeleteNode(params);
-      session.touchNode(params.graphId, params.kind, params.id);
-      for (const edgeId of connectedEdgeIds) {
-        session.touchEdge(params.graphId, edgeId);
-      }
-    },
-
-    async insertEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.insertEdge(params);
-      session.touchEdge(params.graphId, params.id, row);
-      return row;
-    },
-
-    ...(target.insertEdgeNoReturn === undefined ?
-      {}
-    : {
-        async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await runInsertNoReturn(edgeDispatch, params);
-          session.touchEdge(params.graphId, params.id);
-        },
-      }),
-
-    ...(target.insertEdgesBatch === undefined ?
-      {}
-    : {
-        async insertEdgesBatch(
-          params: readonly InsertEdgeParams[],
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraphs(params);
-          await runInsertBatch(edgeDispatch, params);
-          for (const edge of params) {
-            session.touchEdge(edge.graphId, edge.id);
-          }
-        },
-      }),
-
-    ...(target.insertEdgesBatchReturning === undefined ?
-      {}
-    : {
-        async insertEdgesBatchReturning(
-          params: readonly InsertEdgeParams[],
-        ): Promise<readonly EdgeRow[]> {
-          session.assertOpen();
-          await lockGraphs(params);
-          const rows = await runInsertBatchReturning(edgeDispatch, params);
-          const rowsByIdentity = new Map(
-            rows.map((row) => [edgeRowIdentityKey(row), row] as const),
-          );
-          for (const edge of params) {
-            session.touchEdge(
-              edge.graphId,
-              edge.id,
-              rowsByIdentity.get(edgeParamsIdentityKey(edge)),
-            );
-          }
-          return rows;
-        },
-      }),
-
-    async updateEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      const row = await target.updateEdge(params);
-      session.touchEdge(params.graphId, params.id, row);
-      return row;
-    },
-
-    async deleteEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.deleteEdge(params);
-      session.touchEdge(params.graphId, params.id);
-    },
-
-    async hardDeleteEdge(params) {
-      session.assertOpen();
-      await lockGraph(params.graphId);
-      await target.hardDeleteEdge(params);
-      session.touchEdge(params.graphId, params.id);
-    },
-
-    ...(target.deleteEdgesBatch === undefined ?
-      {}
-    : {
-        async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await requireDefined(target.deleteEdgesBatch)(params);
-          for (const id of params.ids) {
-            session.touchEdge(params.graphId, id);
-          }
-        },
-      }),
-
-    ...(target.hardDeleteEdgesBatch === undefined ?
-      {}
-    : {
-        async hardDeleteEdgesBatch(
-          params: DeleteEdgesBatchParams,
-        ): Promise<void> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          await requireDefined(target.hardDeleteEdgesBatch)(params);
-          for (const id of params.ids) {
-            session.touchEdge(params.graphId, id);
-          }
-        },
-      }),
+    ...buildRecordedWriteMembers(target, sink, hooks),
+    commands: buildRecordedCommandsPort(target, sink, hooks),
   });
   registerRecordedGraphLockMemo(overlay, graphLocks);
+  // Bind BOTH the overlay and the raw target to this capture session. Identity
+  // mutations first resolve the overlay to its raw target (runIdentityMutation),
+  // then a nested coordinator (importIdentityAssertionsIntoTarget) re-wraps that
+  // RAW target — without a raw-target binding the second lookup would miss and
+  // silently drop every touch, losing the merge-created assertions from history.
+  const binding: RecordedTransactionBinding = {
+    target,
+    assertOpen: session.assertOpen,
+    sink,
+    capture: { session, graphLocks },
+  };
+  recordedTransactionBindings.set(overlay, binding);
+  recordedTransactionBindings.set(target, binding);
+  recordedRevisionBindings.set(overlay, session);
   return overlay;
+}
+
+/**
+ * The one owner of "does the transaction handed to
+ * {@link createRecordedTransactionScope} already hold a SQLite write lock"
+ * (its `ownsWriteLock` parameter) — every caller that cannot otherwise prove
+ * it structurally (i.e. is not itself inside a known `BEGIN IMMEDIATE` path)
+ * calls this instead of re-spelling the dialect comparison inline. PostgreSQL
+ * has no equivalent lock a schema-commit transaction could already be
+ * holding at this call, so `false` there is correct, not a stand-in for "not
+ * yet implemented".
+ */
+export function transactionOwnsSqliteWriteLock(
+  target: TransactionBackend,
+): boolean {
+  return target.dialect === "sqlite";
 }
 
 export function createRecordedTransactionScope(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema?: SqlSchema,
   // True only when the enclosing transaction already holds a SQLite write lock
   // (the bundled BEGIN IMMEDIATE paths), letting clock allocation skip the
@@ -542,7 +1086,7 @@ export function createRecordedTransactionScope(
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.
       return withRecordedRelationsPrecondition(
-        session.flush(target, resolvedSchema, ownsWriteLock),
+        session.flush(target, batchPointRead, resolvedSchema, ownsWriteLock),
         { dialect: target.dialect, surface: "capture-flush" },
       );
     },
@@ -552,6 +1096,7 @@ export function createRecordedTransactionScope(
 async function runCapturedAutocommit<T>(
   backend: GraphBackend,
   schema: SqlSchema | undefined,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   fn: (target: TransactionBackend) => Promise<T>,
   options?: InternalTransactionOptions,
 ): Promise<T> {
@@ -559,7 +1104,12 @@ async function runCapturedAutocommit<T>(
   return backend.transaction(async (target) => {
     await assertRecordedCaptureTransactionIsolation(target);
     // The bundled transaction opened BEGIN IMMEDIATE, so the write lock is held.
-    const scope = createRecordedTransactionScope(target, schema, true);
+    const scope = createRecordedTransactionScope(
+      target,
+      batchPointRead,
+      schema,
+      true,
+    );
     const result = await fn(scope.backend);
     await scope.flush();
     return result;
@@ -571,16 +1121,84 @@ export function createRecordedBackend(
   schema?: SqlSchema,
 ): GraphBackend {
   assertCapturableBackend(backend);
+  // Resolved ONCE, here, into a closure local threaded to every capture path
+  // this overlay opens (ruling B8 spec item 2): the autocommit-wrapped single
+  // write below and the multi-statement `transaction` override further down.
+  const batchPointRead = batchPointReadVerdict(backend);
   const capture = <T>(
     fn: (target: TransactionBackend) => Promise<T>,
-  ): Promise<T> => runCapturedAutocommit(backend, schema, fn);
+  ): Promise<T> => runCapturedAutocommit(backend, schema, batchPointRead, fn);
 
-  const projectedBackend = createGraphBackendProjection(backend);
-  return createBackendOverlay(projectedBackend, {
+  const projectedBackend = projectGraphBackend(backend);
+  return deriveBackend(projectedBackend, {
     ...rawWriteGuards(backend, "backend"),
 
     async insertNode(params) {
       return capture((target) => target.insertNode(params));
+    },
+
+    ...(backend.insertNodeIfAbsent === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsent(
+          params: InsertNodeParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsent)(params),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeIfAbsentWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsentWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    commands: {
+      session: "root",
+      execute: async (
+        command: GraphCommand,
+        context: GraphCommandExecutionContext,
+      ): Promise<GraphCommandResult> => {
+        assertGraphCommandExecutionContext(context);
+        if (context.session !== "root") {
+          throw new CompilerInvariantError(
+            "A recorded root command received a transaction execution context.",
+            { contextSession: context.session },
+          );
+        }
+        const result = await capture((target) =>
+          executeAuthoritativeGraphCommand(target.commands, command),
+        );
+        return result;
+      },
     },
 
     ...(backend.insertNodeNoReturn === undefined ?
@@ -621,6 +1239,76 @@ export function createRecordedBackend(
       return capture((target) => target.updateNode(params));
     },
 
+    ...(backend.upsertHeterogeneousNodes === undefined ?
+      {}
+    : {
+        async upsertHeterogeneousNodes(
+          params: HeterogeneousNodeUpsertParams,
+        ): Promise<readonly NodeRow[]> {
+          return capture((target) => {
+            const upsert = target.upsertHeterogeneousNodes;
+            if (upsert === undefined) {
+              throw new ConfigurationError(
+                "Recorded heterogeneous node upsert capability disappeared inside a transaction.",
+                { operation: "upsertHeterogeneousNodes" },
+              );
+            }
+            return upsert(params);
+          });
+        },
+      }),
+
+    ...(backend.updateResolvedNodesBatch === undefined ?
+      {}
+    : {
+        async updateResolvedNodesBatch(params) {
+          return capture((target) => {
+            const updateResolvedNodesBatch = target.updateResolvedNodesBatch;
+            if (updateResolvedNodesBatch === undefined) {
+              throw new ConfigurationError(
+                "Recorded resolved node update batch capability disappeared inside a transaction",
+                { operation: "updateResolvedNodesBatch" },
+              );
+            }
+            return updateResolvedNodesBatch(params);
+          });
+        },
+      }),
+
+    ...(backend.updateNodeSet === undefined ?
+      {}
+    : {
+        async updateNodeSet(params) {
+          return capture((target) => {
+            const updateNodeSet = target.updateNodeSet;
+            if (updateNodeSet === undefined) {
+              throw new ConfigurationError(
+                "Recorded updateNodeSet capability disappeared inside a transaction",
+                { operation: "updateNodeSet" },
+              );
+            }
+            return updateNodeSet(params);
+          });
+        },
+      }),
+
+    ...(backend.compareAndSetNode === undefined ?
+      {}
+    : {
+        async compareAndSetNode(params) {
+          return capture((target) => {
+            const compareAndSetNode = target.compareAndSetNode;
+            if (compareAndSetNode === undefined) {
+              throw new ConfigurationError(
+                "Recorded compareAndSetNode capability disappeared inside a transaction",
+                { operation: "compareAndSetNode" },
+              );
+            }
+            return compareAndSetNode(params);
+          });
+        },
+      }),
+
     async deleteNode(params) {
       await capture((target) => target.deleteNode(params));
     },
@@ -628,6 +1316,18 @@ export function createRecordedBackend(
     async hardDeleteNode(params) {
       await capture((target) => target.hardDeleteNode(params));
     },
+
+    ...(backend.hardDeleteNodesBatch === undefined ?
+      {}
+    : {
+        async hardDeleteNodesBatch(
+          params: HardDeleteNodesBatchParams,
+        ): Promise<HardDeleteNodesBatchResult> {
+          return capture((target) =>
+            requireDefined(target.hardDeleteNodesBatch)(params),
+          );
+        },
+      }),
 
     async insertEdge(params) {
       return capture((target) => target.insertEdge(params));
@@ -667,6 +1367,18 @@ export function createRecordedBackend(
         },
       }),
 
+    ...(backend.insertEdgesDurableBatchReturning === undefined ?
+      {}
+    : {
+        async insertEdgesDurableBatchReturning(
+          params: readonly InsertEdgeParams[],
+        ): Promise<readonly EdgeRow[]> {
+          return capture((target) =>
+            requireDefined(target.insertEdgesDurableBatchReturning)(params),
+          );
+        },
+      }),
+
     async updateEdge(params) {
       return capture((target) => target.updateEdge(params));
     },
@@ -676,7 +1388,7 @@ export function createRecordedBackend(
     },
 
     async hardDeleteEdge(params) {
-      await capture((target) => target.hardDeleteEdge(params));
+      return capture((target) => target.hardDeleteEdge(params));
     },
 
     ...(backend.deleteEdgesBatch === undefined ?
@@ -694,8 +1406,8 @@ export function createRecordedBackend(
     : {
         async hardDeleteEdgesBatch(
           params: DeleteEdgesBatchParams,
-        ): Promise<void> {
-          await capture((target) =>
+        ): Promise<readonly string[]> {
+          return capture((target) =>
             requireDefined(target.hardDeleteEdgesBatch)(params),
           );
         },
@@ -703,15 +1415,22 @@ export function createRecordedBackend(
 
     async transaction(fn, options) {
       const observer = readRecordedFlushObserver(options);
-      const backendOptions = stripRecordedFlushObserver(options);
+      const firePreCommitHook = claimTransactionPreCommitHook(options);
+      const backendOptions = stripRecordedFlushOptions(options);
       assertRequestedRecordedIsolation(backend, backendOptions);
       return backend.transaction(async (target) => {
         await assertRecordedCaptureTransactionIsolation(target, backendOptions);
         const readOnly = backendOptions?.accessMode === "read_only";
-        const scope = createRecordedTransactionScope(target, schema, !readOnly);
+        const scope = createRecordedTransactionScope(
+          target,
+          batchPointRead,
+          schema,
+          !readOnly,
+        );
         const result = await fn(scope.backend);
         const instants = await scope.flush();
         observer?.(instants);
+        await firePreCommitHook?.(target);
         return result;
       }, backendOptions);
     },

@@ -1,5 +1,6 @@
 import { CompilerInvariantError } from "../../../errors";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { markRecursivePlan } from "../../sql-intent";
 import { type LogicalPlan } from "../plan";
 import { inspectRecursiveProjectPlan } from "./plan-inspector";
 
@@ -8,8 +9,14 @@ export type RecursiveQueryEmitterInput = Readonly<{
   limitOffset?: SqlFragment;
   logicalPlan: LogicalPlan;
   orderBy?: SqlFragment;
+  /**
+   * Non-recursive CTE definitions the recursive CTE reads, in dependency order.
+   * They join the same `WITH RECURSIVE` list — both dialects accept a mix.
+   */
+  precedingCtes?: readonly SqlFragment[];
   projection: SqlFragment;
   recursiveCte: SqlFragment;
+  resultAlias?: string;
 }>;
 
 function assertRecursiveEmitterClauseAlignment(
@@ -48,11 +55,17 @@ export function emitRecursiveQuerySql(
 ): SqlFragment {
   assertRecursiveEmitterClauseAlignment(input.logicalPlan, input);
 
+  const cteList = sql.join(
+    [...(input.precedingCtes ?? []), input.recursiveCte],
+    sql`, `,
+  );
   const parts: SqlFragment[] = [
     sql`WITH RECURSIVE`,
-    input.recursiveCte,
+    cteList,
     sql`SELECT ${input.projection}`,
-    sql`FROM recursive_cte`,
+    input.resultAlias === undefined ?
+      sql`FROM recursive_cte`
+    : sql`FROM recursive_cte AS ${sql.identifier(input.resultAlias)}`,
     input.depthFilter,
   ];
 
@@ -63,5 +76,7 @@ export function emitRecursiveQuerySql(
     parts.push(input.limitOffset);
   }
 
-  return sql.join(parts, sql` `);
+  const query = sql.join(parts, sql` `);
+  markRecursivePlan(query);
+  return query;
 }

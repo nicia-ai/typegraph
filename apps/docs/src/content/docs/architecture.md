@@ -81,7 +81,7 @@ cases—knowledge bases, organizational structures, content relationships—the 
 not a standalone system.
 
 **Tradeoff**: You don't get Neo4j's broad graph-data-science suite (community
-detection, betweenness centrality, and similar specialized analytics), but you
+detection such as Leiden or Louvain, betweenness centrality, and similar specialized analytics), but you
 avoid:
 
 - Additional deployment complexity
@@ -177,7 +177,7 @@ const store = createStore(graph, backend);
 These closures are stored in the `TypeRegistry` and used during query compilation:
 
 ```typescript
-.from("Media", "m", { includeSubClasses: true })
+.from("Media", "m", { expansion: "subclasses" })
 // At compile time, expands to: WHERE kind IN ('Media', 'Podcast', 'Article', 'Video')
 ```
 
@@ -204,6 +204,10 @@ and stored in `typegraph_schema_versions`:
 SELECT schema_doc FROM typegraph_schema_versions
 WHERE graph_id = 'my_graph' AND is_active = TRUE;
 ```
+
+From TypeScript,
+[`getActiveSchema`](/schema-management#what-does-this-database-already-have)
+runs this query and parses the result into a typed `SerializedSchema`.
 
 The stored schema includes everything needed to understand the graph:
 
@@ -243,12 +247,12 @@ import { getActiveSchema, getSchemaChanges } from "@nicia-ai/typegraph/schema";
 
 // Query the active schema at runtime
 const schema = await getActiveSchema(backend, "my_graph");
-console.log("Node types:", Object.keys(schema.nodes));
-console.log("Edge types:", Object.keys(schema.edges));
+console.log("Node types:", Object.keys(schema?.nodes ?? {}));
+console.log("Edge types:", Object.keys(schema?.edges ?? {}));
 
 // Detect pending changes before deployment
 const diff = await getSchemaChanges(backend, graph);
-if (!diff.isBackwardsCompatible) {
+if (diff && !diff.isBackwardsCompatible) {
   console.error("Breaking changes require migration");
 }
 ```
@@ -260,7 +264,9 @@ benefit is a database that explains itself.
 
 ### Storage Schema
 
-TypeGraph uses two core tables:
+TypeGraph keeps graph data in two core tables. Bookkeeping tables (schema
+versions, uniqueness and edge claims, write fences, recorded history, and
+others) sit beside them.
 
 ```sql
 -- Nodes table
@@ -268,34 +274,41 @@ CREATE TABLE typegraph_nodes (
   graph_id    TEXT NOT NULL,
   kind        TEXT NOT NULL,
   id          TEXT NOT NULL,
-  props       JSON NOT NULL,      -- Properties as JSON
+  props       JSON NOT NULL,      -- Properties as JSON (TEXT on SQLite, JSONB on PostgreSQL)
   version     INTEGER NOT NULL,   -- Optimistic concurrency
-  valid_from  TEXT NOT NULL,      -- Temporal validity
+  valid_from  TEXT,               -- Temporal validity
   valid_to    TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
   deleted_at  TEXT,               -- Soft delete
-  PRIMARY KEY (graph_id, kind, id, valid_from)
+  PRIMARY KEY (graph_id, kind, id)
 );
 
 -- Edges table
 CREATE TABLE typegraph_edges (
   graph_id    TEXT NOT NULL,
-  kind        TEXT NOT NULL,
   id          TEXT NOT NULL,
+  kind        TEXT NOT NULL,
   from_kind   TEXT NOT NULL,
   from_id     TEXT NOT NULL,
   to_kind     TEXT NOT NULL,
   to_id       TEXT NOT NULL,
   props       JSON NOT NULL,
-  version     INTEGER NOT NULL,
-  valid_from  TEXT NOT NULL,
+  match_identity_name TEXT,
+  match_identity_key  TEXT,
+  valid_from  TEXT,
   valid_to    TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
   deleted_at  TEXT,
-  PRIMARY KEY (graph_id, kind, id, valid_from)
+  CHECK (
+    (match_identity_name IS NULL) = (match_identity_key IS NULL)
+  ),
+  PRIMARY KEY (graph_id, id)
 );
+
+CREATE UNIQUE INDEX typegraph_edges_match_identity_uq
+  ON typegraph_edges (graph_id, kind, match_identity_name, match_identity_key);
 ```
 
 ### Why JSON for Properties?
@@ -326,32 +339,77 @@ filtering, consider:
 
 See [Indexes](/performance/indexes) for TypeGraph utilities to define and create these indexes.
 
+### Durable edge match identity
+
+An edge registration can promote one endpoint/property comparison from a
+caller convention to a stored graph-schema contract:
+
+```text
+graph matchIdentity declaration
+            │
+            ▼
+canonical endpoint/property key
+            │
+            ▼
+authoritative edge command ──► database unique arbiter
+            │                         │
+            └──────── created ◄───────┤
+                      found   ◄───────┘
+```
+
+The database unique constraint is the concurrency authority. A cache, an
+outside read, or a process-local lock cannot replace it because serverless
+requests may use different processes and connections. Bundled root backends can
+therefore lower an eligible `getOrCreateByEndpoints()` call to one statement;
+paths with cardinality claims, history, revision tracking, or caller-owned work
+use the same arbiter inside their transaction.
+
+Each decision has one owner:
+
+| Decision | Owner |
+| --- | --- |
+| Which property fields form the identity | The graph registration's named `matchIdentity` |
+| Whether a schema can activate or re-key it | The schema manager's all-physical-row emptiness fence |
+| How endpoint/property values become a portable key | The shared canonical encoder |
+| Which concurrent writer owns the identity | The database unique constraint |
+| Whether a command created or found a row | The authoritative command result |
+| Whether a failed import batch may retry rows | The semantic savepoint result |
+
+The semantic savepoint is broader than raw SQL transaction control. Rolling it
+back restores the database savepoint and TypeGraph's pending capture touches,
+forced revisions, and graph-lock memo together. Consumers receive the resulting
+decision instead of re-deriving it from an exception, row count, or follow-up
+read. That is what keeps direct creates, convergence, bulk writes, import,
+history, and operation hooks aligned.
+
 ### Temporal Model
 
-Every node and edge tracks temporal validity:
+Every node and edge row carries a validity window, `valid_from` to `valid_to`:
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ Node: Article#123                                            │
 ├──────────────────────────────────────────────────────────────┤
-│ Version 1: "Draft"      │ valid_from: 2024-01-01            │
-│                         │ valid_to:   2024-01-15            │
-├─────────────────────────┼────────────────────────────────────┤
-│ Version 2: "Published"  │ valid_from: 2024-01-15            │
-│                         │ valid_to:   NULL (current)        │
-└─────────────────────────┴────────────────────────────────────┘
+│ props:      { "title": "Published" }                         │
+│ version:    2                                                │
+│ valid_from: 2024-01-01                                       │
+│ valid_to:   NULL (open-ended)                                │
+│ deleted_at: NULL                                             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-When you update a node:
-
-1. The current row's `valid_to` is set to now
-2. A new row is inserted with `valid_from = now`, `valid_to = NULL`
+When you update a node, TypeGraph rewrites its one row in place: the props
+change, `version` increments, and `updated_at` advances. The validity window
+moves only when you state `validFrom`, `validTo` or `clearValidTo` on the
+write. Past states of a row are not kept by default. With `history: true` the
+store captures every committed write into recorded-time relations that
+`store.asOfRecorded(T)` reads (see [Temporal](/queries/temporal#recorded-time-bitemporal)).
 
 This enables:
 
-- **Point-in-time queries**: "What did the graph look like on January 10th?"
-- **Audit trails**: "What were all the versions of this article?"
-- **Soft deletes**: `deleted_at` marks deletion without losing history
+- **Point-in-time queries**: "Which facts were valid on January 10th?"
+- **Ended facts**: a `valid_to` in the past ends a fact without deleting it
+- **Soft deletes**: `deleted_at` marks deletion without removing the row
 
 ## Query Compilation
 
@@ -460,8 +518,11 @@ Each backend wires a strategy that knows how to store embeddings and compile sim
 | libSQL / Turso | `libsqlVectorStrategy` (wired automatically)              | `F32_BLOB(N)`, DiskANN ANN via `libsql_vector_idx` + `vector_top_k` | cosine, l2                |
 
 `createSqliteBackend` and `createPostgresBackend` accept a `vector?: VectorStrategy` option to override the
-default. The strategies, `buildVectorCapabilities`, and the complete `VectorStrategy` / `VectorSlot` authoring
-vocabulary are exported from `@nicia-ai/typegraph/backend`.
+default (the PostgreSQL option also accepts `false`). Each strategy is exported from its adapter entrypoint
+(`pgvectorStrategy` from `@nicia-ai/typegraph/adapters/drizzle/postgres`, `sqliteVecStrategy` from
+`.../adapters/drizzle/sqlite`, `libsqlVectorStrategy` from `.../adapters/drizzle/sqlite/libsql`). The
+`VectorStrategy` / `VectorSlot` authoring vocabulary and `buildVectorCapabilities` are exported from
+`@nicia-ai/typegraph/backend`.
 
 A backend advertises its vector support as data on `backend.capabilities.vector`:
 
@@ -474,7 +535,9 @@ backend.capabilities.vector; // { supported, metrics, indexTypes, maxDimensions,
 Embeddings are stored in **per-field typed tables**, one per `(graphId, nodeKind, fieldPath)`, each carrying
 that field's fixed dimension. Tables are provisioned by the privileged migrator (`createStoreWithSchema`, and
 `evolve()` for runtime-added fields), with a durable contribution marker; the runtime hot path asserts the
-marker and never issues DDL. They are named `tg_vec_<graphId>_<kind>_<field>`. Graph-scoping the table name lets
+marker and never issues DDL. They are named `tg_vec_<graphId>_<kind>_<field>_<hash>`
+(lowercased and sanitized, with a hash of the exact
+`(graphId, kind, field)` tuple; the SQL below omits the hash). Graph-scoping the table name lets
 multiple graphs in one database declare the same kind+field at different dimensions without collision.
 
 ```sql
@@ -532,15 +595,57 @@ nearest neighbor search efficiently.
 - **Whole-graph algorithms**: WCC, label propagation, and PageRank iterate over every visible node
   by default, or over an explicit `nodeKinds` induced subgraph, and their selected edges
 - **Large property filtering without indexes**: JSON extraction is slower than column access
-- **Cross-kind queries**: `includeSubClasses: true` increases the WHERE IN set
+- **Cross-kind queries**: `expansion: "subclasses"` increases the WHERE IN set
 
 ### Optimization Strategies
 
 1. **Filter early**: Apply predicates as close to the source as possible
 2. **Limit results**: Always paginate large result sets
-3. **Use specific kinds**: Avoid `includeSubClasses` unless needed
+3. **Use specific kinds**: A supertype query expands its `WHERE kind IN (...)` set by
+   default; pass `{ expansion: "exact" }` when the wider set isn't needed
 4. **Index JSON paths**: For frequently-filtered properties, add expression indexes
 5. **Batch writes**: Use transactions to reduce disk syncs and round-trips
+
+### Mutation execution classes
+
+TypeGraph classifies bulk writes by what must be known before SQL can be
+submitted:
+
+- A **closed mutation program** carries every input, fence, and refusal rule
+  needed for the database to decide the write. Eligible node/edge creates and
+  soft deletes use one exact-resource execution profile and can run as one native
+  atomic exchange on bundled serverless transports. The profile is attached to
+  the exact backend object. Derived backends do not inherit it accidentally;
+  an already-open PostgreSQL transaction earns a separate session-bound
+  registration.
+- A **resolved mutation set** requires an authoritative database preimage and
+  application computation before its writes are known. `bulkUpsertById()` is
+  the canonical example: stored props are merged and Zod-validated, temporal
+  decisions are derived, and repeated IDs observe earlier batch items. An
+  eligible distinct-ID set can cross the exact registered boundary after resolution:
+  its guarded SQL carries the node versions or complete edge preimages that
+  justified the after-images. Update-only sets use one guarded set statement;
+  mixed create/update sets add a terminal database postimage assertion inside
+  the same native exchange, so an incomplete update aborts and rolls back its
+  creates before the transport commits. Complex sets resolve and execute inside
+  one interactive transaction. Neither shape is mislabeled as a read-free
+  program. On an interactive PostgreSQL root, the operation runs on the exact
+  collection-opened, caller-supplied, or adopted transaction and returns an
+  explicit `applied | unsupported` verdict. `unsupported` proves that no
+  program SQL ran before the complete portable path begins.
+
+This boundary keeps transport optimization subordinate to Store semantics. A
+new bulk optimization must either prove its mutation is closed or name the
+authoritative resolution phase it preserves; it cannot read on one connection
+and write on another, silently discard sidecars, or duplicate an eligibility
+predicate beside the profile owner.
+
+Backend authors can certify the transport boundary independently of mutation
+eligibility with the framework-agnostic atomic transport conformance runner.
+The runner supplies no dialect assumptions: the author provides statements,
+state observers, and exact-root provenance checks, while the shared checks
+verify ordered result slots, bound-parameter preservation, empty programs, and
+all-or-nothing rollback across primary and sidecar writes.
 
 ## Why These Tradeoffs?
 
@@ -580,7 +685,8 @@ graph DSL and its schema-derived types from the Drizzle-free
 `@nicia-ai/typegraph/core` entrypoint. Backend and search-strategy authors can
 import the full Drizzle-free port vocabulary, including `GraphBackend`,
 `AdapterBackend`, `DialectAdapter`, and `SqlFragment`, from
-`@nicia-ai/typegraph/backend`.
+`@nicia-ai/typegraph/backend`. That authoring surface is not covered by semver
+and may change in any release; see [Stability](/backend-authoring#stability).
 
 ### Why Zod for Schemas?
 

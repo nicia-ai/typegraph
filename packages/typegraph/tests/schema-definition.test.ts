@@ -13,16 +13,14 @@ import { z } from "zod";
 import {
   ConfigurationError,
   defineEdge,
-  defineEdgeIndex,
   defineGraph,
   defineNode,
-  defineNodeIndex,
-  getEdgeKinds,
-  getNodeKinds,
   subClassOf,
 } from "../src";
+import { getEdgeKinds, getNodeKinds } from "../src/core";
 import { type DefineEdgeOptions } from "../src/core/edge";
 import { type DefineNodeOptions } from "../src/core/node";
+import { defineEdgeIndex, defineNodeIndex } from "../src/indexes";
 import { requireDefined } from "../src/utils/presence";
 
 describe("defineNode()", () => {
@@ -368,6 +366,111 @@ describe("defineGraph()", () => {
     const constraint = registration.unique[0];
     expect(constraint.name).toBe("person_name_unique");
     expect(constraint.fields).toEqual(["name"]);
+  });
+});
+
+function refusalOf(build: () => unknown): unknown {
+  try {
+    build();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected defineGraph to refuse the edge");
+}
+
+describe("defineGraph() edge endpoint registration", () => {
+  const Person = defineNode("Person", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Company = defineNode("Company", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Robot = defineNode("Robot", {
+    schema: z.object({ serial: z.string() }),
+  });
+  const worksAt = defineEdge("worksAt");
+
+  it.each([
+    [
+      "from",
+      () =>
+        defineGraph({
+          id: "endpoint_from",
+          nodes: { Company: { type: Company } },
+          edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+        }),
+    ],
+    [
+      "to",
+      () =>
+        defineGraph({
+          id: "endpoint_to",
+          nodes: { Person: { type: Person } },
+          edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+        }),
+    ],
+  ] as const)(
+    "refuses an edge whose %s names an unregistered node kind",
+    (endpoint, build) => {
+      const error = refusalOf(build);
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as Error).message).toContain(
+        `Edge "worksAt" names node kind`,
+      );
+      expect(error).toMatchObject({
+        details: {
+          code: "EDGE_ENDPOINT_KIND_NOT_REGISTERED",
+          edge: "worksAt",
+          endpoint,
+          kind: endpoint === "from" ? "Person" : "Company",
+        },
+      });
+    },
+  );
+
+  it("refuses an unregistered kind inside a source-to-target map", () => {
+    const error = refusalOf(() =>
+      defineGraph({
+        id: "endpoint_target_map",
+        nodes: { Person: { type: Person }, Company: { type: Company } },
+        edges: {
+          worksAt: {
+            type: worksAt,
+            from: [Person],
+            to: { Person: [Company, Robot] },
+          },
+        },
+      }),
+    );
+    expect(error).toMatchObject({
+      details: { edge: "worksAt", endpoint: "to", kind: "Robot" },
+    });
+  });
+
+  it("refuses an unregistered kind from an edge type's own endpoints", () => {
+    const employs = defineEdge("employs", { from: [Company], to: [Robot] });
+    const error = refusalOf(() =>
+      defineGraph({
+        id: "endpoint_edge_type",
+        nodes: { Company: { type: Company } },
+        edges: { employs },
+      }),
+    );
+    expect(error).toMatchObject({
+      details: { edge: "employs", endpoint: "to", kind: "Robot" },
+    });
+  });
+
+  it("accepts endpoints that are all registered, and unconstrained edges", () => {
+    const graph = defineGraph({
+      id: "endpoint_registered",
+      nodes: { Person: { type: Person }, Company: { type: Company } },
+      edges: {
+        worksAt: { type: worksAt, from: [Person], to: [Company] },
+        relatedTo: defineEdge("relatedTo"),
+      },
+    });
+    expect(Object.keys(graph.edges)).toEqual(["worksAt", "relatedTo"]);
   });
 });
 

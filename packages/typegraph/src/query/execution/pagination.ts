@@ -11,10 +11,13 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   type FieldRef,
+  type LiteralValue,
   type NodePredicate,
   type OrderSpec,
   type PredicateExpression,
+  type TupleComparisonPredicate,
 } from "../ast";
+import { isNullableSystemOrderField } from "../builder/order-by-field";
 import type {
   AliasMap,
   EdgeAliasMap,
@@ -23,12 +26,14 @@ import type {
   SelectContext,
   StreamOptions,
 } from "../builder/types";
+import { requireCursorField } from "../cursor";
 import {
   buildCursorFromRow,
   type CursorData,
   decodeCursor,
   validateCursorColumns,
 } from "../cursor";
+import { resolveNullOrdering } from "../order";
 
 /**
  * Parses pagination options into internal format.
@@ -77,6 +82,7 @@ export function adjustOrderByForDirection(
   return orderBy.map((spec) => ({
     ...spec,
     direction: spec.direction === "asc" ? ("desc" as const) : ("asc" as const),
+    nulls: resolveNullOrdering(spec) === "first" ? "last" : "first",
   }));
 }
 
@@ -92,6 +98,15 @@ export function buildCursorPredicate(
 ): NodePredicate {
   const values = cursorData.vals;
 
+  const tupleComparison = buildTupleComparisonPredicate(
+    values,
+    orderBy,
+    direction,
+  );
+  if (tupleComparison !== undefined) {
+    return { targetAlias, expression: tupleComparison };
+  }
+
   // Build OR of progressively longer AND conditions
   const orConditions: PredicateExpression[] = [];
 
@@ -102,21 +117,21 @@ export function buildCursorPredicate(
     for (let index_ = 0; index_ < index; index_++) {
       const spec = requireDefined(orderBy[index_]);
       const value = values[index_];
-      andConditions.push(buildEqualityPredicate(spec.field, value));
+      andConditions.push(
+        buildEqualityPredicate(requireCursorField(spec.field), value),
+      );
     }
 
     // Current column uses comparison
     const currentSpec = requireDefined(orderBy[index]);
-    const currentValue = values[index];
-    const isAsc = currentSpec.direction === "asc";
-    const isForward = direction === "forward";
-    // ASC + forward = gt | ASC + backward = lt
-    // DESC + forward = lt | DESC + backward = gt
-    const op = isAsc === isForward ? "gt" : "lt";
-
-    andConditions.push(
-      buildComparisonPredicate(currentSpec.field, op, currentValue),
+    const comparison = buildPositionPredicate(
+      requireCursorField(currentSpec.field),
+      currentSpec,
+      values[index],
+      direction === "forward" ? "after" : "before",
     );
+    if (comparison === undefined) continue;
+    andConditions.push(comparison);
 
     // Combine with AND
     if (andConditions.length === 1) {
@@ -128,14 +143,193 @@ export function buildCursorPredicate(
 
   // Combine with OR
   const expression: PredicateExpression =
-    orConditions.length === 1 ?
-      requireDefined(orConditions[0])
+    orConditions.length === 0 ?
+      buildImpossiblePredicate(
+        requireCursorField(requireDefined(orderBy[0]).field),
+      )
+    : orConditions.length === 1 ? requireDefined(orConditions[0])
     : { __type: "or", predicates: orConditions };
 
   return {
     targetAlias,
     expression,
   };
+}
+
+/** The parts of a query a cursor is applied to. */
+type CursorFilterTarget = Readonly<{
+  startAlias: string;
+  /**
+   * Whether the cursor is a property of the completed match row rather than
+   * of the start node alone — see {@link applyCursorFilters}.
+   */
+  positionsCompletedMatch: boolean;
+  predicates: readonly NodePredicate[];
+  resultPredicate?: PredicateExpression | undefined;
+}>;
+
+/** A query's filters with one page's cursor applied. */
+type CursorFilters = Readonly<{
+  predicates: readonly NodePredicate[];
+  resultPredicate: PredicateExpression | undefined;
+}>;
+
+/**
+ * Applies a cursor to a query: WHERE the keyset position is tested.
+ *
+ * A node predicate is compiled against its target alias alone, so it can
+ * only carry a cursor whose every key reads that alias — the start alias of a
+ * query with no traversal. Once a traversal is present the keyset names
+ * traversal aliases too (the caller's own order keys, and the row-identity
+ * tiebreaker), and the position is a property of the COMPLETED match row. It
+ * is then applied as the completed-match predicate, which resolves every
+ * alias, ANDed with any `where()` the caller stated.
+ *
+ * For a traversal query the leading keys that read the start alias are also
+ * pushed into the start alias's own filter, non-strictly ("at or after the
+ * cursor's start row"): every row strictly after the cursor satisfies it, and
+ * it keeps a page from re-reading every start row before the cursor.
+ */
+export function applyCursorFilters(
+  target: CursorFilterTarget,
+  cursorData: CursorData,
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+): CursorFilters {
+  const position = buildCursorPredicate(
+    cursorData,
+    orderBy,
+    direction,
+    target.startAlias,
+  );
+  if (!target.positionsCompletedMatch) {
+    return {
+      predicates: [...target.predicates, position],
+      resultPredicate: target.resultPredicate,
+    };
+  }
+  const startPrefix = buildStartPrefixPredicate(
+    cursorData,
+    orderBy,
+    direction,
+    target.startAlias,
+  );
+  return {
+    predicates:
+      startPrefix === undefined ?
+        target.predicates
+      : [...target.predicates, startPrefix],
+    resultPredicate:
+      target.resultPredicate === undefined ?
+        position.expression
+      : {
+          __type: "and",
+          predicates: [target.resultPredicate, position.expression],
+        },
+  };
+}
+
+/**
+ * "At or after the cursor" over the leading order keys that read the start
+ * alias: strictly after on that prefix, or equal on all of it. `undefined`
+ * when the first key reads another alias, which leaves nothing to push down.
+ */
+function buildStartPrefixPredicate(
+  cursorData: CursorData,
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+  startAlias: string,
+): NodePredicate | undefined {
+  const firstOtherAlias = orderBy.findIndex(
+    (spec) => requireCursorField(spec.field).alias !== startAlias,
+  );
+  const prefixLength =
+    firstOtherAlias === -1 ? orderBy.length : firstOtherAlias;
+  if (prefixLength === 0) return undefined;
+  const prefixOrderBy = orderBy.slice(0, prefixLength);
+  const prefixValues = cursorData.vals.slice(0, prefixLength);
+  const strictlyAfter = buildCursorPredicate(
+    { ...cursorData, vals: prefixValues },
+    prefixOrderBy,
+    direction,
+    startAlias,
+  ).expression;
+  const equalities = prefixOrderBy.map((spec, index) =>
+    buildEqualityPredicate(requireCursorField(spec.field), prefixValues[index]),
+  );
+  return {
+    targetAlias: startAlias,
+    expression: {
+      __type: "or",
+      predicates: [strictlyAfter, { __type: "and", predicates: equalities }],
+    },
+  };
+}
+
+/** Uses row values only when SQL NULL semantics cannot change the ordering. */
+function buildTupleComparisonPredicate(
+  values: readonly unknown[],
+  orderBy: readonly OrderSpec[],
+  direction: "forward" | "backward",
+): TupleComparisonPredicate | undefined {
+  if (orderBy.length < 2 || values.length !== orderBy.length) return;
+  const [first] = orderBy;
+  if (first === undefined) return;
+  if (
+    orderBy.some(
+      (spec, index) =>
+        spec.direction !== first.direction ||
+        spec.nulls !== undefined ||
+        !isTupleComparableField(spec.field) ||
+        values[index] === null ||
+        values[index] === undefined,
+    )
+  ) {
+    return;
+  }
+  const fields = orderBy.map((spec) => requireCursorField(spec.field)) as [
+    FieldRef,
+    ...FieldRef[],
+  ];
+  const tupleValues = values.map((value) => ({
+    __type: "literal" as const,
+    value: value as string | number | boolean,
+  })) as [LiteralValue, ...LiteralValue[]];
+  const afterAscending =
+    (direction === "forward" && first.direction === "asc") ||
+    (direction === "backward" && first.direction === "desc");
+  return {
+    __type: "tuple_comparison",
+    fields,
+    op: afterAscending ? "gt" : "lt",
+    values: tupleValues,
+  };
+}
+
+function isTupleComparableField(field: OrderSpec["field"]): boolean {
+  if (field.__type !== "field_ref") return false;
+  if (field.nullable === true) return false;
+  if (field.nullable === false) return isTupleScalarValueType(field.valueType);
+  // System identity and creation columns are physically NOT NULL. Existing
+  // manually assembled ASTs may predate the nullable marker, so retain this
+  // narrow compatibility path without making user properties eligible.
+  return (
+    field.path.length === 1 &&
+    isTupleScalarValueType(field.valueType) &&
+    !isNullableSystemOrderField(requireDefined(field.path[0])) &&
+    ["id", "kind", "created_at", "updated_at"].includes(
+      requireDefined(field.path[0]),
+    )
+  );
+}
+
+function isTupleScalarValueType(valueType: FieldRef["valueType"]): boolean {
+  return (
+    valueType === "boolean" ||
+    valueType === "date" ||
+    valueType === "number" ||
+    valueType === "string"
+  );
 }
 
 /**
@@ -159,21 +353,47 @@ function buildEqualityPredicate(
 /**
  * Builds a comparison predicate for cursor pagination.
  */
-function buildComparisonPredicate(
+function buildPositionPredicate(
   field: FieldRef,
-  op: "gt" | "lt",
+  spec: OrderSpec,
   value: unknown,
-): PredicateExpression {
+  position: "after" | "before",
+): PredicateExpression | undefined {
+  const nulls = resolveNullOrdering(spec);
   if (value === null || value === undefined) {
-    // For null, the comparison depends on NULLS FIRST/LAST behavior
-    // For simplicity, treat as IS NOT NULL for forward, fail for backward
-    return { __type: "null_check", op: "isNotNull", field };
+    const nonNullValuesMatch =
+      (position === "after" && nulls === "first") ||
+      (position === "before" && nulls === "last");
+    return nonNullValuesMatch ?
+        { __type: "null_check", op: "isNotNull", field }
+      : undefined;
   }
-  return {
+
+  const isAscending = spec.direction === "asc";
+  const comparison: PredicateExpression = {
     __type: "comparison",
-    op,
+    op: isAscending === (position === "after") ? "gt" : "lt",
     left: field,
     right: { __type: "literal", value: value as string | number | boolean },
+  };
+  const nullValuesMatch =
+    (position === "after" && nulls === "last") ||
+    (position === "before" && nulls === "first");
+  return nullValuesMatch ?
+      {
+        __type: "or",
+        predicates: [comparison, { __type: "null_check", op: "isNull", field }],
+      }
+    : comparison;
+}
+
+function buildImpossiblePredicate(field: FieldRef): PredicateExpression {
+  return {
+    __type: "and",
+    predicates: [
+      { __type: "null_check", op: "isNull", field },
+      { __type: "null_check", op: "isNotNull", field },
+    ],
   };
 }
 
@@ -210,21 +430,34 @@ export function buildPaginatedResult<
     row: Record<string, unknown>,
   ) => SelectContext<Aliases, EdgeAliases>,
 ): PaginatedResult<R> {
-  let nextCursor: string | undefined;
-  let previousCursor: string | undefined;
+  return buildPaginatedResultFromRows(
+    data,
+    orderedRows,
+    hasMore,
+    isBackward,
+    cursor,
+    (row, direction) =>
+      buildCursorFromContext(buildContext(row), orderBy, direction),
+  );
+}
 
-  if (orderedRows.length > 0) {
-    const firstRow = requireDefined(orderedRows[0]);
-    const lastRow = requireDefined(orderedRows.at(-1));
-
-    // Build cursors using mapped result context
-    const firstContext = buildContext(firstRow);
-    const lastContext = buildContext(lastRow);
-
-    // Extract values for ORDER BY columns from the context
-    previousCursor = buildCursorFromContext(firstContext, orderBy, "b");
-    nextCursor = buildCursorFromContext(lastContext, orderBy, "f");
-  }
+/**
+ * Constructs a paginated result from rows and a caller-owned cursor encoder.
+ */
+export function buildPaginatedResultFromRows<R, Row>(
+  data: readonly R[],
+  orderedRows: readonly Row[],
+  hasMore: boolean,
+  isBackward: boolean,
+  cursor: string | undefined,
+  buildCursor: (row: Row, direction: "f" | "b") => string,
+): PaginatedResult<R> {
+  const firstRow = orderedRows[0];
+  const lastRow = orderedRows.at(-1);
+  const previousCursor =
+    firstRow === undefined ? undefined : buildCursor(firstRow, "b");
+  const nextCursor =
+    lastRow === undefined ? undefined : buildCursor(lastRow, "f");
 
   return {
     data,

@@ -26,10 +26,9 @@ import {
 } from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let bootstrap: Sql | undefined;
 let isPostgresAvailable = false;
@@ -111,11 +110,11 @@ describe("postgres-js custom-plan opt-out", () => {
       await store.edges.references.create(root, child, {});
 
       calls.length = 0;
-      const result = await store.subgraph(root.id, {
+      const result = await store.subgraph(root, {
         edges: ["references"],
         maxDepth: 2,
       });
-      expect(result.nodes.size).toBe(2);
+      expect(result.nodes.length).toBe(2);
 
       const fetches = calls.filter((call) => call.text.includes("unnest("));
       expect(fetches.length).toBeGreaterThanOrEqual(2);

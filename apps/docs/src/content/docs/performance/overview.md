@@ -10,18 +10,25 @@ your knowledge graph scales with your application.
 
 ## Performance Philosophy
 
-1. **One Query, One Statement**: Every query — including multi-hop traversals — compiles to a
-   single SQL statement. No N+1 queries by design.
+1. **One Fluent Query, One Statement**: Every fluent query — including multi-hop traversals —
+   compiles to a single SQL statement, so its statement count never grows with the size of the
+   graph. This prevents compiler-generated N+1 work inside that query; application code can still
+   create an N+1 by issuing separate reads in a loop. (Compilation, not execution: a query whose
+   selective-field mapping falls back re-runs as a full fetch, costing a second statement. See
+   [Batch reads](#batch-reads).)
 2. **Precomputed Ontology**: Transitive closures, subclass hierarchies, and edge implications are
    computed once at schema initialization, not during every query.
-3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes;
-   `store.batch()` does the same for reads.
+3. **Batching & Transactions**: Bulk collection APIs minimize round-trips for writes. On the read
+   side that job belongs to the query compiler — `store.batch()` only caps concurrency at one query
+   in flight, it does not reduce round trips and it is not a snapshot.
 4. **Zero-Cost Abstractions**: Type safety and ontological reasoning add no measurable runtime overhead.
 
 ## N+1 Prevention
 
 A common performance problem in ORMs is the N+1 query: you fetch N entities, then issue one
-query per entity to load related data. TypeGraph eliminates this structurally.
+query per entity to load related data. TypeGraph's fluent query compiler eliminates that pattern
+inside one graph-shaped query; it cannot eliminate separate collection reads issued by application
+code.
 
 Every query — regardless of how many traversals it chains — compiles to a **single SQL statement**
 using Common Table Expressions (CTEs). Each traversal step becomes a CTE that joins against the
@@ -74,10 +81,264 @@ This holds for all query types:
 - Aggregations with traversals (CTEs + GROUP BY, 1 statement)
 - [Set operations](/queries/combine) (UNION/INTERSECT/EXCEPT of CTEs, 1 statement)
 
-There is no dataloader or batching layer because there is nothing to batch — the database handles
-the entire join graph in a single execution.
+The fluent query needs no dataloader for that joined read because the database handles its entire
+join graph in one execution. Separate reads can still form an N+1; use a traversal, `batchOnce()`,
+`neighbors()` / `countNeighbors()`, or `subgraph()`. Inside `batchOnce()`, its batch-scoped `read` builder
+creates composable versions of the set-oriented reads when unlike result shapes must share one
+statement. Chunked collection reads remain useful for homogeneous ID and endpoint sets.
 
 ## Batch Write Patterns
+
+### Remote edge convergence
+
+For a latency-sensitive `getOrCreateByEndpoints()` path, declare the canonical
+identity on the edge registration instead of supplying an ad hoc `matchOn` list
+at each call:
+
+```typescript
+const graph = defineGraph({
+  id: "work",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+      matchIdentity: { name: "employment", fields: ["role"] },
+    },
+  },
+});
+
+await store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+  role: "engineer",
+});
+```
+
+On a schema-managed bundled root backend (including D1 and neon-http), with
+claims, sidecars, history, and revision work absent, the default
+`ifExists: "return"` path combines the
+schema fence, endpoint validation, unique arbitration, and created/found result
+into one statement. A typical Neon WebSocket miss therefore falls from roughly
+five sequential requests to one. The found path is also one request, but the
+PostgreSQL implementation performs a no-op conflict update: it takes a row lock
+and can create write amplification, so it is not a substitute for a hot read
+cache.
+
+Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
+stores, caller-owned transactions, and custom backends without the matching
+semantic program retain the transactional path required by their additional
+contracts. In particular, writes made through `store.transaction()` remain on
+the interactive path and do not receive the root-path exchange-count reduction.
+Eligible durable bulk endpoint
+convergence now submits one closed native atomic exchange: the durable identity
+arbiter, endpoint validation, and ordered created/found
+results are all resolved by the program. This removes the outside probe, the
+transaction open/commit, and the per-item write legs for the eligible shape.
+The fallback bulk path still discovers exact directed endpoint pairs in
+set-oriented bind-budget chunks and retains its transactional contract. See
+[`getOrCreateByEndpoints`](/schemas-stores#getorcreatebyendpointsfrom-to-props-options)
+for field restrictions, migration rules, and PostgreSQL retry guidance.
+
+The one-request path is an authoritative command, not a general Store batch:
+the backend statement owns endpoint validation, durable-key arbitration, and
+the created/found result. Static adapter batches (including multi-row inserts)
+are separate internal optimizations and do not turn a sequence of public Store
+calls into one atomic operation. Use `store.transaction(...)` when several
+operations—including claims, Operational Identity, history, or revision
+sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
+that interactive-transaction requirement; only a schema-declared durable
+`matchIdentity` can qualify for the one-statement root command.
+
+Bulk endpoint convergence has a narrower native envelope than direct edge
+inserts. A schema-declared durable `matchIdentity` with `cardinality: "many"`,
+the declaration's match fields, default `ifExists: "return"`, and no temporal
+mutation qualifies on an exact bundled root. The libSQL transport inventory
+records one client `batch` submission and zero client `execute` calls for a
+multi-item eligible call; this is a submission-count measurement, not a
+wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
+cardinality, temporal options, caller transactions, derived backends, custom
+backends without a registered durable-convergence family, and history/revision
+stores intentionally retain the fallback path.
+Outside the native envelope, an all-live `ifExists: "return"` batch is the
+read-only exception: every backend may return that result from its single
+set-oriented root read without opening a confirmation transaction. Inside the
+native envelope, the authoritative upsert program runs first. An all-live call
+still returns `"found"` in one exchange, but the conflict-update mechanism may
+take incumbent-row locks and produce write amplification. Any batch outside
+that envelope that may create, resurrect, or update requires the complete
+transactional fallback.
+If an otherwise eligible batch resolves a tombstoned identity, the native
+attempt rolls back and transactionless convergence refuses with the typed
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
+transaction-capable backend when resurrection must merge partial properties
+through the graph's Zod update schema.
+
+Cloudflare D1's 100-parameter budget admits at most seven **unique durable
+identities** in the native convergence program; duplicate inputs reuse their
+first identity and do not consume another program entry. Above that ceiling,
+an all-live return completes through the read-only one-read path described
+above. A
+batch that needs a write uses the portable fallback on a transaction-capable
+backend and refuses on a transactionless D1 root rather than splitting one
+atomic convergence contract across multiple submissions.
+
+Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
+Cloudflare D1, and libSQL also expose native write programs for eligible
+ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
+`nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
+no Operational Identity, history, or revision work. The program composes each
+member's complete advertised uniqueness/disjointness claim set with its
+fulltext/vector projection transitions. Same-kind and hierarchy-wide
+uniqueness, generated and caller IDs, and mixed claim families share this one
+program boundary.
+Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
+PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
+statement per bind-budget chunk. The batch may use generated IDs,
+caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
+input order. Claim work is chunked by member inside the same atomic submission,
+so Cloudflare D1 no longer has a batch-wide claimed-member ceiling. Its
+100-parameter budget leaves 87 claim-input binds per member after the row and
+fence: a canonical claim costs six, each legacy hierarchy-wide uniqueness
+probe costs nine, and each legacy disjointness probe costs six. Custom
+executors should call the exported `atomicNodeClaimInputCost()` owner rather
+than reproduce this formula. A member beyond that complexity, identity-enabled and
+history/revision-tracked shapes, and other unsupported node work retain the
+existing transaction or fallback path. This per-member budget is distinct from
+the seven unique durable edge identities admitted by the convergence program
+above. A successful program needs no diagnostic reads. A refused claim first
+rolls the entire native batch back, then uses committed-state fence and claim
+reads to recover the same typed error as the portable path. Bundled backends
+diagnose the complete refused input with set-oriented node and uniqueness reads
+rather than one probe per member. Custom backends without those batch reads
+advance through 32-member concurrency windows until the earliest refusal can be
+selected in input order; when no claim explains the rollback, every input is
+covered before the honest terminal error. These failure-only reads are not part
+of the successful-write RTT count.
+
+Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
+schema-fenced atomic program when the store has no history or revision capture.
+The program validates live endpoints, arbitrates declared durable
+`matchIdentity`, and maintains `one`, `unique`, and `oneActive` cardinality
+claims at the write boundary. It rolls back the whole call when any
+bind-budget chunk or constraint sidecar fails and restores `bulkCreate()`
+results to input order.
+
+Eligible `bulkDelete()` calls use the same mutation-program boundary. Direct
+edge batches on bundled roots submit one schema-fenced atomic program; the
+statement refuses an ID owned by another edge collection and rolls back every
+chunk. Restricted node batches also submit one exchange and release uniqueness
+and disjointness claims owned by the tombstoned rows in that program. The node
+statement rechecks connected live edges at the write boundary, so a restricted
+delete cannot race an earlier application-side probe. Cascade, disconnect,
+projection, identity, captured, derived-backend, unregistered custom-backend, and
+caller-transaction shapes keep the interactive path.
+
+The same exact-root programs serve eligible singleton `update()` and
+`delete()` calls without changing their per-operation hook contract. On an
+interactive PostgreSQL root, the guarded mutation owns a short transaction;
+on the single-submission transports it remains one batch. A node
+update with no unique/identity sidecars (disjointness has no update-side
+transition) may carry its fulltext/vector replacements in the same program. A
+`cardinality: "many"` edge update with no durable match identity, performs one
+authoritative preimage read, validates and merges properties in TypeGraph, then
+submits one guarded atomic update. Every direct edge delete, and a restricted
+node delete with supported claim cleanup, performs its existing live-row gate
+and then submits one guarded atomic delete. Missing or tombstoned deletes remain
+hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
+history/revision capture, ordinary derived backends, and unregistered custom
+families retain the complete portable transaction path.
+The guarded update converges optimistically rather than holding a transaction
+lock across its read and write. A one-row update gets four attempts; sustained
+same-row contention can still end in `DatabaseOperationError`, while larger
+resolved batches retain their two-attempt budget to bound retry cost.
+
+These operations are registered through an exact-resource mutation execution
+profile. Create and delete are **closed programs**: validation and arbitration
+can be expressed by the submitted SQL itself. Node `bulkReplaceById()` is also
+a closed program: every item supplies a complete document, so eligible bundled
+roots submit missing-row creation, live replacement, tombstone resurrection,
+claim release/acquisition, and fulltext/vector transitions in one read-free
+atomic exchange. Live rows preserve their validity windows; resurrected rows
+receive a fresh stamped window. Operational Identity and history/revision
+capture retain the portable path.
+
+`bulkUpsertById()` is deliberately different. It first reads authoritative
+stored properties, then merges and validates them before its write set is
+known. On bundled serverless roots, a
+distinct-ID batch with no claims, Operational Identity, durable
+edge match identity, temporal mutation, history, or revision capture submits
+its resolved mutation set, including node fulltext/vector replacements, as one
+atomic exchange. An eligible set on bundled
+session-capable PostgreSQL stays inside its exact open transaction and
+dispatches the same reviewed program through a separate registration bound to
+that pinned transaction. Its `applied | unsupported` result is explicit:
+`unsupported` is returned only before any program SQL runs, after which the
+collection enters the complete portable path. Update-only sets use one
+guarded set update. A set containing both fresh creates and live updates carries
+both legs plus a zero-write terminal postimage assertion in the same native
+batch; an incomplete preimage deliberately aborts the batch before any create
+can commit. Repeated IDs, resurrections, temporal changes, claims, edge
+sidecars, and
+unregistered transaction sessions retain the consolidated interactive path.
+The exact session may be collection-opened, supplied by `store.transaction()`,
+or adopted from the caller. A
+session program uses a savepoint so a deliberate database refusal can be rolled
+back and diagnosed without poisoning the caller's surrounding PostgreSQL
+transaction.
+
+Measured at the libSQL transport boundary, eligible plain node
+`bulkInsert()` and `bulkCreate()` calls each submit one exchange for generated,
+caller-supplied, and mixed ID batches. A one-chunk unconstrained edge
+batch remains 1 exchange, a durable-match batch drops from 6 transport
+submissions to 1 atomic exchange, and a cardinality-constrained batch drops
+from 8 transport submissions to 1 atomic exchange. Eligible one-chunk node and
+edge `bulkDelete()` calls likewise submit 1 atomic exchange instead of a
+transaction plus per-row probes/writes. On the portable edge path, one batched
+authoritative read plus one set-based soft delete replaces the former two
+statements per input. Eligible `nodes.bulkReplaceById()` calls submit 1 atomic
+exchange with no preimage read, including claim and projection sidecars.
+Eligible update-only and mixed create/update node and edge
+`bulkUpsertById()` calls whose preimages fit one bind-budget read submit 2
+exchanges: one batched preimage read and one atomic mutation exchange. Mixed
+sets previously required separate create and update submissions after the read,
+so they fall from 3 exchanges to 2 (33%). D1's 100-parameter budget admits 17
+node mutations or 6 edge mutations per mutation statement. One D1 native
+submission accepts at most 512 node members or 187 edge members; larger sets
+fail closed to the portable path rather than constructing an unbounded
+transport request. Within that ceiling, the mutation program chunks statements
+inside one atomic batch, and a terminal postimage assertion for every chunk
+rolls the complete submission back if any guarded member moved. When the
+preimage read also exceeds its bind budget, it costs one read exchange per read
+chunk plus the single atomic mutation submission. Other backends derive their
+per-statement chunk size from their declared parameter budget and retain an
+absolute 512-member submission ceiling. The native exchange still contains the
+SQL statements needed for inserts and node projection sidecars; it groups
+fulltext and per-vector-slot transitions into set statements and submits them
+as one transaction so they do not each pay network latency. The exact previous
+count varies by driver and endpoint shape. The program also proves the exact
+durable contribution-marker identity and strategy signature in that
+submission. A newly constructed backend therefore pays no separate cold marker
+read before an eligible projected write. Missing, stale, failed, or
+unmaterialized evidence aborts the whole submission; the failure path then
+reads committed marker state to recover the existing typed contribution
+diagnostic. The marker proof is an additional SQL statement inside that atomic
+submission, so the optimization removes a network exchange rather than all
+server-side proof work. Schemas with more marker identities may require more
+than one proof statement within the same submission.
+
+On session-capable PostgreSQL, the preimage read and mutation program remain in
+one collection-owned transaction. The program has a bounded number of
+statements independent of row count within its bind ceiling; it is not described
+as a single network exchange because wire-protocol drivers execute those
+statements on the pinned session. The gain is removal of the portable
+per-family/per-member write-plan fan-out while retaining whole-call rollback.
+
+These are internal execution optimizations, not a public Store batch API.
+History/revision capture, ordinary derived or custom backends, dynamic
+get-or-create convergence, and other unsupported shapes retain their
+transaction or fallback behavior. Eligible mixed sets inside a bundled
+PostgreSQL transaction are the narrow session-bound exception.
 
 ### Single vs bulk operations
 
@@ -85,13 +346,15 @@ For small numbers of writes, individual `create()` calls inside a transaction ar
 volumes, use the bulk collection APIs — they use multi-row INSERTs and handle parameter chunking
 internally.
 
-| Method | Returns results | Use case |
-|--------|----------------|----------|
-| `bulkCreate(items)` | Yes | Need created nodes back |
-| `bulkInsert(items)` | No | Maximum throughput ingestion |
-| `bulkUpsertById(items)` | Yes | Idempotent import (create or update by ID) |
-| `bulkDelete(ids)` | No | Mass soft-delete |
-| `trustedImportGraphStream(store, chunks)` | No | Fastest initial load into a fresh dedicated database |
+| Method                                    | Returns results | Use case                                             |
+| ----------------------------------------- | --------------- | ---------------------------------------------------- |
+| `bulkCreate(items)`                       | Yes             | Need created nodes back                              |
+| `bulkInsert(items)`                       | No              | Maximum throughput ingestion                         |
+| `bulkUpsertById(items)`                   | Yes             | Idempotent import (create or update by ID)           |
+| `bulkReplaceById(items)`                  | Yes             | Idempotent complete-document replacement by ID       |
+| `bulkDelete(ids)`                         | No              | Mass soft-delete                                     |
+| `bulkHardDelete(ids)`                     | No              | Mass permanent removal (retention, cleanup)          |
+| `trustedImportGraphStream(store, chunks)` | No              | Fastest initial load into a fresh dedicated database |
 
 The collection APIs remain the default: they validate data and maintain every
 configured constraint and sidecar. For a one-time initial load whose producer
@@ -103,18 +366,33 @@ maintain.
 
 ### PostgreSQL parameter limits
 
-PostgreSQL has a 65,535 bind parameter limit per statement. TypeGraph automatically chunks bulk
-operations to stay within this limit:
+PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a portable
+65,533-parameter budget across its bundled drivers. Bulk operations are automatically chunked to
+stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
-- Edge inserts: ~5,400 per chunk (12 params per edge)
+- Edge inserts: ~4,680 per chunk (budgeted at 14 params per durable edge)
 
 You don't need to chunk manually — pass arrays of any size and TypeGraph handles the rest.
 
 ### Transaction wrapping
 
-Bulk operations are individually transactional (each chunk is atomic), but if you need the
-entire batch to be atomic, wrap it in a transaction:
+On a transaction-capable backend, each bulk method call made on the store is atomic across all of
+its bind-budget chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
+eligible plain node `bulkDelete()` calls, and direct edge
+`bulkInsert()` / `bulkCreate()` / `bulkDelete()` calls also provide
+whole-call atomicity on bundled transactionless roots through one native
+atomic exchange, including durable-match and cardinality-constrained edge
+batches. Other
+bulk shapes on a transactionless root either refuse when their contract requires a fence or use
+their documented non-atomic path. A certified atomic SQL program is available only to operations
+whose closed statement contract has been proven by the backend conformance runner; it does not
+make arbitrary Store calls atomic.
+`store.transaction()` refuses before
+invoking its callback on a transactionless root; it never presents sequential writes as atomic.
+
+To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
+transaction:
 
 ```typescript
 // Atomic: all-or-nothing for the entire import
@@ -125,7 +403,63 @@ await store.transaction(async (tx) => {
 });
 ```
 
-Without the wrapping transaction, a failure partway through would leave partial data.
+Without the wrapping transaction, a failure in a later bulk call leaves earlier calls committed.
+
+#### Catching a bulk refusal inside a transaction
+
+A bulk call's atomicity comes from the transaction it runs in, and that
+decides what a refused batch leaves behind:
+
+- **Called on the store**, the bulk method owns its transaction. A refusal
+  from any item rolls the whole call back: nothing of the batch is written.
+- **Called on `tx` inside `store.transaction(...)`**, the bulk method runs on
+  your transaction and opens none of its own. The write layer has no
+  savepoint to roll one bulk call back to, so the bulk methods reach every
+  verdict their items can raise by reading before their first write: a
+  refusal you catch inside the callback leaves none of the batch written,
+  and the transaction can commit.
+
+```typescript
+await store.transaction(async (tx) => {
+  try {
+    await tx.nodes.Person.bulkUpsertById(items);
+  } catch (error) {
+    // Nothing of `items` was written on `tx` by the refused call, unless a
+    // concurrent writer raced it: rethrow to roll the transaction back
+    // when that must not be left to chance.
+    throw error;
+  }
+});
+```
+
+That covers `bulkUpsertById` and `bulkReplaceById`, whose updates are
+judged together with the creates they write first; `bulkGetOrCreateByConstraint`
+and `bulkGetOrCreateByEndpoints`, whose matched items are judged together
+with the rows they create; the composition batches (`bulkCreate` /
+`bulkInsert` with `partOf`, `bulkReparent`); and, on an identity graph,
+every node create, whose identity fold on a caller-chosen id is read before
+the insert. A batch is judged as the state it produces, in the order it
+writes, so a later item may take a unique key or a cardinality allowance an
+earlier item gives up and is refused one an earlier item takes. A concurrent
+writer that the per-graph write fence does not exclude can still claim a key
+or remove a row between a batch's reads and its writes; that refusal comes
+from the write, after earlier items wrote. See
+[A bulk refusal caught inside `store.transaction` can keep earlier rows](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+for what stays outside the guarantee.
+
+Deciding a batch before writing costs reads. A batch that writes its rows one
+at a time (an update half, resurrections, the matched items of a
+get-or-create) prepares every row before the first write, against the rows
+read inside the transaction, and probes the batch's unique keys and
+cardinality claims once more as a set. A `bulkGetOrCreateByConstraint` batch
+with more than one item that owes a write (an update, a resurrection, or an
+attachment not already held), or one such item next to a new row, runs one
+extra fenced pass that reads each item once more before the per-item writes;
+a batch whose matched items all need nothing stays read-only. A
+`bulkUpsertById`, `bulkReplaceById` or `bulkGetOrCreateByEndpoints` batch
+that both creates and updates, and does not run as one native statement,
+writes its creates through the portable create path rather than the native
+batch create program, so they are decided together with the updates.
 
 ### Choosing the right pattern
 
@@ -165,37 +499,267 @@ loop if per-call refreshes still dominate.
 
 ### Batch reads
 
-`getByIds()` on node and edge collections uses a single `SELECT ... WHERE id IN (...)` instead of N
-individual queries. Results are returned in input order with `undefined` for missing entries.
+`getByIds()` on node and edge collections uses `SELECT ... WHERE id IN (...)` — one statement per
+bind-limit chunk, so a single statement for id counts under the limit — instead of N individual
+queries. Results are returned in input order with `undefined` for missing entries.
 
 ```typescript
 const [alice, bob] = await store.nodes.Person.getByIds([aliceId, bobId]);
 ```
 
-For multiple independent queries with different shapes and filters, use
-[`store.batch()`](/schemas-stores#batch-query-execution) to execute them over a single connection:
+For multiple independent embeddable reads with different shapes and filters, use
+[`store.batchOnce()`](/schemas-stores#batch-query-execution) to execute exactly one statement:
 
 ```typescript
-const [activeUsers, recentOrders] = await store.batch(
-  store.query().from("User", "u")
+const [activeUsers, recentOrders] = await store.batchOnce(() => [
+  store
+    .query()
+    .from("User", "u")
     .whereNode("u", (u) => u.status.eq("active"))
     .select((ctx) => ({ id: ctx.u.id, name: ctx.u.name })),
-  store.query().from("Order", "o")
+  store
+    .query()
+    .from("Order", "o")
     .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
-    .orderBy("o", "createdAt", "desc")
+    .orderBy("o", "meta.createdAt", "desc")
     .limit(20),
+]);
+```
+
+Runtime arrays of compatible `read.subgraph()` calls use one origin-keyed recursive traversal
+by default and can opt into deduplicated entity payloads
+with `store.batchOnce(build, { shareSubgraphs: true })`. This helps overlapping, payload-heavy
+neighborhoods; it adds overhead for membership and per-request reconstruction, so the independent
+per-request payload remains the default. Measure the real root overlap and projection rather than
+enabling sharing universally.
+
+Compare the [concrete sharing examples](#choosing-shared-subgraphs) before enabling the option.
+
+The callback's batch-scoped builder composes set-oriented reads in the same call:
+
+```typescript
+const [latest, versionCount, detail] = await store.batchOnce((read) => [
+  read.neighbors(document, {
+    edges: ["hasVersion"],
+    orderBy: { by: "node", field: "sequence", direction: "desc" },
+    limit: 1,
+  }),
+  read.countNeighbors(document, { edges: ["hasVersion"] }),
+  read.subgraph(document, { edges: ["hasSection"], maxDepth: 2 }),
+]);
+```
+
+The returned collection may be a runtime-sized array, including `roots.map(...)`. Empty arrays
+execute zero statements; every nonempty array, including a singleton, executes exactly one or is
+refused before execution. The portable ceiling is 500 reads and the final statement must fit the
+backend's bind-parameter budget. Since all member rows are returned in materialized JSON envelopes,
+use bounded projections and limits; `batchOnce()` does not stream, predict payload size, or impose a
+response-byte cap.
+
+When a request needs several independent neighborhoods, prefer one runtime batch over awaiting
+`store.subgraph()` in a loop, especially when the database is remote:
+
+```typescript
+const neighborhoods = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root, {
+      edges: ["knows", "worksAt"],
+      maxDepth: 2,
+      project: {
+        nodes: { Person: ["name"], Company: ["name"] },
+        edges: { knows: [], worksAt: ["role"] },
+      },
+    }),
+  ),
 );
 ```
 
+This changes several database round trips into one. Each subgraph still has its own recursive CTE and
+hydration work: By default, `batchOnce()` does not merge roots, share traversal, or guarantee less database CPU.
+For one large closure, the direct backend-tuned `store.subgraph()` path can be faster. Use
+`batchOnce()` when round-trip latency across several independent, bounded subgraphs is the cost to
+remove, and measure both forms when database work dominates.
+
+When the response needs a list of matching child records per parent, use a relation grouped by the
+parent key and [`expr.collect()` with named scalar fields](/queries/relations#ordered-collections).
+That aggregates the selected fields into ordered records in one query. Apply
+[`topPerPartition()`](/queries/relations#top-n-per-parent) before grouping when each parent needs
+only its highest-priority or most recent N children. The database chooses winners before returning
+results; it may still scan and sort all candidates. For several independent,
+bounded subgraphs, keep using the `batchOnce(read => roots.map(root => read.subgraph(...)))` pattern
+above; record collection does not replace subgraph hydration.
+
+Use `store.batch()` when queued edge collection reads must participate. It runs them in sequence.
+On a transactional backend it still issues at least one statement per query plus
+`begin`/`commit`, so N queries are N+2 round trips at best; without transactions there is no
+framing. It buys a connection profile that never peaks at N — not lower latency, and not a snapshot
+(PostgreSQL's default read-committed isolation lets a later query see a newer commit).
+
 Edge collection `batchFind*` methods (`batchFindFrom`, `batchFindTo`, `batchFindByEndpoints`) also
-participate in `store.batch()`, replacing N individual `findFrom`/`findTo` calls with a single
-transactional round-trip.
+participate in `store.batch()`. On a transactional backend they move N `findFrom`/`findTo` calls
+into one transaction — the statement count is unchanged either way. If the round trips are what
+hurt, replace the calls with `store.neighbors()` / `store.countNeighbors()` or a traversal (one
+statement), or compose the batch-scoped `read.neighbors()`, `read.countNeighbors()`, and
+`read.subgraph()` forms in `batchOnce()`.
+
+The same read family is available on `TransactionContext`. Use `tx.neighbors()`,
+`tx.countNeighbors()`, or `tx.subgraph()` for a direct read that must see earlier writes in the
+callback. Use `tx.batchOnce()` to combine independent transaction-bound reads into exactly one
+statement on the held connection; fluent items in that batch start from `tx.query()`. Direct
+`tx.subgraph()` also uses its one-statement plan so it never submits concurrent statements to the
+held transaction connection.
+
+Direct `store.subgraph()` and batch-scoped `read.subgraph()` share one semantic planner and produce the
+same result, but intentionally use different physical plans. The direct form uses 2 statements
+on SQLite and 3 on PostgreSQL so each backend can hydrate a closure efficiently. The scoped form
+uses 1 statement everywhere to make cross-shape composition possible. On PostgreSQL, prefer the
+direct form for a standalone large closure; use the batch-scoped form when eliminating network round
+trips across several independent reads matters more than optimizing that closure in isolation.
+
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+[Edge Collections](/schemas-stores#edge-collections)).
+Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
+itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
+on the same index prefix seek the singleton read uses — and return the edges grouped per input:
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+This is the fix for the "list view with relationship counts" N+1: statement count grows with
+endpoint kinds and bind-budget chunks instead of with every item on the page. Pass `limitPerInput`
+to bound each endpoint's fan-out.
+
+If a view spans several source kinds and edge kinds, use the Store-level
+`bulkFindEdgesFrom` operation instead of calling each licensed edge collection separately. It
+accepts heterogeneous source groups and edge kinds, then executes one set-oriented statement per
+bind-budget chunk. Round trips therefore grow with input size, not with the number of licensed
+`(source kind, edge kind)` combinations:
+
+```typescript
+const edgesBySource = await store.bulkFindEdgesFrom({
+  sources: [
+    { kind: "Company", ids: companyIds },
+    { kind: "Person", ids: personIds },
+  ],
+  edgeKinds: ["employs", "owns", "dependsOn"],
+});
+// edgesBySource[i] identifies its source and contains that source's matching edges
+```
 
 :::note[Operation hooks]
-Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item operation hooks for
-throughput. Query hooks still fire normally. See
+Bulk operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkHardDelete`) skip per-item
+operation hooks for throughput, and the bulk hooks (`onBulkOperationStart` / `onBulkOperationEnd`) do not stand in
+for them — those fire only for node `updateWhere`, so a bulk method emits no hook events at all, neither per-item nor
+bulk. To observe every individual write, call the single-item method instead. Query hooks still fire normally. See
 [Schemas & Stores](/schemas-stores#observability-hooks) for details.
 :::
+
+#### Choosing shared subgraphs
+
+Consider a `Person` graph with `name` and a long `biography` property, connected by
+outgoing `knows` edges. The following examples use the same Store and bounded depth.
+Sharing preserves a separate subgraph for each input root; it changes the database
+plan and response encoding, not the returned neighborhoods.
+
+**Good candidate: overlapping neighborhoods with substantial properties.** Ada and
+Bea both know Cara, and Cara knows Dev:
+
+```text
+Ada ──knows──▶ Cara ──knows──▶ Dev
+Bea ──knows──▶ Cara
+```
+
+Both depth-two subgraphs contain Cara and Dev. If their biographies are several
+kilobytes each, per-request payloads repeat that property data. Enable sharing so the
+compatible reads send those shared entities once:
+
+```typescript
+const overlapping = await store.batchOnce(
+  (read) =>
+    [ada, bea].map((root) =>
+      read.subgraph(root, {
+        edges: ["knows"],
+        maxDepth: 2,
+        project: { nodes: { Person: ["name", "biography"] } },
+      }),
+    ),
+  { shareSubgraphs: true },
+);
+// overlapping[0]: Ada, Cara, Dev
+// overlapping[1]: Bea, Cara, Dev
+// Each result owns independent projected values, including nested objects.
+```
+
+**Disjoint neighborhoods.** Suppose Erin knows Finn, Finn knows
+Gia, Hana knows Ivan, and Ivan knows Jules, with no connections between the groups:
+
+```text
+Erin ──knows──▶ Finn ──knows──▶ Gia
+Hana ──knows──▶ Ivan ──knows──▶ Jules
+```
+
+No entities are reused across roots. Sharing adds membership information without
+removing duplicate biographies. Default `batchOnce()` still combines the two reads
+into one statement:
+
+```typescript
+const disjoint = await store.batchOnce((read) =>
+  [erin, hana].map((root) =>
+    read.subgraph(root, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: ["name", "biography"] } },
+    }),
+  ),
+);
+```
+
+**Overlapping roots, identity-only results.** A graph
+preview might need only connectivity, even when the stored biographies are large.
+Use empty property selections to retain identities and edge endpoints without
+transferring biographies:
+
+```typescript
+const connectivity = await store.batchOnce((read) =>
+  [ada, bea].map((root) =>
+    read.subgraph(root, {
+      edges: ["knows"],
+      maxDepth: 2,
+      project: { nodes: { Person: [] }, edges: { knows: [] } },
+    }),
+  ),
+);
+```
+
+Overlap alone does not make sharing a payload optimization here: little repeated
+property data remains to remove. Sharing may still improve latency, so measure
+both response size and elapsed time before choosing it.
+
+The payload tradeoff depends on how much entity data repeats across requests versus the size
+of the membership information. Benchmark response size and elapsed time for your actual roots,
+projections, and database route before choosing the option.
+
+The [historical SQLite report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-sqlite-2026-09-14.md),
+[PostgreSQL report](https://github.com/nicia-ai/typegraph/blob/6196354c/packages/benchmarks/reports/subgraph-batch-postgres-2026-09-14.md),
+and [remote Neon report](https://github.com/nicia-ai/typegraph/blob/cffd0082906bffd5f5e993dfeede1e01e6e6f300/packages/benchmarks/reports/subgraph-batch-neon-oregon-2026-09-15.md)
+describe the older planner. Their timings and percentage differences are not recommendations
+for the current origin-keyed traversal.
+
+Sharing also requires compatible options. Different edge sets, depths, temporal
+coordinates, projections, or edge windows can keep reads in separate groups even
+when their results overlap. For example, a social `knows` neighborhood and an
+employment `worksAt` neighborhood still fit in one `batchOnce()` call, but enabling
+sharing does not fuse those incompatible plans.
+PostgreSQL refuses more than 25 independent recursive plans in one batch: emitted fluent recursive
+stages, historical identity ledger reconstructions, and subgraph groups after compatible roots
+combine. Historical identity expansion consumes a slot even in an otherwise nonrecursive read.
+This single allowance applies in both payload modes. `shareSubgraphs` does not combine fluent
+queries; split reads into explicit `batchOnce()` calls when they exceed the allowance. If one
+composed read alone exceeds it, simplify the read or use standalone `.execute()`, which does not
+impose this batch budget.
 
 ## Connection Management
 
@@ -206,15 +770,17 @@ for the ownership matrix and shutdown examples.
 
 ### PostgreSQL pooling
 
-Always use a connection pool in production. TypeGraph issues one SQL statement per query, so pool
-utilization is straightforward — no long-held connections or multi-statement conversations.
+Always use a connection pool in production. An individual query holds a connection only while each
+statement runs. Most queries issue a single statement; a query whose selective-field mapping falls
+back issues a second. `store.transaction()` holds one connection for the whole callback, and
+`store.batch()` does the same for its implicit transaction.
 
 ```typescript
 import { Pool } from "pg";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,                       // Size based on your concurrency needs
+  max: 20, // Size based on your concurrency needs
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 2_000,
 });
@@ -224,14 +790,18 @@ pool.on("error", (err) => {
 });
 ```
 
-**Sizing guidance:** Each concurrent query uses one connection for the duration of that single SQL
-statement. A pool of 10–20 connections handles most workloads. If you're running bulk imports in
-parallel, size up accordingly.
+**Sizing guidance:** Each concurrent query holds one connection for as long as its statement runs.
+A pool of 10–20 connections handles most workloads. If you're running bulk imports in parallel,
+size up accordingly.
 
 **Reducing pool pressure with `batch()`:** When loading multiple independent queries (e.g., a
-detail page with several relationship types), `Promise.all` acquires N connections simultaneously.
-[`store.batch()`](/schemas-stores#batch-query-execution) runs all queries over a single connection
-within an implicit transaction, reducing N connections to 1 while guaranteeing snapshot consistency.
+detail page with several relationship types), `Promise.all` can acquire up to N connections
+simultaneously — fewer if the pool is undersized or saturated, in which case it queues instead.
+[`store.batch()`](/schemas-stores#batch-query-execution) keeps at most one query in flight, so peak
+connection use is 1 — on a transactional backend that is literally one checked-out connection for
+the implicit transaction; elsewhere it is one at a time, and whether the adapter reuses the same
+client is its own business. It does not reduce the statement count, and read-committed isolation
+means it is not a snapshot.
 
 ### SQLite concurrency
 
@@ -265,6 +835,26 @@ await store.transaction(
 
 Available levels: `read_uncommitted`, `read_committed` (default), `repeatable_read`, `serializable`.
 
+Schema-managed Stores fence writes against concurrent schema-version commits.
+That includes Stores opened by `createStoreWithSchema`,
+`createAdapterStoreWithSchema`, `createVerifiedStore`, or
+`createVerifiedAdapterStore`; an adapter Store constructed with a cached
+`{ reconciled }` snapshot; and Stores returned by `evolve()` or rebound from
+one of those Stores. `store.introspect().schemaVersion !== undefined` is the
+runtime test.
+
+PostgreSQL reacquires and validates the active-schema row lock at every managed
+write. The lock is normally reentrant and remains held to transaction end, but
+the repeated check is required because rolling back to a caller-created
+savepoint releases row locks acquired after that savepoint. At
+`repeatable_read` or `serializable`, a concurrent schema commit can raise
+PostgreSQL's normal serialization failure; retry the whole transaction.
+Graph-merge commits already retry those failures automatically. Raw
+`createStore` / `createAdapterStore` instances without a reconciled snapshot,
+and writes issued directly through a backend, do not carry schema metadata and
+remain outside this guarantee. `store.clear()` also resets the cleared Store to
+that raw state.
+
 SQLite always operates at `serializable` isolation.
 
 ## Query Optimization Features
@@ -273,10 +863,14 @@ SQLite always operates at `serializable` isolation.
 
 When you define an ontology (e.g., `subClassOf`, `implies`), TypeGraph precomputes the full
 transitive closure at store initialization. Queries like
-`.from("Parent", "p", { includeSubClasses: true })` use a pre-calculated list of kinds rather than
+`.from("Parent", "p", { expansion: "subclasses" })` use a pre-calculated list of kinds rather than
 recursive lookups at runtime.
 
 ### Smart Select
+
+For explicit SQL field selection, prefer [`project()`](/queries/expressions#projection-and-mapping).
+Use `map()` afterward for JavaScript transformations. This avoids legacy selector probing
+and makes the database projection explicit.
 
 TypeGraph automatically optimizes queries based on which fields your `select()` callback accesses.
 When you select specific fields, TypeGraph generates SQL that only extracts those fields using
@@ -307,16 +901,23 @@ a workaround.
 
 **When optimization applies:**
 
-| Pattern | Optimized? | Reason |
-|---------|-----------|--------|
-| `ctx => ({ email: ctx.p.email })` | Yes | Simple field extraction |
-| `ctx => [ctx.p.id, ctx.p.name]` | Yes | Multiple fields in array |
-| `ctx => ctx.p` | No | Whole node returned |
-| `ctx => ({ upper: ctx.p.email.toUpperCase() })` | Yes | Field extracted; method runs in JS |
-| `ctx => ({ ...ctx.p })` | No | Spread requires full node |
+| Pattern                                         | Optimized? | Reason                             |
+| ----------------------------------------------- | ---------- | ---------------------------------- |
+| `ctx => ({ email: ctx.p.email })`               | Yes        | Simple field extraction            |
+| `ctx => [ctx.p.id, ctx.p.name]`                 | Yes        | Multiple fields in array           |
+| `ctx => ctx.p`                                  | No         | Whole node returned                |
+| `ctx => ({ upper: ctx.p.email.toUpperCase() })` | Yes        | Field extracted; method runs in JS |
+| `ctx => ({ ...ctx.p })`                         | No         | Spread requires full node          |
 
 The optimization is transparent — if your callback can't be optimized, TypeGraph automatically
 falls back to fetching the full node data.
+
+For data-dependent callbacks, TypeGraph first plans with representative values, including a
+high-value pass that covers common numeric threshold branches. If an unobserved branch accesses an
+additional field at execution time, the first miss may require a second statement that fetches the
+full row. Prepared queries remember that missing-field failure and use the full-row plan directly on
+later executions. Comparisons against arbitrary string values can still take an unobserved branch;
+the high-value pass does not guarantee that every possible callback path is planned in advance.
 
 :::note[Select callback purity]
 Smart select applies to `.execute()`, `.paginate()`, and `.stream()`. The `select()` callback may be evaluated
@@ -341,15 +942,19 @@ For application-specific indexes on JSON properties, see [Indexes](/performance/
 ### SQL Compilation
 
 Each builder method (`.where()`, `.limit()`, `.orderBy()`, etc.) returns a new immutable instance.
-`.execute()`/`.toSQL()`/`.compile()` compile fresh SQL from the AST on every call — this applies to
-standard queries, aggregate queries, and set-operation queries (`union`, `intersect`, `except`).
-Compilation is pure, in-memory string-building with no I/O, so recompiling is cheap; the query's
-actual database round-trip dominates the cost either way.
 
-This is deliberate, not just unoptimized: a "current" (live) read binds its temporal-validity filter
-to the instant it's compiled at. Caching compiled SQL across calls would freeze that instant at
-whichever call first triggered compilation, silently hiding any row created afterward from every
-later call on the same query instance.
+A reused query instance compiles **once**. The first `.execute()` builds a cached template and every
+later call reuses it — for standard queries, aggregate queries, set-operation queries (`union`,
+`intersect`, `except`), and prepared queries alike. Explicit `.toSQL()` / `.compile()` calls are the
+exception: they compile on demand every time, because producing the statement is the thing the
+caller asked for.
+
+The subtlety a cache like that has to survive is freshness. A "current" (live) read filters on
+temporal validity as of the instant it runs, so a template with a concrete "now" baked into it would
+freeze that instant for the query instance's whole lifetime, hiding every row created afterward. The
+template therefore reserves the read instant as a **placeholder** rather than a value, and each
+execution fills it with a fresh instant alongside that call's bindings. Nothing in the statement's
+text depends on either, so reuse costs no freshness.
 
 ```typescript
 const activeUsers = store
@@ -358,35 +963,64 @@ const activeUsers = store
   .whereNode("u", (u) => u.status.eq("active"))
   .select((ctx) => ctx.u);
 
-// Each call compiles AST → SQL fresh, so a user created between these two
-// calls is visible to the second one.
+// One compilation, two executions. The read instant is bound per call, so a
+// user created between these two is visible to the second one.
 await activeUsers.execute();
 await activeUsers.execute();
 ```
+
+Two things fall back to compiling on every call:
+
+- **Backends that cannot execute pre-compiled SQL text** — a custom or async backend, i.e. one
+  without `executeRaw`.
+- **Statements whose execution semantics ride on the compiled SQL object rather than its text**,
+  even on PostgreSQL with `executeRaw` fully available. Two query shapes do: **approximate vector
+  search** (`similarTo(..., { approximate: true })`, which carries the pgvector / `sqlite-vec`
+  iterative-scan wrapper) and **`store.subgraph()` on PostgreSQL**, whose (kind, id)-array fetches are
+  marked to force a custom plan so the planner sizes them against the actual array rather than
+  reusing a generic one. Flattening either to cacheable text would silently drop the behavior it
+  depends on, so they are excluded deliberately — the trade is a template hit against correct
+  execution, and correctness wins.
+
+Compilation is pure, in-memory string-building with no I/O, so both fallbacks are cheap; the query's
+database round-trip dominates either way. Worth knowing if you are profiling a vector query and
+expecting the compile-once behavior described above — that is the one shape where it does not apply.
 
 ### Prepared Queries
 
 For hot paths that execute the same query shape with different values, `.prepare()` builds and
 structurally validates the query AST once — a malformed query fails fast, before the first
-`.execute()`, instead of on first use. The AST itself carries no timestamp, so this validation is
-safe to do once and reuse. SQL text is still compiled fresh on every `.execute(bindings)` call, for
-the same reason as above: the compiled text is what carries the current-read instant, the bound
-parameter values, and the query's structure.
+`.execute()`, instead of on first use — and compiles the statement once into a cached template. Each
+`.execute(bindings)` fills that template's placeholders (a fresh read instant plus the call's own
+parameter values) and runs the cached text directly through `executeRaw`.
 
-When `executeRaw` is available (both SQLite and PostgreSQL backends), the freshly compiled SQL text
-is sent directly to the driver with the bindings substituted in.
+Because arity never reaches the SQL text, a list-valued parameter reuses the same template no matter
+how long the list is:
 
-Best for: validating a query shape once (fail fast on a malformed query) and reusing it with
-different parameter values — not for avoiding SQL compilation cost, which is negligible next to the
-database round-trip.
+```typescript
+const byIds = store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.id.in(param("ids")))
+  .select((ctx) => ctx.p)
+  .prepare();
+
+await byIds.execute({ ids: ["a", "b", "c"] });
+await byIds.execute({ ids: ["d"] }); // same compiled statement
+```
+
+Best for: validating a query shape once, then reusing it with different parameter values. The saved
+compilation is real but small — the database round-trip still dominates.
 
 See [Prepared Queries](/queries/execute#prepared-queries) for usage details.
 
 ### Subgraph extraction
 
 For the "load entity with all relationships" pattern, [`store.subgraph()`](/schemas-stores#subgraph-extraction)
-is the fastest strategy. It compiles to a single recursive CTE that fans out across all specified
-edge types in one round trip — no matter how many relationship kinds are involved. See
+is a backend-tuned option for a single bounded neighborhood. It compiles to a recursive CTE
+that fans out across all specified edge
+types in a fixed 2 statements on SQLite and 3 on PostgreSQL — no matter how many relationship kinds
+are involved, or how much it returns. See
 [Choosing a query strategy](/schemas-stores#choosing-a-query-strategy) for guidance on when to use
 `subgraph()` vs the fluent query builder vs manual `findFrom` calls.
 
@@ -398,19 +1032,21 @@ full `props` blob transfer and metadata columns for projected kinds.
 
 ### Filter early
 
-Apply `.whereNode()` predicates as early as possible in your query chain. TypeGraph moves these
-predicates into the initial CTEs, reducing the number of rows that need to be joined in subsequent
-steps.
+Use `.whereNode()` and `.whereEdge()` for match constraints that should restrict expansion.
+The compiler applies them at the matching stage regardless of their position in the chain.
+Use scoped `.where()` when the condition must filter completed rows; moving a completed-row
+condition into an optional match or recursive hop can change its meaning.
 
 ### Select specific fields
 
-When you only need certain fields, select them explicitly rather than returning whole nodes.
-This triggers the [smart select optimization](#smart-select) and can enable index-only scans with
-properly configured indexes.
+When you only need certain fields, use `project()` to make the SQL projection explicit.
+Legacy `select()` also supports [smart select optimization](#smart-select). Smaller projections
+reduce transferred data and may benefit from covering indexes, subject to the engine limitations
+described above.
 
 ```typescript
 // Preferred: Only fetches what you need
-.select((ctx) => ({ name: ctx.p.name, email: ctx.p.email }))
+.project((e) => ({ name: e.p.name, email: e.p.email }))
 
 // Avoid when possible: Fetches entire props blob
 .select((ctx) => ctx.p)
@@ -418,8 +1054,11 @@ properly configured indexes.
 
 ### Use specific kinds
 
-Unless you specifically need to query across a hierarchy, avoid `includeSubClasses: true`. Being
-specific about the node kind allows the SQL engine to use more restrictive index scans.
+A query against a kind with `subClassOf` descendants returns their rows too
+by default. Unless you specifically need to query across the hierarchy, pass
+`{ expansion: "exact" }` (or set `queryDefaults.expansion: "exact"` on the
+store). Being specific about the node kind allows the SQL
+engine to use more restrictive index scans.
 
 ### Use cursor pagination
 
@@ -478,46 +1117,46 @@ and schema/data shape.*
 
 Current suite configuration:
 
-| Setting | Value |
-|---------|-------|
-| Seed users | 1200 |
-| Follows per user | 10 |
-| Posts per user | 5 |
-| Batch size | 250 |
-| Warmup iterations | 2 |
-| Sample iterations (median reported) | 15 |
+| Setting                             | Value |
+| ----------------------------------- | ----- |
+| Seed users                          | 1200  |
+| Follows per user                    | 10    |
+| Posts per user                      | 5     |
+| Batch size                          | 250   |
+| Warmup iterations                   | 2     |
+| Sample iterations (median reported) | 15    |
 
 Default guardrails:
 
-| Check | Threshold |
-|-------|-----------|
-| reverse/forward ratio | <= 6x |
-| inverse traversal latency | <= 500ms |
-| inverse/forward ratio | <= 10x |
-| 3-hop latency | <= 500ms |
-| 3-hop/2-hop ratio | <= 8x |
-| aggregate latency | <= 500ms |
-| aggregate distinct latency | <= 700ms |
-| aggregateDistinct/aggregate ratio | <= 4x |
-| cached execute latency | <= 500ms |
-| prepared execute latency | <= 500ms |
-| prepared/cached ratio | <= 2x |
-| 10-hop recursive latency | <= 250ms |
-| 100-hop recursive latency | <= 1000ms |
-| 100-hop-recursive/10-hop-recursive ratio | <= 30x |
-| 1000-hop recursive latency | <= 5000ms |
-| 1000-hop-recursive/100-hop-recursive ratio | <= 20x |
+| Check                                      | Threshold |
+| ------------------------------------------ | --------- |
+| reverse/forward ratio                      | <= 6x     |
+| inverse traversal latency                  | <= 500ms  |
+| inverse/forward ratio                      | <= 10x    |
+| 3-hop latency                              | <= 500ms  |
+| 3-hop/2-hop ratio                          | <= 8x     |
+| aggregate latency                          | <= 500ms  |
+| aggregate distinct latency                 | <= 700ms  |
+| aggregateDistinct/aggregate ratio          | <= 4x     |
+| cached execute latency                     | <= 500ms  |
+| prepared execute latency                   | <= 500ms  |
+| prepared/cached ratio                      | <= 2x     |
+| 10-hop recursive latency                   | <= 250ms  |
+| 100-hop recursive latency                  | <= 1000ms |
+| 100-hop-recursive/10-hop-recursive ratio   | <= 30x    |
+| 1000-hop recursive latency                 | <= 5000ms |
+| 1000-hop-recursive/100-hop-recursive ratio | <= 20x    |
 
 Backend-specific overrides:
 
-| Backend | Check | Threshold |
-|---------|-------|-----------|
-| SQLite | 1000-hop recursive latency | <= 7000ms |
-| PostgreSQL | inverse traversal latency | <= 1000ms |
-| PostgreSQL | inverse/forward ratio | <= 30x |
-| PostgreSQL | 3-hop latency | <= 1000ms |
+| Backend    | Check                      | Threshold |
+| ---------- | -------------------------- | --------- |
+| SQLite     | 1000-hop recursive latency | <= 7000ms |
+| PostgreSQL | inverse traversal latency  | <= 1000ms |
+| PostgreSQL | inverse/forward ratio      | <= 30x    |
+| PostgreSQL | 3-hop latency              | <= 1000ms |
 | PostgreSQL | aggregate distinct latency | <= 1200ms |
-| PostgreSQL | prepared execute latency | <= 700ms |
+| PostgreSQL | prepared execute latency   | <= 700ms  |
 
 </details>
 

@@ -13,20 +13,26 @@
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import {
+  createAdapterStoreWithSchema,
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "../../../src";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 const GRAPH_WRITE_NAMESPACE = "typegraph:recorded-graph-write";
+const RECORDED_CLOCK_NAMESPACE = "typegraph:recorded-clock";
 
 let pool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -89,11 +95,142 @@ function graphWriteLockCount(statements: readonly LoggedStatement[]): number {
   return statements.filter(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      statement.params[0] === GRAPH_WRITE_NAMESPACE,
+      statement.params.includes(GRAPH_WRITE_NAMESPACE),
   ).length;
 }
 
+function recordedClockLockCount(
+  statements: readonly LoggedStatement[],
+): number {
+  return statements.filter(
+    (statement) =>
+      statement.query.includes("pg_advisory_xact_lock") &&
+      statement.params.includes(RECORDED_CLOCK_NAMESPACE),
+  ).length;
+}
+
+function schemaFenceLockCount(statements: readonly LoggedStatement[]): number {
+  return statements.filter((statement) => /for share/i.test(statement.query))
+    .length;
+}
+
 describe("recorded graph-write advisory lock churn", () => {
+  it("leases the pre-callback history fence on the derived target", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const db = drizzle(activePool, {
+      logger: {
+        logQuery(query: string, params: unknown[]) {
+          statements.push({ query, params });
+        },
+      },
+    });
+    const backend = createPostgresBackend(db);
+    const [store] = await createAdapterStoreWithSchema(
+      buildGraph("adopted_schema_fence_lease"),
+      backend,
+      { history: true },
+    );
+
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        // The fence is acquired before this callback. Rolling back a savepoint
+        // created here therefore cannot release it, and both writes can reuse
+        // the lease on the capture-derived target.
+        await externalTx.execute(sql`SAVEPOINT adopted_fence_probe`);
+        await externalTx.execute(
+          sql`ROLLBACK TO SAVEPOINT adopted_fence_probe`,
+        );
+        await tx.nodes.Person.create({ name: "first" }, { id: "adopted-1" });
+        await tx.nodes.Person.create({ name: "second" }, { id: "adopted-2" });
+      });
+    });
+
+    expect(schemaFenceLockCount(statements)).toBe(1);
+
+    // The lease belongs to the derived transaction target and is cleared when
+    // the adopted callback finishes: a later caller transaction must acquire
+    // its own schema fence.
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        await tx.nodes.Person.create({ name: "later" }, { id: "adopted-3" });
+      });
+    });
+    expect(schemaFenceLockCount(statements)).toBe(1);
+  });
+
+  it("keeps per-write fencing for a non-history adopted transaction", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const db = drizzle(activePool, {
+      logger: {
+        logQuery(query: string, params: unknown[]) {
+          statements.push({ query, params });
+        },
+      },
+    });
+    const backend = createPostgresBackend(db);
+    const [store] = await createAdapterStoreWithSchema(
+      buildGraph("adopted_schema_fence_non_history"),
+      backend,
+    );
+
+    statements.length = 0;
+    await db.transaction(async (externalTx) => {
+      await store.withRecordedTransaction(externalTx, async (tx) => {
+        await tx.nodes.Person.create({ name: "first" }, { id: "plain-1" });
+        await tx.nodes.Person.create({ name: "second" }, { id: "plain-2" });
+      });
+    });
+
+    // Non-history adoption has no pre-callback fence to make savepoint-safe,
+    // so each managed write retains the conservative per-write probe.
+    expect(schemaFenceLockCount(statements)).toBe(2);
+  });
+
+  it("leases one schema fence to every write in a TypeGraph-owned transaction", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const backend = createPostgresBackend(
+      drizzle(activePool, {
+        logger: {
+          logQuery(query: string, params: unknown[]) {
+            statements.push({ query, params });
+          },
+        },
+      }),
+    );
+    // `createStoreWithSchema`, rather than `createAdapterStoreWithSchema`,
+    // deliberately exposes the portable Store transaction surface. It has no
+    // `tx.sql`, so the fence acquired before its callback cannot have been
+    // acquired after a caller-controlled savepoint.
+    const [store] = await createStoreWithSchema(
+      buildGraph("schema_fence_lease_churn"),
+      backend,
+    );
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+      await tx.nodes.Person.create({ name: "second" }, { id: "second" });
+    });
+
+    // Removing the transaction-local lease makes this 2: each create calls
+    // the same `lockSchemaVersionForWrite` fence independently.
+    expect(schemaFenceLockCount(statements)).toBe(1);
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "third" }, { id: "third" });
+    });
+
+    // The lease belongs to the transaction target, never the pool/root
+    // backend, so a new transaction always validates again.
+    expect(schemaFenceLockCount(statements)).toBe(1);
+  });
+
   it("acquires the lock once per transaction, not once per write", async (ctx) => {
     const activePool = requirePostgres(ctx);
     const statements: LoggedStatement[] = [];
@@ -124,8 +261,10 @@ describe("recorded graph-write advisory lock churn", () => {
     });
     expect(graphWriteLockCount(statements)).toBe(1);
 
-    // --- Single autocommit write: also exactly one (was two — the
-    //     write-transaction boundary plus the delegate's own write). ---
+    // --- Single managed write: the combined schema/graph fence seeds the
+    //     capture delegate's memo, so the row wrapper does not issue a second
+    //     advisory-lock statement. This is asserted at the driver trace, not
+    //     inferred from backend-member calls. ---
     statements.length = 0;
     await store.nodes.Person.create({ name: "solo" }, { id: "solo" });
     expect(graphWriteLockCount(statements)).toBe(1);
@@ -154,6 +293,55 @@ describe("recorded graph-write advisory lock churn", () => {
     expect(graphWriteLockCount(statements)).toBe(1);
   });
 
+  it("keeps requested revision and graph-write lock ownership distinct", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const backend = createPostgresBackend(
+      drizzle(activePool, {
+        logger: {
+          logQuery(query: string, params: unknown[]) {
+            statements.push({ query, params });
+          },
+        },
+      }),
+    );
+    const [store] = await createStoreWithSchema(
+      buildGraph("requested_revision_lock_churn"),
+      backend,
+      { history: true },
+    );
+
+    statements.length = 0;
+    await store.transaction((tx) => {
+      tx.requestRecordedRevision();
+      return Promise.resolve();
+    });
+
+    expect(graphWriteLockCount(statements)).toBe(0);
+    expect(recordedClockLockCount(statements)).toBe(1);
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      tx.requestRecordedRevision();
+      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+    });
+
+    const graphLockIndex = statements.findIndex(
+      (statement) =>
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
+    );
+    const clockLockIndex = statements.findIndex(
+      (statement) =>
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(RECORDED_CLOCK_NAMESPACE),
+    );
+    expect(graphWriteLockCount(statements)).toBe(1);
+    expect(recordedClockLockCount(statements)).toBe(1);
+    expect(graphLockIndex).toBeGreaterThanOrEqual(0);
+    expect(clockLockIndex).toBeGreaterThan(graphLockIndex);
+  });
+
   it("still serializes: the lock statement is present before row writes", async (ctx) => {
     const activePool = requirePostgres(ctx);
     const statements: LoggedStatement[] = [];
@@ -178,7 +366,7 @@ describe("recorded graph-write advisory lock churn", () => {
     const lockIndex = statements.findIndex(
       (statement) =>
         statement.query.includes("pg_advisory_xact_lock") &&
-        statement.params[0] === GRAPH_WRITE_NAMESPACE,
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
     );
     const insertIndex = statements.findIndex((statement) =>
       statement.query.includes("typegraph_nodes"),

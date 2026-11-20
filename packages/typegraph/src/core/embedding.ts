@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { VectorSlot } from "../query/dialect/vector-strategy";
 import type { GraphDef } from "./define-graph";
+import { objectSchemaShape } from "./kind-schema";
 
 // ============================================================
 // Embedding Brand Symbol
@@ -25,9 +26,15 @@ declare const EMBEDDING_BRAND: unique symbol;
  * At runtime this is just `readonly number[]`, but TypeScript can
  * distinguish it from regular arrays for query builder typing.
  */
-export type EmbeddingValue = readonly number[] & {
-  readonly [EMBEDDING_BRAND]: true;
-};
+export type EmbeddingValue = readonly number[] & EmbeddingBrand;
+
+/**
+ * The type-only tag {@link EmbeddingValue} carries on top of
+ * `readonly number[]`. A value carries no runtime trace of it, so a plain
+ * number array that satisfies an `embedding()` field's validation is a valid
+ * value of that field.
+ */
+export type EmbeddingBrand = Readonly<{ [EMBEDDING_BRAND]: true }>;
 
 // ============================================================
 // Embedding Metadata Symbol
@@ -315,9 +322,8 @@ export const DEFAULT_EMBEDDING_INDEX_TYPE: EmbeddingIndexType = "hnsw";
 export function resolveEmbeddingFields(
   schema: z.ZodType,
 ): readonly ResolvedEmbeddingField[] {
-  if (schema.type !== "object") return [];
-  const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-  if (!shape) return [];
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) return [];
 
   const fields: ResolvedEmbeddingField[] = [];
   for (const [fieldPath, fieldSchema] of Object.entries(shape)) {

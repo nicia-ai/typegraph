@@ -7,6 +7,29 @@ This reference documents the schema definition functions and store API for TypeG
 
 ## Schema Definition
 
+### `defineGraph(config)` annotations
+
+`defineGraph` accepts consumer-owned JSON metadata for the schema as a whole:
+
+```typescript
+const graph = defineGraph({
+  id: "support",
+  annotations: {
+    displayName: "Support knowledge graph",
+    description: "Queryable product and incident knowledge",
+    capabilities: { search: true, temporal: true },
+  },
+  nodes: { Incident: { type: Incident } },
+  edges: {},
+});
+```
+
+The value is available as `graph.annotations`, is persisted in
+`SerializedSchema.annotations`, and is returned by
+`store.introspect().annotations`. It follows the same JSON-only validation and
+canonical hashing rules as per-kind annotations. An absent or empty object is
+omitted from canonical form and retains legacy hashes.
+
 ### `defineNode(name, options)`
 
 Creates a node type definition.
@@ -384,9 +407,11 @@ import { defineGraph } from "@nicia-ai/typegraph";
 
 function defineGraph<G extends GraphDef>(config: {
   id: string;
+  annotations?: GraphAnnotations;
   nodes: Record<string, NodeRegistration>;
   edges: Record<string, EdgeRegistration | EdgeType>;
   ontology?: OntologyRelation[];
+  identity?: GraphIdentityConfig;
   indexes?: IndexDeclaration[];
   defaults?: {
     onNodeDelete?: DeleteBehavior;
@@ -400,17 +425,28 @@ function defineGraph<G extends GraphDef>(config: {
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | `string` | Unique identifier for this graph |
+| `annotations` | `GraphAnnotations` | Optional consumer-owned JSON metadata; see [`defineGraph(config)` annotations](#definegraphconfig-annotations) |
 | `nodes` | `Record<string, NodeRegistration>` | Node type registrations |
 | `edges` | `Record<string, EdgeRegistration \| EdgeType>` | Edge registrations or edge types directly |
 | `ontology` | `OntologyRelation[]` | Optional semantic relationships |
+| `identity` | `GraphIdentityConfig` | Optional identity profile (`sameIdAcrossKinds`, ...); see [Identity](/identity) |
 | `indexes` | `IndexDeclaration[]` | Optional explicit index declarations from `defineNodeIndex` / `defineEdgeIndex`. Vector indexes are auto-derived from `embedding()` brands; explicit declarations win on `(kind, fieldPath)` collisions. |
 | `defaults` | `{ onNodeDelete?, temporalMode? }` | Optional graph-wide defaults. `onNodeDelete` defaults to `"restrict"`; `temporalMode` defaults to `"current"`. |
 
 Edge entries can be:
 
-- **`EdgeRegistration`** — explicit `{ type, from, to }` with optional `cardinality`
+- **`EdgeRegistration`** — explicit `{ type, from, to }` with optional `cardinality`, `targetCardinality` and
+  `acyclic` (see [Edge Constraints](/core-concepts#edge-constraints)); an unknown value raises `ConfigurationError`
+  with `details.code: "EDGE_INTEGRITY_OPTION_INVALID"`
 - **`EdgeType` with `from`/`to`** — uses built-in constraints
 - **`EdgeType` without `from`/`to`** — unconstrained, connects any node to any node
+
+Every node kind an edge names in `from` or `to` (including the values of a
+source-to-target map and an `EdgeType`'s own endpoints) must be registered in
+`nodes`. `defineGraph` refuses an edge that names an unregistered kind with a
+`ConfigurationError` whose `details` carry `code:
+"EDGE_ENDPOINT_KIND_NOT_REGISTERED"`, the `edge`, the `endpoint` (`"from"` or
+`"to"`), and the `kind`.
 
 **Example:**
 
@@ -434,6 +470,63 @@ const graph = defineGraph({
 });
 ```
 
+### Graph identity and the kind namespace
+
+`id` is the isolation boundary, and it is the most important operational fact
+about a TypeGraph deployment: **kinds are scoped to the `graph_id`** — not to the
+module, file, or proposal that declared them.
+
+Everything committed under one `id` shares a single schema document and a single
+set of physical collections:
+
+- Two graphs with the **same `id`** share one kind namespace. Committing a graph
+  that declares `Invoice` makes `Invoice` part of *that graph's* schema for every
+  process that opens it — including ones whose compile-time graph never mentioned
+  it. Re-committing a different graph under the same `id` is a **schema change**,
+  diffed against what is already committed; it is not a separate scope.
+- Two graphs with **different `id`s** are fully independent: separate kind
+  namespaces, separate data, separate schema versions. They can hold divergent
+  schemas in the same database.
+
+The practical consequence: a namespace *is* a `graph_id`. If you want two units
+(tenants, test suites, per-customer graphs) to declare kinds without colliding,
+give them different `id`s — do not rely on separate declaration sites, module
+boundaries, or naming conventions to isolate them. A shared test database where
+every suite commits under one `id` will see those suites fight over one schema.
+
+See [Multi-Tenant Architecture](/integration#multi-tenant-architecture) for
+running many `graph_id`s in a single database.
+
+### Pre-flighting a schema change
+
+Committing a schema is a privileged, migration-gated operation — in a
+least-privilege deployment the runtime role cannot run DDL at all. Both of these
+are **SELECT-only**: they report what a commit *would* do without attempting it.
+
+```typescript
+import { classifySchemaChanges } from "@nicia-ai/typegraph/schema";
+
+// Cheapest check: does this need the privileged path at all?
+if (await store.requiresMigration()) {
+  // Route to the privileged bootstrap instead of failing mid-request.
+}
+
+// Or decide additive-vs-incompatible before committing:
+const diff = await store.schemaChanges();
+const classification =
+  diff === undefined ? "uninitialized" : classifySchemaChanges(diff);
+// "identical" | "additive" | "incompatible"
+```
+
+`requiresMigration()` is `true` when the committed schema is behind the graph
+**and** when nothing has been committed yet, since both need the privileged path.
+
+If a commit does fail, branch on the structured outcome rather than the message
+text (which is free to be reworded in any release): `MigrationError.details.reason`
+is a stable discriminant (`MIGRATION_FAILURE_REASONS`), and `details.diff` carries
+the same structured diff — with per-change `severity` — that `getSchemaChanges`
+returns. See [Handling Breaking Changes](/schema-management#handling-breaking-changes).
+
 ## Store Creation
 
 ### `createStore(graph, backend, options?)`
@@ -441,7 +534,10 @@ const graph = defineGraph({
 Creates the portable store contract for a graph definition. It contains the
 complete TypeGraph API and graph-owned transactions, but deliberately omits
 adapter-native handles, caller-owned transaction adoption, and mutable backend
-internals.
+internals. This synchronous factory performs no database I/O, including schema
+shape checks. Use an async factory below when startup must verify storage.
+Because it carries no committed schema-version metadata, its writes are raw and
+are not fenced against concurrent schema changes.
 
 ```typescript
 import { createStore } from "@nicia-ai/typegraph";
@@ -462,8 +558,9 @@ function createStore<G extends GraphDef>(
 | `recordedRead` | `ExternalRecordedReadSource` | Bind an already-populated recorded relation for `store.asOfRecorded(T)` reads without enabling TypeGraph-managed capture. Must be created with `recordedRelation({ schema })` using a `createSqlSchema(...)` schema; the store validates those factory descriptors at runtime. Use `history: true` when TypeGraph should capture writes and advance `store.recordedNow()`. |
 | `schema` | `SqlSchema` | Custom table name configuration created with `createSqlSchema(...)` |
 | `queryDefaults.traversalExpansion` | `TraversalExpansion` | Default ontology expansion mode for traversals (default: `"inverse"`) |
+| `queryDefaults.expansion` | `"exact" \| "subclasses"` | Default expansion axis for `from`/`to`/`fromDynamic`/`toDynamic` when an alias states no `expansion` (default: `"subclasses"` — a supertype query is polymorphic by default; see [Ontology](/ontology#subsumption-type-inheritance) and [Scope at a glance](/queries/source#scope-at-a-glance)). It applies to list sources, `from([...])`, too. `"narrower"` is not a store-wide default. `search()` takes its own `expansion` option (default `"exact"`) and the collection APIs stay exact-kind; neither follows this default. Any other value, `"narrower"` included, is refused at store construction (`QUERY_ALIAS_EXPANSION_INVALID`) |
 | `autoRefreshStatistics` | `false \| number` | Row threshold at which a single autocommit `bulkCreate`/`bulkInsert` triggers an automatic planner-statistics refresh (default: `1000`); `false` disables. See [Refreshing planner statistics](/backend-setup#refreshing-planner-statistics-after-bulk-loads). |
-| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` / `bulkUpsertById` item whose validated props already equal the existing live row (default: `false`). For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options) and [Materializing external event logs](/materializing-event-logs). |
+| `coalesceUnchangedUpserts` | `boolean` | Skip the write for an `upsertById` or endpoint get-or-create update whose validated props and requested window already equal the existing live row; bulk forms behave identically (default: `false`). Node `getOrCreateByConstraint` updates are not coalesced; use `upsertById` for replay projectors that must avoid unchanged node history churn. For at-least-once / replay materializers: a byte-identical re-delivery performs no write, no history row, and no revision advance. See [`upsertById`](#upsertbyidid-props-options), [`getOrCreateByEndpoints`](#getorcreatebyendpointsfrom-to-props-options), and [Materializing external event logs](/materializing-event-logs). |
 
 **Example:**
 
@@ -477,11 +574,25 @@ returns `AdapterStore<G, TNativeTransaction>`, which adds precisely typed
 `tx.sql`, `withTransaction`, `withRecordedTransaction`, and the adapter backend
 surface. A plain `GraphBackend` cannot be passed to this factory.
 
+`createAdapterStore` is likewise raw unless passed a cached `{ reconciled }`
+snapshot. Writes issued directly through a backend are always outside the Store
+schema fence.
+
 Override the default traversal expansion:
 
 ```typescript
 const store = createStore(graph, backend, {
   queryDefaults: { traversalExpansion: "none" },
+});
+```
+
+Restore the earlier exact-kind query rows (no subclass expansion) everywhere. This
+changes which rows an alias returns, not its type: aliases over a kind the ontology
+can affect stay widened, and `{ expansion: "exact" }` on the call keeps the literal type:
+
+```typescript
+const store = createStore(graph, backend, {
+  queryDefaults: { expansion: "exact" },
 });
 ```
 
@@ -493,6 +604,42 @@ for any graph with `searchable()` fields: it durably materializes the
 fulltext storage. Bare `createStore()` does not, and the first fulltext
 operation against an uninitialized database throws
 `StoreNotInitializedError`.
+
+The privileged open also adopts versioned, deployment-wide physical base
+storage even when the per-graph TypeGraph schema document is unchanged.
+Base-schema version 1 covers the durable graph-template relation and nullable
+edge match-identity columns and arbiter. Fresh and published schemas also carry
+the nullable-pair CHECK; SQLite adoption does not require rebuilding an
+externally managed table solely to add that defensive constraint. The marker
+advances only after all adoption steps succeed. A database provisioned by an
+older release must either be opened once with `createStoreWithSchema()` under a
+DDL-capable role or receive the published additive migration before a DML-only
+runtime attaches.
+
+With `history: true`, the async open also verifies the recorded node, edge, and
+clock column shapes before returning. Databases created by the timestamp-only
+recorded-time preview must run `migrateLegacyRecordedTime({ backend })` first;
+an unmigrated schema throws a typed `ConfigurationError` with
+`details.code === "RECORDED_SCHEMA_INCOMPATIBLE"` at open rather than on the
+first write.
+
+For an existing history-enabled database that predates identity enablement,
+open it once through `createStoreWithSchema(...)` after adding
+`defineGraph(...).identity`. Bundled backends provision the identity relations
+before the migration preflight. A later missing relation reports
+`details.code === "IDENTITY_STORAGE_MISSING"` instead of opening over silently
+empty state. Restore a missing assertion ledger from backup. If only the
+derived closure is missing, recreate that relation with TypeGraph's standard
+DDL, then run `rebuildIdentityClosure()` before serving traffic. Any
+`history: true` open of an identity-enabled graph verifies the recorded
+identity relation exists and reports `RECORDED_IDENTITY_SCHEMA_MISSING` if it
+does not; bundled backends provision it, so this is rare there and more likely
+on a custom backend that skipped it. Restore that recorded ledger from backup;
+recreating it empty would silently discard identity history. Provision an empty
+relation through the backend's privileged setup path only when this is confirmed
+first-time identity enablement with no identity history to preserve. Malformed
+columns in an existing relation continue to report
+`RECORDED_SCHEMA_INCOMPATIBLE`.
 
 ```typescript
 import { createStoreWithSchema } from "@nicia-ai/typegraph";
@@ -541,6 +688,160 @@ Use `createAdapterStoreWithSchema` for the same provisioning behavior with an
 adoption or `tx.sql`; schema provisioning alone does not expose adapter
 capabilities on the portable `Store`.
 
+#### Schema-managed write fence
+
+A Store is schema-managed when
+`store.introspect().schemaVersion !== undefined`. This includes Stores opened by
+`createStoreWithSchema`, `createAdapterStoreWithSchema`, `createVerifiedStore`,
+or `createVerifiedAdapterStore`; `createAdapterStore(..., { reconciled })`;
+Stores returned by `evolve()`; and Stores rebound from an already-managed Store.
+
+The official transactional backends fence and revalidate every managed write
+against schema commits. Rechecking matters when adapter-native SQL rolls back to
+a savepoint, because PostgreSQL releases row locks acquired after that
+savepoint. A custom or non-transactional backend without fence support fails
+closed when a managed write is attempted rather than racing. Raw Stores and
+direct backend writes remain available when the application deliberately owns
+schema/write coordination.
+
+Because a managed Store is pinned to the schema version it opened, use the
+Store returned by `evolve()` for every subsequent operation in that request. A
+Store captured before the commit is not updated, and its next managed write is
+rejected by this fence. See
+[Store lifetime after a schema commit](/schema-management#store-lifetime-after-a-schema-commit)
+for the `StoreRef` and cross-process cache patterns.
+
+#### Managed-write latency and batching
+
+A single managed write is intentionally a small read/write protocol, not one
+blind `INSERT` or `UPDATE`. Its statement count includes the schema-version
+fence, the per-graph fence for a declared check-then-write constraint, identity
+coordination when a caller-supplied node id can fold across kinds, the
+operation's existence/endpoint/constraint probes, and the row plus its claim
+and sidecar writes. The exact count depends on the graph declaration and
+backend capabilities.
+
+Outside an explicit Store transaction, the schema fence is rechecked for every
+managed write. Inside one `store.transaction(...)` callback, TypeGraph acquires
+the fence on the pinned transaction target and leases that held fence to later
+writes in the callback. Adapters must not introduce a broader cache: PostgreSQL
+releases row locks acquired after a savepoint when the transaction rolls back
+to that savepoint, and a backend-instance cache could therefore outlive the
+database protection it claims. The per-graph write lock follows the same
+transaction-scoped ownership rule.
+
+Endpoint, duplicate-id, claim, and projection work is folded only through the
+backend's semantic command port, never into a blind write. A command either
+applies every requested dimension atomically or returns `unsupported` before
+issuing SQL, after which the Store re-enters the portable validation path.
+That fallback is available only when the backend can preserve the requested
+atomicity; a root backend that cannot keep a row and its projection sidecars
+together refuses the write with a typed transaction-required error.
+Node creates still distinguish live duplicates from tombstones, and edge
+writes still preserve endpoint and claim ordering. `getOrCreateByEndpoints`
+uses an outside read only for its no-write found fast path; every create,
+resurrection, or update makes its decision on the fenced transaction target.
+An adopted PostgreSQL transaction can therefore return an existing match at
+any isolation level. A convergence on a match key no database key backs
+advances the graph's fence row behind the graph lock, so a repeatable-read or
+serializable transaction whose snapshot predates another converging writer's
+commit fails there with
+`TransactionConflictError` (SQLSTATE `40001`) rather than converging on a
+relation it can no longer see; retry the whole transaction. A custom backend
+whose fence advances no fence row refuses the create leg at those levels with
+`MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT`.
+
+Dynamic `matchOn` remains transaction-scoped because a call-level field list
+has no database uniqueness object. For latency-sensitive paths, declare a
+graph-local `matchIdentity` on the edge registration. TypeGraph stores its
+canonical endpoint/property key on every edge row and both bundled dialects
+enforce it with a unique database arbiter. PostgreSQL and SQLite then lower an
+eligible root, single-item `getOrCreateByEndpoints` create/found decision,
+endpoint validation, and schema fence to one conflict-arbitrated statement.
+Eligibility requires a bundled root backend (including D1/neon-http), a
+schema-managed generated-id node or `cardinality: "many"` edge, and no claims,
+sidecars, history, or revision work. Derived wrappers, adopted transactions,
+custom backends, and constrained edges remain on the interactive path.
+On a Neon WebSocket connection this removes the dispatcher read plus `BEGIN`,
+graph-lock, and `COMMIT` exchanges: the common eligible miss falls from roughly
+five sequential requests to one. Constrained cardinalities and
+history/revision stores retain a transaction and their required sidecar/fence
+work, so they are not eligible for the one-request root path; declared
+identities are still arbitrated by the durable key inside that transaction.
+Undeclared dynamic matches retain the fenced portable path and fail closed when
+a backend cannot provide it.
+
+For ingestion, bundled PostgreSQL roots using a recognized session-capable
+driver, Neon HTTP, Cloudflare D1, and libSQL roots have a narrower native path
+for schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()`:
+generated, caller-supplied, or mixed IDs can run as one schema-fenced atomic
+program when there is no Operational Identity, history, or revision work. The
+program composes fulltext/vector projections with its supported uniqueness and
+disjointness claim envelope. Session-capable PostgreSQL pins the program to one transaction;
+Neon HTTP, D1, and libSQL submit one transport batch. `bulkCreate()` restores
+rows to input order. Multiple claims, hierarchy-wide uniqueness scopes,
+generated/caller ID mixtures, and claim-plus-projection work share the program;
+compatibility probes preserve legacy claim-axis rows. Identity,
+history/revision capture, or a member beyond the executor's claim-input budget
+keep the existing transaction or fallback path. This is an internal
+implementation detail, not a general Store batch surface.
+
+The same bundled roots execute eligible node and edge `bulkDelete()` calls as
+closed schema-fenced mutation programs. Edge collection identity and node
+`restrict` behavior are rechecked by the write statement itself. Restricted
+node programs release owner-side uniqueness and disjointness claims in the
+same exchange. Nodes with search, identity, or capture sidecars, or with cascade
+or disconnect behavior, retain the interactive path, as do derived/custom
+backends and caller-owned transactions. On a portable backend, edge bulk
+deletion still resolves all IDs in one batched read and applies them through a
+set-based delete port when available, replacing the former per-ID loop.
+
+Keep these guarantees distinct:
+
+- An **interactive transaction** is the public `store.transaction(...)` API;
+  it pins a session and groups the callback's Store writes. Internally,
+  `runOptionallyInTransaction` reports this as
+  `{ mode: "interactive-transaction" }`, or `{ mode: "sequential" }` when it
+  cannot open one.
+- A **static internal adapter batch** is a backend implementation detail, such
+  as a D1 batch or a bind-budgeted multi-row insert. It is not a Store API and
+  does not make arbitrary Store calls atomic.
+- A **certified atomic SQL program** is a closed, ordered sequence submitted to
+  a backend transport that has passed the framework conformance runner. The
+  runner checks ordered result slots, exact parameter forwarding, empty-batch
+  no-op behavior, and rollback of primary and sidecar writes after a later
+  statement fails. This transport capability is separate from the semantic
+  proof that makes a particular mutation eligible.
+- An **authoritative one-statement command** is the semantic `commands` port;
+  its statement returns the created/found decision it owns. Durable
+  `matchIdentity` convergence can qualify for this root path because the
+  schema-declared key has a database arbiter.
+
+Operational Identity, claim/cardinality checks, undeclared dynamic
+`matchOn`, and history/revision sidecars remain interactive-transaction
+contracts. A durable edge match identity only authorizes its own canonical
+edge create/found arbitration; it does not make those other responsibilities
+transactionless.
+
+For networked deployments, amortize the safe costs at the call boundary:
+
+- Use `bulkCreate`, `bulkInsert`, `bulkUpsertById`, and the bulk get-or-create
+  methods for batches. They batch endpoint and node validation and use one
+  transaction and set-based writes where the backend supports them.
+- Group several related writes in `store.transaction(async (tx) => ...)` to
+  amortize transaction framing and per-transaction graph-lock acquisition.
+  Always use the `tx` collections inside the callback. Calling the root Store
+  there can open a second transaction or use the wrong connection.
+- Keep schema-managed writes on a transactional backend. A non-transactional
+  adapter cannot provide the schema or constraint fences and fails closed for
+  those writes.
+
+There is no supported option to disable these checks for a single write. If an
+application has already established stronger invariants, it may use a direct
+backend write under its own transaction and coordination policy, but that is
+outside the Store's typed validation, claim, sidecar, history, and identity
+contracts.
+
 ## Store Projection
 
 ### `StoreProjection<G, N, E>`
@@ -550,7 +851,8 @@ edge keys. Use this to type reusable helpers that work with any store containing
 subgraph.
 
 ```typescript
-import type { StoreProjection } from "@nicia-ai/typegraph";
+import type { Node } from "@nicia-ai/typegraph";
+import type { StoreProjection } from "@nicia-ai/typegraph/store";
 
 type CoreStore = StoreProjection<
   typeof myGraph,
@@ -577,11 +879,72 @@ example with multiple graphs.
 
 The store provides typed node and edge collections via `store.nodes.*` and `store.edges.*`.
 
-Every write method below that accepts a `validFrom` option (`create`,
+On creation, every method that accepts `validFrom` (`create`,
 `createFromRecord`, `upsertById`, `upsertByIdFromRecord`, `bulkCreate`,
-`bulkInsert`, `bulkUpsertById`, and their edge equivalents) defaults it to
-that operation's own creation timestamp when omitted — `validFrom` is never
-left open-ended. `validTo` remains optional and open-ended until set.
+`bulkInsert`, `bulkUpsertById`, and their edge equivalents) distinguishes three
+inputs:
+
+| Input | Stored lower bound |
+| --- | --- |
+| Omitted | The operation's creation timestamp, except for the born-ended case below |
+| Canonical UTC timestamp | That timestamp |
+| `null` | No lower bound: an explicitly **open-left** window |
+
+```typescript
+const person = await store.nodes.Person.create(
+  { name: "Alice" },
+  { validFrom: null },
+);
+// person.meta.validFrom === undefined
+```
+
+An open-left row is visible at every valid-time coordinate before its `validTo`,
+or at every coordinate when there is no end. Returned metadata uses `undefined`
+for an absent bound; pass `validFrom: row.meta.validFrom ?? null` to preserve that
+state when creating a copy. Passing `undefined` requests the creation default.
+`validTo` remains optional and open-ended until set.
+
+On a live upsert, omission preserves the stored lower bound. An explicit `null`
+restates an already open-left row and is refused if the live row has a timestamp,
+just as a different timestamp is refused. `onImmutableLowerBound: "preserve"`
+continues to make the stated bound creation/resurrection-only input.
+
+The one exception is a row **born already ended**: a write that CREATES or
+RESETS a row's window while stating a `validTo` at or before its own instant and
+no `validFrom` stores **no lower bound** ("ended at T, start unknown") rather
+than a start after its own end, and `meta.validFrom` reads back as `undefined`.
+Such a row is visible at every `asOf` coordinate before its end and at none after
+it. A `validTo` in the future is unaffected — it still stamps the creation
+timestamp, so the row is invisible at instants before it existed.
+
+One stated window reaches one stored shape. Every **node** write that resets the
+window takes the exception: `create`, `bulkCreate` and `bulkInsert` on a fresh id
+or on one naming a tombstone, and `upsertById` / `bulkUpsertById` resurrecting a
+tombstoned node — all of them store no lower bound for a lone historical
+`validTo`, and `meta.validFrom` reads back as `undefined` in every case. An
+**edge** is different, and deliberately: an edge create never lands on a
+tombstone (a taken id raises `Edge already exists`), and a tombstoned edge is
+reachable again only through `bulkUpsertById` or `getOrCreateByEndpoints`, both
+of which RETAIN the bound that row already carries and judge the stated `validTo`
+against it — so a `validTo` before that bound is refused. Pass `validFrom`
+alongside a historical `validTo` when an edge upsert may land on a tombstone.
+
+Writes that accept a validity-end mutation have three explicit states: omit both
+fields to preserve the stored end, pass `{ validTo }` to set or move it, or pass
+`{ clearValidTo: true }` to remove it and reopen the window. `validTo` and
+`clearValidTo` are mutually exclusive. Clearing is supported by node `update`,
+`upsertById`, `upsertByIdFromRecord`, and `bulkUpsertById`, plus edge `update`,
+`bulkUpsertById`, and both endpoint get-or-create forms.
+
+A window may not have negative width. Stating both endpoints out of order, or
+updating a row with a `validTo` that precedes its stored `validFrom`, raises a
+`ValidationError` whose issue carries the code `INVERTED_VALIDITY_WINDOW` — such
+a row stopped being true before it started, so no `asOf` coordinate could ever
+observe it. Two related shapes are legal: a ZERO-width window
+(`validTo === validFrom`), which is what a same-instant retraction produces; and
+a create carrying only a historical `validTo`, which means "born already ended"
+and is read back at any `asOf` coordinate before that end, or through the
+`includeEnded` temporal mode.
 
 ### Node Collections
 
@@ -605,7 +968,7 @@ Creates a new node.
 ```typescript
 store.nodes.Person.create(
   props: { name: string; email?: string },
-  options?: { id?: string; validFrom?: string; validTo?: string }
+  options?: { id?: string; validFrom?: string | null; validTo?: string }
 ): Promise<Node<Person>>;
 ```
 
@@ -630,8 +993,10 @@ write surfaces that mint or claim ids.
 
 #### `getByIds(ids)`
 
-Retrieves multiple nodes by ID in a single query. Returns results in input order,
-with `undefined` for missing IDs.
+Retrieves multiple nodes by ID, returning results in input order with `undefined`
+for missing IDs. Costs one statement per bind-limit chunk where the backend
+exposes a batch read; where it does not, it falls back to one lookup per distinct
+id, issued concurrently.
 
 ```typescript
 store.nodes.Person.getByIds(
@@ -640,38 +1005,168 @@ store.nodes.Person.getByIds(
 ): Promise<readonly (Node<Person> | undefined)[]>;
 ```
 
-When the backend supports batch lookups (`getNodes`), this executes a single
-`SELECT ... WHERE id IN (...)` query. Otherwise it falls back to sequential lookups.
+When the backend supports batch lookups (`getNodes`), this executes
+`SELECT ... WHERE id IN (...)` once per bind-limit chunk — a single statement for
+id counts under the limit. Otherwise it falls back to one lookup per distinct id,
+issued concurrently rather than sequentially.
 
 ```typescript
 const [alice, bob, unknown] = await store.nodes.Person.getByIds([
   aliceId,
   bobId,
-  "nonexistent",
+  asNodeId<typeof Person>("nonexistent"),
 ]);
 // alice: Node<Person>
 // bob: Node<Person>
 // unknown: undefined
 ```
 
-#### `update(id, props)`
+#### `update(id, props, options?)`
 
 Updates node properties.
 
 ```typescript
 store.nodes.Person.update(
   id: NodeId<Person>,
-  props: Partial<{ name: string; email?: string }>
+  props: Partial<{ name: string; email?: string }>,
+  options?: { validTo?: string } | { clearValidTo: true },
 ): Promise<Node<Person>>;
 ```
 
-#### `delete(id)`
+#### `compareAndSet(id, params)`
 
-Soft-deletes a node.
+Applies a patch only while the current live row still has the supplied exact
+property values. The id, expected values, and update execute as one set-based
+mutation, so this closes the race left by a separate `getById()` followed by
+`update()`.
 
 ```typescript
-store.nodes.Person.delete(id: NodeId<Person>): Promise<void>;
+const reopened = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
+  expected: {
+    tenantId,
+    projectId,
+    status: "adopted",
+  },
+  patch: { status: "proposed" },
+});
+
+const claimedUnassigned = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
+  expected: { assigneeId: compareAndSetAbsent },
+  patch: { assigneeId },
+});
+
+if (!reopened) {
+  // Missing row or stale/mismatched precondition; nothing was written.
+}
 ```
+
+Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`).
+Use the `compareAndSetAbsent` marker (imported from `@nicia-ai/typegraph/store`) to require that an optional
+property is not stored. `undefined` is refused rather than treated as absence,
+because it can disappear while an object is assembled or serialized; arrays and
+objects are also refused so every backend uses the same exact scalar comparison.
+Expected predicates are re-checked directly on the target row by the outer
+`UPDATE`, so a concurrent writer cannot satisfy the guard and then change the
+row before the patch lands.
+
+The complete after-image still goes through ordinary schema validation,
+uniqueness, history/version bookkeeping, fulltext, and vector maintenance. This
+makes `compareAndSet()` suitable for narrowly authorized exceptional recovery
+without broadening a schema's normal transition map. It requires the same
+transactional set-update backend support as `updateWhere()`.
+
+#### `updateWhere(params)`
+
+Updates a set of current, live nodes in one transactional operation and returns
+the number of rows changed. A selector is mandatory: provide `candidates`,
+`where`, one or more independent `exists` relationship predicates, or the
+explicit `all: true` acknowledgement. `candidates` accepts a query created by
+the same Store (or transaction) whose source resolves to exactly one concrete
+node kind; its root node ids are intersected with any other selectors in the
+same atomic write. `from(kind)` is polymorphic by default, so a candidate query
+over a kind that has subclasses or `equivalentTo` kinds resolves to several
+kinds and is refused with `ConfigurationError` (`details.code`
+`SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED`); pass
+`{ expansion: "exact" }` to `from()` to select only the named kind. A kind with
+no subclasses or equivalents resolves to itself either way.
+Candidate queries must contain concrete predicate values and select rows
+directly. TypeGraph refuses `param()` references because `updateWhere()` has no
+binding argument, and refuses `groupBy()` / `having()` because replacing an
+aggregate projection with root node ids would change the query's grouping
+semantics. Queries created by `withCheckedReads()` are also refused: embedding
+one in a mutation would bypass the checked read's schema-version fence.
+
+```typescript
+const result = await store.nodes.Person.updateWhere({
+  patch: { active: false },
+  where: (person) => person.lastSeen.lt(cutoff),
+  exists: [
+    {
+      edgeKind: "worksAt",
+      direction: "out",
+      relatedKind: "Company",
+      whereRelated: (company) =>
+        company.field("status").string().eq("closed"),
+    },
+  ],
+});
+// { affectedCount: number }
+
+const candidates = store
+  .query()
+  .from("Person", "person")
+  .whereNode("person", (person) => person.age.gte(18))
+  .select((context) => context.person.id);
+
+await store.nodes.Person.updateWhere({
+  candidates,
+  patch: { active: true },
+});
+```
+
+Each `exists` entry is evaluated independently and ANDed with the other
+selectors. The patch is shallow: values replace top-level properties, explicit
+`null` is preserved, and `undefined` removes an optional property. TypeGraph
+validates every complete after-image and updates uniqueness, fulltext, vector,
+history, and revision state in the same transaction. If any row or sidecar is
+invalid, the whole update rolls back. Backends without transactional set-write
+and batched sidecar support reject the operation before writing.
+
+The selectors are evaluated once, against the statement's snapshot, and the
+write applies only to a row whose stored version is still the one that snapshot
+selected. Under PostgreSQL `READ COMMITTED`, a row that another transaction
+changes and commits after that snapshot (while this update waits for its row
+lock) is skipped rather than patched on the strength of its previous state, and
+`affectedCount` does not count it. Re-run `updateWhere()` to apply the patch to
+rows that still match.
+
+`updateWhere()` is current-state only and is intentionally unavailable on a
+`StoreView`. Use `all: true` for an intentional whole-kind update:
+
+```typescript
+await store.nodes.Person.updateWhere({
+  patch: { needsBackfill: false },
+  all: true,
+});
+```
+
+#### `delete(id, options?)`
+
+Soft-deletes a node. A no-op for a node that is absent or already deleted.
+
+```typescript
+store.nodes.Person.delete(
+  id: NodeId<Person>,
+  options?: { expect: NodeDeletePlan },
+): Promise<void>;
+```
+
+`expect` takes a plan from `planDelete(id)` and refuses the delete with
+`NodeDeletePlanMismatchError`, before any write, when the plan the delete
+computes for itself no longer matches it or the node is no longer live. Only a
+composition whole's delete plans under a per-graph lock; see
+[Previewing a delete](/ontology#previewing-a-delete) for what each isolation
+level does with a write that commits concurrently.
 
 #### `hardDelete(id)`
 
@@ -734,7 +1229,7 @@ at runtime, not compile time. The return type is fully typed — only the input 
 ```typescript
 store.nodes.Person.createFromRecord(
   data: Record<string, unknown>,
-  options?: { id?: string; validFrom?: string; validTo?: string }
+  options?: { id?: string; validFrom?: string | null; validTo?: string }
 ): Promise<Node<Person>>;
 ```
 
@@ -753,7 +1248,12 @@ Creates or updates a node by ID.
 store.nodes.Person.upsertById(
   id: string,
   props: { name: string; email?: string },
-  options?: { validFrom?: string; validTo?: string }
+  options?: {
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: "refuse" | "preserve";
+  }
 ): Promise<Node<Person>>;
 ```
 
@@ -772,12 +1272,27 @@ advance, and no `update` operation hooks — and resolves with the existing node
 at-least-once / replay materializers, where a byte-identical re-delivery would
 otherwise rewrite every row and grow recorded history by one per delivery. A
 write still happens (never coalesced) when the row is soft-deleted (an upsert
-resurrects it), when an explicit `validFrom` / `validTo` is passed, or when any
-prop differs after Zod normalization. The default is off, because some
+resurrects it), when an explicit `validFrom` / `validTo` MOVES the window the row
+already holds, or when any prop differs after Zod normalization. Re-stating the
+window a row already holds — including clearing an already-open end — coalesces
+like any other unchanged value after backend capability validation, and a
+`validFrom` naming a bound a live row does not hold is refused rather than
+written (see
+[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound)) —
+with this option on or off, because coalescing must not decide whether an
+unappliable or malformed bound is reported. The default is off, because some
 consumers want an audit row per re-delivery as proof the event was reprocessed.
 In a receipt, a coalesced upsert still counts as one write intent
 (`writes.total`) but captures nothing (`recorded` stays `undefined`) — the same
 shape as a no-op delete.
+
+**Create-only event time.** The default
+`onImmutableLowerBound: "refuse"` treats `validFrom` as an assertion on every
+branch. Event projectors that carry the source start on every revision can use
+`"preserve"`: create and resurrection still validate and store `validFrom`,
+while a live-row update preserves the bound already stored and applies the new
+props and `validTo`. This is an explicit branch policy, not a silent drop, and
+avoids catching `IMMUTABLE_VALIDITY_LOWER_BOUND` as normal control flow.
 
 #### `upsertByIdFromRecord(id, data, options?)`
 
@@ -788,7 +1303,12 @@ as `upsertById` but accepts `Record<string, unknown>` instead of the typed schem
 store.nodes.Person.upsertByIdFromRecord(
   id: string,
   data: Record<string, unknown>,
-  options?: { validFrom?: string; validTo?: string }
+  options?: {
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: "refuse" | "preserve";
+  }
 ): Promise<Node<Person>>;
 ```
 
@@ -800,6 +1320,31 @@ const run = await store.nodes.Run.upsertByIdFromRecord(
 );
 ```
 
+#### Batch methods and failures
+
+The batch methods take a whole input in one call: on node collections `bulkCreate`, `bulkInsert`,
+`bulkUpsertById`, `bulkReplaceById`, `bulkDelete`, `bulkHardDelete`, `bulkGetOrCreateByConstraint` and
+`bulkReparent`; on edge collections `bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`,
+`bulkHardDelete` and `bulkGetOrCreateByEndpoints`.
+
+Inside `store.transaction()` a batch method runs in the caller's transaction, and what a failure
+leaves behind when the callback catches the error and the transaction commits depends on the method:
+
+- **Node and edge `bulkHardDelete`** run their writes behind a savepoint. A failure among them rolls the
+  savepoint back before the error reaches the callback, so the commit keeps none of the call's writes.
+- **Every other batch method** takes no savepoint. The statements it ran before the failure stay in the
+  transaction, and the commit keeps them: a node `bulkCreate` whose second row write fails commits the
+  first row, and an edge `bulkDelete` whose second delete fails commits the first delete.
+  A refusal the method reaches before its first write leaves nothing, but a failure among its writes
+  does; [Limitations](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+  lists which refusals each method reaches before writing and which can follow a write.
+
+Either way the failed call counts 0 in [transaction receipts](#transaction-receipts). To discard a
+partial batch, let the error leave the callback, so the whole transaction rolls back. A savepoint's
+rollback also undoes other calls on the same transaction that overlap it, so await a `bulkHardDelete`
+before starting other work on that transaction (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+
 #### `bulkCreate(items)`
 
 Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
@@ -809,7 +1354,7 @@ store.nodes.Person.bulkCreate(
   items: readonly {
     props: { name: string; email?: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<Node<Person>[]>;
@@ -831,7 +1376,7 @@ store.nodes.Person.bulkInsert(
   items: readonly {
     props: { name: string; email?: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<void>;
@@ -846,8 +1391,10 @@ store.nodes.Person.bulkUpsertById(
   items: readonly {
     id: string;
     props: { name: string; email?: string };
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: "refuse" | "preserve";
   }[]
 ): Promise<Node<Person>[]>;
 ```
@@ -856,6 +1403,27 @@ With [`coalesceUnchangedUpserts: true`](#createstoregraph-backend-options) the
 dirty-check is applied per item: value-identical items are skipped from the
 write batch but still appear in the returned array (the existing node, in input
 order). See [`upsertById`](#upsertbyidid-props-options).
+
+#### `bulkReplaceById(items)`
+
+Creates or completely replaces multiple node documents by distinct IDs:
+
+```typescript
+store.nodes.Person.bulkReplaceById(
+  items: readonly {
+    id: string;
+    props: { name: string; email?: string };
+  }[]
+): Promise<Node<Person>[]>;
+```
+
+Unlike `bulkUpsertById`, replacement does not merge with stored properties.
+An omitted optional field is removed. Missing IDs are created, live rows keep
+their stored validity window, and tombstones are resurrected with a freshly
+stamped validity window. The method deliberately accepts no temporal mutation
+options: its complete postimage is knowable before dispatch, which lets eligible
+serverless backends execute the call without a preimage read. Duplicate IDs are
+refused rather than interpreted as an ordered script.
 
 #### `bulkDelete(ids)`
 
@@ -866,6 +1434,70 @@ store.nodes.Person.bulkDelete(
   ids: readonly NodeId<Person>[]
 ): Promise<void>;
 ```
+
+On eligible bundled roots, a restricted node kind runs this call as one
+schema-fenced atomic exchange, including owner-side uniqueness and disjointness
+claim cleanup. Kinds that owe search, identity, or capture cleanup, or
+cascade/disconnect work, use the transactional path instead.
+
+#### `bulkHardDelete(ids)`
+
+Permanently deletes multiple nodes. This is irreversible and should be used carefully.
+
+```typescript
+store.nodes.Person.bulkHardDelete(
+  ids: readonly NodeId<Person>[]
+): Promise<void>;
+```
+
+The call leaves exactly the state that calling `hardDelete()` once per ID, in
+the order the IDs first appear, inside one transaction leaves: each node is
+removed with its uniqueness, fulltext and embedding rows and every connected
+edge (live or soft-deleted, of any edge kind), each node's `onDelete` behavior
+applies, a composition whole's parts are deleted with it, and its Operational
+Identity assertions are detached. Absent IDs, IDs that exist only under another
+node kind, and repeated IDs are ignored, and a history store captures each
+removed row's last version without recording a delete row. Every node is judged
+before the first row is removed, so the first refusal the per-ID loop would
+reach (for example `RestrictedDeleteError` from an `onDelete: "restrict"` node
+that still has an edge) refuses the whole call and deletes nothing.
+
+Each node is judged against the graph the earlier IDs' deletes leave, exactly as
+the loop judges it. When two nodes of the call are connected and both are
+`restrict`, the error names whichever comes first in the input; a `cascade`
+node earlier in the input removes the edge a later node would otherwise be
+refused for.
+
+A node whose delete cascades to no composition parts, and that no identity
+assertion or identity class names, is removed set-wise: the call
+reads the batch's rows, connected edges and identity participation with a fixed
+number of statements per bind-budget chunk, and removes such nodes in runs with
+another fixed number per chunk, so 10 and 1,000 of them cost the same
+statements apart from extra chunks. A composition whole with parts and an
+identity participant go through the same path as `hardDelete()` and cost what it
+costs. A backend without the optional `hardDeleteNodesBatch` and
+`findEdgesConnectedToNodes` ports gets one statement set per node instead.
+Like the other batch methods, it fires no operation hooks.
+
+On its own the call is one write transaction. Inside `store.transaction()` it
+runs in the caller's transaction, and its writes sit behind a savepoint: if one
+of them fails and the callback catches the error, the commit keeps none of the
+call's writes (see [Batch methods and failures](#batch-methods-and-failures)).
+Await the call before starting other work on the same transaction: the
+savepoint's rollback also undoes calls that overlap it (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+On a raw store over a driver without interactive transactions
+(Cloudflare D1, `drizzle-orm/neon-http`) the statements run separately; every
+refusal still comes before the first delete, but a failure in a later statement
+leaves the earlier ones applied. As in `hardDelete()`, a node's row is removed
+only after its uniqueness, fulltext and connected-edge rows, so repeating the
+call after such a failure finishes the delete and frees the node's unique keys.
+A schema-managed store on those drivers refuses
+the call before it writes, as it refuses every write it cannot fence (see
+[Backend support](#backend-support)).
+
+Claim rows still held by a removed node's soft-deleted edges are left in place,
+as `hardDelete()` leaves them.
 
 #### `getOrCreateByConstraint(constraintName, props, options?)`
 
@@ -891,6 +1523,8 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
   constraintName: string,
   items: readonly {
     props: { name: string; email?: string };
+    // Per item, as on bulkCreate: see partOf on get-or-create.
+    partOf?: { whole; via?; props?; validFrom?; validTo? };
   }[],
   options?: { ifExists?: "return" | "update" }
 ): Promise<
@@ -900,6 +1534,17 @@ store.nodes.Person.bulkGetOrCreateByConstraint(
   }[]
 >;
 ```
+
+Items whose constraint matches an existing node are decided together before
+the batch writes anything: every attachment verdict a stated `partOf` can
+reach (counting the attachments of the rows the batch will create), and —
+with `ifExists: "update"` or on a resurrection — the property update's
+validation and unique-key probes, a restored row's disjointness and identity
+checks. A refusal from a matched item therefore leaves nothing written,
+including when you catch it on `tx` inside `store.transaction(...)`. Unmatched
+items are created afterwards; see
+[`partOf` on get-or-create is a postcondition](/ontology#partof-on-get-or-create-is-a-postcondition)
+for what a new row can still refuse after the matched items wrote.
 
 #### `findByConstraint(constraintName, props)`
 
@@ -1061,8 +1706,10 @@ Edge write APIs that mint ids still accept plain strings.
 
 #### `getByIds(ids)`
 
-Retrieves multiple edges by ID in a single query. Returns results in input order,
-with `undefined` for missing IDs.
+Retrieves multiple edges by ID, returning results in input order with `undefined`
+for missing IDs. Costs one statement per bind-limit chunk where the backend
+exposes a batch read (`getEdges`); where it does not, it falls back to one lookup
+per distinct id, issued concurrently.
 
 ```typescript
 store.edges.worksAt.getByIds(
@@ -1083,7 +1730,7 @@ Updates edge properties.
 store.edges.worksAt.update(
   id: EdgeId<worksAt>,
   props: Partial<{ role: string }>,
-  options?: { validTo?: string }
+  options?: { validTo?: string } | { clearValidTo: true }
 ): Promise<Edge<worksAt>>;
 ```
 
@@ -1113,12 +1760,102 @@ store.edges.worksAt.findTo(
 ): Promise<Edge<worksAt>[]>;
 ```
 
+#### `bulkFindFrom(froms, options?)` / `bulkFindTo(tos, options?)`
+
+Finds the edges of a **set** of endpoints in one read. This is `findFrom` /
+`findTo` with the endpoint predicate widened from `from_id = ?` to
+`from_id IN (...)` — the same index prefix seek, the same temporal model, the
+same per-endpoint ordering — so a page of N nodes costs one statement per
+endpoint kind and bind-budget chunk instead of N singleton statements.
+
+Results are grouped per input: index `i` of the returned array holds the edges
+of `froms[i]`, an endpoint with no edges gets an empty array, and repeated
+inputs each get their own copy. Pass `limitPerInput` to bound each endpoint's
+fan-out; it keeps the leading edges of that endpoint's `findFrom` order. Large
+inputs are transparently split across statements to respect the backend's
+bound-parameter budget.
+
+Requires a backend that implements the `findEdgesByEndpointSet` operation —
+both bundled Drizzle backends do. On a custom backend without it, these
+methods throw a `ConfigurationError` instead of falling back to one
+`findFrom` per input: a caller reaching for a bulk read is asking for a
+set-oriented read, so quietly issuing N singleton statements would be the cost
+surprise the method exists to remove. Loop over `findFrom` / `findTo` yourself
+if that trade is fine.
+
+```typescript
+store.edges.worksAt.bulkFindFrom(
+  froms: readonly NodeRef<Person>[],
+  options?: { temporalMode?: TemporalMode; asOf?: string; limitPerInput?: number }
+): Promise<readonly Edge<worksAt>[][]>;
+```
+
+```typescript
+const people = await store.nodes.Person.find({ limit: 50 });
+const jobsPerPerson = await store.edges.worksAt.bulkFindFrom(people);
+// jobsPerPerson[i] holds the worksAt edges of people[i]
+```
+
+#### `store.bulkFindEdgesFrom(params, options?)`
+
+Reads multiple edge kinds from heterogeneous source kinds through one set-oriented backend
+operation. The result preserves source-group and ID order, includes an empty `edges` array for a
+source with no matches, and preserves repeated source references as separate result entries.
+
+The bundled SQLite and PostgreSQL backends issue one statement per bind-budget chunk, independent
+of the number of licensed `(source kind, edge kind)` combinations. `limitPerInput` bounds each
+source's fan-out. Temporal options have the same meaning as edge-collection reads, and
+`StoreView.bulkFindEdgesFrom` supplies its pinned coordinate automatically.
+
+```typescript
+const results = await store.bulkFindEdgesFrom(
+  {
+    sources: [
+      { kind: "Company", ids: companyIds },
+      { kind: "Person", ids: personIds },
+    ],
+    edgeKinds: ["employs", "owns", "dependsOn"],
+  },
+  { limitPerInput: 20 },
+);
+
+for (const { source, edges } of results) {
+  console.log(source.kind, source.id, edges.length);
+}
+```
+
+The operation validates every dynamic kind against the Store's graph. It requires a backend that
+implements `findEdgesByHeterogeneousEndpointSet`; a custom backend without that capability gets a
+`ConfigurationError` instead of an implicit loop of singleton reads.
+
+#### `store.bulkFindEdgesTo(params, options?)`
+
+The reverse-direction mirror accepts `targets` and `edgeKinds`, returning `{ target, edges }`
+buckets in input order. It shares the forward method's chunking, empty/repeated bucket behavior,
+`limitPerInput`, capability checks, and temporal options. `StoreView.bulkFindEdgesTo` uses the
+view's pinned coordinate.
+
+```typescript
+const inbound = await store.bulkFindEdgesTo({
+  targets: [{ kind: "Document", ids: documentIds }],
+  edgeKinds: ["owns", "references"],
+});
+```
+
+For a single edge kind, `store.edges.references.bulkFindTo(targets)` already provides a
+set-oriented reverse read. Neither API needs `store.batch()`.
+
 #### `batchFindFrom(from, options?)` / `batchFindTo(to, options?)` / `batchFindByEndpoints(from, to, options?)`
 
 Deferred variants of `findFrom`, `findTo`, and `findByEndpoints` for use with
 [`store.batch()`](#batch-query-execution). These return a `BatchableQuery` instead of
 executing immediately. `batchFindFrom` / `batchFindTo` accept the same temporal
 `options` as `findFrom` / `findTo`.
+
+Batching them does not merge the reads — each still costs its own statement, and they share a
+connection only when the backend supports transactions. It is not a snapshot: PostgreSQL's default
+read-committed isolation lets a later read observe a commit the earlier ones did not. To read edges
+for many sources in one statement, traverse from them in a single query.
 
 ```typescript
 store.edges.worksAt.batchFindFrom(
@@ -1137,7 +1874,7 @@ store.edges.worksAt.batchFindByEndpoints(
 ```
 
 ```typescript
-// Execute multiple edge lookups over a single connection
+// Execute multiple edge lookups in sequence — one statement each
 const [skills, employer] = await store.batch(
   store.edges.hasSkill.batchFindFrom(alice),
   store.edges.worksAt.batchFindFrom(alice),
@@ -1206,7 +1943,7 @@ store.edges.worksAt.bulkCreate(
     to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<Edge<worksAt>[]>;
@@ -1230,7 +1967,7 @@ store.edges.worksAt.bulkInsert(
     to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<void>;
@@ -1246,6 +1983,56 @@ store.edges.worksAt.bulkDelete(
 ): Promise<void>;
 ```
 
+On eligible bundled roots, the whole call is one schema-fenced atomic exchange.
+An ID belonging to another edge kind refuses the call and rolls back every
+chunk. Portable backends batch both the authoritative lookup and soft delete
+when their optional batch ports are available.
+
+#### `bulkHardDelete(ids)`
+
+Permanently deletes multiple edges. This is irreversible and should be used carefully.
+
+```typescript
+store.edges.worksAt.bulkHardDelete(
+  ids: readonly EdgeId<worksAt>[]
+): Promise<void>;
+```
+
+The call leaves exactly the state that calling `hardDelete()` once per ID inside
+one transaction leaves: live and soft-deleted edges are removed, absent and
+repeated IDs are ignored, cardinality and composition claims are released, and a
+history store captures each removed edge's last version without recording a
+delete row. Every ID is resolved and judged before the first row is removed, so
+an ID belonging to another edge kind (`ValidationError` with
+`EDGE_IDENTITY_MISMATCH_CODE`), or a delete that would leave a live
+`existence: "required"` part without its whole (`CompositionExistenceError`),
+refuses the whole call and deletes nothing.
+
+The call makes one batched lookup, then one delete per bind-budget chunk that
+also asserts the collection's kind, so an ID re-pointed at another kind by a
+concurrent writer is never removed, and claims are released only for the rows
+the delete actually removed, so such a replacement keeps its own. A backend
+without the optional `hardDeleteEdgesBatch` port issues one delete per edge
+instead. The only per-edge statement on the batched path is the part read the
+required-existence check makes, and only for a composition edge whose part kind
+is `existence: "required"`. Like the other batch methods, it fires no
+operation hooks.
+
+On its own the call is one write transaction. Inside `store.transaction()` it
+runs in the caller's transaction, and its deletes and claim releases sit behind
+a savepoint: if one of them fails and the callback catches the error, the
+commit keeps none of the call's writes (see
+[Batch methods and failures](#batch-methods-and-failures)). Await the call
+before starting other work on the same transaction: the savepoint's rollback
+also undoes calls that overlap it (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+On a raw store over a driver without
+interactive transactions (Cloudflare D1, `drizzle-orm/neon-http`) the chunks
+run as separate statements, so a failure in a later chunk leaves the earlier
+chunks deleted; a schema-managed store on those drivers refuses the call before
+it writes, as it refuses every write it cannot fence (see
+[Backend support](#backend-support)).
+
 #### `bulkUpsertById(items)`
 
 Creates or updates multiple edges by ID.
@@ -1257,8 +2044,9 @@ store.edges.worksAt.bulkUpsertById(
     from: NodeRef<Person>;
     to: NodeRef<Company>;
     props?: { role: string };
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
+    clearValidTo?: true;
   }[]
 ): Promise<Edge<worksAt>[]>;
 ```
@@ -1268,6 +2056,43 @@ store.edges.worksAt.bulkUpsertById(
 Looks up an existing edge by endpoints (and optionally by property fields via `matchOn`).
 Returns the match if found, or creates a new edge if not.
 
+Declare the durable identity in the graph registration. An empty `fields`
+array means directed endpoints only; otherwise the named top-level persisted
+properties join the endpoint key.
+
+```typescript
+edges: {
+  worksAt: {
+    type: worksAt,
+    from: [Person],
+    to: [Company],
+    matchIdentity: { name: "employment", fields: ["role"] },
+  },
+}
+```
+
+When this declaration exists, omitting `matchOn` uses its fields. A supplied
+`matchOn` must name exactly the same field set or the call is refused; it can
+never silently select a different identity. The identity fields are immutable
+through ordinary updates, soft deletion retains the key for deterministic
+resurrection, and hard deletion releases it. Direct creates and import paths
+materialize the same key, so they cannot bypass endpoint convergence.
+The complete indexed identity tuple is limited to 2,000 UTF-8 bytes on every
+backend. Larger identities refuse with
+`EDGE_MATCH_IDENTITY_KEY_TOO_LARGE` before writing, rather than succeeding on
+SQLite and later exceeding PostgreSQL's btree tuple limit. Durable identities
+must use compact JSON-scalar fields: strings, finite numbers, booleans,
+literals, enums, and nullable/optional/readonly unions of those types. Schema
+defaults, prefaults, and catch values are accepted when their wrapped output
+type stays inside that grammar. Transforms, pipes, and codecs are refused
+because their runtime result cannot be proven portable. `z.date()`, objects,
+arrays, maps, and sets are refused for the same reason. Long scalar payloads refuse
+per row during import, so one malformed edge does not roll back unrelated rows.
+Adding, removing, or changing the declaration is a breaking schema change.
+The first release refuses that migration while the edge kind holds rows; export
+and hard-delete the rows, migrate, then import them to materialize the new key.
+It never activates a declaration over legacy rows with `NULL` keys.
+
 ```typescript
 store.edges.worksAt.getOrCreateByEndpoints(
   from: NodeRef<Person>,
@@ -1276,6 +2101,10 @@ store.edges.worksAt.getOrCreateByEndpoints(
   options?: {
     matchOn?: readonly ("role")[]; // Default: []
     ifExists?: "return" | "update"; // Default: "return"
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: "refuse" | "preserve"; // Default: "refuse"
   }
 ): Promise<{
   edge: Edge<worksAt>;
@@ -1283,9 +2112,70 @@ store.edges.worksAt.getOrCreateByEndpoints(
 }>;
 ```
 
+`validFrom` applies when the operation creates or resurrects the edge. On an
+`"updated"` live match, `onImmutableLowerBound: "preserve"` treats it as
+create/resurrection-only input: the stored start remains unchanged while props
+and `validTo` are applied. The default `"refuse"` policy instead refuses a
+`validFrom` naming a different instant; restating the bound the edge already
+holds is accepted. See
+[Immutable validity lower bounds](/errors/#immutable_validity_lower_bound).
+On a resurrection, naming `validFrom` asserts the COMPLETE window: an
+accompanying `validTo` is applied, and an omitted one reopens the revived row
+rather than keeping the tombstoned incarnation's end. `validTo` applies when
+the edge is created, updated, or resurrected, and may not precede the row's
+effective start — see
+[Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
+is omitted or `"return"`, a live match produces the `"found"` action and neither
+temporal option changes the edge.
+The bundled one-statement arbiter implements a contended/found result through
+the database conflict target. PostgreSQL and SQLite consequently perform a
+no-op physical update on this path: it can acquire a row lock and produce
+write amplification even though the logical edge is unchanged. This is the
+trade-off that keeps a cache-safe create/found verdict to one database request;
+do not treat `getOrCreateByEndpoints` as a read primitive on a hot identity.
+Inside a caller-owned PostgreSQL `repeatable_read` or `serializable`
+transaction, contention can instead abort that whole transaction with SQLSTATE
+`40001`. Retry the complete caller transaction; TypeGraph cannot safely replay
+only a nested callback whose surrounding relational work it does not own.
+At any isolation level, two transactions converging on durable identities in
+opposite orders can deadlock on their incumbent row locks and PostgreSQL can
+abort one with SQLSTATE `40P01`. Apply the same whole-transaction retry policy.
+`clearValidTo` is the exception: a live match can apply it only under
+`ifExists: "update"`. Supplying it with the default/`"return"` mode refuses with
+`ConfigurationError` code `CLEAR_VALID_TO_REQUIRES_UPDATE` instead of silently
+returning an ended edge. A create or tombstone resurrection can still apply the
+clear request.
+
+With `coalesceUnchangedUpserts: true`, an `ifExists: "update"` match whose
+validated props and requested validity bounds already equal the live edge is a
+no-op. It returns the existing edge with action `"found"`; action `"updated"`
+therefore always means an UPDATE ran. The same rule applies per item to
+`bulkGetOrCreateByEndpoints`. Confirming that no-op requires the endpoint
+match-key convergence fence; a top-level backend without transactions refuses
+it with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than eliding the write from
+an unfenced read.
+
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
 Batch version of `getOrCreateByEndpoints`. Returns results in input order.
+The bundled backends read all candidate endpoint pairs with set-oriented
+statements rather than one lookup per item. These are exact directed-pair
+joins, so a high-fan-out source does not materialize all of its unrelated
+outgoing edges for client-side filtering. For a schema-declared durable
+`matchIdentity` with `cardinality: "many"`, the declaration's match fields,
+default `ifExists: "return"`, and no temporal mutation, bundled roots use one
+closed native atomic exchange. That program owns endpoint validation, durable
+identity arbitration and ordered live results, so it does not perform an
+outside probe or open a separate interactive transaction. Its authoritative
+upsert establishes an all-live `"found"` result in the same exchange, but can
+take incumbent-row locks and produce write amplification. An all-live
+default-`"return"` batch outside that envelope is read-only and returns from one
+set-oriented root read. Other outcomes retain the set-oriented read plus
+transactional write path. Tombstoned winners
+roll the native attempt back and refuse transactionless convergence with the
+typed `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error;
+use a transaction-capable backend when resurrection must preserve schema-aware
+partial updates.
 
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(
@@ -1293,6 +2183,10 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     from: NodeRef<Person>;
     to: NodeRef<Company>;
     props: { role: string };
+    validFrom?: string | null;
+    validTo?: string;
+    clearValidTo?: true;
+    onImmutableLowerBound?: "refuse" | "preserve";
   }[],
   options?: {
     matchOn?: readonly ("role")[];
@@ -1305,6 +2199,15 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
   }[]
 >;
 ```
+
+Temporal fields and `onImmutableLowerBound` belong to each item so identities
+with different endpoints or `matchOn` values can carry independent validity
+windows and lower-bound policies in one batch. Items with the same
+endpoint-plus-`matchOn` identity are duplicates: the first item supplies the
+write values and later items return that edge with the `"found"` action. To
+represent multiple periods between the same endpoints, add a stable period or
+source-event field to the edge schema and include it in `matchOn`. Their create,
+update, and resurrection semantics otherwise match the single operation.
 
 #### `findByEndpoints(from, to, options?, temporal?)`
 
@@ -1345,8 +2248,9 @@ const colleague = await store.edges.knows.findByEndpoints(alice, bob, {
 #### `store.transaction(fn)`
 
 Executes a callback within an atomic transaction. All operations succeed together or are
-rolled back together. The transaction context (`tx`) provides the same `nodes.*` and
-`edges.*` collection API as the store itself.
+rolled back together. The transaction context (`tx`) provides the same `nodes.*` and `edges.*`
+collection API as the store, plus transaction-bound `query()`, `neighbors()`, `countNeighbors()`,
+`subgraph()`, and `batchOnce()` reads. Those reads see writes made earlier in the callback.
 
 ```typescript
 await store.transaction(async (tx) => {
@@ -1355,6 +2259,62 @@ await store.transaction(async (tx) => {
   await tx.edges.worksAt.create(person, company, { role: "Engineer" });
 });
 ```
+
+#### Read-only transactions
+
+`store.transaction(fn, { accessMode: "read_only" })` opens a transaction for reads only. Every
+write its context offers is refused before it issues any statement, with an
+`UnsupportedBackendCapabilityError` whose `details` carry `capability: "write transaction access"`,
+`accessMode: "read_only"` and the `operation` refused (for example `tx.nodes.Person.hardDelete()`):
+every node and edge collection write, every `tx.identity` write, `tx.writeNodeUpsertBatch()`,
+`tx.nodes.<Kind>.planDelete()` (which takes the delete's lock), `tx.assertUnchangedSince()`,
+`tx.requestRecordedRevision()` and `applyMergePlanInTransaction()`. The refusal comes from the
+store on every backend, so the transaction stays usable: reads after it run, and the transaction
+commits.
+
+The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
+not checked: PostgreSQL rejects a write there and aborts the transaction, while SQLite, whose
+transaction is not read-only at the engine, runs it and commits it.
+
+#### Overlapping calls in one transaction
+
+Some calls take a TypeGraph savepoint inside the transaction they write to, so that a failure among their
+writes keeps none of them:
+
+- node and edge `bulkHardDelete`
+  (see [Batch methods and failures](#batch-methods-and-failures));
+- `importGraph` writing into a transaction that other calls also use (its window-end updates, edge rounds
+  and composition moves each run behind a savepoint; see [Interchange](/interchange));
+- `applyMergePlanInTransaction`, the adopted merge apply
+  (see [Apply a plan with application writes](/graph-merge#apply-a-plan-with-application-writes)).
+
+A savepoint's rollback undoes every statement issued on its transaction since the savepoint was taken,
+whichever call issued it. When another call on the same transaction starts without awaiting one of these
+calls, for example under `Promise.all`, and the savepoint-guarded call fails after it has written, a
+callback that catches the failure and commits loses the other call's writes, even though that call
+completed and reported success. The same rollback can drop that call's recorded-history row and its count
+in the transaction receipt while its write still commits.
+
+Await each of these calls before starting other work on the same transaction:
+
+```typescript
+// Unsafe: the bulkHardDelete's rollback can undo the bulkCreate.
+await store.transaction(async (tx) => {
+  await Promise.all([
+    tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined),
+    tx.nodes.Person.bulkCreate(newPeople),
+  ]);
+});
+
+// Safe: one call at a time.
+await store.transaction(async (tx) => {
+  await tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined);
+  await tx.nodes.Person.bulkCreate(newPeople);
+});
+```
+
+TypeGraph does not detect or refuse overlapping calls; see
+[Limitations](/limitations#overlapping-calls-inside-one-transaction).
 
 #### Return values
 
@@ -1403,26 +2363,67 @@ affected:
   input before failing. On SQLite a failed statement does not abort the
   surrounding transaction, so a caller that catches the rejection and commits
   can persist rows the receipt never counted. Do not read the receipt as
-  rows-affected in that scenario.
+  rows-affected in that scenario (see
+  [Batch methods and failures](#batch-methods-and-failures)).
 - A node `delete` under `cascade` / `disconnect` removes connected edges through
   the backend, not the edge-collection surface; those removals do not appear in
   `edges`.
 - Rows-affected fidelity is intentionally out of scope for this first version; a
   future extension could ask backends to return row counts.
 
+On an identity-enabled graph, `writes.identity` counts `tx.identity`'s writers
+the same way: `sameAssertions`, `differentAssertions`, and `retractions`, plus
+`total` (their sum — the count of ledger truth rows the transaction produced).
+`writes.identity.transitions` sits beside `total`, not inside it: it is the
+number of identity transition-log notes the transaction's flush wrote, an
+annotation of the writes above rather than a fourth kind of write. It is
+always `0` when identity is disabled, when the store was opened without
+`history: true`, and on a `tx.measure()` scoped receipt — transitions are
+counted at commit-flush time, once per transaction, never per scope.
+
+```typescript
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  await tx.identity.assertSame(alice, bob);
+});
+outcome.receipt.writes.identity;
+// { sameAssertions: 1, differentAssertions: 0, retractions: 0, transitions: 1, total: 1 }
+```
+
 When the store was created with `{ history: true }` and the transaction flushed
-captured writes, `receipt.recorded` is the recorded commit instant allocated for
-this store's graph by this transaction. It is `undefined` when history capture is
-off, the transaction is read-only, or no captured writes were flushed. Writes
+captured writes or an explicit revision request, `receipt.recorded` is the
+recorded commit instant allocated for this store's graph by this transaction. It
+is `undefined` when history capture is off, the transaction is read-only, or no
+captured writes or revision request were flushed. Writes
 that bypass the transaction collection surface — direct backend writes, raw SQL,
 and import helpers — are not counted. `store.withRecordedTransaction()` — the
 adopted-commit path for history stores — returns the same `TransactionOutcome`,
 so the exactly-once cursor pattern gets a receipt too (see
 [Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only
 `withTransaction`, whose commit belongs entirely to the caller with no flush
-point, produces no receipt. On non-transactional backends a receipt describes
-operations that individually committed; if the callback rejects there, no
-receipt is returned even though earlier operations committed.
+point, produces no receipt. On a Store backed by a non-transactional driver,
+`transactionWithReceipt()` refuses before invoking the callback, so it cannot
+produce a receipt. Ordinary Store writes remain available when the application
+deliberately owns non-atomic coordination.
+
+History transaction contexts also expose `tx.requestRecordedRevision()`. Call
+it when the transaction must produce a replay anchor even if it changes no
+nodes, edges, or identity assertions. Requests are idempotent: repeated calls,
+or a request combined with ordinary graph writes, allocate one revision at the
+terminal capture flush. The instant is not available inside the callback; read
+it from the outer `receipt.recorded` after the callback completes. A thrown
+callback rolls the request back with the transaction. Engine-native history
+refuses this method because revision allocation belongs to the database engine,
+and an `accessMode: "read_only"` transaction refuses it because allocation is a
+write. Plain `store.transaction()` can request a revision, but returns no receipt;
+callers that must persist the exact anchor produced by their own transaction use
+`transactionWithReceipt()` or `withRecordedTransaction()`.
+
+```typescript
+const outcome = await store.transactionWithReceipt(async (tx) => {
+  tx.requestRecordedRevision();
+});
+const checkpoint = outcome.receipt.recorded;
+```
 
 ##### Scoped receipts: `tx.measure()`
 
@@ -1455,6 +2456,130 @@ through its own scoped context, never cross-count. Nesting composes:
 A scoped receipt's `recorded` is **always `undefined`** — the recorded instant is
 a per-transaction flush concern, unknowable mid-transaction. Plain
 `store.transaction()` contexts have no `measure` (no receipt is being produced).
+The scoped history context still exposes `requestRecordedRevision()`; its request
+belongs to the outer transaction, so only the outer receipt contains the instant.
+
+##### Cascaded parts in receipts and hooks
+
+Deleting a [composition](/ontology#composition) whole cascades through its
+live parts — see [Composition Cascade](/limitations#composition-cascade) for
+what the cascade itself does and does not do. Both the delete's
+`onOperationEnd` hook context (see [Observability Hooks](#observability-hooks))
+and every transaction receipt that covers the delete carry the parts it
+removed, as `cascadedParts`: one `{ kind, id, whole, viaEdgeKind }` entry per
+part, naming the whole it was directly a part of and the composition edge kind
+that bound it, taken from the same plan the cascade executed, in the order the
+cascade deleted them — **leaf-first, then
+deterministically by kind, then id**. Leaf-first is the part of that order with
+meaning: a part is always named before the whole it belongs to. Two sibling
+parts of one whole have no order between them to respect, so they are sorted
+rather than left in the order the cascade's reads returned them — which is what
+lets you compare `cascadedParts` for equality across runs and backends.
+
+```typescript
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  partOf,
+} from "@nicia-ai/typegraph";
+import { z } from "zod";
+
+const Album = defineNode("Album", { schema: z.object({ title: z.string() }) });
+const Track = defineNode("Track", { schema: z.object({ title: z.string() }) });
+const trackOf = defineEdge("trackOf");
+
+const graph = defineGraph({
+  id: "music",
+  nodes: { Album: { type: Album }, Track: { type: Track } },
+  edges: {
+    trackOf: { type: trackOf, from: [Track], to: [Album], cardinality: "one" },
+  },
+  ontology: [partOf(Track, Album, { via: trackOf })],
+});
+
+const store = createStore(graph, backend, {
+  hooks: {
+    onOperationStart: (ctx) => {
+      // cascadedParts is never present here — the cascade has not been
+      // planned when the operation begins.
+      console.log("start", ctx.kind, ctx.cascadedParts);
+    },
+    onOperationEnd: (ctx) => {
+      console.log("end", ctx.kind, ctx.cascadedParts);
+    },
+  },
+});
+
+const album = await store.nodes.Album.create({ title: "Origins" });
+const trackOne = await store.nodes.Track.create(
+  { title: "Intro" },
+  { partOf: { whole: album } },
+);
+const trackTwo = await store.nodes.Track.create(
+  { title: "Outro" },
+  { partOf: { whole: album } },
+);
+
+const albumTwo = await store.nodes.Album.create({ title: "Reissue" });
+const trackThree = await store.nodes.Track.create(
+  { title: "Bonus" },
+  { partOf: { whole: albumTwo } },
+);
+
+const { receipt, result } = await store.transactionWithReceipt(async (tx) => {
+  const scope = await tx.measure(async (scoped) => {
+    // "end" fires exactly once, for the Album delete — the two cascaded
+    // Track deletes are not separate operations.
+    await scoped.nodes.Album.delete(album.id);
+  });
+  // Issued through the outer `tx`, outside the measured scope: this
+  // cascade belongs only to the transaction's own receipt, not to `scope`.
+  await tx.nodes.Album.delete(albumTwo.id);
+  return scope;
+});
+
+result.receipt.cascadedParts;
+// [
+//   { kind: "Track", id: trackOne.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackTwo.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+// ]
+result.receipt.writes.nodes;
+// { Album: 1 } — the scope's own delete call. The two cascaded Track
+// deletes never went through `scoped.nodes.Track.*`, so they are not write
+// intents and are not folded into this count.
+
+receipt.cascadedParts;
+// every cascade the transaction ran, scoped and outer alike: each delete's own
+// closure (leaf-first, then by kind and id), concatenated in the order the
+// deletes ran:
+// [
+//   { kind: "Track", id: trackOne.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackTwo.id, whole: { kind: "Album", id: album.id }, viaEdgeKind: "trackOf" },
+//   { kind: "Track", id: trackThree.id, whole: { kind: "Album", id: albumTwo.id }, viaEdgeKind: "trackOf" },
+// ]
+receipt.writes.nodes; // { Album: 2 }
+```
+
+`onOperationStart` never carries `cascadedParts` — the cascade has not run
+yet. `onOperationEnd` carries it on every node delete, present but empty when
+the whole has no live parts. A `tx.measure()` scope's receipt sees a cascade
+only for a delete issued **through that scoped context**; the same delete
+issued through the outer `tx` while the scope is open counts in the
+transaction's own receipt instead, following the same attribution rule as
+`scope.receipt.writes` (see
+[Scoped receipts: `tx.measure()`](#scoped-receipts-txmeasure)).
+
+A cascaded part is never a write intent, in either place it is reported.
+`receipt.writes.nodes` counts only the whole's own `delete` call, and the
+hook context's `entity` / `kind` / `id` fields describe only that same call.
+Cascaded parts are reported as refs beside those counters, never folded into
+them.
+
+To see what a delete will cascade through before running it, call
+`nodes.<Kind>.planDelete(id)`; see
+[Previewing a delete](/ontology#previewing-a-delete).
 
 #### Rollback and error propagation
 
@@ -1473,6 +2598,78 @@ try {
 }
 ```
 
+#### Retrying on conflict
+
+PostgreSQL can abort a transaction with a serialization failure or deadlock
+when two writers race — its own protocol response is to re-run the whole
+transaction from the top. By default `store.transaction()` and
+`store.transactionWithReceipt()` do this once: a conflict the backend reports
+surfaces as `TransactionConflictError` (code `TRANSACTION_CONFLICT`, with the
+driver error as `cause`) instead of the raw error, and `details.attempts` is
+`1`.
+
+Pass `retry: { attempts }` to have TypeGraph re-run the callback itself, up to
+`attempts` times total, whenever a conflict is detected:
+
+```typescript
+import { TransactionConflictError } from "@nicia-ai/typegraph";
+
+try {
+  await store.transaction(
+    async (tx) => {
+      // Read inside the callback: a replayed attempt must see fresh balances.
+      const from = await tx.nodes.Account.getById(fromId);
+      const to = await tx.nodes.Account.getById(toId);
+      if (from === undefined || to === undefined) throw new Error("missing account");
+      await tx.nodes.Account.compareAndSet(fromId, {
+        expected: { balance: from.balance },
+        patch: { balance: from.balance - 10 },
+      });
+      await tx.nodes.Account.compareAndSet(toId, {
+        expected: { balance: to.balance },
+        patch: { balance: to.balance + 10 },
+      });
+    },
+    { retry: { attempts: 3 } },
+  );
+} catch (error) {
+  if (error instanceof TransactionConflictError) {
+    // every attempt conflicted; error.details.attempts === 3
+  }
+}
+```
+
+A retried callback re-runs unconditionally on conflict, so it must satisfy the
+**replay contract**:
+
+- **Await all of its own work** before returning or throwing. A retried
+  callback that leaves a fire-and-forget effect in flight from a failed try
+  could duplicate that effect, or let the caller observe it after the try that
+  started it was rolled back.
+- **Read and write only values created fresh on each call.** A failed attempt's
+  transaction rolled back, so anything it left in a variable outside the
+  callback — a counter, a buffer, an accumulated list — describes state no
+  committed database agrees with. Reading it on the next attempt lets a rolled
+  back try leak into the one that commits.
+- **Perform no effect outside the transaction itself.** The whole callback
+  re-runs on conflict, so a network call, a write to a different store, or any
+  other side effect the transaction does not own runs again too.
+- **Tolerate being invoked up to `attempts` times**, not exactly once.
+
+Every hook fired by the callback's operations (`onOperationStart`,
+`onBulkOperationStart`, `onQueryStart`, and a failing operation's own
+`onError`) carries the 1-based attempt number that produced it, so a listener
+can tell a replay apart from a new operation. A rolled-back attempt's
+completed operations report neither `onOperationEnd` nor `onError` of their
+own — only the attempt that actually commits (or the last one, once `attempts`
+is exhausted) is reported, and `transactionWithReceipt`'s receipt reflects
+only that same committed attempt's writes.
+
+`retry` changes nothing about which backends `store.transaction()` accepts in
+the first place: a backend without interactive transactions (see
+[Backend support](#backend-support) below) already refuses the call before the
+callback ever runs, `retry` present or not.
+
 #### Nesting
 
 Transactions do **not** nest. The transaction context intentionally omits the
@@ -1484,17 +2681,18 @@ context through your call chain.
 
 Not all backends support atomic transactions. Cloudflare D1 and
 `drizzle-orm/neon-http` cannot hold a multi-statement session and report
-`capabilities.transactions: false`. On these backends `store.transaction(fn)`
-still runs — `fn` executes against the same backend used outside
-`transaction()`, sequentially — **but writes are applied as they happen and
-a thrown error does not roll back earlier writes inside the callback**. If
-you require atomicity, branch on the capability:
+`capabilities.execution.interactiveTransactions: false`. A schema-managed Store fails closed before
+writing on these backends because it cannot hold the schema fence. On a raw
+Store, `store.transaction(fn)` refuses because no interactive transaction is
+available. Eligible operations backed by a certified atomic SQL program remain
+separate from this interactive capability. If you require atomicity or version
+fencing, branch on the capability:
 
 ```typescript
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => { /* atomic */ });
 } else {
-  // Sequential, non-atomic — handle partial-failure recovery yourself.
+  // Use individual operations or an eligible certified atomic operation.
 }
 ```
 
@@ -1505,34 +2703,204 @@ the full list of affected backends and edge-runtime alternatives.
 
 #### `store.clear()`
 
-Hard-deletes all data for the current graph: nodes, edges, uniqueness entries,
-embeddings, and schema versions. Resets collection caches so the store is immediately reusable.
+Hard-deletes the current graph's data: nodes, edges, uniqueness entries,
+embeddings, and schema versions. Contribution materialization markers are
+preserved by default so a clear does not invalidate their attestations. Pass
+`preserveContributionMaterializations: false` to remove those graph-local
+markers during a full cutover purge. Resets collection caches so the store is
+immediately reusable.
 
 ```typescript
-store.clear(): Promise<void>;
+store.clear(options?: { preserveContributionMaterializations?: boolean }): Promise<void>;
 ```
 
 Wrapped in a transaction when the backend supports it. Does not affect other graphs sharing the same backend.
+
+Every bundled backend can preserve the markers. A custom backend does so through its optional
+`clearGraphPreservingContributionMaterializations` member. When that member is missing:
+
+- `store.clear()` with the option omitted clears through the backend's `clearGraph`, so whether the
+  markers survive is that backend's own `clearGraph` behavior.
+- `store.clear({ preserveContributionMaterializations: true })` is refused with
+  `UnsupportedBackendCapabilityError` before anything is deleted. Stating `true` asks for a
+  guarantee, so call it this way when your code depends on the markers surviving.
+- `store.clear({ preserveContributionMaterializations: false })` clears through `clearGraph` as on
+  any backend.
+
+To verify what remains afterward without reading TypeGraph's physical tables, use
+[`inspectGraphStorage(store)`](/multiple-graphs#inspectgraphstoragestore).
 
 ```typescript
 // Wipe all data and start fresh
 await store.clear();
 
-// Store is immediately reusable
+// Also remove this graph's contribution markers during a full cutover purge.
+await store.clear({ preserveContributionMaterializations: false });
+
+// Store is immediately reusable, now with raw/unversioned semantics.
 const person = await store.nodes.Person.create({ name: "Alice" });
 ```
 
+Because `clear()` deletes the committed schema rows, it also resets a formerly
+managed Store to `introspect().schemaVersion === undefined`. Subsequent writes
+are raw and unfenced. Reopen the graph through a managed factory before writing
+when the schema-version guarantee is required.
+
 ### Batch Query Execution
+
+#### `store.batchOnce(buildReads, options?)`
+
+Executes zero or more independent reads. A nonempty input is exactly one SQL statement; an empty
+input returns `[]` without issuing SQL. Each read is
+embedded as a CTE, and one JSON envelope carries the independently typed result sets back in input
+order. This is the batch surface for latency-bound page assembly: dozens of independent reads still
+form one statement and one database round trip. Each query's explicit `.orderBy()` is preserved even
+when its sort fields are not part of the public projection.
+
+The callback may return a heterogeneous tuple, a singleton, or a readonly runtime array. This makes
+dynamic multi-root subgraph retrieval direct. Prefer this form over awaiting `store.subgraph()` in a
+loop when one request needs several independent bounded neighborhoods, especially against a remote
+database:
+
+```typescript
+const subgraphs = await store.batchOnce((read) =>
+  roots.map((root) =>
+    read.subgraph(root, { edges: ["knows"], maxDepth: 2 }),
+  ),
+);
+```
+
+Repeated roots remain separate results. Missing roots produce their ordinary empty subgraph result.
+The portable planning limit is 500 reads, matching SQLite's compound-select ceiling. The complete
+statement must also fit the backend's declared bind-parameter limit; otherwise `batchOnce()` refuses
+before execution. It never chunks. Result rows for every member are materialized in JSON envelopes,
+so this API is intended for bounded reads and is not streaming. TypeGraph does not guess response
+size or impose a response-byte cap; use explicit limits, projections, and subgraph bounds to control
+it.
+
+Each member keeps its own root and options. A tuple can therefore combine unrelated neighborhood
+shapes in the same call:
+
+```typescript
+const [social, work] = await store.batchOnce((read) => [
+  read.subgraph(person, {
+    edges: ["knows"],
+    maxDepth: 2,
+    edgeWindows: { knows: { limit: 25 } },
+  }),
+  read.subgraph(person, {
+    edges: ["worksAt"],
+    maxDepth: 1,
+    project: {
+      nodes: { Company: ["name", "industry"] },
+      edges: { worksAt: ["role"] },
+    },
+  }),
+]);
+```
+
+Compatible subgraph reads use one origin-keyed recursive traversal by default, while returning
+entity payloads per request. For compatible, overlapping, payload-heavy subgraphs, pass
+`{ shareSubgraphs: true }` as the second `batchOnce()` argument to send each shared entity once
+with request memberships:
+
+```typescript
+const details = await store.batchOnce(
+  (read) => roots.map((root) => read.subgraph(root, options)),
+  { shareSubgraphs: true },
+);
+```
+
+Default batches aggregate JSON per request, so compatible reads do not share one JSON value's size
+limit. PostgreSQL allows at most 25 independent recursive plans in total: each emitted fluent
+recursive stage counts separately, and each compatible subgraph group counts once after its roots
+combine. Historical identity expansion (`includeIdentityMembers` with `asOf` or `recordedAsOf`)
+adds one slot per emitted ledger reconstruction, even without a fluent recursive stage. Current
+identity expansion adds no slots. Single-hop recursion lowered to a fixed traversal adds no slots.
+Exceeding this budget throws `ConfigurationError` before SQL runs. Align subgraph options or split
+reads into explicit `batchOnce()` calls. If a single composed read exceeds the budget, simplify it
+or run it directly with `.execute()`, which does not impose this batch budget. The limit applies
+with either value of `shareSubgraphs`; that option does not combine fluent queries.
+
+Every request still receives independent result objects. Sharing adds membership and reconstruction
+work, and measurements show it can increase encoded response size when roots do not overlap or the
+projection is small. Keep the independent default unless the request shape benefits in a benchmark.
+
+```typescript
+const [people, neighbors] = await store.batchOnce((read) => [
+  store.query().from("Person", "p").select((ctx) => ctx.p),
+  read.neighbors(person, {
+    edges: ["knows"],
+    orderBy: { by: "node", field: "name", direction: "asc" },
+    limit: 5,
+  }),
+]);
+```
+
+The same API is available on a transaction context. Both the fluent query and the callback's read
+builder execute through the already-open transaction, so they see writes made earlier in the
+callback while the combined batch remains exactly one statement:
+
+```typescript
+await store.transaction(async (tx) => {
+  const alice = await tx.nodes.Person.create({ name: "Alice" });
+
+  const [people, neighborCount] = await tx.batchOnce((read) => [
+    tx.query().from("Person", "p").select((ctx) => ctx.p),
+    read.countNeighbors(alice, { edges: ["knows"] }),
+  ]);
+});
+```
+
+`batchOnce()` has no sequential fallback. Every read must belong to the same graph and execution
+target as the Store or transaction running the batch; cross-Store and cross-transaction rebinding is
+refused before SQL. Its callback returns fluent relational queries, set
+operations, and batch-scoped composable reads built through the callback's `read.neighbors()`,
+`read.countNeighbors()`, and `read.subgraph()` methods. Prepared queries and edge collection
+`batchFind*` values are excluded because they cannot be embedded without changing their execution
+contract. Use `batch()` when those queued collection reads or sequential execution are the goal.
 
 #### `store.batch(...queries)`
 
-Executes multiple independent queries over a single connection with snapshot consistency.
-Accepts two or more queries (from `.select()`, set operations, or edge collection `batchFind*` methods)
-and returns a typed tuple of results preserving input order.
+Runs several independent queries in sequence and returns a typed tuple of results preserving input
+order — N query executions, never one round trip. Accepts two or more queries (from `.select()`,
+set operations, or edge collection `batchFind*` methods), each keeping its own projection,
+filtering, sorting, and pagination.
 
-All queries run within an implicit transaction — they see the same database snapshot.
-This avoids connection pool pressure from `Promise.all` patterns (N connections → 1) while
-giving each query independent projection, filtering, sorting, and pagination.
+**Cost.** At least one statement per query. Whole-node, whole-edge, and spread selections detected
+during planning use a full fetch from the start. A selector branch that depends on actual row
+values can still trigger a second statement: selective-field mapping falls back after its
+statement has executed, then re-runs as a full fetch. That fallback clears the fast path for the
+query instance, so reusing it avoids repeating the extra statement.
+
+With `backend.capabilities.execution.interactiveTransactions` the queries share one transaction; how that reaches the
+wire is the adapter's business. A SQL backend frames them with `begin`/`commit`, putting a networked
+one at N+2 round trips **at best**, while Durable Objects use an ambient storage transaction with no
+framing statements. Without transactions there is no framing. Connection reuse is a separate
+question from transaction support: the no-transaction path passes the same backend object, so an
+adapter may reuse one client there too (see [Limitations](/limitations)). The portable guarantee is
+only that at most one query is in flight at a time.
+
+**Not a snapshot by default.** PostgreSQL defaults to read-committed isolation, so a later query in
+the batch can observe a commit the earlier ones did not. For one stable snapshot, call `tx.query()`
+or the transaction's set-oriented reads inside
+`store.transaction(fn, { isolationLevel: "repeatable_read" })`. `tx.batchOnce()` is already one
+statement and preserves that physical shape inside the transaction. Transactions require a backend
+with interactive transaction support; a history-enabled store on PostgreSQL additionally requires
+`accessMode: "read_only"` for a read-only transaction.
+
+**Will not fix an N+1.** Serializing N queries does not reduce their number. The alternatives are
+set-oriented or chunked rather than fixed-cost: `.traverse()` compiles a whole chain to one
+statement; [`store.subgraph()`](#subgraph-extraction) costs 2 statements on SQLite and 3 on
+PostgreSQL however large the result; `getByIds()` issues one statement per bind-limit chunk,
+falling back to one per distinct id where the backend exposes no batch read; `bulkFindByIndex()`
+costs one probe plus that same chunked hydration.
+
+**Versus `Promise.all`.** Workload- and adapter-dependent in both directions. `Promise.all`
+overlaps its queries against a pool with idle capacity, but it does not necessarily hold N
+connections, and against a single client or a saturated pool it queues. `batch()` keeps at most one
+query in flight, so it pays the sum of their latencies — but it can still come out ahead where
+connection acquisition dominates. Measure rather than assume.
 
 ```typescript
 store.batch<R1, R2, ...Rn>(
@@ -1634,10 +3002,12 @@ const [skills, employer, colleague] = await store.batch(
 
 | Pattern | Use |
 |---------|-----|
-| Multiple queries with different shapes/filters | `store.batch()` |
+| Independent embeddable reads that must use one statement | `store.batchOnce()` / `tx.batchOnce()` |
+| Mixed fluent and queued collection queries | `store.batch()` |
 | Load entity with all relationships (uniform) | `store.subgraph()` |
+| Fixing an N+1 / reducing round trips | `.traverse()` or `store.batchOnce()` (one statement), `store.subgraph()` (2–3), `getByIds()` (chunked) |
 | Single query | `.execute()` directly |
-| Writes interleaved with reads | `store.transaction()` |
+| Writes interleaved with fluent or set-oriented reads | `store.transaction()` |
 | Same-shape queries merged into one result | `.union()` / `.intersect()` / `.except()` |
 
 :::note
@@ -1645,20 +3015,129 @@ const [skills, employer, colleague] = await store.batch(
 operations in a `store.transaction()`.
 :::
 
+### Neighbor Reads
+
+`store.neighbors(source, options)` joins visible relationships to their adjacent nodes in one
+statement. Ordering and limiting happen before hydration, so append-only relationship histories can
+fetch only their newest target.
+
+```typescript
+const [latest] = await store.neighbors(document, {
+  edges: ["hasVersion"],
+  direction: "out",
+  orderBy: { field: "createdAt", direction: "desc" },
+  limit: 1,
+});
+
+console.log(latest?.edge, latest?.node);
+```
+
+Use `store.countNeighbors(source, options)` for the matching aggregate-only read. It counts visible
+relationships through the selected edge kinds without hydrating edge or node objects.
+
+Both methods accept `direction: "out" | "in" | "both"` and the Store's temporal read options.
+`neighbors()` can order by edge `id`, `createdAt`, `updatedAt`, `validFrom`, or `validTo`, with a
+positive integer `limit`. Null metadata sorts last on both dialects, and ties are resolved by edge
+ID so a bounded read is deterministic.
+
+:::note
+These names are a known inconsistency. The query builder's `orderBy(alias, field)` names the same
+metadata `meta.createdAt`, `meta.validFrom` and so on (see [Field Names](/queries/order#field-names)),
+while `neighbors()` still takes the bare names. `neighbors()` will move to the `meta.` names in a
+later release; until then, use the bare names here.
+:::
+
+Set `orderBy.by` to `"node"` to order by a schema-declared adjacent-node property instead. Omit it
+or use `"edge"` for edge metadata. Inside `batchOnce()`, use the callback's `read.neighbors()` and
+`read.countNeighbors()` methods to compose these shapes with other independent reads.
+
+### Schema-Checked Read Scopes
+
+`store.withCheckedReads(expectedVersion, fn)` binds one expected active schema version to every
+fluent query created through the callback scope. Calling `.execute()` on those queries automatically
+uses the same statement-level schema check as `.executeChecked(expectedVersion)`.
+
+```typescript
+const page = await store.withCheckedReads(schemaVersion, async (reads) => {
+  const people = await reads.query().from("Person", "p").select((ctx) => ctx.p).execute();
+  const teams = await reads.query().from("Team", "t").select((ctx) => ctx.t).execute();
+  return { people, teams };
+});
+```
+
+A mismatch throws `SchemaChangedError` from the read block, giving the caller one boundary at which
+to reload the store/schema cache and retry the whole block.
+
+The scope currently accepts ordinary `.execute()` fluent selects only. Prepared queries, aggregates,
+set operations, pagination, streaming, and `batchOnce()` refuse with `ConfigurationError` rather
+than silently running without the schema check.
+
 ### Subgraph Extraction
 
-#### `store.subgraph(rootId, options)`
+#### `store.subgraph(root, options)`
 
 Extracts a typed subgraph by performing a BFS traversal from a root node, following
-the specified edge kinds. Returns an indexed result with adjacency maps for immediate
-traversal.
+the specified edge kinds. Returns the reached nodes and edges with `(kind, id)` lookups for
+immediate traversal.
 
-Under the hood, this compiles to a single `WITH RECURSIVE` CTE — the traversal,
-filtering, and hydration all happen in the database.
+`root` is a `{ kind, id }` node reference; a node returned by a collection read is one. Node rows
+are keyed by `(kind, id)`, so two nodes of different kinds may share an id. The walk starts from
+the node the reference names, steps along each edge only from the node whose kind and id the
+edge's endpoint names, and returns every node it reaches, including both nodes of a same-id pair.
+An unregistered kind throws `KindNotFoundError`; a root that is not visible at the read's temporal
+coordinate yields an empty result. On a graph with `identity: { sameIdAcrossKinds: "fold" }`, the
+walk follows edges, not identity classes: a folded peer is returned only when an edge reaches it,
+and it is returned under its own kind.
+
+```typescript
+const sg = await store.subgraph({ kind: "Show", id: showId }, { edges: ["features"] });
+```
+
+`maxDepth` defaults to 10 and accepts integers from 0 through 1000. Zero returns only the root
+(unless excluded). Values outside that range are rejected; they are never silently clamped.
+`direction` accepts `"out"` or `"both"`, and `cyclePolicy` accepts `"prevent"` or `"allow"`.
+
+Use `edgeWindows` to choose direction and cap an append-only edge kind per source at every traversal hop.
+The ranking is applied inside the recursive traversal and again during edge hydration,
+so omitted targets are not loaded and do not remain as orphan nodes.
+
+```typescript
+const detail = await store.subgraph(document, {
+  edges: ["hasVersion", "hasSection"],
+  maxDepth: 3,
+  edgeWindows: {
+    hasVersion: {
+      direction: "in",
+      limit: 1,
+      orderBy: { field: "createdAt", direction: "desc" },
+    },
+  },
+});
+```
+
+Each window accepts `direction: "out" | "in" | "both"`; when omitted it inherits the traversal's
+global direction. Ranking is partitioned by the oriented source endpoint, so bidirectional windows
+have an unambiguous top N for each endpoint.
+
+Inside `batchOnce()`, the callback's batch-scoped `read.subgraph()` method accepts the same options,
+except `composition`, and produces the same result as `store.subgraph()`, but compiles hydration and
+traversal into one embeddable statement. A composition closure is a second walk read in its own
+statement, so `read.subgraph()` refuses `composition` with `ConfigurationError`
+(`SUBGRAPH_COMPOSITION_ONE_STATEMENT_UNSUPPORTED`) before the batch runs any statement. Both forms
+share the same validation, traversal, projection plan, and result assembly; only their physical
+execution strategy differs.
+
+Under the hood the traversal is a `WITH RECURSIVE` CTE and all filtering and hydration happen in
+the database. Direct `subgraph()` calls use a backend-tuned fixed cost: 2 statements on SQLite
+(nodes and edges, each embedding the CTE) and 3 on PostgreSQL (the closure's (kind, id) pairs once,
+then nodes and edges). Batch-scoped `read.subgraph()` uses 1 statement on both backends. Prefer direct
+`store.subgraph()` unless the read must compose with other independent reads in `batchOnce()`;
+PostgreSQL can execute the split hydration plan substantially faster for larger closures even
+though it uses more round trips.
 
 ```typescript
 store.subgraph<EK, NK>(
-  rootId: NodeId<AllNodeTypes<G>>,
+  root: GraphNodeReferenceInput<G>, // an exact reference, or a polymorphic row
   options: SubgraphOptions<G, EK, NK>,
 ): Promise<SubgraphResult<G, NK, EK>>;
 ```
@@ -1668,32 +3147,50 @@ store.subgraph<EK, NK>(
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EK[]` | *(required)* | Edge kinds to follow during traversal |
-| `maxDepth` | `number` | `10` | Maximum traversal depth from root (capped at `MAX_RECURSIVE_DEPTH`) |
-| `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output |
+| `maxDepth` | `number` | `10` | Integer traversal depth from root for the `edges` walk, from 0 through `MAX_EXPLICIT_RECURSIVE_DEPTH` (1000); larger values are rejected. It does not bound the `composition` closure |
+| `includeKinds` | `readonly NK[]` | all kinds | Node kinds to include in the result. Other kinds are traversed through but omitted from output. Kinds are exact: a subclass or `equivalentTo` kind is included only when listed |
 | `excludeRoot` | `boolean` | `false` | Exclude the root node from the result |
 | `direction` | `"out" \| "both"` | `"out"` | `"out"` follows edges in their defined direction; `"both"` treats edges as undirected |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during traversal |
-| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to both nodes and edges along the traversal — same semantics as `store.query()` and collection reads |
+| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | Whether to detect and skip cycles during the `edges` walk. The `composition` closure needs no policy: it stops at the nodes it has already visited |
+| `temporalMode` | `TemporalMode` | `graph.defaults.temporalMode` | Filter applied to nodes, and to the edges of the `edges` walk — same semantics as `store.query()` and collection reads. Composition edges follow ownership at the read's instant instead — see [Composition export](#composition-export) |
 | `asOf` | `string` (ISO-8601) | *(none)* | Snapshot timestamp, required when `temporalMode: "asOf"` |
 | `project` | `{ nodes?, edges? }` | *(none)* | Per-kind field projection — see [Projection](#subgraph-projection) below |
+| `composition` | `boolean \| { via? }` | `false` | Close the root over its declared composition parts (`true`), or over one realizing edge (`{ via }`) — see [Composition export](#composition-export) below |
 
 **Result:**
 
 ```typescript
 type SubgraphResult<G, NK, EK> = Readonly<{
   root: SubgraphNodeResult<G, NK> | undefined;
-  nodes: ReadonlyMap<string, SubgraphNodeResult<G, NK>>;
-  adjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
-  reverseAdjacency: ReadonlyMap<string, ReadonlyMap<EK, readonly SubgraphEdgeResult<G, EK>[]>>;
+  nodes: readonly SubgraphNodeResult<G, NK>[];
+  edges: readonly SubgraphEdgeResult<G, EK>[];
 }>;
 ```
 
 | Field | Description |
 |-------|-------------|
-| `root` | The root node, or `undefined` if it was not found or `excludeRoot` is set |
-| `nodes` | All reachable nodes keyed by string ID |
-| `adjacency` | Forward adjacency: `fromId → edgeKind → edges[]` |
-| `reverseAdjacency` | Reverse adjacency: `toId → edgeKind → edges[]` |
+| `root` | The root node, or `undefined` if it was not found, `excludeRoot` is set, or `includeKinds` omits its kind |
+| `nodes` | Every returned node once, ordered by kind then id (code points) |
+| `edges` | Every returned edge once, ordered by id (code points) |
+
+The result is plain data, so it survives `structuredClone`, `postMessage`, React Server Component
+props, and JSON serialization. For lookups, index it once with `indexSubgraph()`:
+
+```typescript
+import { indexSubgraph } from "@nicia-ai/typegraph/store";
+
+const { node, outgoing, incoming } = indexSubgraph(sg);
+```
+
+| Lookup | Description |
+|--------|-------------|
+| `node(key)` | The returned node with that kind and id. A literal `kind` narrows the result type and must be a kind the result can hold; a `string` kind such as an edge's `toKind` returns any returned kind |
+| `outgoing(key, edgeKind?)` | Returned edges whose source is that node, optionally of one edge kind, in id order |
+| `incoming(key, edgeKind?)` | Returned edges whose target is that node, optionally of one edge kind, in id order |
+
+Every lookup takes a `{ kind, id }` key: a node, a `GraphNodeReference`, or an edge's endpoint
+(`{ kind: edge.toKind, id: edge.toId }`) all fit, so following an edge needs no cast. Per-kind
+lookups are constant-time and return frozen arrays.
 
 Edges are only included when **both** endpoints appear in the result set.
 Nodes and edges are filtered by the resolved `temporalMode` — by default,
@@ -1703,33 +3200,36 @@ multiple paths) are deduplicated.
 **Example:**
 
 ```typescript
-const sg = await store.subgraph(run.id, {
+import { indexSubgraph } from "@nicia-ai/typegraph/store";
+
+const sg = await store.subgraph(run, {
   edges: ["has_task", "runs_agent", "uses_skill"],
   maxDepth: 4,
 });
+const { node, outgoing, incoming } = indexSubgraph(sg);
 
 // Root node (the traversal starting point)
 console.log(sg.root?.kind);
 
-// Lookup by ID
-const task = sg.nodes.get(taskId);
+// Lookup by kind and id
+const task = node({ kind: "Task", id: taskId });
 
-// Forward adjacency: edges of a kind from a node
-const taskEdges = sg.adjacency.get(String(run.id))?.get("has_task") ?? [];
-const tasks = taskEdges.map((edge) => sg.nodes.get(String(edge.toId)));
+// Outgoing edges of a kind from a node, and the nodes they reach
+const taskEdges = outgoing(run, "has_task");
+const tasks = taskEdges.map((edge) => node({ kind: edge.toKind, id: edge.toId }));
 
-// Reverse adjacency: edges of a kind pointing to a node
-const parentEdges = sg.reverseAdjacency.get(taskId)?.get("has_task") ?? [];
+// Incoming edges of a kind pointing to a node
+const parentEdges = incoming({ kind: "Task", id: taskId }, "has_task");
 
 // Narrow by kind with a switch
-for (const node of sg.nodes.values()) {
-  switch (node.kind) {
+for (const member of sg.nodes) {
+  switch (member.kind) {
     case "Task": {
-      console.log(node.title, node.status);
+      console.log(member.title, member.status);
       break;
     }
     case "Agent": {
-      console.log(node.model);
+      console.log(member.model);
       break;
     }
   }
@@ -1739,25 +3239,112 @@ for (const node of sg.nodes.values()) {
 **Filtering to specific node kinds:**
 
 ```typescript
-const tasksOnly = await store.subgraph(run.id, {
+const tasksOnly = await store.subgraph(run, {
   edges: ["has_task", "depends_on"],
   includeKinds: ["Task"],
   excludeRoot: true,
 });
 
-// tasksOnly.nodes values are typed as Node<typeof Task>
+// tasksOnly.nodes entries are typed as Node<typeof Task>
 ```
 
 **Bidirectional traversal:**
 
 ```typescript
 // Find all nodes connected to a skill, regardless of edge direction
-const neighborhood = await store.subgraph(skill.id, {
+const neighborhood = await store.subgraph(skill, {
   edges: ["uses_skill", "has_task"],
   direction: "both",
   maxDepth: 3,
 });
 ```
+
+#### Composition export
+
+`composition: true` closes the root over its declared `partOf`/`hasPart`
+parts — the whole-plus-parts export unit — in addition to whatever `edges`
+already lists. It walks every composition edge kind transitively under the
+root's kind (see [Composition](/ontology#composition) in the ontology
+guide), regardless of orientation, so a mix of `part -> whole` and `whole ->
+part` (`has_*`) edges in the same chain is exported in one call:
+
+```typescript
+const sg = await store.subgraph(episode, {
+  edges: [],
+  composition: true,
+});
+
+// sg.nodes includes the Episode and every Segment transitively part of it,
+// reached through whichever composition edge kind realizes each level —
+// no need to name segmentOf/episodeOf/... by hand.
+```
+
+The closure follows what the root **owns**, not what its edges' validity
+windows show: the composition rows that bind a part to its whole — the same
+membership the delete cascade counts. An ended
+`population: "one"` edge still binds its part, because a `one` binding holds
+for the row's whole life, and an ended `population: "oneActive"` edge, the
+history a `reparent` leaves behind, binds nothing. Such an ended `"one"` edge
+is returned in `edges` with its `validTo`. The read's temporal mode sets the
+instant the closure is evaluated at, and still decides which nodes are
+visible:
+
+- A current read, and an `includeEnded` or `includeTombstones` read, closes
+  over what the root owns now. Those two modes widen what the `edges` walk
+  and node visibility admit, never what the root owns, so they do not
+  re-attach a part through an ended `"oneActive"` edge or a deleted one.
+- `store.asOf(t)` closes over what the root owned at `t`: an edge that
+  existed at `t` and, for `"oneActive"`, had not yet ended. A `"one"` edge
+  that ended before `t` still binds at `t`.
+- A recorded read (`store.asOfRecorded(...)`) closes over the ownership its
+  pinned revision recorded.
+
+The membership rule decides which **edges** the closure follows; **nodes**
+still follow the read's temporal filter at every hop. A part node the read
+cannot see — its own validity window ended, or not yet started — is not
+returned, and neither is anything reachable only through it, even though the
+whole still owns them and a delete would remove them. The export is the
+owned unit as the read sees it, not a delete preview: use
+[`planDelete`](/ontology#previewing-a-delete) to see what a delete removes.
+
+The `edges` list you name keeps the read's validity window. When a kind is in
+both lists, an edge is returned if either admits it.
+
+`composition: { via }` closes over one realizing edge instead of all of them:
+pass the edge's type or its kind string. `via` follows the same rule as
+[`parts({ via })`](/queries/recursive#composition-shortcuts-parts-and-wholes):
+it must realize a pair at the root's kind itself. An edge that realizes a pair
+only further down the tree is refused with `CompositionConfigurationError`
+(`COMPOSITION_VIA_NOT_DECLARED`), and `details.declaredVia` lists the edges
+that would work. `via` is the object form's only key: any other is refused
+with `ValidationError` (issue path `composition.<key>`, code
+`unrecognized_keys`) rather than read as `composition: true`, so a misspelled
+`via` never widens the export to every realizing edge.
+
+This is set-level, not per-root-kind-required: a root whose kind declares
+no composition parts contributes nothing extra and the read still runs
+normally. A graph that declares no composition relation at all cannot
+honor the option meaningfully and throws `CompositionConfigurationError`
+(`COMPOSITION_NO_PARTS_DECLARED`) rather than silently running as if
+`composition` were absent.
+
+`tx.subgraph()` honors `composition` the same way inside a transaction,
+reading through the transaction's session. The batch-scoped
+`read.subgraph()` inside `batchOnce()` refuses it (see
+[Subgraph Extraction](#subgraph-extraction)).
+
+The composition edge kinds a read adds are not part of the `edges` list the
+call names, so `composition: true` widens the result's edge-kind type to the
+graph's whole edge-kind union: every edge kind the read can return is
+reachable through `edges` and the `indexSubgraph()` lookups, and no kind
+outside the graph's own edges ever appears. A `{ via }` selection adds exactly
+its one realizing edge kind. With `composition` absent or `false`, the kind
+type is the `edges` list you named, exactly as before. (A `composition` whose value is
+only known to be a `boolean` widens too — the conservative reading.) The
+matching `project.edges` keys widen with it, so a `composition: true` call can
+shrink the payload of the composition edges it receives; without
+`composition: true`, projecting an edge kind outside `edges` stays a
+compile-time error.
 
 #### Subgraph Projection
 
@@ -1766,7 +3353,7 @@ specify which properties to keep per kind, reducing payload size and enabling SQ
 extraction via `json_extract()` / JSONB paths.
 
 ```typescript
-const result = await store.subgraph(rootId, {
+const result = await store.subgraph(root, {
   edges: ["has_task", "uses_skill"],
   maxDepth: 2,
   project: {
@@ -1800,7 +3387,7 @@ Result types narrow per-kind based on the projection. Accessing an omitted field
 compile-time error:
 
 ```typescript
-for (const node of result.nodes.values()) {
+for (const node of result.nodes) {
   if (node.kind === "Task") {
     console.log(node.title);  // OK
     console.log(node.status); // TypeScript error — status was not projected
@@ -1814,9 +3401,9 @@ When storing a projection config in a variable, TypeScript widens field arrays t
 defeating compile-time narrowing. Use `defineSubgraphProject()` to preserve literal types:
 
 ```typescript
-import { defineSubgraphProject } from "@nicia-ai/typegraph";
+import { defineSubgraphProject } from "@nicia-ai/typegraph/store";
 
-const agentProjection = defineSubgraphProject<typeof graph>()({
+const agentProjection = defineSubgraphProject(graph)({
   nodes: {
     Task: ["title", "status"],
     Skill: ["name"],
@@ -1827,7 +3414,7 @@ const agentProjection = defineSubgraphProject<typeof graph>()({
 });
 
 // Reuse across calls — types are preserved
-const result = await store.subgraph(rootId, {
+const result = await store.subgraph(root, {
   edges: ["has_task", "uses_skill"],
   project: agentProjection,
 });
@@ -1839,31 +3426,35 @@ TypeGraph offers several ways to load related data. The right choice depends on 
 
 | Pattern | Best strategy | Why |
 |---------|--------------|-----|
-| Load entity with all relationships | `subgraph(maxDepth: 1)` | Single SQL round trip — fans out across all edge types in one recursive CTE |
-| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop in one query |
-| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes |
-| Multiple independent queries with per-query control | `store.batch()` | Single connection, snapshot consistency, typed tuple results |
+| Load entity with all relationships | `subgraph(maxDepth: 1)` | Fixed 2 SQLite / 3 PostgreSQL statements — recursive traversal cost does not grow with edge count |
+| Load entity with deep chain | `subgraph(maxDepth: N)` | Recursive CTE handles multi-hop without extra round trips per hop |
+| Filter/sort within a relationship | `.query().traverse()` | Fluent query supports WHERE/ORDER/LIMIT on target nodes, in one statement |
+| Several independent bounded reads in one round trip | `store.batchOnce()` | Embeds fluent queries, relations, neighbors, counts, or subgraphs in exactly one statement |
+| Multiple independent queries with per-query control | `store.batch()` | Typed tuple results, at most one query in flight — still at least a statement per query, and not a snapshot |
 | Check if an edge exists | `edges.X.findFrom()` | Lightweight — no node resolution needed; honors the graph's temporal mode by default |
 | Traverse + resolve one edge type | `edges.X.findFrom()` + `nodes.X.getByIds()` | Two queries, simple and explicit; pass `temporalMode` / `asOf` when reading history |
 | Shortest path, reachability, neighborhoods, degree | `store.algorithms.*` | Set-based BFS frontier or a single `COUNT` — see [Graph Algorithms](/graph-algorithms) |
 
-**Key insight:** `subgraph()` issues a single SQL statement regardless of how many edge types it
-traverses. Parallel `findFrom` calls scale linearly in round trips — one per edge type, plus
+**Key insight:** `subgraph()` costs a fixed number of statements — 2 on SQLite (nodes, edges) and 3
+on PostgreSQL (the closure's (kind, id) pairs, then nodes and edges) — regardless of how many edge types it traverses
+or how much it returns. Parallel `findFrom` calls scale linearly instead: one per edge type, plus
 additional queries for node resolution. The gap widens as relationship count grows.
 
 For the common "load an entity and everything it touches" pattern (detail pages, config hydration,
-template instantiation), `subgraph()` with `maxDepth: 1` is the fastest approach. When you need
-per-query filtering, sorting, or pagination across multiple independent queries, use
-[`store.batch()`](#batch-query-execution) to run them over a single connection with snapshot
-consistency. Reserve individual fluent queries for one-off operations.
+template instantiation), use `subgraph()` with `maxDepth: 1`. When one request needs several
+independent bounded reads, use [`store.batchOnce()`](#batch-query-execution) to keep them in one
+statement. Use `store.batch()` when a member cannot be embedded or sequential transaction execution
+is the intended contract; it still costs at least one statement per query. Reserve individual fluent
+queries for one-off operations.
 
 ### Graph Algorithms
 
 #### `store.algorithms`
 
 Lazy-initialized facade exposing the graph algorithms —
-`shortestPath`, `reachable`, `canReach`, `neighbors`, and `degree`.
-See [Graph Algorithms](/graph-algorithms) for the full API; this section
+`shortestPath`, `weightedShortestPath`, `reachable`, `canReach`, `neighbors`,
+`degree`, `labelPropagation`, `weaklyConnectedComponents`, `pageRank`, and
+`personalizedPageRank`. See [Graph Algorithms](/graph-algorithms) for the full API; this section
 is a quick reference.
 
 ```typescript
@@ -1926,12 +3517,15 @@ const results = await store
 | `count()` | `Promise<number>` | Count matching results |
 | `exists()` | `Promise<boolean>` | Check if any results exist |
 | `paginate(options)` | `Promise<PaginatedResult<T>>` | Cursor-based pagination |
+| `page(options)` | `CompiledOneStatementRead<PaginatedResult<T>>` with `execute()` | Cold cursor page; executes alone or in `batchOnce()` |
 | `stream(options?)` | `AsyncIterable<T>` | Stream results in batches |
 | `prepare()` | `PreparedQuery<T>` | Validate query AST once for repeated execution with different parameters |
 
-#### `store.batch(...queries)`
+#### `store.batchOnce(buildReads, options?)` and `store.batch(...queries)`
 
-Execute multiple queries over a single connection. See [Batch Query Execution](#batch-query-execution).
+Use `batchOnce()` to embed independent fluent and batch-scoped set-oriented reads in one statement. Use `batch()` for mixed
+fluent and queued collection reads that may run sequentially. See
+[Batch Query Execution](#batch-query-execution) for the exact contracts.
 
 ### Dynamic Collection Access
 
@@ -1946,7 +3540,7 @@ Returns the [`DynamicNodeCollection`](/types#dynamicnodecollection) for the give
 `undefined` if the kind is not registered in this graph.
 
 ```typescript
-import { getNodeKinds } from "@nicia-ai/typegraph";
+import { getNodeKinds } from "@nicia-ai/typegraph/core";
 
 // Count every node kind
 const counts: Record<string, number> = {};
@@ -1962,13 +3556,46 @@ const collection = store.getNodeCollection(edge.fromKind);
 const node = await collection?.getById(edge.fromId);
 ```
 
+#### `store.getNodeByRef(reference)`
+
+Reads the node a `{ kind, id }` reference names through the same node collection
+`getNodeCollectionOrThrow(kind)` returns. It returns `undefined` when no node with that
+id exists under that kind, and rejects with `KindNotFoundError` when the kind is not
+registered. The kind is matched exactly: a reference naming a supertype with a subclass
+node's id resolves to `undefined`.
+
+The result is typed by the reference. A reference whose `kind` is one of the graph's
+node kinds resolves to that kind's node. A reference whose `kind` is `string`, such as
+the endpoint of an edge whose declared kind has subclasses, resolves to the union of the
+graph's node types plus the base `Node` of a kind added at runtime.
+
+```typescript
+const [employment] = await store.edges.employs.findFrom(acme);
+// employment.toKind is string: the declared Person endpoint admits Employee rows.
+if (employment.toKind === "Employee") {
+  // Narrowing the reference first resolves straight to Node<typeof Employee>.
+  const employee = await store.getNodeByRef({
+    kind: employment.toKind,
+    id: employment.toId,
+  });
+}
+// Without narrowing: Node<typeof Person> | Node<typeof Employee> | ... | Node
+const target = await store.getNodeByRef({
+  kind: employment.toKind,
+  id: employment.toId,
+});
+```
+
+Transactions (`tx.getNodeByRef`) resolve through the transaction's own collections, and
+views (`view.getNodeByRef`, including recorded-time views) read at their pinned coordinate.
+
 #### `store.getEdgeCollection(kind)`
 
 Returns the [`DynamicEdgeCollection`](/types#dynamicedgecollection) for the given kind, or
 `undefined` if the kind is not registered in this graph.
 
 ```typescript
-import { getEdgeKinds } from "@nicia-ai/typegraph";
+import { getEdgeKinds } from "@nicia-ai/typegraph/core";
 
 // Snapshot all edges
 for (const kind of getEdgeKinds(graph)) {
@@ -1984,6 +3611,19 @@ The returned collections expose the full API (`create`, `getById`, `find`, `coun
 `createFromRecord`, etc.) with widened generics — see
 [`DynamicNodeCollection`](/types#dynamicnodecollection) and
 [`DynamicEdgeCollection`](/types#dynamicedgecollection).
+
+Both edge lookups are also available inside `transaction`, `withTransaction`,
+and receipt-enabled transaction contexts. They resolve the transaction's own
+collections; lookups inside `measure` contribute to that scope's receipt.
+`getEdgeCollectionOrThrow` throws `KindNotFoundError` for an unknown kind and also
+accepts a Store-issued runtime edge token, using the same token validation as the
+Store. Known graph keys retain their edge property schema while endpoints are
+validated at runtime.
+
+For generic graph/kind helpers, use these lookups instead of casting
+`tx.edges[kind]`; see [dynamic edge types and migration](/types#dynamicedgecollection).
+Valid-time views expose `view.getEdgeCollection(kind)` for dynamic reads at their
+pinned coordinate.
 
 ### Dynamic Props Schema Access
 
@@ -2049,7 +3689,11 @@ store.search.rebuildFulltext(nodeKind?, options?): Promise<RebuildFulltextResult
 
 Runs a ranked fulltext query against nodes of the given kind. Requires
 at least one `searchable()` field on the node schema. `hit.node` is
-narrowed to the typed node for `nodeKind` — no cast required.
+narrowed to the typed node for `nodeKind` — no cast required — unless the
+call states `expansion: "subclasses"` on a kind the ontology can affect, in
+which case `hit.node` keeps the kind's properties but its `kind` and `NodeId`
+brand widen, exactly as a `from()` alias over that kind does. The same holds
+for `store.search.vector` and `store.search.hybrid`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -2059,6 +3703,7 @@ narrowed to the typed node for `nodeKind` — no cast required.
 | `language` | `string` | per-row | Language override (Postgres only; throws on FTS5). |
 | `minScore` | `number` | — | Drop hits below this backend-native score. |
 | `includeSnippets` | `boolean` | `false` | Return a `<mark>…</mark>` snippet per hit. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant and `equivalentTo` kinds and widens the hit's `kind` and `NodeId` brand. |
 
 #### `store.search.hybrid(nodeKind, options)`
 
@@ -2082,6 +3727,7 @@ with Reciprocal Rank Fusion. Requires both `vectorSearch` and
 | `fulltext.includeSnippets` | `boolean` | `false` | Return snippets per fulltext sub-hit. |
 | `fusion.method` | `"rrf"` | `"rrf"` | Fusion method. |
 | `fusion.k` | `number` | `60` | RRF constant. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | Applies to both legs; `"subclasses"` widens the hit's `kind` and `NodeId` brand as for `fulltext`. |
 | `fusion.weights.vector` | `number` | `1` | Bias toward the vector retriever. |
 | `fusion.weights.fulltext` | `number` | `1` | Bias toward the fulltext retriever. |
 
@@ -2150,7 +3796,7 @@ const names = await past
   .select((ctx) => ctx.p.name)
   .execute();
 const reach = await past.reachable(aliceId, { edges: ["knows"] });
-const sg = await past.subgraph(aliceId, { edges: ["knows"] });
+const sg = await past.subgraph({ kind: "Person", id: aliceId }, { edges: ["knows"] });
 ```
 
 #### Surface
@@ -2161,17 +3807,24 @@ coordinate:
 | Surface | Behavior |
 | --- | --- |
 | `view.nodes` / `view.edges`: `getById`, `getByIds`, `find`, `count` | pinned |
-| `view.edges`: `findFrom`, `findTo`, `findByEndpoints` | pinned |
+| `view.edges`: `findFrom`, `findTo`, `bulkFindFrom`, `bulkFindTo`, `findByEndpoints` | pinned |
+| `view.bulkFindEdgesFrom(params, options?)` | pinned |
+| `view.bulkFindEdgesTo(params, options?)` | pinned |
 | `view.query()` | a pinned query builder with a **sealed** temporal axis — `.temporal(...)` throws |
-| `view.subgraph(rootId, options)` | pinned |
-| `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree` | pinned |
-| `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
+| `view.subgraph(root, options)` | pinned |
+| `view.reachable` / `canReach` / `shortestPath` / `neighbors` / `degree`, and `view.algorithms.*` (all ten reads, adding `weightedShortestPath`, `labelPropagation`, `weaklyConnectedComponents`, `pageRank`, `personalizedPageRank`) | pinned |
+| `view.nodes`: `findByConstraint` / `bulkFindByConstraint` / `bulkFindByIndex` / `planDelete` | current-only reads: delegate on a `"current"` view; reject on any temporal pin |
 | `view.search` reads (`fulltext` / `vector` / `hybrid`) | delegate to the live search on a `"current"` view; reject on any other pin |
 | `view.search.rebuildFulltext()` | rejected on every view (maintenance write) |
 | `view.mode` / `view.asOf` | the pinned coordinate |
 
 The algorithm and `subgraph` option objects are the same as on the live `Store`
-**minus** `temporalMode` / `asOf`, which the pin supplies.
+**minus** `temporalMode` / `asOf`, which the pin supplies. Stating one anyway (possible from untyped code) is refused with
+`ConfigurationError` `STORE_VIEW_SEALED_COORDINATE` on every view, `"current"` included; the
+heterogeneous `bulkFindEdgesFrom` / `bulkFindEdgesTo` reads, the edge collections'
+`bulkFindFrom` / `bulkFindTo`, and the collections' point reads (`getById`, `getByIds`,
+`find`, `count`, `findFrom`, `findTo`, `findByEndpoints`) refuse the same way when a
+coordinate is stated in the position the live collection takes its temporal options.
 
 `view.query()` is a **capability-safe** pinned read context: the returned query
 builder seeds the view's coordinate and seals the temporal axis, so calling
@@ -2210,18 +3863,26 @@ store.asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
 // also: store.asOf(validT).asOfRecorded(recordedT)
 //       store.view({ mode }).asOfRecorded(recordedT)
 store.recordedNow(): Promise<RecordedInstant | undefined>;
-asRecordedInstant(value: string): RecordedInstant; // brand an external timestamp
+asRecordedInstant(value: string): RecordedInstant; // re-brand a persisted anchor
+recordedInstantRevision(value: RecordedInstant): number;
+recordedInstantWallTime(value: RecordedInstant): string;
+compareRecordedInstants(a: RecordedInstant, b: RecordedInstant): -1 | 0 | 1;
 ```
 
 - **`store.asOfRecorded(T)`** is diagonal sugar — the recorded *and* valid axes
   both at `T`. Chain from `store.asOf(validT)` / `store.view({ mode })` to pin
   the two axes independently.
-- **`T` is a `RecordedInstant`**, a branded canonical timestamp. It comes from
-  `store.recordedNow()` or `asRecordedInstant(...)`; a raw wall-clock string
-  (`new Date().toISOString()`) is a compile error. Recorded instants are
-  monotonic and can run briefly ahead of wall-clock time under bursty writes, so
-  a wall-clock value may sort before the most recent commits and silently omit
-  them — the brand prevents that at the type level.
+- **`T` is a `RecordedInstant`**, a branded canonical string encoded as
+  `r2:<graph origin>:<namespace digest>:<16-digit revision>:<canonical UTC timestamp>`. It comes from
+  `store.recordedNow()` or from `asRecordedInstant(...)` after the exact anchor
+  has round-tripped through untyped storage. A raw wall-clock string
+  (`new Date().toISOString()`) is a compile error because it cannot distinguish
+  multiple commits in one millisecond. The logical revision orders commits; the
+  timestamp is a non-decreasing physical wall-time high-water mark. Use
+  `recordedInstantRevision(T)`, `recordedInstantWallTime(T)`, and
+  `compareRecordedInstants(a, b)` instead of splitting or comparing anchor
+  strings manually. Comparisons are meaningful only within one graph. See
+  [Logical revision and physical time](/queries/temporal#logical-revision-and-physical-time).
 - **`store.recordedNow()`** returns the recorded high-water mark — the latest
   captured recorded instant. After guarding the `undefined` case,
   `store.asOfRecorded(checkpoint)` reconstructs everything committed so far. Use
@@ -2254,6 +3915,15 @@ handle. See
 ## Observability Hooks
 
 TypeGraph supports observability hooks for monitoring and logging store operations.
+Query hooks describe SQL statements submitted by Store read APIs, not logical API calls or
+backend-internal setup statements. Fluent queries, `batchOnce()`, `neighbors()`,
+`countNeighbors()`, and `subgraph()` all use this observed execution path. A logical read that
+submits more than one statement fires one start/end pair per statement: direct `subgraph()` emits
+two pairs on SQLite and three on PostgreSQL, including at a recorded coordinate
+(`store.asOfRecorded(...).subgraph()`), while `tx.subgraph()` and the same subgraph embedded in
+`batchOnce()` emit one. A `subgraph()` with `composition` emits four on both backends (the `edges`
+closure, the composition closure, then nodes and edges), inside a transaction too. A fluent
+query that retries with a different projection likewise fires a pair for each statement it submits.
 
 ### `StoreHooks`
 
@@ -2261,11 +3931,13 @@ Configuration for observability callbacks:
 
 ```typescript
 import type {
+  BulkOperationHookContext,
+  CompositionNodeRef,
   HookContext,
   QueryHookContext,
   OperationHookContext,
   StoreHooks,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/store";
 ```
 
 ```typescript
@@ -2273,7 +3945,15 @@ type StoreHooks = Readonly<{
   onQueryStart?: (ctx: QueryHookContext) => void;
   onQueryEnd?: (ctx: QueryHookContext, result: { rowCount: number; durationMs: number }) => void;
   onOperationStart?: (ctx: OperationHookContext) => void;
-  onOperationEnd?: (ctx: OperationHookContext, result: { durationMs: number }) => void;
+  onBulkOperationStart?: (ctx: BulkOperationHookContext) => void;
+  onOperationEnd?: (
+    ctx: OperationHookContext,
+    result: { durationMs: number; outcome: "written" | "unchanged" | "unknown" },
+  ) => void;
+  onBulkOperationEnd?: (
+    ctx: BulkOperationHookContext,
+    result: { affectedCount: number; durationMs: number },
+  ) => void;
   onError?: (ctx: HookContext, error: Error) => void;
 }>;
 
@@ -2281,6 +3961,8 @@ type HookContext = Readonly<{
   operationId: string;
   graphId: string;
   startedAt: Date;
+  /** 1-based attempt inside a retried transaction; absent means 1. */
+  attempt?: number;
 }>;
 
 type QueryHookContext = HookContext &
@@ -2289,22 +3971,56 @@ type QueryHookContext = HookContext &
     params: readonly unknown[];
   }>;
 
+type BulkOperationHookContext = HookContext &
+  Readonly<{
+    operation: "compareAndSet" | "updateWhere";
+    entity: "node";
+    kind: string;
+  }>;
+
 type OperationHookContext = HookContext &
   Readonly<{
     operation: "create" | "update" | "delete";
     entity: "node" | "edge";
     kind: string;
     id: string;
+    /**
+     * The composition parts a whole's delete cascaded through, leaf-first, each
+     * with the whole it was directly a part of and the edge kind that bound
+     * it. Present (and possibly empty) on `onOperationEnd`
+     * for a node delete; absent on `onOperationStart`, which fires before the
+     * cascade is planned, and on every non-delete operation. See
+     * [Cascaded parts in receipts and hooks](#cascaded-parts-in-receipts-and-hooks).
+     */
+    cascadedParts?: readonly CompositionCascadedPart[];
   }>;
 ```
 
-> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`) skip per-item
-operation hooks for throughput. Query hooks still fire normally.
+> **Note:** Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`, `bulkHardDelete`,
+`bulkReparent`) skip per-item operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` /
+`onBulkOperationEnd`) do not stand in for them — those fire only for node `updateWhere` and `compareAndSet`, so a
+batch method emits no hook events at all, neither
+per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally. For what a
+failed batch leaves behind inside a transaction, see [Batch methods and failures](#batch-methods-and-failures).
+
+`onOperationEnd.result.outcome` is `"written"` when durable graph state
+changed. It is `"unchanged"` when an authoritative write attempt completed
+without a logical mutation—for example, when a one-statement durable edge
+get-or-create found the incumbent. Expected convergence is therefore a
+successful unchanged completion, never an `onError` event. This is the same
+decision TypeGraph uses to suppress revision/history churn. It is `"unknown"`
+when the backend command does not report an authoritative physical-write
+verdict; TypeGraph never guesses from a successful return alone.
+
+When TypeGraph rolls back a savepoint inside a transaction (for example, a refused in-transaction merge that the
+caller catches), the operations the savepoint covered are reported through `onError` with the rollback cause rather
+than as completed writes.
 
 **Example:**
 
 ```typescript
-import { createStore, type StoreHooks } from "@nicia-ai/typegraph";
+import { createStore } from "@nicia-ai/typegraph";
+import type { StoreHooks } from "@nicia-ai/typegraph/store";
 
 const hooks: StoreHooks = {
   onQueryStart: (ctx) => {
@@ -2317,7 +4033,9 @@ const hooks: StoreHooks = {
     console.log(`[${ctx.operationId}] ${ctx.operation} ${ctx.entity}:${ctx.kind}`);
   },
   onOperationEnd: (ctx, result) => {
-    console.log(`[${ctx.operationId}] Completed in ${result.durationMs}ms`);
+    console.log(
+      `[${ctx.operationId}] ${result.outcome} in ${result.durationMs}ms`,
+    );
   },
   onError: (ctx, error) => {
     console.error(`[${ctx.operationId}] Error:`, error.message);
@@ -2326,11 +4044,13 @@ const hooks: StoreHooks = {
 
 const store = createStore(graph, backend, { hooks });
 
-// Operations now trigger hooks
+// CRUD operations trigger operation hooks; observed Store read statements
+// trigger query hooks.
 await store.nodes.Person.create({ name: "Alice" });
-// Logs:
+await store.query().from("Person", "p").select((ctx) => ctx.p).execute();
+// Logs include:
 // [op-abc123] create node:Person
-// [op-abc123] SQL: INSERT INTO ...
-// [op-abc123] 1 rows in 2ms
 // [op-abc123] Completed in 5ms
+// [query-def456] SQL: WITH ... SELECT ...
+// [query-def456] 1 rows in 2ms
 ```

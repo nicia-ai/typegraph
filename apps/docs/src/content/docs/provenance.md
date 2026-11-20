@@ -118,14 +118,76 @@ const previous = before ? store.asOfRecorded(before) : undefined;
 const current = after ? store.asOfRecorded(after) : undefined;
 ```
 
+Every retraction verb also takes a polymorphic query row, such as one a
+supertype query over the source kinds returns, whose `kind` is `string`. The
+row's actual kind must be one of the configured source kinds; any other is
+refused with `ConfigurationError`.
+
 The report partitions facts relative to the retracted source:
 
-- `died`: facts that were believed before and lost grounded support
+- `died`: every fact whose currency this transition closed
 - `survivedVia`: affected facts that still have a firing justification
 - `unaffected`: previously believed facts outside the source's provenance
 
+`died` names every close, including a fact that was not believed to begin with.
+A live fact is unsupported whenever no justification of it fires, and a
+transition that reaches such a fact closes it and reports it. Ordinary store
+calls reach that state: a justification with two premises, one of them a source
+created with its retracted flag already set, leaves the fact it derives live and
+unsupported from the moment it is linked, with no constraint violated and
+nothing for `store.verifyConstraintFences()` to report. The composition case is
+narrower — a required part whose whole was tombstoned outside the store's own
+paths — and that one the fence audit does report. Either way a tombstone the
+report cannot mention would be invisible data loss, so the pass that writes the
+tombstones and the report that names them read one set of rows.
+
 `unRetract(source)` clears the source flag, recomputes support, and reopens
 facts that regain support.
+
+## Composition and retraction
+
+A [required composition part](/ontology#composition) cannot exist without a
+live whole, so its belief status follows its whole's. Support treats the
+dependency as part of the fact's grounding: a required part is supported only
+while the whole it currently hangs from is itself supported (a whole that is
+also a fact kind) or live (any other whole, including a plain node that carries
+no belief status at all).
+
+Closing a whole therefore closes its required parts in the same transition,
+transitively through a part that is itself a whole, and the report names every
+one of them in `died`. Reopening the whole reopens the parts that are otherwise
+supported, because a reopen is driven by support rather than by a ledger of
+what a close closed: a part whose own justification no longer fires stays
+closed. A required part is closed even when a different source supports it —
+the existence dependency dominates its own grounding.
+
+An optional part is untouched. It can exist with no whole, so it keeps both its
+attachment to the closed whole and its own belief status; the composition claim
+still stops a second whole from taking it.
+
+No edge is deleted by any of this, so `store.verifyConstraintFences()`'s
+`compositionExistence` family reports nothing after a close: a closed required
+part is tombstoned, not an orphan.
+
+A whole that is not a fact is held to the same liveness the write path holds an
+attachment's whole to: present and not tombstoned. A closed validity window does
+not make it dead, because the write path would still accept it as a whole. A
+whole that IS tombstoned leaves its live required parts unsupported, which is
+also what the `compositionExistence` audit reports for that state. A transition
+that reaches such a part closes it and names it in `died`, even though the part
+was already unbelieved when the transition began.
+
+Each closed fact fires its own `delete` operation hook, parts included — unlike
+the delete cascade, which emits one event for the whole. A belief close has no
+cascade to report: every part reaching the close is a fact of its own, closed by
+its own support verdict, so its hook is its own too.
+
+A configuration that cannot reach a required part is refused when the capability
+is created. If a fact kind is the whole of an `existence: "required"` pair whose
+part kind is not itself in `fact.kinds`, `createRetractionCapability` throws
+`ConfigurationError` (`PROVENANCE_REQUIRED_PART_NOT_A_FACT`) naming both kinds —
+closing such a whole would leave a live required part hanging from it, and no
+transition could fix that.
 
 Use `retractMany(sources)` or `unRetractMany(sources)` to change several source
 flags in one recorded transaction:
@@ -155,3 +217,133 @@ Use `holding()` when you only need the current well-founded believed facts:
 ```typescript
 const facts = await provenance.holding();
 ```
+
+`holding()` waits for a transition or history write in flight on the same
+graph, so its multi-statement read never sees half of one, and it writes
+nothing: on PostgreSQL it takes the graph's advisory lock and no row, so it
+runs in a read-only transaction or under a `SELECT`-only role. On a standby
+the lock excludes nothing, since the primary's writers do not hold it there.
+
+## Guarding a derivation at commit time
+
+`retract` reconciles the facts reachable from the sources it names. A fact
+written afterwards is not revisited until a later call names its source, so a
+write that derives a fact from an already-retracted source, or from a fact that
+is live but unsupported, commits as an ordinary live row. `holding()` excludes
+that fact, but it opens its own transaction, so using it as a guard leaves a
+race between the check and the write.
+
+`assertHolds(tx, facts)` runs inside your own write transaction, after your
+writes, and refuses the commit when a named fact is not believed:
+
+```typescript
+await store.transaction(async (tx) => {
+  const justification = await tx.nodes.Justification.create({ label: "summarize" });
+  const summary = await tx.nodes.Fact.create({ label: "summary" });
+  await tx.edges.premiseOf.create(source, justification, {});
+  await tx.edges.derives.create(justification, summary, {});
+
+  const [held] = await provenance.assertHolds(tx, [summary]);
+  // held.via: the justifications currently firing for `summary`
+});
+// throws FactNotHoldingError; the transaction rolls back
+```
+
+A fact holds when it is believed: supported and a live row. That is the same
+definition `holding()` uses, composition included, so a required part whose
+whole is missing or unsupported does not hold. `assertHolds(tx, facts)` is
+defined as "every named fact is in `holding(tx)`".
+
+The call:
+
+- dedupes the named facts; an empty list is checked for transaction ownership
+  only, then returns an empty result without a lock or a read, so it is not
+  refused in a read-only transaction
+- reads rows written earlier in the same transaction
+- returns one `{ fact, via }` entry per distinct fact, in the order each was
+  first named, where `via` is the justifications firing for it, the same shape
+  as `survivedVia` in a retraction report
+- throws one [`FactNotHoldingError`](/errors#factnotholdingerror) listing every
+  failure, and closes or reconciles nothing; the throw aborts your transaction
+- refuses a transaction that does not belong to a running callback of the
+  capability's store, and a fact whose kind is not in `fact.kinds`, with
+  `ConfigurationError`
+
+### Checking your own intent with `via`
+
+`assertHolds` checks that the fact is believed, not that the justification you
+just wrote is the reason. A fact that already holds through another
+justification passes even when your new justification does not fire. `via`
+names the justifications that do fire, so compare it with what you wrote:
+
+```typescript
+const [held] = await provenance.assertHolds(tx, [summary]);
+const mine = held.via.some((entry) => entry.id === justification.id);
+if (!mine) throw new Error("the new justification does not fire");
+```
+
+### Justifications with no premises
+
+A justification with no `premiseOf` edges fires. That is the support rule, and
+`assertHolds` does not change it: a fact derived by a premise-less justification
+holds, and that justification appears in `via`. Use such a justification for an
+axiom, and check that a derivation which should have premises actually has
+them.
+
+### Reading the believed set inside a transaction
+
+`holding(tx)` runs the same believed-set computation on the transaction you
+pass, so it sees the rows that transaction wrote:
+
+```typescript
+await store.transaction(async (tx) => {
+  const believed = await provenance.holding(tx);
+});
+```
+
+`holding()` with no argument is a point-in-time answer, not a write guard. The
+facts it returns can stop holding before your next statement runs, because it
+reads in its own transaction.
+
+### Locking and transactions
+
+- `assertHolds` is a write guard and needs a read-write transaction. A
+  transaction opened with `accessMode: "read_only"` is refused with
+  `UnsupportedBackendCapabilityError` before any statement. On
+  PostgreSQL it takes the schema-version fence and then the graph write lock, in
+  the store's canonical order, before it reads, so it is safe to call before or
+  after your first write. A `retract` that overlaps the transaction either is
+  seen by the assert, which refuses, or commits after it and closes the new
+  fact and names it in `died`; the fact never ends up live and unsupported.
+- `holding(tx)` writes nothing. In a read-write transaction it takes the same
+  locks as `assertHolds`, the schema-version fence and then the graph write
+  lock, so it is safe to call before or after your writes and `assertHolds`.
+  Two consequences: on a store handle whose schema version is no longer the
+  active one it throws `StaleVersionError`, and a role that may only `SELECT`
+  gets the database's own permission error, because the schema fence is a row
+  lock.
+- In a transaction opened with `accessMode: "read_only"`, `holding(tx)` takes
+  the graph write lock alone, so it runs under a `SELECT`-only role. At a
+  snapshot isolation level it answers as of that transaction's snapshot. In a
+  read-only transaction, use `holding(tx)` rather than `assertHolds`.
+- A `SELECT`-only role reads the believed set with `holding()`, or with
+  `holding(tx)` in a transaction opened read-only.
+- `holding(tx)` holds the graph write lock until your transaction ends, so a
+  long transaction that calls it early blocks every other writer of that graph
+  for as long as it runs. Call it late, or keep the transaction short.
+- Inside a transaction, use `holding(tx)`, not `holding()`. The no-argument
+  form opens its own transaction and waits for a graph lock that yours already
+  holds.
+- `retract`, `retractMany`, `unRetract` and `unRetractMany` each run in a
+  transaction of their own and take the schema-version fence and then the graph
+  write lock before their first read. On a store handle whose schema version is
+  no longer the active one they throw `StaleVersionError`, even when the call
+  would have changed nothing or would have reported a missing source.
+- Reacquiring a lock the transaction already holds reuses it.
+- `assertHolds` reads only what is behind the named facts, not the whole
+  provenance graph, so its cost follows the size of their derivations.
+
+Plain node and edge writes stay unchecked: only a transaction that calls
+`assertHolds` carries the guarantee. A guard on the current state also does not
+protect a run that read its premises earlier and writes later; a premise that
+was retracted and then restored, or edited in place, passes.

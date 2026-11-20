@@ -96,6 +96,34 @@ const Document = defineNode("Document", {
 });
 ```
 
+### Search field scope
+
+Fulltext search addresses a node kind's declared searchable fields as one
+indexed document. It has no public field selector. For the `Document` above,
+`store.search.fulltext("Document", { query })` and `d.$fulltext.matches(query)`
+search both `title` and `body`; their ranking is for that combined document.
+
+| Search leg | Field scope |
+| --- | --- |
+| Fulltext | All declared `searchable()` fields on the selected kind |
+| Vector | The embedding field named by `fieldPath` |
+| Hybrid | Kind-wide fulltext plus the vector leg's selected `fieldPath` |
+
+In `store.search.hybrid`, `vector.fieldPath` selects only the vector leg. It does
+not restrict the fulltext leg to that field or to the source text used to produce
+its embedding. An adapter must describe these scopes accurately rather than
+presenting kind-wide matches as field-restricted fulltext results.
+
+Post-filtering fulltext hits by a property does not implement field-restricted
+search: omitted candidates cannot be recovered, scores still describe the
+combined document, and paging and recall change. A future field selector needs
+an explicit backend capability with defined indexing, ranking, and pagination
+semantics; the current API provides no such selector.
+
+Fulltext, vector, and hybrid indexes serve current-state search. Historical
+views continue to refuse these search APIs; pinning a recorded or valid-time
+coordinate does not turn a current index into a historical index.
+
 ### How Indexing Works
 
 TypeGraph stores one fulltext row per node. When you create or update a
@@ -163,6 +191,37 @@ Also useful for:
 - Re-tokenizing after changing `language` on a `searchable()` field.
 - Recovering from bulk inserts that bypassed the store layer.
 
+### Checking Whether Search Is Ready
+
+`store.search.rebuildFulltext()` fixes *content*. It cannot fix storage
+that is missing, unattested, or provisioned at the wrong shape — and it
+throws `StoreNotInitializedError` when it is, because the hot-path gate
+refuses fulltext writes until both the deployment marker attests the shared
+table and the graph-local activation marker admits this graph. To find out
+which situation you are in without writing anything:
+
+```typescript
+const health = await store.probeContributions();
+const fulltext = health.entries.find(
+  (entry) => entry.contribution === "fulltext",
+);
+
+if (fulltext?.state !== "ready") {
+  console.warn(`fulltext search is ${fulltext?.state}`, fulltext?.detail);
+}
+```
+
+The probe writes nothing, so it is safe to call from a health check, on a
+read path, or on a replica — which is the point: the alternative was to
+run `store.repairContributions()`, a write with repair side effects, and
+hope. When it reports `degraded`, escalate through the contribution health
+ladder — probe, then `repairContributions()`, then
+`rebuildContribution("fulltext")`, which is scoped to the calling graph: it
+deletes and refills only that graph's rows in the shared fulltext table, and
+drops and recreates the table itself only when no other graph has rows in
+it. The three rungs, what each one writes, and when to stop are in
+[Contribution health: probe, repair, rebuild](/troubleshooting#contribution-health-probe-repair-rebuild).
+
 ## Database Setup
 
 ### Initialization is required (boot via `createStoreWithSchema`)
@@ -191,8 +250,10 @@ No extensions required. The built-in `tsvector` type and GIN indexes
 work on every managed Postgres (RDS, Supabase, Neon, Cloud SQL, Aiven).
 
 The fulltext table's DDL ships in `bootstrapTables()` and the migration
-SQL; `createStoreWithSchema` is what then records the durable
-materialization marker that fulltext operations check (see above):
+SQL. The first privileged `createStoreWithSchema` boot records one
+deployment-scoped physical marker for that shared table plus a graph-local
+activation marker. Later graphs reuse the physical attestation and need only
+the DML activation write; fulltext operations require both markers (see above):
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
@@ -246,6 +307,13 @@ is fine for single-predicate use. `.limit()` on the query controls the
 `.fuseWith()`), pass a larger `k` per predicate (e.g. 200) so there are
 enough candidates for the fused ranking to be meaningful.
 
+Traversal happens after candidate generation. A candidate can therefore fan
+out into several match rows. Use query-level `.where((ctx) => ...)` to filter
+those completed rows, then apply an explicit `.orderBy()` and `.limit()` for
+the final result. The final order does not change which nodes entered the
+top-k candidate set, and the final limit counts match rows rather than distinct
+source nodes.
+
 ### Query Modes
 
 ```typescript
@@ -283,7 +351,7 @@ store
     d.$fulltext
       .matches("machine learning", 20, { mode: "websearch" })
       .and(d.published.eq(true))
-      .and(d.publishedAt.gte("2024-01-01"))
+      .and(d.publishedAt.gte("2024-01-01T00:00:00.000Z"))
       .and(d.tenantId.eq(tenant))
   )
   .select((ctx) => ctx.d)
@@ -354,6 +422,7 @@ store
       .and(d.tenantId.eq(tenant))
   )
   .fuseWith({ k: 60, weights: { vector: 1.0, fulltext: 1.5 } })
+  .select((ctx) => ctx.d)
   .limit(10)
   .execute();
 ```
@@ -373,7 +442,7 @@ round trip instead of three. The saving scales with per-statement cost:
 decisive on serverless HTTP drivers, Cloudflare D1 / Durable Objects, and
 remote databases; on a local low-latency connection the two paths are
 within a few milliseconds of each other. (Kind expansions via
-`includeSubClasses`, and custom backends without the composed statement,
+`expansion`, and custom backends without the composed statement,
 transparently use a multi-statement path with identical results.)
 
 ```typescript
@@ -441,16 +510,85 @@ for (const hit of hits) {
 | `includeSnippets` | `boolean` | `false` | Return a highlighted `<mark>…</mark>` snippet per hit. Noticeably slower than plain search — request only for final-page results. |
 | `where` | `(accessor) => Predicate` | *(none)* | Property predicate compiled into the search statement's candidate set — the engine ranks only matching rows, so a filter never shrinks results below `limit` when enough matches exist (libSQL DiskANN: bounded by its 4× over-fetch). Same accessor and semantics as `store.nodes.<kind>.find({ where })`. |
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
-| `includeSubClasses` | `boolean` | `false` | Also search `subClassOf` descendant kinds and merge their scores into one ranking. |
+| `expansion` | `"exact" \| "subclasses"` | `"exact"` | `"subclasses"` also searches `subClassOf` descendant kinds and merges their scores into one ranking. |
+
+`search()`'s `expansion` stays **opt-in** and defaults to `"exact"` —
+a deliberate asymmetry with the query builder's `from()`/`to()`, which
+default to `expansion: "subclasses"`, and `search()` does not follow
+`queryDefaults.expansion` either. An expanded search can be refused where an
+expanded query never is. A subclass that omits the searched field holds no
+value there and is skipped, but one that redeclares the field without
+`searchable()` (or, for a vector search, with an `embedding()` tag that
+differs from its parent's) is refused because its rows are not in the index
+the search reads, and a vector search across kinds refuses kinds that
+declare different metrics (see [Semantic Search](/semantic-search)). If the
+default expanded, adding such a subclass would turn a search call that works
+today into a refusal. Opting in keeps that a decision made at the call.
+[Scope at a glance](/queries/source#scope-at-a-glance) lists the default
+scope of every query, collection and search surface side by side. A subclass
+only a persisted [graph extension](/graph-extensions) declares is searched like
+any other under `expansion: "subclasses"`, because the hit type is widened
+whatever the compile-time graph declares (see below).
+
+An expansion that would silently miss rows is refused rather than
+under-returned, exactly where `$fulltext.matches()` refuses the same alias: if
+a subclass redeclares a `searchable()` field without `searchable()`, its text
+is not in the index, so `expansion: "subclasses"` throws `ConfigurationError`
+(`SEARCH_EXPANSION_KIND_UNINDEXED`) naming the kind. The same holds for an
+exact search of a kind that declares no `searchable()` field at all: it is
+refused rather than returning nothing, as `$fulltext.matches()` refuses the
+same alias. A subclass that merely omits the field holds no text there and is
+searched as usual. Passing the
+removed `includeSubClasses` option from untyped code is refused
+(`QUERY_ALIAS_EXPANSION_INVALID`) rather than ignored.
+
+A hit's type follows the stated axis. With `"exact"` (stated or omitted),
+`hit.node` is the searched kind exactly. With `expansion: "subclasses"`,
+`hit.node` keeps the searched kind's properties while its `kind` widens to
+`string` and its `NodeId` brand widens, exactly as a
+`from(kind, alias, { expansion: "subclasses" })` alias does: the row may be a
+subclass, so its id is not accepted by the searched kind's own `update()`.
+This holds even for a kind no compile-time subsumption relation names, since
+a persisted extension can still subclass it. Narrowing `hit.node.kind` does
+not narrow `hit.node` itself: the hit carries no correlation between its
+`kind` and its id brand, so `hit.node.id` stays unaccepted by the narrowed
+kind's collection. To work with one concrete kind, narrow the kind and resolve
+the hit as a reference with
+[`store.getNodeByRef`](/schemas-stores#storegetnodebyrefreference), which
+types a literal-kind reference as that kind's node. An `expansion` value that
+is not a literal at the call site (a variable typed `"exact" | "subclasses"`,
+or an options value typed `FulltextSearchOptions` that a wrapper forwards)
+also types the hit in the widened form.
+
+```typescript
+const hits = await store.search.fulltext("Content", {
+  query: "climate",
+  limit: 10,
+  expansion: "subclasses",
+});
+
+for (const hit of hits) {
+  hit.node.title; // typed: every subclass satisfies Content's properties
+  hit.node.kind; // string — "Content", or any of its subclasses
+  if (hit.node.kind === "Article") {
+    // Node<typeof Article> | undefined
+    const article = await store.getNodeByRef({
+      kind: hit.node.kind,
+      id: hit.node.id,
+    });
+  }
+}
+```
 
 The same three options are available on `store.search.vector` and
-`store.search.hybrid` (where `where` and `includeSubClasses` apply to both
+`store.search.hybrid` (where `where` and `expansion` apply to both
 halves). Search always follows current-read semantics: tombstoned nodes and
 nodes outside their validity window never rank.
 
 Returned hits are `FulltextSearchHit<Node<K>>` with `node`, `score`
 (higher = more relevant), `rank` (1-based), and `snippet` (when
-requested).
+requested). Under `expansion: "subclasses"`, `Node<K>` is the widened form
+described above.
 
 ## Reciprocal Rank Fusion
 
@@ -759,10 +897,10 @@ Capabilities (`phraseQueries`, `prefixQueries`, `highlighting`,
 ### `StoreNotInitializedError: fulltext storage … is not initialized`
 
 The database was never booted through `createStoreWithSchema`, so the
-durable fulltext-materialization marker is missing (or it is `stale` —
-the strategy/DDL changed since it was recorded, or `failed` — the last
-boot-time attempt errored). Bare `createStore()` deliberately does **not**
-self-heal this on the hot path.
+deployment-scoped physical marker or this graph's activation marker is missing
+(or it is `stale` — the strategy/DDL changed since it was recorded, or
+`failed` — the last boot-time attempt errored). Bare `createStore()`
+deliberately does **not** self-heal this on the hot path.
 
 Fix: call `createStoreWithSchema(graph, backend)` once at application
 startup — outside request handlers and adopted transactions — before any
@@ -772,6 +910,15 @@ move the initialization to an explicit boot step. A `stale` reason means
 the recorded shape no longer matches the active strategy/DDL: migrate or
 drop the fulltext table and re-run the boot, or restore the original
 strategy.
+
+`ContributionUnavailableError` with `state: "physical-storage-missing"` is
+different: the physical fulltext table disappeared after initialization. Gated
+fulltext searches and searchable node writes raise this typed error; compiled
+query-builder predicates can still surface the engine's missing-relation error.
+Run `store.rebuildContribution("fulltext")`; rerunning ordinary initialization
+cannot reconstruct the missing indexed content. Use `probeContributions()` at
+startup when an application must detect this out-of-band catalog damage before
+the first dependent read or write.
 
 ### `Cannot call .$fulltext.matches() on alias "x"`
 

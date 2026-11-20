@@ -6,12 +6,27 @@
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
+    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
+    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
+        waitBudgetMs: number;
+    }>) => Promise<AdoptedSchemaWriteTransaction>;
 }>;
 
 // @public (undocumented)
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
+
+// @public
+export type AdoptedSchemaWriteTransaction = Readonly<{
+    backend: SchemaWriteTransactionBackend & Readonly<{
+        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
+        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
+            onDrift?: "throw" | "skip";
+        }>) => Promise<void>;
+    }>;
+    activeSchema: SchemaVersionRow | undefined;
+}>;
 
 // @public
 export const ALL_FULLTEXT_MODES: readonly FulltextQueryMode[];
@@ -23,24 +38,500 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
+export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort, graphId: string, coordination: GraphCommandCoordination): void;
+
+// @public
+export function assertGraphCommandExecutionContext(context: unknown): asserts context is GraphCommandExecutionContext;
+
+// @public
+export function assertRecursiveTraversal(verdict: RecursiveTraversalVerdict, operation: string): asserts verdict is Extract<RecursiveTraversalVerdict, {
+    supported: true;
+}>;
+
+// @public
 export function assertVectorMinScore(minScore: number, metric: VectorMetric, label?: string): void;
 
 // @public
 export function assertVectorSearchLimit(limit: number): void;
 
 // @public
-export type BackendCapabilities = Readonly<{
-    transactions: boolean;
-    windowFunctions: boolean;
-    returning?: boolean;
-    maxBindParameters?: number;
-    vector?: VectorCapabilities | undefined;
-    fulltext?: FulltextCapabilities | undefined;
-    graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
+
+// @public
+export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND: {
+    readonly "durable-convergence": "mutateEdges.durableConvergence";
+    readonly "resolved-set": "mutateEdges.resolvedSet";
+};
+
+// @public
+export const ATOMIC_MUTATION_PROGRAM_VARIANTS: readonly ["createNodes", "replaceNodes", "createEdges", "deleteNodes", "deleteEdges", "updateNodes", "updateEdges", "mutateNodes", "mutateEdges.resolvedSet", "mutateEdges.durableConvergence"];
+
+// @public
+export type AtomicDeleteBatchResult = Readonly<{
+    affectedCount: number;
+    schemaFenceMatched: boolean;
+}>;
+
+// @public
+export class AtomicEdgeBatchCardinalityRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export type AtomicEdgeBatchCountInput = Readonly<{
+    claims: readonly ClaimEdgeCardinalityParams[];
+    params: readonly InsertEdgeParams[];
+    resultMode: "count";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicEdgeBatchEndpointRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export interface AtomicEdgeBatchExecutor {
+    // (undocumented)
+    (input: AtomicEdgeBatchCountInput): Promise<number>;
+    // (undocumented)
+    (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
+}
+
+// @public
+export type AtomicEdgeBatchRowsInput = Readonly<{
+    claims: readonly ClaimEdgeCardinalityParams[];
+    params: readonly InsertEdgeParams[];
+    resultMode: "rows";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceEntry = Readonly<{
+    params: InsertEdgeParams;
+    match: EdgeConvergenceMatch;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceInput = Readonly<{
+    kind: "durable-convergence";
+    entries: readonly AtomicEdgeConvergenceEntry[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceResult = Readonly<{
+    row: EdgeRow;
+    outcome: "created" | "found";
+}>;
+
+// @public
+export class AtomicEdgeConvergenceTombstoneRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export type AtomicEdgeDeleteBatchExecutor = (input: AtomicEdgeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>;
+
+// @public
+export type AtomicEdgeDeleteBatchInput = Readonly<{
+    graphId: string;
+    expectedKind: string;
+    ids: readonly string[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicEdgeDeleteIdentityRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export interface AtomicEdgeMutationProgramExecutor {
+    // (undocumented)
+    (input: AtomicEdgeResolvedMutationSetInput): Promise<AtomicEdgeResolvedMutationSetResult>;
+    // (undocumented)
+    (input: AtomicEdgeConvergenceInput): Promise<readonly AtomicEdgeConvergenceResult[]>;
+    // (undocumented)
+    readonly maxEntries: Readonly<{
+        resolvedSet: number;
+        durableConvergence: number;
+    }>;
+}
+
+// @public
+export type AtomicEdgeResolvedMutationSetInput = Readonly<{
+    kind: "resolved-set";
+    creates: readonly InsertEdgeParams[];
+    updates: readonly AtomicEdgeResolvedUpdateEntry[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeResolvedMutationSetResult = Readonly<{
+    created: readonly EdgeRow[];
+    updated: readonly EdgeRow[];
+}>;
+
+// @public
+export interface AtomicEdgeResolvedUpdateBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicEdgeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly EdgeRow[]>;
+    readonly maxEntries: number;
+}
+
+// @public
+export type AtomicEdgeResolvedUpdateEntry = Readonly<{
+    existing: EdgeRow;
+    props: Readonly<Record<string, unknown>>;
 }>;
 
 // @public (undocumented)
-export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+export type AtomicMutationProgramConformanceCase = Readonly<{
+    backend: GraphBackend | TransactionBackend;
+    variant: AtomicMutationProgramVariant;
+    orderedSuccess: AtomicMutationProgramSuccessCase;
+    staleFenceNoWrite: AtomicMutationProgramRefusalCase & Readonly<{
+        dispatch: "required";
+    }>;
+    semanticRefusalRollback: AtomicMutationProgramRefusalCase;
+}>;
+
+// @public (undocumented)
+export class AtomicMutationProgramConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public (undocumented)
+export type AtomicMutationProgramConformanceFixture = Readonly<{
+    backend: GraphBackend | TransactionBackend;
+    equal: (actual: unknown, expected: unknown) => boolean;
+    cases: readonly AtomicMutationProgramConformanceCase[];
+}> & ExactRootRegistrationProvenanceFixture;
+
+// @public
+export type AtomicMutationProgramConformancePreparation = Readonly<{
+    expectedResult: unknown;
+    expectedState: unknown;
+}>;
+
+// @public (undocumented)
+export type AtomicMutationProgramConformanceReport = Readonly<{
+    variants: readonly Readonly<{
+        variant: AtomicMutationProgramVariant;
+        passed: readonly string[];
+    }>[];
+    provenance: ExactRootRegistrationProvenanceReport;
+}>;
+
+// @public (undocumented)
+export type AtomicMutationProgramRefusalCase = Readonly<{
+    prepare: () => AtomicMutationProgramRefusalPreparation | PromiseLike<AtomicMutationProgramRefusalPreparation>;
+    execute: () => unknown;
+    observeState: () => unknown;
+    errorMatches: (error: unknown) => boolean;
+    dispatch: AtomicMutationProgramRefusalDispatch;
+}>;
+
+// @public (undocumented)
+export type AtomicMutationProgramRefusalDispatch = "required" | "pre-dispatch";
+
+// @public (undocumented)
+export type AtomicMutationProgramRefusalPreparation = Readonly<{
+    expectedState: unknown;
+}>;
+
+// @public
+export type AtomicMutationProgramRegistration = Readonly<{
+    createNodes?: AtomicNodeBatchExecutor | undefined;
+    replaceNodes?: AtomicNodeReplacementBatchExecutor | undefined;
+    createEdges?: AtomicEdgeBatchExecutor | undefined;
+    deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
+    deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
+    updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
+    updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
+    mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
+    mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
+}>;
+
+// @public (undocumented)
+export type AtomicMutationProgramSuccessCase = Readonly<{
+    prepare: () => AtomicMutationProgramConformancePreparation | PromiseLike<AtomicMutationProgramConformancePreparation>;
+    execute: () => unknown;
+    observeState: () => unknown;
+}>;
+
+// @public
+export type AtomicMutationProgramVariant = (typeof ATOMIC_MUTATION_PROGRAM_VARIANTS)[number];
+
+// @public
+export type AtomicNodeBatchEntry = Readonly<{
+    idSource: AtomicNodeBatchIdSource;
+    params: InsertNodeParams;
+    claims?: readonly NodeInsertClaim[];
+    projections?: readonly AtomicNodeProjection[];
+}>;
+
+// @public
+export interface AtomicNodeBatchExecutor {
+    // (undocumented)
+    (input: AtomicNodeBatchInput & Readonly<{
+        resultMode: "count";
+    }>): Promise<number>;
+    // (undocumented)
+    (input: AtomicNodeBatchInput & Readonly<{
+        resultMode: "rows";
+    }>): Promise<readonly NodeRow[]>;
+    readonly claimSupport?: AtomicNodeClaimSupport;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
+}
+
+// @public
+export type AtomicNodeBatchIdSource = "generated" | "caller";
+
+// @public
+export type AtomicNodeBatchInput = Readonly<{
+    entries: readonly AtomicNodeBatchEntry[];
+    resultMode: AtomicNodeBatchResultMode;
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicNodeBatchResultMode = "count" | "rows";
+
+// @public
+export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
+
+// @public
+export function atomicNodeClaimInputCost(claims: readonly NodeInsertClaim[]): number;
+
+// @public
+export type AtomicNodeClaimSupport = Readonly<{
+    families: readonly AtomicNodeClaimFamily[];
+    maxInputCostPerEntry: number;
+}>;
+
+// @public
+export type AtomicNodeDeleteBatchExecutor = Readonly<{
+    releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}> & ((input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>);
+
+// @public
+export type AtomicNodeDeleteBatchInput = Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicNodeDeleteRestrictedRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export type AtomicNodeProjection = Extract<NodeInsertProjection, {
+    kind: "fulltext";
+}> | Readonly<{
+    kind: "embedding";
+    action: "upsert";
+    fieldPath: string;
+    embedding: readonly number[];
+    dimensions: number;
+    metric: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["metric"];
+    indexType: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["indexType"];
+}> | Readonly<{
+    kind: "embedding";
+    action: "delete";
+    fieldPath: string;
+    dimensions: number;
+    metric: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["metric"];
+    indexType: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["indexType"];
+}>;
+
+// @public
+export type AtomicNodeProjectionFamily = "embedding" | "fulltext";
+
+// @public
+export type AtomicNodeProjectionSupport = Readonly<{
+    families: readonly AtomicNodeProjectionFamily[];
+}>;
+
+// @public
+export interface AtomicNodeReplacementBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicNodeReplacementEntry[];
+        releaseClaims: boolean;
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly NodeRow[]>;
+    readonly accepts?: (entries: readonly AtomicNodeReplacementEntry[]) => boolean;
+    readonly claimSupport?: AtomicNodeClaimSupport;
+    readonly maxEntries: Readonly<{
+        plain: number;
+        claimed: number;
+    }>;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
+    readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}
+
+// @public
+export type AtomicNodeReplacementEntry = Readonly<{
+    params: InsertNodeParams;
+    claims?: readonly NodeInsertClaim[];
+    projections?: readonly AtomicNodeProjection[];
+}>;
+
+// @public
+export interface AtomicNodeResolvedMutationSetExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        creates: readonly AtomicNodeBatchEntry[];
+        updates: readonly AtomicNodeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<AtomicNodeResolvedMutationSetResult>;
+    readonly maxEntries: number;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
+}
+
+// @public
+export type AtomicNodeResolvedMutationSetResult = Readonly<{
+    created: readonly NodeRow[];
+    updated: readonly NodeRow[];
+}>;
+
+// @public
+export interface AtomicNodeResolvedUpdateBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicNodeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly NodeRow[]>;
+    readonly maxEntries: number;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
+}
+
+// @public
+export type AtomicNodeResolvedUpdateEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+    projections?: readonly AtomicNodeProjection[];
+}>;
+
+// @public
+export type AtomicSqlBatchExecutor = <TRow>(statements: readonly CompiledAtomicSqlStatement[]) => Promise<readonly (readonly TRow[])[]>;
+
+// @public (undocumented)
+export type AtomicSqlProgramAdapter = Readonly<{
+    executeAtomicBatch?: AtomicSqlBatchExecutor;
+}>;
+
+// @public
+export type AtomicSqlProgramRegistration = AtomicSqlBatchExecutor | AtomicSqlProgramAdapter;
+
+// @public (undocumented)
+export type AtomicSqlRow = Readonly<Record<string, unknown>>;
+
+// @public (undocumented)
+export class AtomicTransportConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public (undocumented)
+export type AtomicTransportConformanceFixture<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined> = Readonly<{
+    backend: GraphBackend | TransactionBackend;
+    executeAtomicBatch: AtomicSqlBatchExecutor;
+    equal: AtomicTransportEquality;
+    orderedResults: Readonly<{
+        statements: readonly CompiledAtomicSqlStatement[];
+        expected: readonly (readonly AtomicSqlRow[])[];
+    }>;
+    parameterPreservation: Readonly<{
+        statements: readonly CompiledAtomicSqlStatement[];
+        expected: TParameterSnapshot;
+        observe: () => TParameterSnapshot | PromiseLike<TParameterSnapshot | undefined> | undefined;
+    }>;
+    rollback: AtomicTransportRollbackCase<TSnapshot>;
+    emptyBatch: Readonly<{
+        prepare?: () => void | PromiseLike<void>;
+        observe: () => TSnapshot | PromiseLike<TSnapshot>;
+        expected: TSnapshot;
+    }>;
+}> & ExactRootRegistrationProvenanceFixture;
+
+// @public (undocumented)
+export type AtomicTransportConformanceReport = Readonly<{
+    passed: readonly string[];
+    skipped: readonly string[];
+}>;
+
+// @public
+export type AtomicTransportEquality = (actual: unknown, expected: unknown) => boolean;
+
+// @public (undocumented)
+export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
+    prepare: () => void | PromiseLike<void>;
+    statements: readonly CompiledAtomicSqlStatement[];
+    observe: () => TSnapshot | PromiseLike<TSnapshot>;
+    expectedBefore: TSnapshot;
+    errorMatches?: (error: unknown) => boolean;
+}>;
+
+// @public
+export type BackendCapabilities = Readonly<{
+    recordedAnchorLookup?: boolean;
+    recordedAnchorPruning?: boolean;
+    durableStoreOperations?: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root" | "session";
+        unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+    }>;
+    windowFunctions: boolean;
+    orderedAggregates?: boolean;
+    clearValidTo?: boolean;
+    returning?: boolean;
+    maxBindParameters?: number;
+    readonly constraintClaims?: boolean;
+    readonly atomicNodeInsertClaims?: boolean;
+    readonly durableEdgeMatchIdentity?: boolean;
+    vector?: VectorCapabilities | undefined;
+    fulltext?: FulltextCapabilities | undefined;
+    graphAnalytics?: GraphAnalyticsCapabilities | undefined;
+    contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
+}>;
+
+// @public
+export type BackendCatalogProbes = Readonly<{
+    tableExists: (this: void, name: string) => Promise<boolean>;
+    tablesExist: (this: void, names: readonly string[]) => Promise<readonly TableState[]>;
+    indexStates: (this: void, names: readonly string[]) => Promise<readonly IndexState[]>;
+    dropInvalidIndex: (this: void, name: string) => Promise<void>;
+    columnTypes: (this: void, table: string) => Promise<readonly CatalogColumn[]>;
+    indexBehavior: CatalogIndexBehavior;
+}>;
+
+// @public (undocumented)
+export type BackendExecutionCapabilities = BackendCapabilities["execution"];
+
+// @public (undocumented)
+export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public (undocumented)
 export type BackendLifecycle = Pick<GraphBackend, "close">;
@@ -52,7 +543,161 @@ export type BackendMaintenance = Pick<GraphBackend, "refreshStatistics">;
 export type BackendTransactions = Pick<GraphBackend, "transaction">;
 
 // @public
+type BackendValidityEndMutation = Readonly<{
+    validTo?: string;
+    clearValidTo?: never;
+}> | Readonly<{
+    validTo?: never;
+    clearValidTo: true;
+}>;
+
+// @public
 export const BASE_CONTRIBUTION_OWNER = "base";
+
+// @public
+export const BATCH_POINT_READ: {
+    readonly id: "batchPointRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "getNodes";
+        readonly members: readonly ["getNodes"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+    }, {
+        readonly id: "getEdges";
+        readonly members: readonly ["getEdges"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "search hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/search.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import reference validation";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getNode in the routing loop";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import edge endpoint hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "edge batch endpoint priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip the priming pass; endpoint validation reads per-row";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/edge-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node create batch priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip priming; per-row probes";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node collection batch load";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/node-collection.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/node-fetch.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "edge batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "store/edge-fetch.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "identity member hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "getNodes";
+        }];
+    }];
+};
+
+// @public (undocumented)
+type BatchPointReadExtraMember = ExtraMember<typeof BATCH_POINT_READ, keyof ExtrasOf<typeof BATCH_POINT_READ>>;
+
+// @public (undocumented)
+export function batchPointReadMembers(port: Readonly<Partial<Pick<GraphBackend, BatchPointReadExtraMember>>>, verdict: BundleVerdictOf<typeof BATCH_POINT_READ>): PartialBundleBinding<BatchPointReadExtraMember>;
+
+// @public (undocumented)
+export function batchPointReadVerdict(backend: GraphBackend): BundleVerdictOf<typeof BATCH_POINT_READ>;
+
+// @public
+export function bindCore<const D extends GatedBundleDefinition<OptionalGraphBackendMember, string, OptionalGraphBackendMember>, M extends D["core"][number]>(port: Readonly<Partial<Pick<GraphBackend, M>>>, verdict: Extract<BundleVerdictOf<D>, {
+    supported: true;
+}>, definition: D): BundleBinding<M>;
+
+// @public
+export function bindExtra<const M extends OptionalGraphBackendMember>(port: Readonly<Partial<Pick<GraphBackend, M>>>, extraVerdict: Extract<ExtraVerdict<M>, {
+    present: true;
+}>, bundle: CapabilityBundleId): BundleBinding<M>;
+
+// @public
+export function bindExtraIfReachable<const M extends OptionalGraphBackendMember>(port: Readonly<Partial<Pick<GraphBackend, M>>>, extraVerdict: ExtraVerdict<M>, bundle: CapabilityBundleId): BundleBinding<M> | undefined;
 
 // @public
 export function buildFulltextCapabilities(strategy: FulltextStrategy): FulltextCapabilities;
@@ -61,7 +706,658 @@ export function buildFulltextCapabilities(strategy: FulltextStrategy): FulltextC
 export function buildVectorCapabilities(strategy: VectorStrategy): VectorCapabilities;
 
 // @public
+const BUNDLE_BINDING: unique symbol;
+
+// @public
+export type BundleBinding<M extends OptionalGraphBackendMember> = Required<Pick<GraphBackend, M>> & Readonly<{
+    [BUNDLE_BINDING]: true;
+}>;
+
+// @public
+export type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
+}>;
+
+// @public
+export type BundleVerdictOf<D extends CapabilityBundleDefinition> = D extends ({
+    kind: "graduated";
+    extras: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[];
+}) ? GraduatedBundleVerdict<SpecOf<XS>> : D extends ({
+    kind: "gated";
+    core: readonly (infer MCore extends OptionalGraphBackendMember)[];
+    extras?: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[] | undefined;
+}) ? GatedBundleVerdict<MCore, SpecOf<XS extends (readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]) ? XS : []>> : never;
+
+// @public
+export const CAPABILITY_BUNDLES: readonly [{
+    readonly id: "claims";
+    readonly kind: "gated";
+    readonly core: readonly ["claimEdgeCardinality", "claimEdgeCardinalityBatch", "purgeEdgeClaims", "hardDeleteUniquesByConcreteKind"];
+    readonly declaration: "constraintClaims";
+    readonly crossCheck: "bidirectional";
+    readonly portSurfaceCode: "CONSTRAINT_CLAIM_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "fallback";
+        readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+    };
+    readonly operations: readonly [{
+        readonly operation: "edge claim write";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinality";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinalityBatch";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "purgeEdgeClaims";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "hardDeleteUniquesByConcreteKind";
+        }];
+    }];
+}, {
+    readonly id: "uniqueSidecarBatch";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "insertUniqueBatch";
+        readonly members: readonly ["insertUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+    }, {
+        readonly id: "checkUniqueBatch";
+        readonly members: readonly ["checkUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+    }, {
+        readonly id: "hardDeleteUniquesByNodeIds";
+        readonly members: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "unique batch probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+        readonly requires: readonly ["checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1275, 1320];
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1575, 1593];
+        }];
+    }, {
+        readonly operation: "unique claim issue";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+        readonly requires: readonly ["insertUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }, {
+        readonly operation: "unique reap by node ids";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }];
+    }, {
+        readonly operation: "set-based node update";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "checkUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1993];
+        }];
+    }, {
+        readonly operation: "resolved node write";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [211];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [292];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }];
+}, {
+    readonly id: "batchPointRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "getNodes";
+        readonly members: readonly ["getNodes"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+    }, {
+        readonly id: "getEdges";
+        readonly members: readonly ["getEdges"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "search hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/search.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import reference validation";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getNode in the routing loop";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import edge endpoint hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "edge batch endpoint priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip the priming pass; endpoint validation reads per-row";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/edge-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node create batch priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip priming; per-row probes";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node collection batch load";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/node-collection.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/node-fetch.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "edge batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "store/edge-fetch.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "identity member hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "getNodes";
+        }];
+    }];
+}, {
+    readonly id: "statementExecution";
+    readonly kind: "gated";
+    readonly core: readonly ["executeStatement"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+    };
+    readonly operations: readonly [{
+        readonly operation: "identity statement execution";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "identity/sql-target.ts";
+            readonly member: "executeStatement";
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
+        }];
+    }, {
+        readonly operation: "recorded capture statement";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_CAPTURE_STATEMENT_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [62, 79];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
+        }];
+    }, {
+        readonly operation: "history construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "HISTORY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [251];
+        }];
+    }, {
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [299];
+        }];
+    }, {
+        readonly operation: "history-unsafe raw write overlay";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "omit the overriding member; the port's own absence stands";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [219];
+            readonly rewiring: {
+                readonly class: "reasoned";
+                readonly reason: "genuinely a port-surface presence test; re-keying it on a verdict changes behavior in both directions (a phantom-rejecting stub one way, a raw-write escape on a history-enabled store the other — a safety regression), and adding a non-throwing gated accessor to the frozen binder surface for ONE site is the over-generalization anti-pattern";
+            };
+        }];
+    }, {
+        readonly operation: "identity construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_ATOMIC_BACKEND";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [921];
+        }, {
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [928];
+        }];
+    }, {
+        readonly operation: "validity window repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "VALIDITY_WINDOW_REPAIR_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/repair-validity-windows.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded-time migration";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_TIME_MIGRATION_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [154, 161, 801];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";
+            };
+        }];
+    }];
+}, {
+    readonly id: "contributionHealth";
+    readonly kind: "graduated";
+    readonly declaration: "contributions";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "verifyContributions";
+        readonly members: readonly ["verifyContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "repairContributions";
+        readonly members: readonly ["repairContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "rebuildContribution";
+        readonly members: readonly ["rebuildContribution"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "probeContributions";
+        readonly members: readonly ["probeContributions"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "contribution verify";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+        readonly requires: readonly ["verifyContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "verifyContributions";
+        }];
+    }, {
+        readonly operation: "contribution repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+        readonly requires: readonly ["repairContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "repairContributions";
+        }];
+    }, {
+        readonly operation: "contribution rebuild";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+        readonly requires: readonly ["rebuildContribution"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "rebuildContribution";
+        }];
+    }, {
+        readonly operation: "contribution probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+        readonly requires: readonly ["probeContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "probeContributions";
+        }];
+        readonly declarationGate: true;
+    }];
+}, {
+    readonly id: "recordedRevisionOrigins";
+    readonly kind: "gated";
+    readonly core: readonly ["ensureRevisionOriginsTable"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+    };
+    readonly operations: readonly [{
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }, {
+        readonly operation: "revision origin bootstrap";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_ORIGIN_BOOTSTRAP_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/clock.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }];
+}, {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
+    }];
+}];
+
+// @public (undocumented)
+type CapabilityBundleCommon = Readonly<{
+    id: string;
+    dialects?: readonly SqlDialect[];
+    declaration?: keyof BackendCapabilities;
+    crossCheck: CapabilityCrossCheck;
+    portSurfaceCode: string;
+    operations: readonly CapabilityBundleOperation[];
+}>;
+
+// @public (undocumented)
+export type CapabilityBundleDefinition = GatedBundleDefinition<OptionalGraphBackendMember, string, OptionalGraphBackendMember> | GraduatedBundleDefinition<string, OptionalGraphBackendMember>;
+
+// @public
+export type CapabilityBundleDisposition =
+/** Absence refuses, with ONE typed error per operation. */
+Readonly<{
+    kind: "refuse";
+    code: string;
+}>
+/** Absence degrades along a named, tested path. Never refuses. */
+| Readonly<{
+    kind: "fallback";
+    fallback: string;
+}>;
+
+// @public
+export type CapabilityBundleExtra<Id extends string, M extends OptionalGraphBackendMember> = Readonly<{
+    id: Id;
+    members: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public (undocumented)
+export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
+
+// @public
+export type CapabilityBundleOperation = Readonly<{
+    operation: string;
+    disposition: CapabilityBundleDisposition;
+    requires?: readonly string[];
+    sites: readonly CapabilityBundleOperationSite[];
+    declarationGate?: true;
+}>;
+
+// @public
+export type CapabilityBundleOperationSite = Readonly<{
+    file: string;
+    member: OptionalGraphBackendMember;
+    lines?: readonly number[];
+    rewiring?: Readonly<{
+        class: "deferred" | "reasoned";
+        reason: string;
+    }>;
+}>;
+
+// @public (undocumented)
+export type CapabilityCrossCheck =
+/** Presence alone. The default, and 5 of the 6 pilot bundles. */
+"none"
+/**
+* Declared-but-missing refuses; implements-without-declaring resolves
+* supported. One-directional. No bundle uses this today — it exists so a
+* future cross-check has a shape to grow into, one that must carry its own
+* justification row when adopted.
+*/
+| "declared-implies-members"
+/**
+* Disagreement in EITHER direction refuses. `claims` only — the existing
+* `CONSTRAINT_CLAIM_SURFACE_MISMATCH`, whose bidirectionality carries a
+* fence-specific justification ("a silent fallback would unfence exactly
+* the writes the capability exists to fence") that no other family has.
+*/
+| "bidirectional";
+
+// @public
+export type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
+
+// @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+export type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+// @public
+export type CatalogColumn = Readonly<{
+    name: string;
+    kind: NormalizedColumnKind;
+    declaredType: string;
+}>;
+
+// @public
+export type CatalogIndexBehavior = Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
+}>;
 
 // @public
 export type CheckUniqueBatchParams = Readonly<{
@@ -82,6 +1378,18 @@ export type CheckUniqueParams = Readonly<{
 }>;
 
 // @public
+export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
+    graphId: string;
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope?: CompositionClaimScope;
+}>;
+
+// @public
 export type ClaimIndexMaterializationParams = Readonly<{
     indexName: string;
     graphId: string;
@@ -94,6 +1402,51 @@ export type ClaimIndexMaterializationParams = Readonly<{
 }>;
 
 // @public
+export const CLAIMS: {
+    readonly id: "claims";
+    readonly kind: "gated";
+    readonly core: readonly ["claimEdgeCardinality", "claimEdgeCardinalityBatch", "purgeEdgeClaims", "hardDeleteUniquesByConcreteKind"];
+    readonly declaration: "constraintClaims";
+    readonly crossCheck: "bidirectional";
+    readonly portSurfaceCode: "CONSTRAINT_CLAIM_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "fallback";
+        readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+    };
+    readonly operations: readonly [{
+        readonly operation: "edge claim write";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinality";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinalityBatch";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "purgeEdgeClaims";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "hardDeleteUniquesByConcreteKind";
+        }];
+    }];
+};
+
+// @public (undocumented)
+export function claimsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof CLAIMS)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof CLAIMS>, {
+    supported: true;
+}>): BundleBinding<(typeof CLAIMS)["core"][number]>;
+
+// @public (undocumented)
+export function claimsVerdict(backend: GraphBackend): BundleVerdictOf<typeof CLAIMS>;
+
+// @public
+export type ClaimsVerdictThunk = () => BundleVerdictOf<typeof CLAIMS>;
+
+// @public
 export type Collation = "binary" | "caseInsensitive";
 
 // @public
@@ -104,6 +1457,15 @@ export type CommitSchemaVersionExpected = Readonly<{
     version: number;
 }>;
 
+// @public (undocumented)
+export type CommitSchemaVersionIfKindsEmptyResult = Readonly<{
+    status: "committed";
+    row: SchemaVersionRow;
+}> | Readonly<{
+    status: "populated";
+    kinds: readonly PopulatedSchemaKind[];
+}>;
+
 // @public
 export type CommitSchemaVersionParams = Readonly<{
     graphId: string;
@@ -111,6 +1473,24 @@ export type CommitSchemaVersionParams = Readonly<{
     version: number;
     schemaHash: string;
     schemaDoc: SerializedSchema;
+}>;
+
+// @public (undocumented)
+export type CompareAndSetNodeParams = Readonly<{
+    operation: "compareAndSet";
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+    expected: Readonly<Record<string, NodePropertyExpectation>>;
+}>;
+
+// @public
+export type CompiledAtomicSqlStatement = Readonly<{
+    params: readonly unknown[];
+    sql: string;
 }>;
 
 // @public (undocumented)
@@ -124,6 +1504,184 @@ export type CompiledStatementSql = IntentSql<"statement">;
 
 // @public (undocumented)
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
+
+// @public
+export type CompositionClaimScope = Readonly<{
+    kind: "composition";
+    holders: readonly Readonly<{
+        edgeKind: string;
+        partSide: "from" | "to";
+    }>[];
+}>;
+
+// @public
+type CompositionExistence = "optional" | "required";
+
+// @public
+type CompositionPartSide = "from" | "to";
+
+// @public
+type CompositionRealization = Readonly<{
+    via?: string;
+    partSide?: CompositionPartSide;
+    existence?: CompositionExistence;
+}>;
+
+// @public
+class ConfigurationError extends TypeGraphError {
+    constructor(message: string, details?: Record<string, unknown>, options?: {
+        cause?: unknown;
+        suggestion?: string;
+    });
+}
+
+// @public
+type ConstrainedCardinality = Exclude<Cardinality, "many">;
+
+// @public
+type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
+
+// @public
+export type ConstraintFenceViolationRows = Readonly<{
+    contendedUniqueRows: readonly ContendedUniqueRow[];
+    contendedEdgeRows: readonly ContendedEdgeRow[];
+    disjointOverlaps: readonly DisjointOverlapRow[];
+    misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
+}>;
+
+// @public
+export type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+    scope: CompositionClaimScope | undefined;
+}>;
+
+// @public
+export type ContendedUniqueRow = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    key: string;
+    concreteKind: string;
+    nodeId: string;
+}>;
+
+// @public
+export const CONTRIBUTION_HEALTH: {
+    readonly id: "contributionHealth";
+    readonly kind: "graduated";
+    readonly declaration: "contributions";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "verifyContributions";
+        readonly members: readonly ["verifyContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "repairContributions";
+        readonly members: readonly ["repairContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "rebuildContribution";
+        readonly members: readonly ["rebuildContribution"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "probeContributions";
+        readonly members: readonly ["probeContributions"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "contribution verify";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+        readonly requires: readonly ["verifyContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "verifyContributions";
+        }];
+    }, {
+        readonly operation: "contribution repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+        readonly requires: readonly ["repairContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "repairContributions";
+        }];
+    }, {
+        readonly operation: "contribution rebuild";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+        readonly requires: readonly ["rebuildContribution"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "rebuildContribution";
+        }];
+    }, {
+        readonly operation: "contribution probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+        readonly requires: readonly ["probeContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "probeContributions";
+        }];
+        readonly declarationGate: true;
+    }];
+};
+
+// @public
+export type ContributionCapabilities = Readonly<{
+    supported: boolean;
+    probe: boolean;
+    rebuild: boolean;
+}>;
+
+// @public
+export type ContributionDiagnostic = Readonly<{
+    owner: string;
+    logicalName: string;
+    physicalName: string;
+    kind?: string;
+    fieldPath?: string;
+    state: ContributionDiagnosticState;
+    lastError?: string;
+}>;
+
+// @public
+export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
+
+// @public (undocumented)
+type ContributionHealthExtraMember = ExtraMember<typeof CONTRIBUTION_HEALTH, keyof ExtrasOf<typeof CONTRIBUTION_HEALTH>>;
+
+// @public (undocumented)
+export function contributionHealthMembers(port: Readonly<Partial<Pick<GraphBackend, ContributionHealthExtraMember>>>, verdict: BundleVerdictOf<typeof CONTRIBUTION_HEALTH>): PartialBundleBinding<ContributionHealthExtraMember>;
+
+// @public (undocumented)
+export function contributionHealthVerdict(backend: GraphBackend): BundleVerdictOf<typeof CONTRIBUTION_HEALTH>;
 
 // @public (undocumented)
 export type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
@@ -149,6 +1707,75 @@ export type ContributionMaterializationRow = Readonly<{
 }>;
 
 // @public
+export type ContributionProbeContribution = "fulltext" | "vector";
+
+// @public
+export type ContributionProbeEntry = Readonly<{
+    contribution: ContributionProbeContribution;
+    state: ContributionProbeState;
+    detail?: string;
+}>;
+
+// @public
+export type ContributionProbeResult = Readonly<{
+    graphRevision?: string;
+    entries: readonly ContributionProbeEntry[];
+}>;
+
+// @public
+export type ContributionProbeState = "ready" | "degraded" | "building";
+
+// @public
+export type ContributionRebuildResult = Readonly<{
+    rebuilt: readonly string[];
+    processed: number;
+    repopulated: number;
+    skipped: number;
+}>;
+
+// @public
+export type ContributionRebuildScope = ContributionProbeContribution;
+
+// @public
+export type ContributionRepairEntry = Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "repaired";
+}> | Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "requires-rebuild";
+}> | Readonly<{
+    diagnostic: ContributionDiagnostic;
+    status: "failed";
+    error: string;
+}>;
+
+// @public
+export type ContributionRepairResult = Readonly<{
+    results: readonly ContributionRepairEntry[];
+    remaining: readonly ContributionDiagnostic[];
+}>;
+
+// @public
+export type ContributionRepopulationStats = Readonly<{
+    processed: number;
+    repopulated: number;
+    skipped: number;
+}>;
+
+// @public
+export type ContributionScope = "deployment" | "graph";
+
+// @public
+export type CountEdgesAtEndpointParams = Readonly<{
+    graphId: string;
+    edgeKind: string;
+    endpoint: "from" | "to";
+    endpointKind: string;
+    endpointId: string;
+    activeOnly?: boolean;
+}>;
+
+// @public
 export type CountEdgesByKindParams = Readonly<{
     graphId: string;
     kind: string;
@@ -159,15 +1786,7 @@ export type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
-}>;
-
-// @public
-export type CountEdgesFromParams = Readonly<{
-    graphId: string;
-    edgeKind: string;
-    fromKind: string;
-    fromId: string;
-    activeOnly?: boolean;
+    limit?: number;
 }>;
 
 // @public
@@ -177,7 +1796,11 @@ export type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+    limit?: number;
 }>;
+
+// @public
+export function createClaimsVerdictThunk(backend: GraphBackend): ClaimsVerdictThunk;
 
 // @public
 export type CreateVectorIndexParams = Readonly<{
@@ -199,18 +1822,37 @@ export type CreateVectorIndexParams = Readonly<{
 export const D1_MAX_BIND_PARAMETERS = 100;
 
 // @public
+export const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
+
+// @public
+export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
+export function decorateBackend<T extends object, const O extends Partial<T> = Partial<T>>(base: T, overrides: ExactBackendOverlay<T, O>): T;
+
+// @public
+export type DeferredUnbundledMember = Readonly<{
+    kind: "deferred";
+    workstream: "WS5b";
+    bundle: Ws5bBundleId;
+    ceiling: number;
+}>;
+
+// @public
 export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
 
 // @public
 export type DeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
 export type DeleteEdgesBatchParams = Readonly<{
     graphId: string;
     ids: readonly string[];
+    kind?: string;
 }>;
 
 // @public
@@ -239,6 +1881,18 @@ export type DeleteFulltextParams = Readonly<{
 }>;
 
 // @public
+export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAnchorMapOptions): Promise<void>;
+
+// @public (undocumented)
+export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction">;
+    graphId: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+    dropWhenEmpty?: boolean | undefined;
+}>;
+
+// @public
 export type DeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
@@ -248,14 +1902,20 @@ export type DeleteNodeParams = Readonly<{
 // @public
 export type DeleteUniqueParams = Readonly<{
     graphId: string;
-    nodeKind: string;
+    nodeKind?: string;
     constraintName: string;
     key: string;
+    concreteKind: string;
+    nodeId: string;
 }>;
+
+// @public
+export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
 
 // @public
 export interface DialectAdapter {
     readonly analyzeTemporaryTable: (this: void, table: SqlFragment) => SqlFragment | undefined;
+    readonly appendTextJsonArray: (this: void, array: SqlFragment, values: readonly SqlFragment[]) => SqlFragment;
     readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly bindValue: (this: void, value: unknown) => unknown;
     readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
@@ -268,9 +1928,11 @@ export interface DialectAdapter {
     readonly ilike: (this: void, column: SqlFragment, pattern: SqlFragment | string) => SqlFragment;
     readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
     readonly inList: (this: void, left: SqlFragment, values: readonly unknown[], negated: boolean) => SqlFragment;
+    readonly inListParameter: (this: void, left: SqlFragment, packedValues: SqlFragment, options: InListParameterOptions) => SqlFragment;
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
+    readonly jsonArrayContainsExpression?: (this: void, column: SqlFragment, value: SqlFragment, valueType: ValueType) => SqlFragment;
     readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
     readonly jsonExtract: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractBoolean: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
@@ -282,11 +1944,36 @@ export interface DialectAdapter {
     readonly jsonPathIsNotNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
+    readonly jsonScalarPathEquals: (this: void, column: SqlFragment, pointer: JsonPointer, value: JsonScalar) => SqlFragment;
+    readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
+    readonly like: (this: void, column: SqlFragment, pattern: SqlFragment) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
+    readonly orderedRecordJsonArray: (this: void, options: Readonly<{
+        fields: readonly Readonly<{
+            name: string;
+            value: SqlFragment;
+            valueType: ValueType;
+        }>[];
+        orderBy: readonly SqlFragment[];
+        filter: SqlFragment | undefined;
+    }>) => SqlFragment;
+    readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
+    readonly orderedScalarJsonArray: (this: void, options: Readonly<{
+        value: SqlFragment;
+        valueType: ValueType;
+        orderBy: readonly SqlFragment[];
+        filter: SqlFragment | undefined;
+    }>) => SqlFragment;
+    readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
+    readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
+    readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
+    readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
+    unboundedLimit(): SqlFragment;
     readonly wrapSetOperationOperand: (this: void, inner: SqlFragment) => SqlFragment;
 }
 
@@ -300,6 +1987,10 @@ export type DialectCapabilities = Readonly<{
     vectorPredicateStrategy: DialectVectorPredicateStrategy;
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
+    subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+    maxRecursiveBatchPlans?: number;
+    textIndexOrderIsBinary: boolean;
+    transactionReadsShareOneSnapshot: boolean;
 }>;
 
 // @public
@@ -309,7 +2000,16 @@ export type DialectRecursiveQueryStrategy = "recursive_cte";
 export type DialectStandardQueryStrategy = "cte_project";
 
 // @public
+export type DialectSubgraphMembershipStrategy = "materialized-ids" | "inline-cte";
+
+// @public
 export type DialectVectorPredicateStrategy = "native" | "unsupported";
+
+// @public
+export type DisjointOverlapRow = Readonly<{
+    kinds: readonly [string, string];
+    nodeId: string;
+}>;
 
 // @public
 export type DropVectorIndexParams = Readonly<{
@@ -321,11 +2021,111 @@ export type DropVectorIndexParams = Readonly<{
 // @public
 export const DURABLE_OBJECT_MAX_BIND_PARAMETERS = 100;
 
-// @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "countEdgesByKind">;
+// @public
+export type DurableEdgeBatchMembers = Readonly<{
+    insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
+}>;
+
+// @public
+type EdgeCardinalityAxisRef = Readonly<{
+    direction: "source";
+    cardinality: ConstrainedCardinality;
+}> | Readonly<{
+    direction: "target";
+    cardinality: ConstrainedTargetCardinality;
+}>;
+
+// @public
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
+    edgeKind: string;
+    scope?: CompositionClaimScope;
+}>;
+
+// @public
+export type EdgeClaimOutcome = Readonly<{
+    status: "claimed";
+}> | Readonly<{
+    status: "refused";
+    holderEdgeId: string;
+}>;
+
+// @public
+export type EdgeConvergeCreateCommand = Readonly<{
+    kind: "edge.converge-create";
+    plan: ManagedEdgeCreatePlan;
+    match: EdgeConvergenceMatch;
+}>;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeConvergeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "found";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly [
+    "convergence" | "endpointPredicate",
+    ...(readonly ("convergence" | "endpointPredicate")[])
+    ];
+}>;
+
+// @public
+export type EdgeConvergenceMatch = Readonly<{
+    kind: "dynamic";
+    matchOn: readonly string[];
+    props: Record<string, unknown>;
+}> | Readonly<{
+    kind: "durable";
+    identity: EdgeMatchIdentityStorage;
+}>;
+
+// @public
+export type EdgeCreateCommand = Readonly<{
+    kind: "edge.create";
+    plan: ManagedEdgeCreatePlan;
+}>;
+
+// @public (undocumented)
+export type EdgeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly [
+    "schemaFence" | "cardinalityClaim" | "endpointPredicate",
+    ...(readonly ("schemaFence" | "cardinalityClaim" | "endpointPredicate")[])
+    ];
+}>;
+
+// @public
+export type EdgeEndpointAllowance = Readonly<{
+    edgeKind: string;
+    allowedPairs: readonly (readonly [string, string])[];
+}>;
+
+// @public
+type EdgeEndpointSide = "from" | "to";
+
+// @public (undocumented)
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesConnectedToNodes" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findEdgesByMatchIdentity" | "findEdgesAcrossKinds" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+
+// @public (undocumented)
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -348,6 +2148,12 @@ export type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 export type EdgeIndexDirection = "out" | "in" | "none";
 
 // @public
+type EdgeMatchIdentityStorage = Readonly<{
+    name: string;
+    key: string;
+}>;
+
+// @public
 export type EdgeRow = Readonly<{
     graph_id: string;
     id: string;
@@ -357,6 +2163,8 @@ export type EdgeRow = Readonly<{
     to_kind: string;
     to_id: string;
     props: RowProps;
+    match_identity_name?: string;
+    match_identity_key?: string;
     valid_from: string | undefined;
     valid_to: string | undefined;
     created_at: string;
@@ -365,7 +2173,145 @@ export type EdgeRow = Readonly<{
 }>;
 
 // @public
+export const ENDPOINT_SET_READ: {
+    readonly id: "endpointSetRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "findEdgesByEndpointSet";
+        readonly members: readonly ["findEdgesByEndpointSet"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "bulk endpoint read";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/edge-collection.ts";
+            readonly member: "findEdgesByEndpointSet";
+        }];
+    }, {
+        readonly operation: "endpoint edge fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-endpoint findEdgesByKind";
+        };
+        readonly requires: readonly ["findEdgesByEndpointSet"];
+        readonly sites: readonly [];
+    }];
+};
+
+// @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
+
+// @public (undocumented)
+export class EndpointSetReadConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public (undocumented)
+export type EndpointSetReadConformanceFixture = Readonly<{
+    backend: GraphBackend;
+    equal: EndpointSetReadEquality;
+    successes: readonly EndpointSetReadConformanceSuccess[];
+    refusals: readonly EndpointSetReadConformanceRefusal[];
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceRefusal = Readonly<{
+    name: string;
+    params: FindEdgesByEndpointSetParams;
+    errorMatches?: (error: unknown) => boolean;
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceReport = Readonly<{
+    passed: readonly string[];
+}>;
+
+// @public (undocumented)
+export type EndpointSetReadConformanceSuccess = Readonly<{
+    name: string;
+    params: FindEdgesByEndpointSetParams;
+    expected: readonly EdgeRow[];
+}>;
+
+// @public
+export type EndpointSetReadEquality = (actual: readonly EdgeRow[], expected: readonly EdgeRow[]) => boolean;
+
+// @public (undocumented)
+type EndpointSetReadExtraMember = ExtraMember<typeof ENDPOINT_SET_READ, keyof ExtrasOf<typeof ENDPOINT_SET_READ>>;
+
+// @public (undocumented)
+export function endpointSetReadMembers(port: Readonly<Partial<Pick<GraphBackend, EndpointSetReadExtraMember>>>, verdict: BundleVerdictOf<typeof ENDPOINT_SET_READ>): PartialBundleBinding<EndpointSetReadExtraMember>;
+
+// @public (undocumented)
+export function endpointSetReadVerdict(backend: GraphBackend): BundleVerdictOf<typeof ENDPOINT_SET_READ>;
+
+// @public (undocumented)
+const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+export type EngineRecordedRevision = Readonly<{
+    revision: string;
+    recordedAt: string;
+}>;
+
+// @public
+export type EngineRecordedTimeMembers = Readonly<{
+    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
+    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
+}>;
+
+// @public
+export type EngineRevision = string & Readonly<{
+    [ENGINE_REVISION_BRAND]: "EngineRevision";
+}>;
+
+// @public
+export type EntityKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
+// @public
+type ErrorCategory = "user" | "constraint" | "system";
+
+// @public
+export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O & Readonly<Record<Exclude<keyof O, keyof T>, never>>;
+
+// @public
+export type ExactRootRegistrationProvenanceFixture = Readonly<{
+    derivedBackends: readonly [
+    GraphBackend | TransactionBackend,
+    ...(GraphBackend | TransactionBackend)[]
+    ];
+}>;
+
+// @public
+export type ExactRootRegistrationProvenanceReport = Readonly<{
+    passed: readonly string[];
+    skipped: readonly string[];
+}>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: NodeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<NodeCreateCommandResult>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: EdgeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<EdgeCreateCommandResult>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: EdgeConvergeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<EdgeConvergeCreateCommandResult>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: GraphCommand, coordination?: "none" | GraphCommandCoordination): Promise<GraphCommandResult>;
 
 // @public
 export type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -386,8 +2332,11 @@ export type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
+    acyclic?: boolean;
 }>;
 
 // @public
@@ -465,7 +2414,7 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
-}>;
+}> & CompositionRealization;
 
 // @public
 export type ExtensionPropertyModifiers = Readonly<{
@@ -507,6 +2456,42 @@ export type ExtensionUniqueWhere = Readonly<{
     op: NullCheckOp;
 }>;
 
+// @public (undocumented)
+export type ExtraMember<D extends CapabilityBundleDefinition, X extends keyof ExtrasOf<D>> = Extract<ExtrasOf<D>[X], OptionalGraphBackendMember>;
+
+// @public (undocumented)
+export type ExtrasOf<D extends CapabilityBundleDefinition> = SpecOf<NonNullable<D["extras"]>>;
+
+// @public
+export type ExtraVerdict<M extends OptionalGraphBackendMember> = Readonly<{
+    present: true;
+    members: readonly M[];
+}> | Readonly<{
+    present: false;
+    missing: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+export type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
+    [K in keyof X]: ExtraVerdict<X[K]>;
+}>;
+
+// @public
+export type FenceSql = Readonly<{
+    lockTables?: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    advisoryLockExpression?: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression?: () => SqlFragment;
+}>;
+
+// @public
+type FenceStatements = FenceSql & Readonly<{
+    acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedSnapshotFence?: ((namespace: string, key: string | number) => SqlFragment) | undefined;
+    isolationFact: () => SqlFragment;
+}>;
+
 // @public
 export type FilteredApproximateSearch = Readonly<{
     mode: FilteredApproximateSearchMode;
@@ -515,6 +2500,38 @@ export type FilteredApproximateSearch = Readonly<{
 
 // @public
 export type FilteredApproximateSearchMode = "filter-pushdown" | "iterative-scan" | "post-filter";
+
+// @public
+export type FindEdgesByEndpointSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    side: EdgeEndpointSide;
+    endpointKind: string;
+    endpointIds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
+
+// @public
+export type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
+    graphId: string;
+    side: EdgeEndpointSide;
+    endpoints: readonly Readonly<{
+        kind: string;
+        id: string;
+        opposite?: Readonly<{
+            kind: string;
+            id: string;
+        }>;
+    }>[];
+    edgeKinds: readonly string[];
+    limitPerEndpoint?: number;
+    excludeDeleted?: boolean;
+    temporalMode?: TemporalMode;
+    asOf?: string;
+}>;
 
 // @public
 export type FindEdgesByKindParams = Readonly<{
@@ -531,6 +2548,13 @@ export type FindEdgesByKindParams = Readonly<{
     asOf?: string;
     orderBy?: "id" | "created_at";
     after?: string;
+}>;
+
+// @public
+export type FindEdgesConnectedToNodesParams = Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeIds: readonly string[];
 }>;
 
 // @public
@@ -551,6 +2575,18 @@ export type FindNodesByKindParams = Readonly<{
     asOf?: string;
     orderBy?: "id" | "created_at";
     after?: string;
+}>;
+
+// @public
+export type FindRowsAcrossKindsParams = Readonly<{
+    graphId: string;
+    kinds: readonly string[];
+    limit: number;
+    after?: Readonly<{
+        kind: string;
+        id: string;
+    }>;
+    excludeDeleted?: boolean;
 }>;
 
 // @public (undocumented)
@@ -616,10 +2652,51 @@ export type FulltextStrategy = Readonly<{
     snippetExpression: (this: void, tableName: string, query: string, mode: FulltextQueryMode, language?: string) => SqlFragment;
     ownedTables: (this: void, primaryTableName: string) => readonly StrategyTableContribution[];
     buildUpsert: (this: void, tableName: string, params: UpsertFulltextParams, timestamp: string) => readonly SqlFragment[];
+    buildSyncFromInsertedNode?: (this: void, tableName: string, sourceAlias: string, projection: Extract<NodeInsertProjection, {
+        kind: "fulltext";
+    }>, timestamp: string) => SqlFragment;
     buildBatchUpsert: (this: void, tableName: string, params: UpsertFulltextBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, tableName: string, params: DeleteFulltextParams) => readonly SqlFragment[];
     buildBatchDelete: (this: void, tableName: string, params: DeleteFulltextBatchParams) => readonly SqlFragment[];
 }>;
+
+// @public
+export type GatedBundleDefinition<MCore extends OptionalGraphBackendMember, XId extends string = never, MExtra extends OptionalGraphBackendMember = never> = CapabilityBundleCommon & Readonly<{
+    kind: "gated";
+    core: readonly MCore[];
+    extras?: readonly CapabilityBundleExtra<XId, MExtra>[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public (undocumented)
+export type GatedBundleVerdict<MCore extends OptionalGraphBackendMember, X extends CapabilityExtraSpec> = Readonly<{
+    supported: true;
+    bundle: string;
+    members: readonly MCore[];
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
+}> | Readonly<{
+    supported: false;
+    bundle: string;
+    missing: readonly MCore[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+export type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
+    kind: "graduated";
+    extras: readonly CapabilityBundleExtra<XId, MExtra>[];
+}>;
+
+// @public
+export type GraduatedBundleVerdict<X extends CapabilityExtraSpec> = Readonly<{
+    bundle: string;
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
+}>;
+
+// @public (undocumented)
+const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
 
 // @public
 export type GraphAnalyticsCapabilities = Readonly<{
@@ -628,51 +2705,124 @@ export type GraphAnalyticsCapabilities = Readonly<{
 }>;
 
 // @public
+type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+// @public
 export type GraphBackend = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
     tableNames?: SqlTableNames | undefined;
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
+    fenceSql?: FenceSql | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+    insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
+    insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
+    insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
+    upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
+    updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
+    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
+    hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
+    lockNodes: (this: void, graphId: string, kind: string, ids: readonly string[], lock: NodeRowLock) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+    commands: GraphCommandPort;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
     updateEdge: (this: void, params: UpdateEdgeParams) => Promise<EdgeRow>;
     deleteEdge: (this: void, params: DeleteEdgeParams) => Promise<void>;
-    hardDeleteEdge: (this: void, params: HardDeleteEdgeParams) => Promise<void>;
+    hardDeleteEdge: (this: void, params: HardDeleteEdgeParams) => Promise<boolean>;
     deleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
-    hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
+    hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<readonly string[]>;
     getEdge: (this: void, graphId: string, id: string) => Promise<EdgeRow | undefined>;
     getEdges?: (this: void, graphId: string, ids: readonly string[]) => Promise<readonly EdgeRow[]>;
-    countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+    countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
+    findEdgesConnectedToNodes?: (this: void, params: FindEdgesConnectedToNodesParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
+    findNodesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly NodeRow[]>;
     countNodesByKind: (this: void, params: CountNodesByKindParams) => Promise<number>;
     findEdgesByKind: (this: void, params: FindEdgesByKindParams) => Promise<readonly EdgeRow[]>;
+    findActiveEdgesBySourceV1?: (this: void, params: Readonly<{
+        graphId: string;
+        edgeKind: string;
+        fromKind: string;
+        fromId: string;
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesByMatchIdentity?: (this: void, params: Readonly<{
+        graphId: string;
+        identities: readonly Readonly<{
+            kind: string;
+            name: string;
+            key: string;
+        }>[];
+    }>) => Promise<readonly EdgeRow[]>;
+    findEdgesAcrossKinds?: (this: void, params: FindRowsAcrossKindsParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByEndpointSet?: (this: void, params: FindEdgesByEndpointSetParams) => Promise<readonly EdgeRow[]>;
+    findEdgesByHeterogeneousEndpointSet?: (this: void, params: FindEdgesByHeterogeneousEndpointSetParams) => Promise<readonly EdgeRow[]>;
     countEdgesByKind: (this: void, params: CountEdgesByKindParams) => Promise<number>;
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+    hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
+    hardDeleteUniquesByConcreteKind?: (this: void, params: HardDeleteUniquesByConcreteKindParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
+    claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
+    claimEdgeCardinalityGuarded?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
+    claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
+    purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
+    readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
+    commitSchemaVersionIfKindsEmpty?: (this: void, params: CommitSchemaVersionParams, probes: readonly SchemaKindEmptinessProbe[]) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
+    lockSchemaVersionForWrite?: (this: void, params: Readonly<{
+        graphId: string;
+        expectedVersion: number;
+    }>) => Promise<void>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaGraphWriteFenceParams) => Promise<GraphWriteFenceAcquisition>;
+    commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
+    setActiveVersionWithPreflight?: (this: void, params: SetActiveVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<void>;
+    registerGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        schemaHash: string;
+        schemaDoc: SerializedSchema;
+    }>) => Promise<GraphTemplateRow>;
+    instantiateGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        templateSchemaHash: string;
+        graphId: string;
+        schemaHash: string;
+    }>) => Promise<Readonly<{
+        status: "ready";
+        row: SchemaVersionRow;
+    }> | Readonly<{
+        status: "refused";
+    }>>;
+    schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
+        executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+        tableExists: (this: void, tableName: string) => Promise<boolean>;
+        executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+        deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+    }>) => Promise<T>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
     deleteEmbedding?: (this: void, params: DeleteEmbeddingParams) => Promise<void>;
+    deleteEmbeddingBatch?: (this: void, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => Promise<void>;
     vectorSearch?: (this: void, params: VectorSearchParams) => Promise<readonly VectorSearchResult[]>;
     createVectorIndex?: (this: void, params: CreateVectorIndexParams) => Promise<void>;
     dropVectorIndex?: (this: void, params: DropVectorIndexParams) => Promise<void>;
@@ -683,12 +2833,24 @@ export type GraphBackend = Readonly<{
     deleteFulltextBatch?: (this: void, params: DeleteFulltextBatchParams) => Promise<void>;
     fulltextSearch?: (this: void, params: FulltextSearchParams) => Promise<readonly FulltextSearchResult[]>;
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
+    ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureRevisionChangesJournal?: (this: void) => Promise<void>;
+    revisionChangesJournalReady?: (this: void) => Promise<boolean>;
+    ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
+    ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
+        provisionMissing: boolean;
+    }>) => Promise<readonly string[]>;
+    identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
+    recordedTableDdl?: (this: void, tableNames: RecordedTableNames) => Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
+    catalog?: BackendCatalogProbes | undefined;
+    lineage?: LineageMembers | undefined;
+    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -710,13 +2872,25 @@ export type GraphBackend = Readonly<{
     assertVectorSlotInitialized?: (this: void, slot: VectorSlot) => Promise<void>;
     assertVectorSlotsInitialized?: (this: void, slots: readonly VectorSlot[]) => Promise<void>;
     deleteVectorSlotContribution?: (this: void, slot: VectorSlot) => Promise<void>;
+    verifyContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
+    repairContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<ContributionRepairResult>;
+    probeContributions?: (this: void, graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionProbeEntry[]>;
+    rebuildContribution?: (this: void, graphId: string, scope: ContributionRebuildScope, repopulate: (target: TransactionBackend) => Promise<ContributionRepopulationStats>) => Promise<ContributionRebuildResult>;
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
+    adoptBaseSchema?: (this: void) => Promise<void>;
+    assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
+    clearGraphPreservingContributionMaterializations?: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
-    trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>) => Promise<T>;
+    trustedImport?: <T>(this: void, fn: (session: TrustedImportSession) => Promise<T>, options?: Readonly<{
+        schemaWrite?: Readonly<{
+            graphId: string;
+            expectedVersion: number;
+        }>;
+    }>) => Promise<T>;
     execute: <T>(this: void, query: CompiledRowsSql) => Promise<readonly T[]>;
     executeStatement?: (this: void, query: CompiledStatementSql) => Promise<void>;
     executeTemporaryStatement?: (this: void, query: CompiledTemporaryStatementSql) => Promise<void>;
@@ -726,9 +2900,45 @@ export type GraphBackend = Readonly<{
         params: readonly unknown[];
     }>;
     executeDdl?: (this: void, ddl: string) => Promise<void>;
+    ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
+}> & DurableEdgeBatchMembers;
+
+// @public
+export type GraphCommand = NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
+
+// @public
+export type GraphCommandCoordination = Readonly<{
+    [GRAPH_COMMAND_COORDINATION_BRAND]: true;
 }>;
+
+// @public (undocumented)
+export type GraphCommandExecutionContext = Readonly<{
+    session: "root";
+    coordination: "none";
+}> | Readonly<{
+    session: "transaction";
+    coordination: "none" | GraphCommandCoordination;
+}>;
+
+// @public
+export function graphCommandExecutionContext(session: GraphCommandSession, coordination?: "none" | GraphCommandCoordination): GraphCommandExecutionContext;
+
+// @public
+export type GraphCommandIsolation = "read_committed" | "repeatable_read" | "serializable" | "unknown";
+
+// @public
+export type GraphCommandPort = Readonly<{
+    session: GraphCommandSession;
+    execute: (this: void, command: GraphCommand, context: GraphCommandExecutionContext) => Promise<GraphCommandResult>;
+}>;
+
+// @public
+export type GraphCommandResult = NodeCreateCommandResult | EdgeCreateCommandResult | EdgeConvergeCreateCommandResult;
+
+// @public
+export type GraphCommandSession = "root" | "transaction";
 
 // @public (undocumented)
 export type GraphEntityReadBackend = NodeEntityReadBackend & EdgeEntityReadBackend;
@@ -739,6 +2949,7 @@ export type GraphEntityWriteBackend = NodeEntityWriteBackend & EdgeEntityWriteBa
 // @public
 export type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
@@ -748,16 +2959,36 @@ export type GraphExtension = Readonly<{
 // @public
 export type GraphExtensionVersion = number;
 
+// @public
+export type GraphIdentityConfig = Readonly<{
+    sameIdAcrossKinds: "fold" | "ignore";
+}>;
+
 // @public (undocumented)
-export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "clearGraphPreservingContributionMaterializations" | "bootstrapTables">;
 
 // @public
-export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesConnectedTo">;
+export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getNodes" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findActiveEdgesBySourceV1" | "findNodesAcrossKinds" | "findEdgesAcrossKinds" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo">;
+
+// @public
+type GraphTemplateRow = Readonly<{
+    template_id: string;
+    schema_hash: string;
+    schema_doc: string;
+    created_at: string;
+}>;
+
+// @public
+export type GraphWriteFenceAcquisition = Readonly<{
+    isolation: GraphCommandIsolation;
+    fenceRow: "advanced" | "none";
+}>;
 
 // @public
 export type HardDeleteEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
 }>;
 
 // @public
@@ -765,6 +2996,52 @@ export type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+}>;
+
+// @public
+export type HardDeleteNodesBatchParams = Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+}>;
+
+// @public
+export type HardDeleteNodesBatchResult = Readonly<{
+    removedNodeIds: readonly string[];
+    removedEdgeIds: readonly string[];
+}>;
+
+// @public
+export type HardDeleteUniquesByConcreteKindParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+}>;
+
+// @public
+export type HardDeleteUniquesByNodeIdsParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeIds: readonly string[];
+}>;
+
+// @public
+export function hasAtomicMutationProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
+
+// @public
+export function hasAtomicSqlProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
+
+// @public
+export type HeterogeneousNodeUpsertEntry = Readonly<{
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    updateProps: Readonly<Record<string, unknown>>;
+}>;
+
+// @public
+export type HeterogeneousNodeUpsertParams = Readonly<{
+    entries: readonly HeterogeneousNodeUpsertEntry[];
+    schemaFence: SchemaWriteFenceParams;
 }>;
 
 // @public
@@ -808,6 +3085,16 @@ export type HybridSearchRow = Readonly<{
     fulltextRank?: number;
     fulltextScore?: number;
     snippet?: string;
+}>;
+
+// @public
+export type IdentityTableNames = Readonly<{
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
 }>;
 
 // @public
@@ -867,6 +3154,13 @@ export type IndexScope =
 */
 | "none";
 
+// @public
+export type IndexState = Readonly<{
+    name: string;
+    exists: boolean;
+    invalid: boolean;
+}>;
+
 // @public (undocumented)
 export type IndexWhereExpression = Readonly<{
     __type: "index_where_and";
@@ -910,7 +3204,10 @@ export type IndexWhereOperand = Readonly<{
 }>;
 
 // @public
-export type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
+export type InListParameterOptions = Readonly<{
+    negated: boolean;
+    elementType: ValueType | undefined;
+}>;
 
 // @public
 export type InsertEdgeParams = Readonly<{
@@ -922,6 +3219,7 @@ export type InsertEdgeParams = Readonly<{
     toKind: string;
     toId: string;
     props: Readonly<Record<string, unknown>>;
+    matchIdentity?: EdgeMatchIdentityStorage;
     validFrom?: string | null;
     validTo?: string;
 }>;
@@ -978,13 +3276,20 @@ export type JsonPointer = string & {
 };
 
 // @public
+export type JsonScalar = null | string | number | boolean;
+
+// @public
 export type JsonSchema = Readonly<{
     $schema?: string;
     type?: string | readonly string[];
     properties?: Record<string, JsonSchema>;
     required?: readonly string[];
-    items?: JsonSchema;
+    items?: JsonSchema | boolean;
+    prefixItems?: readonly JsonSchema[];
+    minItems?: number;
+    maxItems?: number;
     additionalProperties?: boolean | JsonSchema;
+    propertyNames?: JsonSchema;
     enum?: readonly unknown[];
     const?: unknown;
     anyOf?: readonly JsonSchema[];
@@ -995,6 +3300,7 @@ export type JsonSchema = Readonly<{
     default?: unknown;
     minimum?: number;
     maximum?: number;
+    multipleOf?: number;
     minLength?: number;
     maxLength?: number;
     pattern?: string;
@@ -1003,7 +3309,7 @@ export type JsonSchema = Readonly<{
 }>;
 
 // @public
-export type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+export type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -1025,27 +3331,206 @@ export type KindRemovalRow = Readonly<{
 }>;
 
 // @public
+export type LineageBackend = Pick<GraphBackend, "lineage">;
+
+// @public
+export type LineageDelta = Readonly<{
+    kind: "keys";
+    nodes: readonly EntityKey[];
+    edges: readonly EntityKey[];
+}> | Readonly<{
+    kind: "unbounded";
+}>;
+
+// @public
+export type LineageMembers = Readonly<{
+    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
+    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
+}>;
+
+// @public
+export type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
+
+// @public
 export type LiveNodeRow = NodeRow & Readonly<{
     deleted_at: undefined;
+}>;
+
+// @public (undocumented)
+export type LockSchemaVersionForWriteParams = Readonly<{
+    graphId: string;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ManagedEdgeCreatePlan = Readonly<{
+    entity: "edge";
+    params: InsertEdgeParams;
+    schemaFence?: SchemaWriteFenceParams;
+    cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
+}>;
+
+// @public
+export type ManagedNodeCreateMode = Readonly<{
+    kind: "ordinary";
+}> | Readonly<{
+    kind: "schema-fenced";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type ManagedNodeCreatePlan = Readonly<{
+    entity: "node";
+    params: InsertNodeParams;
+    idGenerated: boolean;
+    mode: ManagedNodeCreateMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
 }>;
 
 // @public (undocumented)
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
 // @public
+export function migrateLegacyRecordedTime(options: MigrateLegacyRecordedTimeOptions): Promise<MigrateLegacyRecordedTimeResult>;
+
+// @public
+export type MigrateLegacyRecordedTimeOptions = Readonly<{
+    backend: GraphBackend;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public (undocumented)
+export type MigrateLegacyRecordedTimeResult = Readonly<{
+    migrated: boolean;
+    graphs: number;
+    anchors: number;
+    mappingTableName: string;
+}>;
+
+// @public
+export function migrateRecordedAnchor(options: MigrateRecordedAnchorOptions): Promise<RecordedInstant>;
+
+// @public (undocumented)
+export type MigrateRecordedAnchorOptions = Readonly<{
+    backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames">;
+    graphId: string;
+    anchor: string;
+    origin?: string;
+    tableNames?: Partial<SqlTableNames> | undefined;
+    mappingTableName?: string | undefined;
+}>;
+
+// @public
+export type MisassignedEdgeEndpointRow = Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
+export function missingRequiredExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op): readonly string[];
+
+// @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
-// @public (undocumented)
-export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
+// @public
+export type NodeCreateCommand = Readonly<{
+    kind: "node.create";
+    plan: ManagedNodeCreatePlan;
+}>;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "deleteNode" | "hardDeleteNode">;
+export type NodeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "node";
+    row: NodeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "node";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "node";
+    dimensions: readonly [
+    "schemaFence" | "claims" | "projections",
+    ...(readonly ("schemaFence" | "claims" | "projections")[])
+    ];
+}>;
+
+// @public (undocumented)
+export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
+
+// @public (undocumented)
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+    keys?: readonly (Readonly<{
+        type: "field";
+        pointer: JsonPointer;
+        valueType: ValueType | undefined;
+        direction: "asc" | "desc";
+    }> | Readonly<{
+        type: "system";
+        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
+        direction: "asc" | "desc";
+    }>)[];
+}>;
+
+// @public (undocumented)
+export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
+
+// @public (undocumented)
+export type NodeInsertClaim = Readonly<{
+    axis: string;
+    constraintName: string;
+    key: string;
+    placement: "pre-insert" | "post-insert";
+    verdict: NodeInsertClaimVerdict;
+}>;
+
+// @public
+export type NodeInsertClaimVerdict = Readonly<{
+    kind: "uniqueness";
+    probeAxes: readonly string[];
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "disjointness";
+    conflictingKinds: readonly string[];
+}>;
+
+// @public
+export type NodeInsertProjection = Readonly<{
+    kind: "embedding";
+    fieldPath: string;
+    embedding: readonly number[];
+    dimensions: number;
+    metric: VectorMetric;
+    indexType: VectorIndexType;
+}> | Readonly<{
+    kind: "fulltext";
+    action: "upsert";
+    content: string;
+    language: string;
+}> | Readonly<{
+    kind: "fulltext";
+    action: "delete";
+}>;
+
+// @public
+export type NodePropertyExpectation = Readonly<{
+    kind: "value";
+    value: JsonScalar;
+}> | Readonly<{
+    kind: "absent";
 }>;
 
 // @public
@@ -1063,10 +3548,38 @@ export type NodeRow = Readonly<{
 }>;
 
 // @public
+export type NodeRowLock = "edgeEndpoint" | "delete";
+
+// @public
+export type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
+
+// @public
 export function normalizeGraphAnalyticsCapabilities(capabilities: BackendCapabilities): BackendCapabilities;
 
 // @public
+export function normalizeGraphCommandIsolation(value: unknown): GraphCommandIsolation;
+
+// @public
 export type NullCheckOp = "isNull" | "isNotNull";
+
+// @public
+export function observesPostFenceCommits(acquisition: GraphWriteFenceAcquisition): boolean;
+
+// @public
+export type OperationNames<D extends CapabilityBundleDefinition> = D["operations"][number]["operation"];
+
+// @public
+export type OptionalGraphBackendMember = OptionalKeys<GraphBackend>;
+
+// @public
+export type OptionalKeys<T> = {
+    [K in keyof T]-?: object extends Pick<T, K> ? K : never;
+}[keyof T];
+
+// @public
+export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonly<Partial<Pick<GraphBackend, M>>> & Readonly<{
+    [BUNDLE_BINDING]: true;
+}>;
 
 // @public
 export class Placeholder {
@@ -1077,11 +3590,22 @@ export class Placeholder {
     readonly name: string;
 }
 
+// @public (undocumented)
+export type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
+    count: number;
+}>;
+
 // @public
 export const POSTGRES_CAPABILITIES: BackendCapabilities;
 
 // @public
-export const POSTGRES_MAX_BIND_PARAMETERS = 65535;
+export const POSTGRES_MAX_BIND_PARAMETERS = 65533;
+
+// @public
+export type PurgeEdgeClaimsParams = Readonly<{
+    graphId: string;
+    edgeIds: readonly string[];
+}>;
 
 // @public (undocumented)
 export type QueryExecutionBackend = Pick<GraphBackend, "execute">;
@@ -1096,6 +3620,22 @@ export type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compil
 export type RawStatementExecutionBackend = Pick<GraphBackend, "executeStatement" | "executeTemporaryStatement" | "executeDdl">;
 
 // @public
+export type ReadConstraintFenceViolationsParams = Readonly<{
+    graphId: string;
+    uniqueConstraintNames: readonly string[];
+    disjointKindPairs: readonly (readonly [string, string])[];
+    edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+    edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
+}>;
+
+// @public
+export type ReasonedUnbundledMember = Readonly<{
+    kind: "reasoned";
+    reason: string;
+    accesses: number;
+}>;
+
+// @public
 export type RecordContributionMaterializationParams = Readonly<{
     graphId: string;
     logicalName: string;
@@ -1106,6 +3646,79 @@ export type RecordContributionMaterializationParams = Readonly<{
     materializedAt: string | undefined;
     error: string | undefined;
 }>;
+
+// @public (undocumented)
+const RECORDED_INSTANT_BRAND: unique symbol;
+
+// @public
+export const RECORDED_REVISION_ORIGINS: {
+    readonly id: "recordedRevisionOrigins";
+    readonly kind: "gated";
+    readonly core: readonly ["ensureRevisionOriginsTable"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+    };
+    readonly operations: readonly [{
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }, {
+        readonly operation: "revision origin bootstrap";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_ORIGIN_BOOTSTRAP_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/clock.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }];
+};
+
+// @public
+export type RecordedInstant = string & {
+    readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
+};
+
+// @public
+export type RecordedRelationDdl = Readonly<{
+    createTable: string;
+    indexes: readonly string[];
+    primaryKeyConstraintName?: string | undefined;
+}>;
+
+// @public (undocumented)
+export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof RECORDED_REVISION_ORIGINS)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>, {
+    supported: true;
+}>): BundleBinding<(typeof RECORDED_REVISION_ORIGINS)["core"][number]>;
+
+// @public (undocumented)
+export function recordedRevisionOriginsVerdict(backend: GraphBackend): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>;
+
+// @public
+export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
+
+// @public
+export type RecordedTableNames = Readonly<{
+    recordedClock: string;
+    recordedEdges: string;
+    recordedNodes: string;
+}>;
+
+// @public
+export type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
+
+// @public
+export type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 export type RecordIndexMaterializationParams = Readonly<{
@@ -1130,6 +3743,36 @@ export type RecordKindRemovalParams = Readonly<{
     removedAt: string | undefined;
     error: string | undefined;
 }>;
+
+// @public
+const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
+
+// @public
+export type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
+}>;
+
+// @public
+export function recursiveTraversalUnsupportedError(verdict: Extract<RecursiveTraversalVerdict, {
+    supported: false;
+}>, operation: string): ConfigurationError;
+
+// @public
+export type RecursiveTraversalVerdict = Readonly<{
+    [RECURSIVE_TRAVERSAL_VERDICT]: true;
+} & ({
+    supported: true;
+} | {
+    supported: false;
+    reason: string;
+})>;
+
+// @public
+export function registerAtomicMutationPrograms<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
+
+// @public
+export function registerAtomicSqlProgram<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
 
 // @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
@@ -1164,17 +3807,106 @@ export function renderSqlInline(fragment: SqlFragment, dialect: SqlDialect): str
 // @public
 export function renderSqlite(fragment: SqlFragment, bindings?: Readonly<Record<string, unknown>>): RenderedSql;
 
+// @public
+export function repairInvertedValidityWindows(options: RepairInvertedWindowsOptions): Promise<RepairInvertedWindowsReport>;
+
+// @public
+export type RepairInvertedWindowsOptions = Readonly<{
+    backend: GraphBackend;
+    graphId?: string | undefined;
+    relations: RepairRelationScope;
+    mode: "report" | "apply";
+    tableNames?: Partial<SqlTableNames> | undefined;
+}>;
+
+// @public
+export type RepairInvertedWindowsReport = Readonly<{
+    relations: RepairRelationScope;
+    counts: Readonly<Record<RepairRelation, number | undefined>>;
+    nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
+    atomic: boolean;
+}>;
+
+// @public
+export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdges";
+
+// @public
+export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+export type RequiredExtrasOf<D extends CapabilityBundleDefinition, Op extends OperationNames<D>> = Extract<D["operations"][number], {
+    operation: Op;
+}> extends ({
+    requires: infer R extends readonly string[];
+}) ? R[number] : never;
+
+// @public
+export function requireExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op, refuse?: (missing: readonly string[]) => never): asserts verdict is BundleVerdictOf<D> & {
+    extras: {
+        [K in RequiredExtrasOf<D, Op> & keyof ExtrasOf<D>]: Extract<ExtraVerdict<ExtraMember<D, K>>, {
+            present: true;
+        }>;
+    };
+};
+
+// @public
+export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "keyed" | "drain"): Extract<WriteFencePlan, {
+    kind: "lock" | "row" | "engine-serialized" | "caller-serialized";
+}>;
+
+// @public
+export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
+
+// @public
+export type ResolvedNodeUpdateBatchEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
+export type ResolvedNodeUpdateBatchParams = Readonly<{
+    entries: readonly ResolvedNodeUpdateBatchEntry[];
+}>;
+
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
+    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
     recordedEdges: string;
     recordedClock: string;
+    recordedAnchors?: string;
+    storeOperations?: string;
     revisionOrigins: string;
+    revisionChanges?: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+    identityTransitions: string;
+    identityTransitionRetention: string;
     fulltext: string;
     uniques: string;
+    edgeClaims: string;
+    fences: string;
+    indexMaterializations?: string;
+    contributionMaterializations?: string;
+    kindRemovals?: string;
+    reconciliationMarkers?: string;
 }>;
+
+// @public
+export function resolveRecursiveTraversal(capabilities: BackendCapabilities): RecursiveTraversalVerdict;
+
+// @public
+export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
+
+// @public
+export function resolveWriteFencePlan(target: WriteFenceTarget): WriteFencePlan;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;
@@ -1185,8 +3917,40 @@ export function rowPropsToJsonText(props: RowProps): string;
 // @public
 export function rowPropsToObject(props: RowProps): Record<string, unknown>;
 
+// @public
+export function runAtomicMutationProgramConformance(fixture: AtomicMutationProgramConformanceFixture): Promise<AtomicMutationProgramConformanceReport>;
+
+// @public
+export function runAtomicTransportConformance<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined>(fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>): Promise<AtomicTransportConformanceReport>;
+
+// @public
+export function runEndpointSetReadConformance(fixture: EndpointSetReadConformanceFixture): Promise<EndpointSetReadConformanceReport>;
+
 // @public (undocumented)
-export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "setActiveVersion">;
+export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
+
+// Warning: (ae-internal-missing-underscore) The name "SchemaCommitPreflightBackend" should be prefixed with an underscore because the declaration is marked as @internal
+//
+// @internal
+export type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
+    executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
+}>;
+
+// @public
+type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
+    fenceRow: "advance" | "leave";
+}>;
+
+// @public (undocumented)
+export type SchemaKindEmptinessProbe = Readonly<{
+    entity: "node" | "edge";
+    kind: string;
+    rows: "nonDeleted" | "all";
+}>;
+
+// @public
+export type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -1199,6 +3963,20 @@ export type SchemaVersionRow = Readonly<{
     schema_doc: string;
     created_at: string;
     is_active: boolean;
+}>;
+
+// @public (undocumented)
+export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | "lockSchemaVersionAndGraphWrite">;
+
+// @public
+type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
 }>;
 
 // @public
@@ -1222,9 +4000,16 @@ export type SerializedEdgeDef = Readonly<{
     kind: string;
     fromKinds: readonly string[];
     toKinds: readonly string[];
+    targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
+    targetCardinality?: TargetCardinality;
     endpointExistence: EndpointExistence;
+    matchIdentity?: Readonly<{
+        name: string;
+        fields: readonly string[];
+    }>;
+    acyclic?: boolean;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;
@@ -1232,11 +4017,6 @@ export type SerializedEdgeDef = Readonly<{
 // @public
 export type SerializedMetaEdge = Readonly<{
     name: string;
-    transitive: boolean;
-    symmetric: boolean;
-    reflexive: boolean;
-    inverse: string | undefined;
-    inference: InferenceType;
     description: string | undefined;
 }>;
 
@@ -1262,11 +4042,12 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
-}>;
+}> & CompositionRealization;
 
 // @public
 export type SerializedSchema = Readonly<{
     graphId: string;
+    annotations?: GraphAnnotations;
     version: number;
     generatedAt: string;
     nodes: Record<string, SerializedNodeDef>;
@@ -1276,6 +4057,7 @@ export type SerializedSchema = Readonly<{
         onNodeDelete: DeleteBehavior;
         temporalMode: TemporalMode;
     }>;
+    identity?: GraphIdentityConfig;
     indexes?: readonly IndexDeclaration[];
     extension?: GraphExtension;
     deprecatedKinds?: readonly string[];
@@ -1299,6 +4081,11 @@ export type SetActiveVersionParams = Readonly<{
 
 // @public
 export function shortHash(input: string): string;
+
+// @public
+export type SpecOf<XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]> = {
+    [K in XS[number] as K["id"]]: K["members"][number];
+};
 
 // @public
 export const sql: SqlTag;
@@ -1357,14 +4144,30 @@ export type SqlPlaceholderChunk = Readonly<{
 
 // @public
 export type SqlTableNames = Readonly<{
+    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;
     recordedEdges?: string | undefined;
     recordedClock?: string | undefined;
+    recordedAnchors?: string | undefined;
+    storeOperations?: string | undefined;
     revisionOrigins?: string | undefined;
+    revisionChanges?: string | undefined;
+    identityAssertions?: string | undefined;
+    recordedIdentityAssertions?: string | undefined;
+    identityClosure?: string | undefined;
+    identitySeparation?: string | undefined;
+    identityTransitions?: string | undefined;
+    identityTransitionRetention?: string | undefined;
     fulltext: string;
     uniques: string;
+    edgeClaims?: string | undefined;
+    fences?: string | undefined;
+    indexMaterializations?: string | undefined;
+    contributionMaterializations?: string | undefined;
+    kindRemovals?: string | undefined;
+    reconciliationMarkers?: string | undefined;
 }>;
 
 // @public
@@ -1383,19 +4186,183 @@ export type SqlTextChunk = Readonly<{
 }>;
 
 // @public
+export const STATEMENT_EXECUTION: {
+    readonly id: "statementExecution";
+    readonly kind: "gated";
+    readonly core: readonly ["executeStatement"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+    };
+    readonly operations: readonly [{
+        readonly operation: "identity statement execution";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "identity/sql-target.ts";
+            readonly member: "executeStatement";
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
+        }];
+    }, {
+        readonly operation: "recorded capture statement";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_CAPTURE_STATEMENT_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [62, 79];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
+        }];
+    }, {
+        readonly operation: "history construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "HISTORY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [251];
+        }];
+    }, {
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [299];
+        }];
+    }, {
+        readonly operation: "history-unsafe raw write overlay";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "omit the overriding member; the port's own absence stands";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [219];
+            readonly rewiring: {
+                readonly class: "reasoned";
+                readonly reason: "genuinely a port-surface presence test; re-keying it on a verdict changes behavior in both directions (a phantom-rejecting stub one way, a raw-write escape on a history-enabled store the other — a safety regression), and adding a non-throwing gated accessor to the frozen binder surface for ONE site is the over-generalization anti-pattern";
+            };
+        }];
+    }, {
+        readonly operation: "identity construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_ATOMIC_BACKEND";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [921];
+        }, {
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [928];
+        }];
+    }, {
+        readonly operation: "validity window repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "VALIDITY_WINDOW_REPAIR_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/repair-validity-windows.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded-time migration";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_TIME_MIGRATION_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [154, 161, 801];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";
+            };
+        }];
+    }];
+};
+
+// @public (undocumented)
+export function statementExecutionMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof STATEMENT_EXECUTION)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof STATEMENT_EXECUTION>, {
+    supported: true;
+}>): BundleBinding<(typeof STATEMENT_EXECUTION)["core"][number]>;
+
+// @public (undocumented)
+export function statementExecutionVerdict(backend: GraphBackend): BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+
+// @public
 export type StrategyTableContribution = TableContribution;
+
+// @public
+export function supportsInteractiveTransactions(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
+
+// @public
+export function supportsRootAtomicBatch(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
 
 // @public (undocumented)
 export type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
 
 // @public
 export type TableContribution = Readonly<{
+    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;
     createDdl: readonly string[];
+    dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+    workingCopyClonePolicy?: Readonly<{
+        kind: "graphRows";
+        graphIdColumn: string;
+    }> | Readonly<{
+        kind: "graphDocument";
+        documentColumn: string;
+        graphIdKey: string;
+    }> | Readonly<{
+        kind: "freshSeed";
+    }> | Readonly<{
+        kind: "rebuildAfterClone";
+    }> | Readonly<{
+        kind: "unsupported";
+        reason: string;
+    }>;
 }>;
+
+// @public
+export type TableState = Readonly<{
+    name: string;
+    exists: boolean;
+}>;
+
+// @public
+type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
@@ -1406,7 +4373,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & SchemaReadBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -1415,7 +4382,15 @@ export type TransactionOptions = Readonly<{
 }>;
 
 // @public
-export type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend>;
+export type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
+
+// @public
+export type TrustedImportOptions = Readonly<{
+    schemaWrite?: Readonly<{
+        graphId: string;
+        expectedVersion: number;
+    }>;
+}>;
 
 // @public
 export type TrustedImportSession = Readonly<{
@@ -1426,8 +4401,673 @@ export type TrustedImportSession = Readonly<{
 // @public (undocumented)
 export const tsvectorStrategy: FulltextStrategy;
 
+// @public
+class TypeGraphError extends Error {
+    constructor(message: string, code: string, options: TypeGraphErrorOptions);
+    readonly category: ErrorCategory;
+    readonly code: string;
+    readonly details: Readonly<Record<string, unknown>>;
+    readonly suggestion?: string;
+    toLogString(): string;
+    toUserMessage(): string;
+}
+
+// @public
+type TypeGraphErrorOptions = Readonly<{
+    details?: Record<string, unknown>;
+    category: ErrorCategory;
+    suggestion?: string;
+    cause?: unknown;
+}>;
+
+// @public
+export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly findActiveEdgesBySourceV1: {
+        readonly kind: "reasoned";
+        readonly reason: "Versioned active-only source read for bounded oneActive candidate planning. Custom backends without it keep the complete-clone path.";
+        readonly accesses: 2;
+    };
+    readonly findNodesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
+    readonly findEdgesAcrossKinds: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional graph-wide merge enumeration. Custom backends retain the per-kind keyset path with identical row semantics.";
+        readonly accesses: 2;
+    };
+    readonly findEdgesConnectedToNodes: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional kind-blind set read of the live edges connected to one kind's nodes, judged by node bulkHardDelete. Custom backends retain one findEdgesConnectedTo per node with identical row semantics.";
+        readonly accesses: 1;
+    };
+    readonly findEdgesByMatchIdentity: {
+        readonly kind: "reasoned";
+        readonly reason: "Optional exact lookup for durable edge identity owners, including tombstones. Candidate planning uses it to seed active owners and falls back to full clone when the capability is absent or the owner is tombstoned.";
+        readonly accesses: 2;
+    };
+    readonly clearGraphPreservingContributionMaterializations: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party Store.clear lifecycle path that preserves contribution attestations while clearing graph data; custom backends without it retain their clearGraph behavior.";
+        readonly accesses: 1;
+    };
+    readonly upsertHeterogeneousNodes: {
+        readonly kind: "reasoned";
+        readonly reason: "Exact-session PostgreSQL heterogeneous node upsert program.";
+        readonly accesses: 6;
+    };
+    readonly adoptBaseSchema: {
+        readonly kind: "reasoned";
+        readonly reason: "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations. Reopening a durable PostgreSQL working copy whose allocation predates the current base schema checks for it and adopts the allocation in place.";
+        readonly accesses: 4;
+    };
+    readonly assertBaseSchemaCurrent: {
+        readonly kind: "reasoned";
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus recorded pruning and the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; lookup preserves the legacy no-gate contract, while pruning explicitly refuses a missing lifecycle assertion.";
+        readonly accesses: 5;
+    };
+    readonly ensureEdgeMatchIdentityStorage: {
+        readonly kind: "reasoned";
+        readonly reason: "Focused privileged base-schema adoption hook. The versioned base-schema lifecycle calls it only while adopting an unstamped release because all edge writes name the nullable columns; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.";
+        readonly accesses: 1;
+    };
+    readonly claimEdgeCardinalityGuarded: {
+        readonly kind: "reasoned";
+        readonly reason: "A stronger first-party single-claim operation whose member presence explicitly permits the store to fold the legacy entity probe into the claim; custom and legacy claim backends keep probe-then-claim, so it is not part of the claims bundle's required portable surface.";
+        readonly accesses: 1;
+    };
+    readonly insertNodeIfAbsentWithSchemaFence: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party schema-managed insert fast path selected only by the node create session; a missing member retains the ordinary fence then insert path.";
+        readonly accesses: 6;
+    };
+    readonly insertNodeWithSchemaFence: {
+        readonly kind: "reasoned";
+        readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
+        readonly accesses: 7;
+    };
+    readonly bootstrapTables: {
+        readonly kind: "reasoned";
+        readonly reason: "One-shot provisioning hook consulted by createStore and the managed libSQL legacy fallback before any capability question exists; it has no operation that could refuse or degrade.";
+        readonly accesses: 4;
+    };
+    readonly tableNames: {
+        readonly kind: "reasoned";
+        readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation. Edge acyclicity adds three readers; the schema-commit tightening probe reads the proposed acyclic and composition relations through one of them.";
+        readonly accesses: 31;
+    };
+    readonly fenceSql: {
+        readonly kind: "reasoned";
+        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The exceptions are the two session-isolation reads, which take the bare `isolationFactExpression` and are gated on `dialect`, not on a resolved fence plan, so there is no plan to read it through: `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`) reads `target.fenceSql` directly, and the graph storage inventory (`backend/graph-storage.ts`) folds the expression into its first count statement to report whether its counts shared one snapshot.";
+        readonly accesses: 3;
+    };
+    readonly commitSchemaVersionIfKindsEmpty: {
+        readonly kind: "reasoned";
+        readonly reason: "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.";
+        readonly accesses: 3;
+    };
+    readonly commitSchemaVersionWithPreflight: {
+        readonly kind: "reasoned";
+        readonly reason: "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.";
+        readonly accesses: 4;
+    };
+    readonly setActiveVersionWithPreflight: {
+        readonly kind: "reasoned";
+        readonly reason: "Same schema-version write-fence family as commitSchemaVersionWithPreflight; rollbackSchema refuses with the tightening capability error when it is absent, and a fixed-schema working copy refuses it when present.";
+        readonly accesses: 2;
+    };
+    readonly lockSchemaVersionForWrite: {
+        readonly kind: "reasoned";
+        readonly reason: "Same family; also the one schema member on TransactionBackend, so bundling it would re-open the accessor's B-1 port-typing question for no pilot consumer.";
+        readonly accesses: 1;
+    };
+    readonly lockSchemaVersionAndGraphWrite: {
+        readonly kind: "reasoned";
+        readonly reason: "PostgreSQL/PGlite transaction-only latency seam which preserves the existing schema-then-graph lock order in one dependent-CTE statement; SQLite and custom backends retain the two portable lock operations.";
+        readonly accesses: 1;
+    };
+    readonly schemaWriteTransaction: {
+        readonly kind: "reasoned";
+        readonly reason: "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.";
+        readonly accesses: 5;
+    };
+    readonly registerGraphTemplate: {
+        readonly kind: "reasoned";
+        readonly reason: "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.";
+        readonly accesses: 2;
+    };
+    readonly instantiateGraphTemplate: {
+        readonly kind: "reasoned";
+        readonly reason: "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.";
+        readonly accesses: 2;
+    };
+    readonly ensureIdentityTables: {
+        readonly kind: "reasoned";
+        readonly reason: "Identity DDL, gated by the identity construction gate (store.ts:918-935), which is the write-fence design's decision and must stay one owner there.";
+        readonly accesses: 4;
+    };
+    readonly identityTableDdl: {
+        readonly kind: "reasoned";
+        readonly reason: "Same identity-DDL family as ensureIdentityTables. Adopted evolution adds one Store handoff of the DDL factory and one same-session catalog inspection before the fenced schema commit; both refuse absent DDL rather than skipping required storage.";
+        readonly accesses: 4;
+    };
+    readonly recordedTableDdl: {
+        readonly kind: "reasoned";
+        readonly reason: "Recorded-time migration DDL factory; its only consumer has its own typed capability refusal, so it is a provisioning port rather than a feature-family operation.";
+        readonly accesses: 1;
+    };
+    readonly ensureKindRemovalsTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Kind-removal provisioning; the removal path's own gate is a schema-lifecycle decision with a single consumer (materialize-removals.ts) and no second theory to consolidate.";
+        readonly accesses: 3;
+    };
+    readonly getAllKindRemovals: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 2;
+    };
+    readonly getPendingKindRemovals: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 4;
+    };
+    readonly recordKindRemoval: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 4;
+    };
+    readonly ensureReconciliationMarkersTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Reconciliation-marker family; single consumer, single gate, same reasoning.";
+        readonly accesses: 2;
+    };
+    readonly getReconciliationMarker: {
+        readonly kind: "reasoned";
+        readonly reason: "Same reconciliation-marker family.";
+        readonly accesses: 2;
+    };
+    readonly setReconciliationMarker: {
+        readonly kind: "reasoned";
+        readonly reason: "Same reconciliation-marker family.";
+        readonly accesses: 2;
+    };
+    readonly readConstraintFenceViolations: {
+        readonly kind: "reasoned";
+        readonly reason: "Read-only fence audit with exactly one caller and a documented \"absent ⇒ the report is unavailable\" contract (history-store-backend.ts:105-108); no operation degrades or refuses on it.";
+        readonly accesses: 1;
+    };
+    readonly ensureContributionMaterializationsTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.";
+        readonly accesses: 0;
+    };
+    readonly ensureRevisionChangesJournal: {
+        readonly kind: "reasoned";
+        readonly reason: "Privileged journal installation is explicit; runtime lineage only reads readiness.";
+        readonly accesses: 2;
+    };
+    readonly revisionChangesJournalReady: {
+        readonly kind: "reasoned";
+        readonly reason: "Owner installation first checks readiness; runtime lineage also verifies installed storage without attempting DDL.";
+        readonly accesses: 2;
+    };
+    readonly getContributionMaterialization: {
+        readonly kind: "reasoned";
+        readonly reason: "Same zero-consumer family as ensureContributionMaterializationsTable.";
+        readonly accesses: 0;
+    };
+    readonly recordContributionMaterialization: {
+        readonly kind: "reasoned";
+        readonly reason: "Zero consumers outside the backend implementations; its only in-tree use is a backend implementation calling its own member (backend/drizzle/contribution-materializations.ts:1588), which the scanner excludes by scope.";
+        readonly accesses: 0;
+    };
+    readonly assertRuntimeContributionsInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "contributionProvisioning";
+        readonly ceiling: 1;
+    };
+    readonly assertVectorSlotInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 1;
+    };
+    readonly assertVectorSlotsInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 1;
+    };
+    readonly catalog: {
+        readonly kind: "reasoned";
+        readonly reason: "Physical-schema introspection (table/index presence, PostgreSQL's invalid-index leftover state, normalized column types) a store path consults directly rather than through a bundle disposition; its own absence has one typed refusal naming it, not a per-operation fallback. That refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory), so its access count is measured as zero even though the refusal reads the member.";
+        readonly accesses: 0;
+    };
+    readonly lineage: {
+        readonly kind: "reasoned";
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition. The store's lineage source selection reads backend lineage once to prefer it over the derived one, and privileged store setup checks whether a backend supplies lineage before installing the bundled journal.";
+        readonly accesses: 2;
+    };
+    readonly recordedTime: {
+        readonly kind: "reasoned";
+        readonly reason: "The engine's own recorded (system-time) read source and revision clock. Present only when a backend's engine declares it, and consulted only through resolveRecordedTimeOwnership/requireRecordedTime, both of which live in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). createSqlBackend's co-requirement check against `lineage` and both dialects' transaction-scoped threading all read `.recordedTime` off `EngineProvisioning`, not off a `GraphBackend`/`TransactionBackend`-typed receiver, so none of them add to this count either.";
+        readonly accesses: 0;
+    };
+    readonly claimIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly compileSql: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "rawStatementReuse";
+        readonly ceiling: 9;
+    };
+    readonly createVectorIndex: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly deleteEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly deleteEmbedding: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 8;
+    };
+    readonly deleteEmbeddingBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly deleteFulltext: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 12;
+    };
+    readonly deleteFulltextBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 6;
+    };
+    readonly deleteVectorSlotContribution: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 0;
+    };
+    readonly dropVectorIndex: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 1;
+    };
+    readonly ensureExtension: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "databaseExtensions";
+        readonly ceiling: 2;
+    };
+    readonly ensureFulltextTable: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextProvisioning";
+        readonly ceiling: 1;
+    };
+    readonly ensureIndexMaterializationsTable: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly ensureRuntimeContributions: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "contributionProvisioning";
+        readonly ceiling: 2;
+    };
+    readonly ensureTrigramExtension: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "databaseExtensions";
+        readonly ceiling: 2;
+    };
+    readonly ensureVectorSlotContribution: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 4;
+    };
+    readonly ensureVectorSlotContributions: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 3;
+    };
+    readonly executeDdl: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "ddlExecution";
+        readonly ceiling: 16;
+    };
+    readonly executeRaw: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "rawStatementReuse";
+        readonly ceiling: 11;
+    };
+    readonly executeTemporaryStatement: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "temporaryStatements";
+        readonly ceiling: 3;
+    };
+    readonly findEdgesByHeterogeneousEndpointSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "heterogeneousEndpointSetRead";
+        readonly ceiling: 7;
+    };
+    readonly fulltextSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 4;
+    };
+    readonly fulltextStrategy: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 4;
+    };
+    readonly getIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 3;
+    };
+    readonly getIndexMaterializations: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly hardDeleteEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 5;
+    };
+    readonly hardDeleteNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 5;
+    };
+    readonly hybridSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "hybridSearch";
+        readonly ceiling: 2;
+    };
+    readonly insertEdgeNoReturn: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertEdgesBatchReturning: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertEdgesDurableBatchReturning: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 8;
+    };
+    readonly insertNodeNoReturn: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertNodeIfAbsent: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 7;
+    };
+    readonly insertNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertNodesBatchReturning: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly recordIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 6;
+    };
+    readonly releaseIndexMaterializationClaim: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly trustedImport: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "trustedImport";
+        readonly ceiling: 1;
+    };
+    readonly compareAndSetNode: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly updateNodeSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly updateResolvedNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly upsertEmbedding: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 12;
+    };
+    readonly upsertEmbeddingBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly upsertFulltext: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 10;
+    };
+    readonly upsertFulltextBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 6;
+    };
+    readonly vectorSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly vectorStrategy: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 15;
+    };
+};
+
 // @public (undocumented)
-export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "checkUnique" | "checkUniqueBatch">;
+export type UnbundledOptionalMember = ReasonedUnbundledMember | DeferredUnbundledMember;
+
+// @public
+export const UNIQUE_SIDECAR_BATCH: {
+    readonly id: "uniqueSidecarBatch";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "insertUniqueBatch";
+        readonly members: readonly ["insertUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+    }, {
+        readonly id: "checkUniqueBatch";
+        readonly members: readonly ["checkUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+    }, {
+        readonly id: "hardDeleteUniquesByNodeIds";
+        readonly members: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "unique batch probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+        readonly requires: readonly ["checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1275, 1320];
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1575, 1593];
+        }];
+    }, {
+        readonly operation: "unique claim issue";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+        readonly requires: readonly ["insertUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }, {
+        readonly operation: "unique reap by node ids";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }];
+    }, {
+        readonly operation: "set-based node update";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "checkUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1993];
+        }];
+    }, {
+        readonly operation: "resolved node write";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [211];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [292];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }];
+};
+
+// @public (undocumented)
+export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
@@ -1443,14 +5083,30 @@ export type UniqueRow = Readonly<{
     deleted_at: string | undefined;
 }>;
 
+// @public (undocumented)
+type UniqueSidecarBatchExtraMember = ExtraMember<typeof UNIQUE_SIDECAR_BATCH, keyof ExtrasOf<typeof UNIQUE_SIDECAR_BATCH>>;
+
+// @public (undocumented)
+export function uniqueSidecarBatchMembers(port: Readonly<Partial<Pick<GraphBackend, UniqueSidecarBatchExtraMember>>>, verdict: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>): PartialBundleBinding<UniqueSidecarBatchExtraMember>;
+
+// @public (undocumented)
+export function uniqueSidecarBatchVerdict(backend: GraphBackend): BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+
 // @public
 export type UpdateEdgeParams = Readonly<{
     graphId: string;
     id: string;
+    kind?: string;
+    fromKind?: string;
+    fromId?: string;
+    toKind?: string;
+    toId?: string;
     props: Readonly<Record<string, unknown>>;
-    validTo?: string;
+    validFrom?: string | null;
+    expectedValidFrom?: string | null;
+    expectedValidTo?: string | null;
     clearDeleted?: boolean;
-}>;
+}> & BackendValidityEndMutation;
 
 // @public
 export type UpdateNodeParams = Readonly<{
@@ -1458,9 +5114,27 @@ export type UpdateNodeParams = Readonly<{
     kind: string;
     id: string;
     props: Readonly<Record<string, unknown>>;
-    validTo?: string;
+    validFrom?: string | null;
+    expectedValidFrom?: string | null;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
+}> & BackendValidityEndMutation;
+
+// @public
+export type UpdateNodeSetParams = Readonly<{
+    operation: "updateWhere";
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+}>;
+
+// @public
+export type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
 }>;
 
 // @public
@@ -1521,6 +5195,7 @@ export type VectorCapabilities = Readonly<{
     indexTypes: readonly VectorIndexType[];
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
+    searchFrontierTuning: VectorSearchFrontierTuning;
 }>;
 
 // @public
@@ -1559,13 +5234,24 @@ export type VectorMetric = "cosine" | "l2" | "inner_product";
 export function vectorMinScoreCondition(distanceExpression: SqlFragment, metric: VectorMetric, minScore: number): SqlFragment;
 
 // @public (undocumented)
-export type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
+export type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
 
 // @public
 export function vectorPhysicalName(prefix: string, graphId: string, nodeKind: string, fieldPath: string): string;
 
 // @public
 export function vectorScoreExpression(distanceExpression: SqlFragment, metric: VectorMetric): SqlFragment;
+
+// @public
+export type VectorSearchFrontierTuning = Readonly<{
+    tunable: true;
+    parameter: string;
+    indexType: VectorIndexType;
+    requiresTransactionScope: boolean;
+}> | Readonly<{
+    tunable: false;
+    reason: string;
+}>;
 
 // @public
 export type VectorSearchParams = Readonly<{
@@ -1611,8 +5297,12 @@ export type VectorStrategy = Readonly<{
     tableName: (this: void, graphId: string, nodeKind: string, fieldPath: string) => string;
     ownedTables: (this: void, slot: VectorSlot) => readonly StrategyTableContribution[];
     buildUpsert: (this: void, slot: VectorSlot, params: UpsertEmbeddingParams, timestamp: string) => readonly SqlFragment[];
+    buildUpsertFromInsertedNode?: (this: void, slot: VectorSlot, sourceAlias: string, embedding: readonly number[], timestamp: string) => SqlFragment;
     buildUpsertBatch?: (this: void, slot: VectorSlot, params: UpsertEmbeddingBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, slot: VectorSlot, params: DeleteEmbeddingParams) => readonly SqlFragment[];
+    buildDeleteBatch: (this: void, slot: VectorSlot, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{
+        nodeIds: readonly string[];
+    }>) => readonly SqlFragment[];
     buildDropStorage: (this: void, slot: VectorSlot) => readonly string[];
     buildSearch: (this: void, slot: VectorSlot, params: VectorSearchParams, candidates?: SqlFragment) => SqlFragment;
     searchIsExact?: boolean;
@@ -1622,6 +5312,92 @@ export type VectorStrategy = Readonly<{
     }>) => SqlFragment | undefined;
     buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
 }>;
+
+// @public
+export type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory";
+    drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
+}> | Readonly<{
+    mechanism: "engine-serialized";
+}> | Readonly<{
+    mechanism: "caller-serialized";
+}>;
+
+// @public
+export type WriteFencePlan =
+/**
+* Take the keyed advisory lock, spelled by `sql` — the target's OWN
+* declared spelling: a lock site never hand-writes the statement, it
+* resolves a plan and consumes `sql.<builder>(…)`.
+*/
+Readonly<{
+    kind: "lock";
+    drain: "table-lock" | "quiescent" | "none";
+    sql: FenceStatements;
+}>
+/**
+* Take the keyed exclusion against the fences relation, spelled by `sql` —
+* mechanism-neutral: a keyed site calls the exact same `sql.acquireKeyed`/
+* `sql.acquireKeyedWithIsolation` a `lock` plan's site calls. `conflict`
+* is the one fact a `row` site (and the tier deriving `optimistic-retry`)
+* reads that a `lock` site never needs, because an advisory engine only
+* ever waits.
+*/
+| Readonly<{
+    kind: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
+    sql: FenceStatements;
+}>
+/** No lock needed: the engine serializes writers. */
+| Readonly<{
+    kind: "engine-serialized";
+}>
+/**
+* No lock needed: the deployment itself promises no concurrent writer
+* exists — this backend's own process serializes every write unit it
+* issues, and no other client writes to the database while it is open.
+*/
+| Readonly<{
+    kind: "caller-serialized";
+}>
+/** Neither. Every non-degradable fence refuses: `capabilities.writeFence` is absent. */
+| Readonly<{
+    kind: "unfenced";
+}>;
+
+// @public
+type WriteFenceTarget = Readonly<{
+    dialect: SqlDialect;
+    capabilities: BackendCapabilities;
+    fenceSql?: FenceSql | undefined;
+    tableNames?: SqlTableNames | undefined;
+}>;
+
+// @public
+export const WS5B_SEED_BUNDLES: {
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "hardDeleteNodesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
+    readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
+    readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
+    readonly hybridSearch: readonly ["hybridSearch"];
+    readonly vectorSlotContributions: readonly ["assertVectorSlotsInitialized", "assertVectorSlotInitialized", "ensureVectorSlotContributions", "ensureVectorSlotContribution", "deleteVectorSlotContribution"];
+    readonly fulltextOperations: readonly ["upsertFulltext", "deleteFulltext", "upsertFulltextBatch", "deleteFulltextBatch", "fulltextSearch", "fulltextStrategy"];
+    readonly fulltextProvisioning: readonly ["ensureFulltextTable"];
+    readonly databaseExtensions: readonly ["ensureExtension", "ensureTrigramExtension"];
+    readonly contributionProvisioning: readonly ["ensureRuntimeContributions", "assertRuntimeContributionsInitialized"];
+    readonly indexMaterialization: readonly ["getIndexMaterialization", "recordIndexMaterialization", "getIndexMaterializations", "ensureIndexMaterializationsTable", "claimIndexMaterialization", "releaseIndexMaterializationClaim"];
+    readonly ddlExecution: readonly ["executeDdl"];
+    readonly temporaryStatements: readonly ["executeTemporaryStatement"];
+    readonly rawStatementReuse: readonly ["executeRaw", "compileSql"];
+    readonly trustedImport: readonly ["trustedImport"];
+};
+
+// @public
+export type Ws5bBundleId = "batchEntityWrite" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
 
 // (No @packageDocumentation comment for this package)
 

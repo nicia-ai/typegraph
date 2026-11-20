@@ -55,6 +55,9 @@ import { validateGraphExtension } from "./validation";
  * const papers = evolved.getNodeCollectionOrThrow("Paper");
  * ```
  */
-export function defineGraphExtension(input: GraphExtension): GraphExtension {
-  return unwrap(validateGraphExtension(input, { strict: true }));
+export function defineGraphExtension<const T extends GraphExtension>(
+  input: T,
+): T & GraphExtension {
+  return unwrap(validateGraphExtension(input, { strict: true })) as T &
+    GraphExtension;
 }

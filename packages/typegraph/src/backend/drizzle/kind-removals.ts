@@ -47,7 +47,7 @@ export const POSTGRES_KIND_REMOVAL_TIMESTAMPS: KindRemovalTimestampAdapter<Date>
  * Raw shape returned by Drizzle for one row of the
  * `typegraph_kind_removals` table.
  */
-type RawKindRemovalRow = Readonly<{
+export type RawKindRemovalRow = Readonly<{
   graphId: string;
   kindName: string;
   entity: string;

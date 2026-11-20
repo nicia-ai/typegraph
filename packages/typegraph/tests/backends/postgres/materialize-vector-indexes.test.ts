@@ -17,10 +17,9 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import { embedding } from "../../../src/core/embedding";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let sharedPool: Pool | undefined;
 let isPostgresAvailable = false;

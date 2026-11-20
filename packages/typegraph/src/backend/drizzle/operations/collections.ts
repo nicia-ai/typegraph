@@ -1,11 +1,17 @@
-import { type SQL, sql } from "drizzle-orm";
+import { type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
 import { type TemporalMode } from "../../../core/types";
+import { edgeCardinalitySpec } from "../../../store/claims/edge-claims";
 import type {
   CountEdgesByKindParams,
   CountNodesByKindParams,
+  FindActiveEdgesBySourceV1Params,
+  FindEdgesByEndpointSetParams,
+  FindEdgesByHeterogeneousEndpointSetParams,
   FindEdgesByKindParams,
+  FindEdgesByMatchIdentityParams,
   FindNodesByKindParams,
+  FindRowsAcrossKindsParams,
 } from "../../types";
 import type { Tables } from "./shared";
 
@@ -106,6 +112,50 @@ export function buildFindNodesByKind(
   `;
 }
 
+/** One keyset page across declared kinds, including tombstones when requested. */
+export function buildFindNodesAcrossKinds(
+  tables: Tables,
+  params: FindRowsAcrossKindsParams,
+): SQL {
+  const { nodes } = tables;
+  const conditions: SQL[] = [
+    sql`${nodes.graphId} = ${params.graphId}`,
+    buildIdSetCondition(nodes.kind, params.kinds),
+    ...buildTemporalConditions(nodes, params),
+  ];
+  if (params.after !== undefined) {
+    conditions.push(
+      sql`(${nodes.kind} > ${params.after.kind} OR (${nodes.kind} = ${params.after.kind} AND ${nodes.id} > ${params.after.id}))`,
+    );
+  }
+  return sql`SELECT * FROM ${nodes} WHERE ${sql.join(conditions, sql` AND `)} ORDER BY ${nodes.kind} ASC, ${nodes.id} ASC LIMIT ${params.limit}`;
+}
+
+/**
+ * `COUNT(*)` over `table` filtered by `whereClause`. With `limit`, the count
+ * stops at that many rows, so a caller that only needs "is there one" reads a
+ * single row instead of the whole population.
+ */
+function buildCountQuery(
+  table: SQLWrapper,
+  whereClause: SQL,
+  limit: number | undefined,
+): SQL {
+  if (limit === undefined) {
+    return sql`
+      SELECT COUNT(*) as count FROM ${table}
+      WHERE ${whereClause}
+    `;
+  }
+  return sql`
+    SELECT COUNT(*) as count FROM (
+      SELECT 1 FROM ${table}
+      WHERE ${whereClause}
+      LIMIT ${limit}
+    ) AS bounded
+  `;
+}
+
 /**
  * Builds a query to count nodes by kind.
  */
@@ -121,12 +171,39 @@ export function buildCountNodesByKind(
     ...buildTemporalConditions(nodes, params),
   ];
 
-  const whereClause = sql.join(conditions, sql` AND `);
+  return buildCountQuery(
+    nodes,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
+}
 
-  return sql`
-    SELECT COUNT(*) as count FROM ${nodes}
-    WHERE ${whereClause}
-  `;
+/** Builds an `IN (...)` membership predicate over a non-empty id list. */
+function buildIdSetCondition(column: SQLWrapper, ids: readonly string[]): SQL {
+  return sql`${column} IN (${sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  )})`;
+}
+
+/**
+ * The edge read ordering in its two equivalent forms. `qualified` addresses the
+ * edges table directly; `bare` addresses the derived table the per-endpoint
+ * `ROW_NUMBER()` wrapper selects from, which re-exposes the same column names
+ * under a different relation name. Both come from here so the window's ordering
+ * and the statement's final ordering cannot drift apart.
+ */
+function buildEdgeOrdering(
+  tables: Tables,
+  orderBy: FindEdgesByKindParams["orderBy"],
+): Readonly<{ qualified: SQL; bare: SQL }> {
+  const { edges } = tables;
+  return orderBy === "id" ?
+      { qualified: sql`${edges.id} ASC`, bare: sql.raw(`"id" ASC`) }
+    : {
+        qualified: sql`${edges.createdAt} DESC, ${edges.id} DESC`,
+        bare: sql.raw(`"created_at" DESC, "id" DESC`),
+      };
 }
 
 /**
@@ -174,10 +251,10 @@ export function buildFindEdgesByKind(
 
   const whereClause = sql.join(conditions, sql` AND `);
 
-  const orderByClause =
-    params.orderBy === "id" ?
-      sql`${edges.id} ASC`
-    : sql`${edges.createdAt} DESC, ${edges.id} DESC`;
+  const { qualified: orderByClause } = buildEdgeOrdering(
+    tables,
+    params.orderBy,
+  );
 
   if (params.limit !== undefined && params.offset !== undefined) {
     return sql`
@@ -201,6 +278,225 @@ export function buildFindEdgesByKind(
     SELECT * FROM ${edges}
     WHERE ${whereClause}
     ORDER BY ${orderByClause}
+  `;
+}
+
+/**
+ * Reads the exact holder population for a `oneActive` source claim. Validity
+ * starts do not affect a claim: a future-start row with an open upper bound is
+ * active, while any ended row is outside the population.
+ */
+export function buildFindActiveEdgesBySourceV1(
+  tables: Tables,
+  params: FindActiveEdgesBySourceV1Params,
+): SQL {
+  const { edges } = tables;
+  const spec = edgeCardinalitySpec({
+    direction: "source",
+    cardinality: "oneActive",
+  });
+  const activeCondition =
+    spec.holderLiveness === "liveAndActive" ?
+      sql`AND ${edges.validTo} IS NULL`
+    : sql.empty();
+  return sql`
+    SELECT * FROM ${edges}
+    WHERE ${edges.graphId} = ${params.graphId}
+      AND ${edges.kind} = ${params.edgeKind}
+      AND ${edges.fromKind} = ${params.fromKind}
+      AND ${edges.fromId} = ${params.fromId}
+      AND ${edges.deletedAt} IS NULL
+      ${activeCondition}
+    ORDER BY ${edges.id} ASC
+  `;
+}
+
+/** Reads exact durable identity owners without filtering soft-deleted rows. */
+export function buildFindEdgesByMatchIdentity(
+  tables: Tables,
+  params: FindEdgesByMatchIdentityParams,
+): SQL {
+  const { edges } = tables;
+  const predicates = params.identities.map(
+    (identity) => sql`
+      (
+      ${edges.kind} = ${identity.kind}
+      AND ${edges.matchIdentityName} = ${identity.name}
+      AND ${edges.matchIdentityKey} = ${identity.key}
+      )
+    `,
+  );
+  if (predicates.length === 0) {
+    return sql`SELECT * FROM ${edges} WHERE ${edges.graphId} = ${params.graphId} AND 1 = 0`;
+  }
+  return sql`
+    SELECT * FROM ${edges}
+       WHERE ${edges.graphId} = ${params.graphId}
+       AND (${sql.join(predicates, sql` OR `)})
+       ORDER BY ${edges.id} ASC
+  `;
+  }
+
+/** One keyset page across declared edge kinds. */
+export function buildFindEdgesAcrossKinds(
+  tables: Tables,
+  params: FindRowsAcrossKindsParams,
+): SQL {
+  const { edges } = tables;
+  const conditions: SQL[] = [
+    sql`${edges.graphId} = ${params.graphId}`,
+    buildIdSetCondition(edges.kind, params.kinds),
+    ...buildTemporalConditions(edges, params),
+  ];
+  if (params.after !== undefined) {
+    conditions.push(
+      sql`(${edges.kind} > ${params.after.kind} OR (${edges.kind} = ${params.after.kind} AND ${edges.id} > ${params.after.id}))`,
+    );
+  }
+  return sql`SELECT * FROM ${edges} WHERE ${sql.join(conditions, sql` AND `)} ORDER BY ${edges.kind} ASC, ${edges.id} ASC LIMIT ${params.limit}`;
+}
+
+/**
+ * Builds a query to read the edges of a SET of endpoints.
+ *
+ * The id list compiles to `IN (...)` on the fanned-out side, scoped to one
+ * `endpointKind` so the predicate is a prefix seek on the edge relation's
+ * system index rather than a scan. `limitPerEndpoint` wraps the read in a
+ * `ROW_NUMBER()` partitioned by that same column, capping each endpoint's rows
+ * inside the statement instead of in the caller.
+ *
+ * Ordering matches {@link buildFindEdgesByKind}'s default so a set read
+ * returns each endpoint's edges in the same order the singleton read does.
+ */
+export function buildFindEdgesByEndpointSet(
+  tables: Tables,
+  params: FindEdgesByEndpointSetParams,
+  endpointIds: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const fromSide = params.side === "from";
+  const kindColumn = fromSide ? edges.fromKind : edges.toKind;
+  const idColumn = fromSide ? edges.fromId : edges.toId;
+
+  const whereClause = sql.join(
+    [
+      sql`${edges.graphId} = ${params.graphId}`,
+      sql`${edges.kind} = ${params.kind}`,
+      ...buildTemporalConditions(edges, params),
+      sql`${kindColumn} = ${params.endpointKind}`,
+      buildIdSetCondition(idColumn, endpointIds),
+    ],
+    sql` AND `,
+  );
+
+  const { qualified: orderByClause, bare: derivedOrderByClause } =
+    buildEdgeOrdering(tables, undefined);
+
+  if (params.limitPerEndpoint === undefined) {
+    return sql`
+      SELECT * FROM ${edges}
+      WHERE ${whereClause}
+      ORDER BY ${orderByClause}
+    `;
+  }
+
+  const ranked = sql`
+    SELECT *, ROW_NUMBER() OVER (
+      PARTITION BY ${idColumn} ORDER BY ${orderByClause}
+    ) AS endpoint_rank
+    FROM ${edges}
+    WHERE ${whereClause}
+  `;
+  return sql`
+    SELECT * FROM (${ranked}) AS ranked_edges
+    WHERE endpoint_rank <= ${params.limitPerEndpoint}
+    ORDER BY ${derivedOrderByClause}
+  `;
+}
+
+/**
+ * Builds a multi-kind edge read from a heterogeneous endpoint relation.
+ *
+ * Joining a `VALUES` relation lets both engines seek the composite endpoint
+ * index without generating one SQL branch for every licensed edge/source-kind
+ * combination.
+ */
+export function buildFindEdgesByHeterogeneousEndpointSet(
+  tables: Tables,
+  params: FindEdgesByHeterogeneousEndpointSetParams,
+  endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"],
+  edgeKinds: readonly string[],
+): SQL {
+  const { edges } = tables;
+  const fromSide = params.side === "from";
+  const kindColumn = fromSide ? edges.fromKind : edges.toKind;
+  const idColumn = fromSide ? edges.fromId : edges.toId;
+  const requestedKind = sql.raw(`requested_endpoints."endpoint_kind"`);
+  const requestedId = sql.raw(`requested_endpoints."endpoint_id"`);
+  const requestedOppositeKind = sql.raw(`requested_endpoints."opposite_kind"`);
+  const requestedOppositeId = sql.raw(`requested_endpoints."opposite_id"`);
+  const oppositeKindColumn = fromSide ? edges.toKind : edges.fromKind;
+  const oppositeIdColumn = fromSide ? edges.toId : edges.fromId;
+  const readsExactPairs = endpoints[0]?.opposite !== undefined;
+  const requestedRows = sql.join(
+    endpoints.map((endpoint) =>
+      endpoint.opposite === undefined ?
+        sql`(${endpoint.kind}, ${endpoint.id}, NULL, NULL)`
+      : sql`(${endpoint.kind}, ${endpoint.id}, ${endpoint.opposite.kind}, ${endpoint.opposite.id})`,
+    ),
+    sql`, `,
+  );
+  const whereClause = sql.join(
+    [
+      sql`${edges.graphId} = ${params.graphId}`,
+      buildIdSetCondition(edges.kind, edgeKinds),
+      ...buildTemporalConditions(edges, params),
+    ],
+    sql` AND `,
+  );
+  const oppositeJoinClause =
+    readsExactPairs ?
+      sql`
+        AND ${oppositeKindColumn} = ${requestedOppositeKind}
+        AND ${oppositeIdColumn} = ${requestedOppositeId}
+      `
+    : sql``;
+  const joinClause = sql`
+    FROM ${edges}
+    INNER JOIN requested_endpoints
+      ON ${kindColumn} = ${requestedKind}
+     AND ${idColumn} = ${requestedId}
+     ${oppositeJoinClause}
+    WHERE ${whereClause}
+  `;
+  const { qualified: orderByClause, bare: derivedOrderByClause } =
+    buildEdgeOrdering(tables, undefined);
+
+  if (params.limitPerEndpoint === undefined) {
+    return sql`
+      WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS (
+        VALUES ${requestedRows}
+      )
+      SELECT ${edges}.*
+      ${joinClause}
+      ORDER BY ${orderByClause}
+    `;
+  }
+
+  const ranked = sql`
+    SELECT ${edges}.*, ROW_NUMBER() OVER (
+      PARTITION BY ${requestedKind}, ${requestedId}, ${requestedOppositeKind}, ${requestedOppositeId}
+      ORDER BY ${orderByClause}
+    ) AS endpoint_rank
+    ${joinClause}
+  `;
+  return sql`
+    WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS (
+      VALUES ${requestedRows}
+    )
+    SELECT * FROM (${ranked}) AS ranked_edges
+    WHERE endpoint_rank <= ${params.limitPerEndpoint}
+    ORDER BY ${derivedOrderByClause}
   `;
 }
 
@@ -235,10 +531,9 @@ export function buildCountEdgesByKind(
     conditions.push(sql`${edges.toId} = ${params.toId}`);
   }
 
-  const whereClause = sql.join(conditions, sql` AND `);
-
-  return sql`
-    SELECT COUNT(*) as count FROM ${edges}
-    WHERE ${whereClause}
-  `;
+  return buildCountQuery(
+    edges,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
 }

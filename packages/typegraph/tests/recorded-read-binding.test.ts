@@ -2,15 +2,14 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  createQueryBuilder,
   createStore,
   defineGraph,
   defineNode,
-  type ExternalRecordedReadSource,
-  recordedRelation,
   type StoreOptions,
 } from "../src";
+import { type RecordedInstantParts } from "../src/core/temporal";
 import { ConfigurationError } from "../src/errors";
+import { createQueryBuilder } from "../src/query";
 import { compileQuery } from "../src/query/compiler";
 import {
   createRecordedReadBinding,
@@ -18,9 +17,19 @@ import {
   recordedReadSqlSchema,
   type SqlSchema,
 } from "../src/query/compiler/schema";
+import {
+  type ExternalRecordedReadSource,
+  recordedRelation,
+} from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend } from "./test-utils";
+
+const SAMPLE_REVISION: RecordedInstantParts = {
+  kind: "typegraph",
+  revision: 1,
+  recordedAt: "2026-01-01T00:00:00.000Z",
+};
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -55,7 +64,7 @@ describe("recorded read binding", () => {
       .select((context) => context.person.id);
     const ast = {
       ...query.toAst(),
-      recordedAsOf: "2026-01-01T00:00:00.000Z",
+      recordedAsOf: "r1:0000000000000001:2026-01-01T00:00:00.000Z",
     };
 
     expect(() =>
@@ -99,7 +108,7 @@ describe("recorded read binding", () => {
   it("rejects runtime-forged external recorded read sources", () => {
     const schema = createSqlSchema();
     const forged = {
-      source: "external",
+      kind: "external",
       schema,
     } as unknown as ExternalRecordedReadSource;
 
@@ -114,12 +123,14 @@ describe("recorded read binding", () => {
   it("rejects runtime-forged recorded read bindings in the compiler", () => {
     const schema = createSqlSchema();
     const forged = {
-      source: "typegraph-capture",
+      kind: "typegraph-capture",
       schema,
     } as unknown as Parameters<typeof recordedReadSqlSchema>[0];
 
-    expect(() => recordedReadSqlSchema(forged)).toThrow(ConfigurationError);
-    expect(() => recordedReadSqlSchema(forged)).toThrow(
+    expect(() => recordedReadSqlSchema(forged, SAMPLE_REVISION)).toThrow(
+      ConfigurationError,
+    );
+    expect(() => recordedReadSqlSchema(forged, SAMPLE_REVISION)).toThrow(
       "Recorded-time reads require a recorded read relation created by TypeGraph",
     );
   });
@@ -132,7 +143,7 @@ describe("recorded read binding", () => {
     expect(Object.isFrozen(external)).toBe(true);
     expect(Object.isFrozen(captured)).toBe(true);
     expect(() => {
-      (external as { source: string }).source = "typegraph-capture";
+      (external as { kind: string }).kind = "typegraph-capture";
     }).toThrow(TypeError);
     expect(() => {
       delete (external as { schema?: unknown }).schema;
@@ -143,6 +154,7 @@ describe("recorded read binding", () => {
     const schema = createSqlSchema();
     const recordedSchema = recordedReadSqlSchema(
       createRecordedReadBinding(schema),
+      SAMPLE_REVISION,
     );
 
     expect(Object.isFrozen(recordedSchema)).toBe(true);

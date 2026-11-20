@@ -53,6 +53,15 @@
  * @packageDocumentation
  */
 
+export type {
+  ContributionDiagnostic,
+  ContributionDiagnosticState,
+  ContributionRepairEntry,
+  ContributionRepairResult,
+} from "../backend/types";
+export type { CompiledOneStatementRead } from "../query";
+export type { BatchReadBuilder } from "../store";
+
 // ============================================================
 // Main Class
 // ============================================================

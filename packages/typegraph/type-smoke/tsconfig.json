@@ -9,5 +9,5 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true
   },
-  "include": ["consumer.ts"]
+  "include": ["consumer.ts", "edge-endpoint-compat.ts"]
 }

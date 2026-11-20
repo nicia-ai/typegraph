@@ -1,0 +1,185 @@
+---
+title: "One Round Trip Per Write"
+date: 2026-09-01
+excerpt: "A single TypeGraph write used to cost five or six sequential round trips, which adds up to about a quarter of a second from an edge worker to managed Postgres. 0.52 and 0.53 fold most writes into one request."
+tags:
+  - announcements
+cover:
+  alt: "A sequence diagram between a worker and its database: five muted request-and-response rungs for begin, schema-fence probe, duplicate check, insert and commit, against one bold line above them for the single fused statement"
+  image: "./cover.png"
+social:
+  alt: "One Round Trip Per Write"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+I turned on statement logging, turned off prepared statements, and created one
+node. This is what went over the wire:
+
+```
+begin
+SELECT ... schema-version fence probe
+SELECT ... duplicate/endpoint check
+INSERT ... (the write)
+commit
+```
+
+That's five round trips to write one row. On a pooled connection sitting next
+to the database you'd never notice, but a lot of people run TypeGraph from
+edge functions against managed Postgres, where a round trip is more like 45ms
+and each of those statements pays it in full, so the row takes roughly a
+quarter of a second to exist.
+
+When I captured a first-run provisioning flow for one graph, it issued 97
+statements, and about 40 of them, spread across just seven writes, were
+schema-version probes, duplicate checks, and `begin`/`commit` rather than
+actual writes.
+
+That was [issue #533](https://github.com/nicia-ai/typegraph/issues/533), and
+closing it took two releases. The short version: an eligible write and every
+check it depends on now go to the database together, as one request.
+
+A note on the numbers: everything below is a count of requests crossing the
+transport, which is what I measured. Latency figures are that count times an
+assumed 45ms round trip, not wall-clock benchmarks.
+
+## Checks and write, in one statement
+
+The old path was a sequence of reads, each deciding whether the write could
+proceed: whether the schema version still matched, whether the row was a
+duplicate, whether the edge's endpoints existed, and whether the cardinality
+constraint held. Each of those was another round trip, and the whole sequence
+was wrapped in a transaction so nothing could change between the checks and
+the insert.
+
+In 0.52, for the common shape on Postgres (schema-managed, generated ID, no
+history or identity tracking), all of those checks and the insert compile into
+a single statement, and the database evaluates the conditions and performs
+the write atomically.
+
+That takes **five or six sequential requests down to one**, which at 45ms
+removes roughly 180–225ms of waiting from every such write. On Neon's WebSocket
+driver, a typical get-or-create that misses drops from five requests to one.
+
+When a write needs something a single statement can't carry (history capture,
+a caller-owned transaction, call-level `matchOn`), it takes the ordinary
+transactional path, which is still there underneath for everything the fast
+path doesn't cover.
+
+## Batches on drivers without transactions
+
+The bigger win is on Neon HTTP, Cloudflare D1, and libSQL, which don't give
+you an interactive transaction at all, only one-shot atomic batches. Before
+0.52, a bulk write on one of them ran statement by statement, so it was slow
+and a partial failure left partial data behind.
+
+Now TypeGraph compiles eligible bulk writes into a precompiled program that
+those drivers execute as a single atomic batch. `nodes.bulkInsert()` becomes
+one request, edge batches validate their endpoints inside the write instead of
+reading candidate endpoints first, and batches with a cardinality constraint
+(`one`, `unique`, `oneActive`) carry the constraint checks in the same batch.
+Counting actual `execute()` / `batch()` calls on libSQL:
+
+| Bulk edge write               | Before | After |
+| ----------------------------- | -----: | ----: |
+| Unconstrained                 |      1 |     1 |
+| With a durable match identity |      6 |     1 |
+| With a cardinality constraint |      8 |     1 |
+
+Since it's all one batch, a conflict anywhere rolls the whole thing back. I
+wanted proof that the conflict check actually did something, so I wrote its
+regression test by deleting the conflict clause, watching duplicates land,
+and then putting the clause back and watching the same input get rejected.
+
+## 0.53: the writes that have to look first
+
+0.52 fused the writes that create things, which left the ones that need to
+know what's already there: updates, upserts, and deletes that have to release
+the uniqueness claims their row held. 0.53 moved those onto the same programs.
+
+- **Single-row `update()` and `delete()`** are one read plus one guarded
+  write, rather than a transaction around both: 60–67% fewer requests.
+- **`bulkUpsertById()`** is two requests: one batched read, one atomic write.
+- **`bulkReplaceById()`** is new. Each item is a complete document, so there's
+  nothing to read first. Creates, replacements, resurrections of deleted
+  rows, uniqueness claims, and fulltext and vector index updates all go in one
+  request.
+- **Large D1 upserts stay atomic.** D1 allows 100 bind parameters per
+  statement, so the program splits into many statements inside one atomic
+  batch. That raised the ceiling from 17 nodes and 6 edges to 512 nodes and
+  187 edges per call. Anything bigger falls back to the regular path instead
+  of building an unbounded request.
+- **Postgres transaction sessions run the same programs** through a
+  savepoint, so a rejected program doesn't poison the transaction around it.
+
+There's one trade-off to know about: the fused `update()` is optimistic. It
+doesn't hold a lock between its read and its write, so if the row moved
+underneath it, it re-reads and tries again, up to four times, and then throws
+`DatabaseOperationError`. Under sustained contention on the same row, that can
+fail a write that a transaction-capable backend used to serialize for you. I
+think that's the right trade for most workloads, but not for something like a
+hot counter.
+
+## Letting the database decide: match identities
+
+Fusing an edge get-or-create needed something the database could arbitrate on
+its own, without a lock or an in-process cache: a real unique constraint. So
+0.52 also added **durable edge match identities**. An edge can declare a named
+set of fields that identify it:
+
+```typescript
+const worksAt = defineEdge("worksAt", {
+  schema: z.object({ role: z.string() }),
+});
+
+edges: {
+  worksAt: {
+    type: worksAt,
+    from: [Person],
+    to: [Company],
+    cardinality: "many",
+    matchIdentity: { name: "employment", fields: ["role"] },
+  },
+},
+```
+
+TypeGraph stores that key on every edge row and backs it with a unique
+index, on both SQLite and Postgres. Once that exists,
+`getOrCreateByEndpoints` no longer has to read, decide, write, and hope
+nothing raced, because it's a single conditional insert the database resolves
+atomically, which is what makes the one-request path safe on a stateless edge
+worker with nothing in memory to lean on.
+
+Changing a match identity is a breaking schema change and is rejected while
+the edge kind has rows. Call-level `matchOn` still works for matching you
+don't want in the schema, through the regular transactional path.
+
+## Upgrading
+
+If you use a bundled backend (`createLocalSqliteBackend`,
+`createPostgresBackend`, or one of the serverless factories), you don't need to
+change any code.
+
+There are two things to know. An existing or externally provisioned database has
+to be opened once through `createStoreWithSchema()` (or get TypeGraph's
+generated base-schema migration) before the zero-DDL verified-store paths will
+run; until then they fail early with `BaseSchemaMigrationError`. And
+`store.transaction()` now throws on a backend without interactive transactions
+instead of quietly running your callback without one.
+
+If you maintain a custom backend, `GraphBackend.commands` is now required and
+a few capability flags changed shape. The
+[authoritative command sessions](/backend-setup#authoritative-command-sessions)
+section has the migration.
+
+## Try it
+
+- [Batch write patterns](/performance/overview#batch-write-patterns) and
+  [remote edge convergence](/performance/overview#remote-edge-convergence):
+  which writes are eligible, and the measured counts
+- [Upgrading deployment-wide base storage](/backend-setup#upgrading-deployment-wide-base-storage)
+- [Changelog](/changelog#0530) for 0.53.0, and [0.52.0](/changelog#0520)
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

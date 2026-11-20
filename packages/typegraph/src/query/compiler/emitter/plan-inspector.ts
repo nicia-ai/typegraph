@@ -33,6 +33,7 @@ function collectPlanOperations(node: LogicalPlanNode, ops: Set<string>): void {
 
   switch (node.op) {
     case "aggregate":
+    case "result_filter":
     case "filter":
     case "fulltext_match":
     case "join":
@@ -68,6 +69,7 @@ function findUnaryNodeInProjectChain<TNode extends LogicalPlanNode>(
 
     switch (currentNode.op) {
       case "aggregate":
+      case "result_filter":
       case "filter":
       case "fulltext_match":
       case "join":
@@ -171,6 +173,7 @@ function findTopLevelLimitOffsetNode(
 
     switch (currentNode.op) {
       case "aggregate":
+      case "result_filter":
       case "filter":
       case "fulltext_match":
       case "join":
@@ -201,6 +204,7 @@ function findTopLevelSortNode(
 
     switch (currentNode.op) {
       case "aggregate":
+      case "result_filter":
       case "filter":
       case "fulltext_match":
       case "join":

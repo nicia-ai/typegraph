@@ -10,22 +10,14 @@
  *   `SET LOCAL`. Issued in autocommit it would roll off with the
  *   statement and the next pooled query would see the session default.
  * - The transactional path still returns correct nearest-neighbor rows.
- * - A transaction-less backend (`transactions: false`) warns once and
+ * - A backend without interactive transactions warns once and
  *   ignores the option rather than emitting an unscoped `SET`.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
-import {
-  afterAll,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
@@ -36,10 +28,9 @@ import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 let sharedPool: Pool | undefined;
 let isPostgresAvailable = false;
@@ -301,44 +292,61 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
 });
 
 describe("Postgres efSearch — transaction-less backend", () => {
-  it("warns once and ignores the override instead of leaking a session SET", async (ctx) => {
+  it("refuses the override instead of silently changing search recall", async (ctx) => {
     const { pool } = requirePostgres(ctx);
     // Seed via a normal (transactional) backend — a transaction-less
     // backend can't bootstrap schema (commitSchemaVersion needs atomicity).
     await seed(pool, "ef_txless");
 
     const noTxBackend = createPostgresBackend(drizzle(pool), {
-      capabilities: { transactions: false },
+      capabilities: { execution: { interactiveTransactions: false } },
     });
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const params = {
-        graphId: "ef_txless",
+    const params = {
+      graphId: "ef_txless",
+      nodeKind: "Doc",
+      fieldPath: "embedding",
+      queryEmbedding: [1, 0, 0, 0],
+      metric: "cosine",
+      dimensions: 4,
+      indexType: "hnsw",
+      limit: 3,
+      efSearch: 256,
+    } as const;
+
+    await expect(
+      requireDefined(noTxBackend.vectorSearch)(params),
+    ).rejects.toMatchObject({
+      code: "UNSUPPORTED_BACKEND_CAPABILITY",
+      details: {
+        capability: "execution.interactiveTransactions",
+        efSearch: 256,
+      },
+    });
+  });
+});
+
+describe("Postgres efSearch — index contract", () => {
+  it("refuses efSearch for an IVFFlat slot instead of ignoring it", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    await seed(pool, "ef_ivfflat_refusal");
+    const backend = createPostgresBackend(drizzle(pool));
+
+    await expect(
+      requireDefined(backend.vectorSearch)({
+        graphId: "ef_ivfflat_refusal",
         nodeKind: "Doc",
         fieldPath: "embedding",
         queryEmbedding: [1, 0, 0, 0],
         metric: "cosine",
         dimensions: 4,
-        indexType: "hnsw",
+        indexType: "ivfflat",
         limit: 3,
         efSearch: 256,
-      } as const;
-
-      const first = await requireDefined(noTxBackend.vectorSearch)(params);
-      const second = await requireDefined(noTxBackend.vectorSearch)(params);
-
-      // The query still runs (override silently dropped, not fatal).
-      expect(Array.isArray(first)).toBe(true);
-      expect(Array.isArray(second)).toBe(true);
-      // Warned exactly once across both calls.
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-      expect(requireDefined(warnSpy.mock.calls[0])[0]).toMatch(
-        /efSearch.*ignored/s,
-      );
-    } finally {
-      warnSpy.mockRestore();
-    }
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFIGURATION_ERROR",
+      details: { efSearch: 256, indexType: "ivfflat" },
+    });
   });
 });
 

@@ -6,10 +6,9 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  getEdgeKinds,
-  getNodeKinds,
   type Store,
 } from "../src";
+import { getEdgeKinds, getNodeKinds } from "../src/core";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 

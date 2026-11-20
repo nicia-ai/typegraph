@@ -2,6 +2,9 @@ import { resolve } from "node:path";
 
 import { configDefaults, defineConfig } from "vitest/config";
 
+import { PGLITE_GLOBS } from "./vitest.pglite-project";
+import { DurationBalancedSequencer } from "./vitest.shard-sequencer";
+
 /**
  * Test globs for the graph-merge subsystem. These suites exercise an in-process
  * PGlite (WASM Postgres) backend and run on BOTH backends, so they get their own
@@ -15,6 +18,15 @@ const GRAPH_MERGE_GLOBS = [
   ...(UNIT_SCOPE ? [] : ["tests/property/graph-merge/**/*.test.ts"]),
 ];
 
+/**
+ * Every suite that boots an in-process PGlite, by whichever route it reaches
+ * one: the backend suite that names it, and the statement-recorder suites,
+ * which create one PGlite per case. Membership is the fact that decides the
+ * budget, not the directory — these recorder files sat in the default project
+ * on a five-second budget, where a slow WASM Postgres boot under file-parallel
+ * load reported as a failed assertion about statements that were in fact
+ * issued.
+ */
 const SHARED_EXCLUDE = [
   ...configDefaults.exclude,
   // #140: workerd-only do-sqlite suite — runs via `test:do`
@@ -47,6 +59,10 @@ export default defineConfig({
         __dirname,
         "src/backend/postgres/pglite.ts",
       ),
+      "@nicia-ai/typegraph/adapters/drizzle/postgres/working-copy": resolve(
+        __dirname,
+        "src/backend/postgres/working-copy.ts",
+      ),
       "@nicia-ai/typegraph/adapters/drizzle/postgres": resolve(
         __dirname,
         "src/backend/postgres/index.ts",
@@ -72,11 +88,42 @@ export default defineConfig({
         __dirname,
         "src/backend/sqlite/index.ts",
       ),
+      "@nicia-ai/typegraph/backend": resolve(__dirname, "src/backend/index.ts"),
+      "@nicia-ai/typegraph/core": resolve(__dirname, "src/core/index.ts"),
+      "@nicia-ai/typegraph/graph-extension": resolve(
+        __dirname,
+        "src/graph-extension/index.ts",
+      ),
+      "@nicia-ai/typegraph/provenance": resolve(
+        __dirname,
+        "src/provenance/index.ts",
+      ),
+      "@nicia-ai/typegraph/store": resolve(__dirname, "src/store-entry.ts"),
+      "@nicia-ai/typegraph/query": resolve(__dirname, "src/query-entry.ts"),
+      "@nicia-ai/typegraph/errors": resolve(__dirname, "src/errors-entry.ts"),
+      "@nicia-ai/typegraph/identity": resolve(
+        __dirname,
+        "src/identity-entry.ts",
+      ),
+      "@nicia-ai/typegraph/maintenance": resolve(
+        __dirname,
+        "src/maintenance.ts",
+      ),
+      "@nicia-ai/typegraph/adapters/drizzle/indexes": resolve(
+        __dirname,
+        "src/backend/drizzle/indexes.ts",
+      ),
+      "@nicia-ai/typegraph/adapters/drizzle/engine": resolve(
+        __dirname,
+        "src/backend/drizzle/engine/index.ts",
+      ),
       "@nicia-ai/typegraph": resolve(__dirname, "src/index.ts"),
     },
   },
   test: {
     globals: false,
+    // `--shard` splits by recorded duration, not by vitest's path hash.
+    sequence: { sequencer: DurationBalancedSequencer },
     coverage: {
       provider: "v8",
       reporter: ["text", "html", "json-summary"],
@@ -93,13 +140,35 @@ export default defineConfig({
         extends: true,
         test: {
           name: "main",
+          // Keep the coverage lane's 15s allowance on this project. A CLI
+          // override also shortens the PGlite and graph-merge budgets below.
+          testTimeout: 15_000,
           include: ["tests/**/*.test.ts"],
           // Graph-merge runs under its own (serialized) project below.
           exclude: [
             ...SHARED_EXCLUDE,
             ...GRAPH_MERGE_GLOBS,
+            ...PGLITE_GLOBS,
             ...UNIT_PROPERTY_EXCLUDE,
           ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "pglite",
+          include: PGLITE_GLOBS,
+          exclude: SHARED_EXCLUDE,
+          // These suites provision in-process Postgres instances and exercise
+          // persistence plus bulk-write paths. Keep their normal startup and
+          // teardown latency from competing with file-parallel unit tests or
+          // the default five-second budget. The PostgreSQL lane opts back in:
+          // it provisions an explicit server connection budget for parallel
+          // files (scripts/test-postgres.sh), and the 60s budgets below
+          // already absorb concurrent PGlite startup latency.
+          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
         },
       },
       {
@@ -112,7 +181,8 @@ export default defineConfig({
           // use generous budgets so normal PGlite startup/cleanup latency does
           // not masquerade as a correctness failure. Scoped to this project so
           // the rest of the package keeps default parallelism + fast timeouts.
-          fileParallelism: false,
+          // The PostgreSQL lane opts back in (see the pglite project note).
+          fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
           testTimeout: 60_000,
           hookTimeout: 60_000,
         },

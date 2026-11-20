@@ -4,27 +4,40 @@
  * Tests the PostgreSQL adapter with a real database via Docker.
  * Requires: docker compose up -d
  *
+ * The shared cross-backend integration suite runs from this lane's
+ * `postgres-integration-slice-*.test.ts` files.
+ *
  * Run: pnpm test:postgres
  *
  * These tests are automatically skipped if PostgreSQL is not available.
  */
+import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { Client, Pool } from "pg";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   defineEdge,
   defineGraph,
   defineNode,
   embedding,
-  NodeConstraintNotFoundError,
+  MigrationError,
+  StaleVersionError,
   subClassOf,
+  ValidationError,
 } from "../../../src";
-import {
-  generatePostgresDDL,
-  generatePostgresMigrationSQL,
-} from "../../../src/backend/drizzle/ddl";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import {
   createPostgresBackend,
   createPostgresTables,
@@ -35,20 +48,40 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
-import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
-import { createStore, createStoreWithSchema } from "../../../src/store";
+import { NodeConstraintNotFoundError } from "../../../src/errors-entry";
+import { sql as portableSql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledTemporaryStatementSql,
+} from "../../../src/query/sql-intent";
+import { migrateSchema } from "../../../src/schema";
+import {
+  createAdapterStoreWithSchema,
+  createStore,
+  createStoreWithSchema,
+} from "../../../src/store";
+import * as idUtilities from "../../../src/utils/id";
 import { requireDefined } from "../../../src/utils/presence";
+import { isSerializationFailure } from "../../../src/utils/sql-errors";
+import {
+  createGate,
+  raceTimeout,
+  TIMEOUT_SENTINEL,
+} from "../../concurrency-utils";
+import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { createAdapterTestSuite } from "../adapter-test-suite";
-import { createIntegrationTestSuite } from "../integration-test-suite";
+import {
+  clearPostgresLaneData,
+  connectPostgresLanePool,
+  recreatePostgresLaneTables,
+} from "./postgres-lane-database";
 
 // ============================================================
 // Test Configuration
 // ============================================================
 
 // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
-const TEST_DATABASE_URL =
-  process.env["POSTGRES_URL"] ??
-  "postgresql://typegraph:typegraph@127.0.0.1:5432/typegraph_test";
+const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
 // ============================================================
 // Connection State
@@ -85,82 +118,12 @@ function createConnection(): { pool: Pool; db: NodePgDatabase } {
 
 /**
  * Checks if PostgreSQL is available and sets up the shared connection.
- * Retries connection to handle CI timing issues.
  */
 async function initializePostgres(): Promise<boolean> {
-  const maxRetries = 5;
-  const retryDelayMs = 1000;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const testPool = new Pool({
-      connectionString: TEST_DATABASE_URL,
-      connectionTimeoutMillis: 5000,
-    });
-
-    try {
-      await testPool.query("SELECT 1");
-      sharedPool = testPool;
-      sharedDb = drizzle(sharedPool);
-      return true;
-    } catch {
-      await testPool.end().catch(() => {
-        // Ignore cleanup errors
-      });
-
-      if (attempt < maxRetries) {
-        // Wait before retrying
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
- * Creates a clean test database.
- */
-async function setupTestDatabase(): Promise<void> {
-  if (!sharedPool) return;
-
-  await sharedPool.query(`
-    DROP TABLE IF EXISTS typegraph_revision_origins CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_clock CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_edges CASCADE;
-    DROP TABLE IF EXISTS typegraph_recorded_nodes CASCADE;
-    DROP TABLE IF EXISTS typegraph_node_uniques CASCADE;
-    DROP TABLE IF EXISTS typegraph_edges CASCADE;
-    DROP TABLE IF EXISTS typegraph_nodes CASCADE;
-    DROP TABLE IF EXISTS typegraph_schema_versions CASCADE;
-  `);
-
-  // Per-(kind, field) vector tables are created lazily with a fixed,
-  // dimension-typed embedding column (`vector(N)`). They are not in the
-  // base migration, so the base DROP above leaves them behind. Truncating
-  // (as `clearTestData` does for row isolation) keeps the column type, so a
-  // leftover `vector(3)` table from a prior run would reject a later test's
-  // `vector(4)` insert. DROP them here — once, before any backend/latch is
-  // created for this file — so the suite is re-runnable against a persistent
-  // database (e.g. the shared dev Postgres) and order-independent across the
-  // serially-run PG test files.
-  await dropPerFieldVectorTables(sharedPool);
-
-  await sharedPool.query(generatePostgresMigrationSQL());
-}
-
-/**
- * Drops every strategy-owned per-field vector table (`tg_vec_*`), including
- * its DiskANN/HNSW index. Used at file setup to clear stale typed tables
- * whose embedding dimension may differ from this run's schema.
- */
-async function dropPerFieldVectorTables(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<{ tablename: string }>(
-    String.raw`SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
-  );
-  for (const row of rows) {
-    await pool.query(`DROP TABLE IF EXISTS "${row.tablename}" CASCADE`);
-  }
+  sharedPool = await connectPostgresLanePool(TEST_DATABASE_URL);
+  if (!sharedPool) return false;
+  sharedDb = drizzle(sharedPool);
+  return true;
 }
 
 /**
@@ -168,55 +131,7 @@ async function dropPerFieldVectorTables(pool: Pool): Promise<void> {
  */
 async function clearTestData(): Promise<void> {
   if (!sharedPool) return;
-
-  // Fulltext tables have no FKs to typegraph_nodes, so truncating the
-  // parent tables alone leaves orphaned rows that leak into subsequent
-  // integration tests (particularly fulltext search, where orphan rows
-  // can outrank fresh ones and cause missing hits). The materialization
-  // status tables also carry graph-id scoped completion markers, so stale
-  // rows there can make a fresh graph cleanup look already completed.
-  //
-  // The durable contribution markers (#135) are cleared alongside the data so
-  // each test starts genuinely un-provisioned and the integration suite's
-  // per-test createStoreWithSchema re-materializes every per-field vector
-  // table + marker in lockstep. Otherwise a marker could outlive a dropped
-  // table on this shared database and a later boot would skip the CREATE.
-  await sharedPool.query(
-    `TRUNCATE typegraph_index_materializations,
-              typegraph_contribution_materializations,
-              typegraph_kind_removals,
-              typegraph_reconciliation_markers,
-              typegraph_node_fulltext,
-              typegraph_revision_origins,
-              typegraph_recorded_clock,
-              typegraph_recorded_nodes,
-              typegraph_recorded_edges,
-              typegraph_nodes,
-              typegraph_edges,
-              typegraph_node_uniques,
-              typegraph_contribution_materializations,
-              typegraph_schema_versions CASCADE`,
-  );
-
-  // Per-(kind, field) vector tables are materialized per field, so enumerate
-  // and truncate any that exist to keep embedding rows from leaking across
-  // tests that reuse graph ids; createStoreWithSchema re-creates any missing.
-  await truncatePerFieldVectorTables(sharedPool);
-}
-
-/**
- * Truncates every strategy-owned per-field vector table (`tg_vec_*`)
- * currently present. Used by test cleanup since the tables are
- * materialized lazily and there is no single shared embeddings table.
- */
-async function truncatePerFieldVectorTables(pool: Pool): Promise<void> {
-  const { rows } = await pool.query<{ tablename: string }>(
-    String.raw`SELECT tablename FROM pg_tables
-      WHERE schemaname = 'public' AND tablename LIKE 'tg_vec\_%'`,
-  );
-  for (const row of rows) {
-    await pool.query(`TRUNCATE "${row.tablename}" CASCADE`);
-  }
+  await clearPostgresLaneData(sharedPool);
 }
 
 // ============================================================
@@ -227,13 +142,10 @@ beforeAll(async () => {
   // Only attempt to connect when POSTGRES_URL is explicitly set (i.e. via
   // `scripts/test-postgres.sh`). Without the gate, a developer with a
   // stray Docker Postgres container running would trigger the
-  // DROP+CREATE schema setup below during `pnpm test:unit` and race with
-  // other postgres test files sharing the same database.
+  // DROP+CREATE schema setup below during `pnpm test:unit`.
   if (!process.env["POSTGRES_URL"]) return;
   isPostgresAvailable = await initializePostgres();
-  if (isPostgresAvailable) {
-    await setupTestDatabase();
-  }
+  if (sharedPool) await recreatePostgresLaneTables(sharedPool);
 });
 
 afterAll(async () => {
@@ -302,6 +214,44 @@ const testGraph = defineGraph({
   ontology: [subClassOf(Company, Organization)],
 });
 
+const SavepointPerson = defineNode("SavepointPerson", {
+  schema: z.object({ email: z.string() }),
+});
+
+const savepointCollisionGraph = defineGraph({
+  id: "savepoint_collision",
+  nodes: {
+    SavepointPerson: {
+      type: SavepointPerson,
+      unique: [
+        {
+          name: "savepoint_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+const testGraphWithoutCompany = defineGraph({
+  id: testGraph.id,
+  nodes: {
+    Person: { type: Person },
+    Organization: { type: Organization },
+  },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+    },
+  },
+});
+
 function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
   backend: GraphBackend;
   statements: string[];
@@ -309,15 +259,13 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
   const statements: string[] = [];
   return {
     statements,
-    backend: {
-      ...backend,
+    backend: deriveBackend(backend, {
       transaction<T>(
         fn: (tx: TransactionBackend) => Promise<T>,
         options?: TransactionOptions,
       ): Promise<T> {
         return backend.transaction(async (tx) => {
-          const observedTransaction: TransactionBackend = {
-            ...tx,
+          const observedTransaction = deriveBackend(tx, {
             async executeTemporaryStatement(
               query: CompiledTemporaryStatementSql,
             ): Promise<void> {
@@ -325,11 +273,11 @@ function observeTemporaryAnalyzeStatements(backend: GraphBackend): Readonly<{
               if (statement.startsWith("ANALYZE ")) statements.push(statement);
               await requireDefined(tx.executeTemporaryStatement)(query);
             },
-          };
+          });
           return fn(observedTransaction);
         }, options);
       },
-    },
+    }),
   };
 }
 
@@ -366,24 +314,6 @@ describe("PostgreSQL Adapter", () => {
       { skipRawQueries: false },
     );
   });
-
-  // Run the shared integration test suite for PostgreSQL
-  describe.runIf(process.env["POSTGRES_URL"])("Integration Test Suite", () => {
-    beforeEach(async () => {
-      await clearTestData();
-    });
-
-    createIntegrationTestSuite("PostgreSQL", () => {
-      // Create a fresh connection for each backend instance
-      const { pool, db } = createConnection();
-      return {
-        backend: createPostgresBackend(db),
-        cleanup: async () => {
-          await pool.end();
-        },
-      };
-    });
-  });
 });
 
 // ============================================================
@@ -391,6 +321,33 @@ describe("PostgreSQL Adapter", () => {
 // ============================================================
 
 describe("PostgreSQL Backend - Adapter Specific", () => {
+  it("serializes overlapping statements across backends sharing a bare client", async (ctx) => {
+    requirePostgres(ctx);
+    const client = new Client({ connectionString: TEST_DATABASE_URL });
+    await client.connect();
+    try {
+      const db = drizzle(client);
+      const firstBackend = createPostgresBackend(db);
+      const secondBackend = createPostgresBackend(db);
+      const querySpy = vi.spyOn(client, "query");
+
+      const first = firstBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 1 AS value FROM pg_sleep(0.1)`),
+      );
+      const second = secondBackend.execute<{ value: number }>(
+        asCompiledRowsSql(portableSql`SELECT 2 AS value`),
+      );
+      await Promise.resolve();
+      expect(querySpy).toHaveBeenCalledTimes(1);
+      expect(await Promise.all([first, second])).toEqual([
+        [{ value: 1 }],
+        [{ value: 2 }],
+      ]);
+      expect(querySpy).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.end();
+    }
+  });
   beforeEach(async () => {
     if (!isPostgresAvailable) return;
     await clearTestData();
@@ -402,7 +359,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const backend = createPostgresBackend(db);
 
       expect(backend.dialect).toBe("postgres");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
     });
 
     it("runs non-vector CRUD with vector disabled (vector: false)", async (ctx) => {
@@ -455,14 +412,19 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       expect(sql).toContain('"created_at" TIMESTAMPTZ NOT NULL');
       expect(sql).toContain('"valid_from" TIMESTAMPTZ');
+      expect(sql).toContain('"recorded_from" BIGINT NOT NULL');
+      expect(sql).toContain('"revision" BIGINT NOT NULL');
     });
 
     it("includes necessary indexes", () => {
       const ddl = generatePostgresDDL();
       const sql = ddl.join("\n");
 
-      expect(sql).toContain('"typegraph_nodes_kind_idx"');
       expect(sql).toContain('"typegraph_nodes_kind_created_idx"');
+      // `(graph_id, kind)` is a prefix of kind_created_idx and the primary
+      // key, so base schema v9 no longer creates a separate kind_idx.
+      expect(sql).not.toContain('"typegraph_nodes_kind_idx"');
+      expect(sql).not.toContain('"typegraph_edges_kind_idx"');
       // Bare-id node lookup (kind resolved by id) — see typegraph#280.
       expect(sql).toContain(
         '"typegraph_nodes_id_idx" ON "typegraph_nodes" ("graph_id", "id")',
@@ -534,6 +496,199 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
 
       const fetched = await backend.getNode("test_graph", "Person", "person-1");
       expect(fetched).toBeDefined();
+    });
+
+    it("supports strong-isolation reads and schema-managed writes", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createStoreWithSchema(testGraph, backend);
+
+      await expect(
+        store.transaction((tx) => tx.nodes.Person.count(), {
+          isolationLevel: "repeatable_read",
+        }),
+      ).resolves.toBe(0);
+
+      await expect(
+        store.transaction(
+          (tx) =>
+            tx.nodes.Person.create({
+              name: "Alice",
+              email: "alice@example.com",
+            }),
+          { isolationLevel: "serializable" },
+        ),
+      ).resolves.toMatchObject({ name: "Alice" });
+      expect(await store.nodes.Person.count()).toBe(1);
+    });
+
+    it("makes an empty-kind schema commit wait for an in-flight managed write", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const insertReached = createGate();
+      const releaseInsert = createGate();
+      let pauseCompanyInsert = false;
+      const observedBackend: GraphBackend = deriveBackend(backend, {
+        async transaction(fn, options) {
+          return backend.transaction(
+            (tx) =>
+              fn({
+                ...tx,
+                async insertNode(params) {
+                  if (pauseCompanyInsert && params.kind === "Company") {
+                    insertReached.open();
+                    await releaseInsert.opened;
+                  }
+                  return tx.insertNode(params);
+                },
+              }),
+            options,
+          );
+        },
+      });
+      const [store] = await createStoreWithSchema(testGraph, observedBackend);
+
+      pauseCompanyInsert = true;
+      const insert = store.nodes.Company.create({ name: "Initech" });
+      await insertReached.opened;
+      const migration = migrateSchema(backend, testGraphWithoutCompany, 1);
+
+      const blockedMigration = await raceTimeout(migration, 200);
+      releaseInsert.open();
+      expect(blockedMigration).toBe(TIMEOUT_SENTINEL);
+      await expect(insert).resolves.toMatchObject({ name: "Initech" });
+      await expect(migration).rejects.toThrow(MigrationError);
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(1);
+    });
+
+    it("aborts a stale serializable writer after a schema commit", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createStoreWithSchema(testGraph, backend);
+      const snapshotRead = createGate();
+      const releaseWrite = createGate();
+
+      const staleWrite = store.transaction(
+        async (tx) => {
+          await tx.nodes.Person.count();
+          snapshotRead.open();
+          await releaseWrite.opened;
+          return tx.nodes.Company.create({ name: "Too late" });
+        },
+        { isolationLevel: "serializable" },
+      );
+      await snapshotRead.opened;
+      await migrateSchema(backend, testGraphWithoutCompany, 1);
+      releaseWrite.open();
+
+      await expect(staleWrite).rejects.toSatisfy((error: unknown) =>
+        isSerializationFailure(error),
+      );
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(2);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Company",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
+    });
+
+    it("reacquires the schema fence after rolling back its first write to a savepoint", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db);
+      const [store] = await createAdapterStoreWithSchema(testGraph, backend);
+
+      await expect(
+        store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available") {
+            throw new Error(
+              "PostgreSQL adapter transaction did not expose native SQL",
+            );
+          }
+
+          await tx.sql.execute(sql.raw("SAVEPOINT schema_fence_regression"));
+          await tx.nodes.Person.create({
+            name: "Rolled back",
+            email: "rolled-back@example.com",
+          });
+          await tx.sql.execute(
+            sql.raw("ROLLBACK TO SAVEPOINT schema_fence_regression"),
+          );
+
+          await migrateSchema(backend, testGraphWithoutCompany, 1);
+          return tx.nodes.Company.create({ name: "Too late" });
+        }),
+      ).rejects.toThrow(StaleVersionError);
+
+      expect(
+        requireDefined(await backend.getActiveSchema(testGraph.id)).version,
+      ).toBe(2);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Person",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
+      expect(
+        await backend.countNodesByKind({
+          graphId: testGraph.id,
+          kind: "Company",
+          excludeDeleted: false,
+        }),
+      ).toBe(0);
+    });
+
+    it("commits after a caught generated-ID collision is rolled back to a native savepoint", async (ctx) => {
+      const { db } = requirePostgres(ctx);
+      const backend = createPostgresBackend(db, {
+        capabilities: { atomicNodeInsertClaims: false },
+      });
+      const [store] = await createAdapterStoreWithSchema(
+        savepointCollisionGraph,
+        backend,
+      );
+      await store.nodes.SavepointPerson.create(
+        { email: "original@example.com" },
+        { id: "savepoint-collision" },
+      );
+
+      const generatedId = vi
+        .spyOn(idUtilities, "generateId")
+        .mockReturnValue("savepoint-collision");
+      try {
+        await store.transaction(async (tx) => {
+          if (tx.sqlAvailability !== "available")
+            throw new Error("PostgreSQL transaction did not expose native SQL");
+
+          await tx.sql.execute(sql.raw("SAVEPOINT collision_recovery"));
+          await expect(
+            tx.nodes.SavepointPerson.bulkCreate([
+              { props: { email: "colliding@example.com" } },
+            ]),
+          ).rejects.toBeInstanceOf(ValidationError);
+          await tx.sql.execute(
+            sql.raw("ROLLBACK TO SAVEPOINT collision_recovery"),
+          );
+          await tx.nodes.SavepointPerson.create(
+            { email: "survivor@example.com" },
+            { id: "savepoint-survivor" },
+          );
+        });
+      } finally {
+        generatedId.mockRestore();
+      }
+
+      expect(
+        await store.nodes.SavepointPerson.getById(
+          "savepoint-survivor" as never,
+        ),
+      ).toBeDefined();
     });
   });
 
@@ -706,6 +861,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           "tg_reprobe_contribution_materializations",
         kindRemovals: "tg_reprobe_kind_removals",
         reconciliationMarkers: "tg_reprobe_reconciliation_markers",
+        graphTemplates: "tg_reprobe_graph_templates",
       } as const;
       const reprobeTables = createPostgresTables(tableNames);
       const ddl = generatePostgresDDL(reprobeTables);
@@ -787,6 +943,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           "tg_search_path_contribution_materializations",
         kindRemovals: "tg_search_path_kind_removals",
         reconciliationMarkers: "tg_search_path_reconciliation_markers",
+        graphTemplates: "tg_search_path_graph_templates",
       } as const;
       const tables = createPostgresTables(tableNames);
       const ddl = generatePostgresDDL(tables);
@@ -1048,6 +1205,149 @@ describe("Store with PostgreSQL Backend", () => {
     expect(updated.name).toBe("Alice Smith");
     expect(updated.age).toBe(30);
     expect(updated.meta.version).toBe(2);
+  });
+
+  it("falls back without a partial resolved batch after concurrent row updates", async (ctx) => {
+    requirePostgres(ctx);
+    const batchStatements: string[] = [];
+    const batchPool = new Pool({ connectionString: TEST_DATABASE_URL });
+    const writerPool = new Pool({ connectionString: TEST_DATABASE_URL });
+    const batchDb = drizzle(batchPool, {
+      logger: {
+        logQuery(query: string): void {
+          batchStatements.push(query);
+        },
+      },
+    });
+    const writerDb = drizzle(writerPool);
+    const snapshotRead = createGate();
+    const releaseSnapshot = createGate();
+    const writerUpdated = createGate();
+    const releaseWriter = createGate();
+    const resolvedBatchResultSizes: number[] = [];
+    let pauseBatchRead = false;
+    const baseBackend = createPostgresBackend(batchDb);
+    const observedBackend = deriveBackend(baseBackend, {
+      transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: TransactionOptions,
+      ): Promise<T> {
+        return baseBackend.transaction(
+          (tx) =>
+            fn(
+              deriveBackend(tx, {
+                async getNodes(graphId, kind, ids) {
+                  const rows = await requireDefined(tx.getNodes)(
+                    graphId,
+                    kind,
+                    ids,
+                  );
+                  if (pauseBatchRead && kind === "Person") {
+                    snapshotRead.open();
+                    await releaseSnapshot.opened;
+                  }
+                  return rows;
+                },
+                async updateResolvedNodesBatch(params) {
+                  const rows = await requireDefined(
+                    tx.updateResolvedNodesBatch,
+                  )(params);
+                  resolvedBatchResultSizes.push(rows.length);
+                  return rows;
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+
+    try {
+      // Neither store enables history, revision tracking, or a constraint.
+      // This leaves the two connections free to contend at the row itself.
+      const [batchStore] = await createStoreWithSchema(
+        testGraph,
+        observedBackend,
+      );
+      const [writerStore] = await createStoreWithSchema(
+        testGraph,
+        createPostgresBackend(writerDb),
+      );
+      await batchStore.nodes.Person.create(
+        { name: "initial-a", email: "initial-a@example.com" },
+        { id: "version-gated-row-a" },
+      );
+      await batchStore.nodes.Person.create(
+        { name: "initial-b", email: "initial-b@example.com" },
+        { id: "version-gated-row-b" },
+      );
+      batchStatements.splice(0);
+      pauseBatchRead = true;
+
+      const batch = batchStore.nodes.Person.bulkUpsertById([
+        { id: "version-gated-row-a", props: { name: "batch-a" } },
+        { id: "version-gated-row-b", props: { name: "batch-b" } },
+      ]);
+      await snapshotRead.opened;
+
+      const writer = writerStore.transaction(async (tx) => {
+        await tx.nodes.Person.update(asNodeId("version-gated-row-b"), {
+          name: "writer",
+          email: "writer@example.com",
+        });
+        writerUpdated.open();
+        await releaseWriter.opened;
+      });
+      await writerUpdated.opened;
+      releaseSnapshot.open();
+
+      // The batch statement has read both version-1 rows, then blocks on the
+      // second row's writer lock. It must not update the uncontended first row
+      // after the second row's eligibility moves.
+      expect(await raceTimeout(batch, 200)).toBe(TIMEOUT_SENTINEL);
+      releaseWriter.open();
+      await writer;
+
+      const result = await batch;
+      expect(resolvedBatchResultSizes).toEqual([0]);
+      const resolvedBatchStatement = batchStatements.find((statement) =>
+        statement.includes("expected_updates"),
+      );
+      expect(resolvedBatchStatement).toBeDefined();
+      expect(resolvedBatchStatement).toContain(
+        'ORDER BY "typegraph_nodes"."id"',
+      );
+      const orderByPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "ORDER BY",
+      );
+      // `NO KEY UPDATE`: the batch's lock must not conflict with an edge
+      // write's `FOR KEY SHARE` on the same rows (#795).
+      const rowLockPosition = requireDefined(resolvedBatchStatement).indexOf(
+        "FOR NO KEY UPDATE",
+      );
+      expect(orderByPosition).toBeGreaterThanOrEqual(0);
+      expect(rowLockPosition).toBeGreaterThan(orderByPosition);
+      const firstResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-a"),
+      );
+      const secondResult = requireDefined(
+        result.find((node) => node.id === "version-gated-row-b"),
+      );
+      expect(firstResult.name).toBe("batch-a");
+      expect(firstResult.email).toBe("initial-a@example.com");
+      expect(firstResult.meta.version).toBe(2);
+      expect(secondResult.name).toBe("batch-b");
+      expect(secondResult.email).toBe("writer@example.com");
+      expect(secondResult.meta.version).toBe(3);
+      expect(
+        batchStatements.some((statement) =>
+          statement.includes("pg_advisory_xact_lock"),
+        ),
+      ).toBe(false);
+    } finally {
+      await batchPool.end();
+      await writerPool.end();
+    }
   });
 
   it("soft deletes nodes", async (ctx) => {

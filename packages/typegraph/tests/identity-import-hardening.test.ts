@@ -1,0 +1,2864 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type GraphBackend,
+} from "../src";
+import type {
+  CompiledRowsSql,
+  CompiledStatementSql,
+  TransactionBackend,
+} from "../src/backend";
+import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  RECORDED_MAX_REVISION,
+  recordedInstantRevision,
+  recordedInstantWallTime,
+} from "../src/core/temporal";
+import { IdentityContradictionError, ValidationError } from "../src/errors";
+import { type IdentityTransferAssertion } from "../src/identity/service";
+import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
+import { pruneIdentityTransitions } from "../src/identity-entry";
+import {
+  exportGraph,
+  exportGraphStream,
+  importGraph,
+  importGraphStream,
+  type ImportResult,
+} from "../src/interchange";
+import {
+  type GraphData,
+  type GraphDataHeader,
+  type GraphInterchangeChunk,
+} from "../src/interchange/types";
+import { disjointWith } from "../src/ontology";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql, type SqlFragment } from "../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../src/query/sql-intent";
+import { storeBackend, storeRuntime } from "../src/store/runtime-port";
+import { generateId } from "../src/utils/id";
+import { requireDefined } from "../src/utils/presence";
+import {
+  completenessReason,
+  truncatedBeforeOf,
+} from "./identity-history-completeness";
+import {
+  createInitializedStore,
+  createTestBackend,
+  expectAuditedBackend,
+  matchingArray,
+  matchingObject,
+} from "./test-utils";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const Author = defineNode("Author", {
+  schema: z.object({ penName: z.string() }),
+});
+const Company = defineNode("Company", {
+  schema: z.object({ name: z.string() }),
+});
+const knows = defineEdge("knows", { schema: z.object({}) });
+
+const graph = defineGraph({
+  id: "identity_import_hardening",
+  nodes: {
+    Person: { type: Person },
+    Author: { type: Author },
+    Company: { type: Company },
+  },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  ontology: [disjointWith(Person, Company)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const HOUR_MS = 60 * 60 * 1000;
+const IDENTITY_PROFILE = "typegraph-identity-v1";
+const CANONICAL_TIMESTAMP = "2024-01-01T00:00:00.000Z";
+
+type Ref = Readonly<{ kind: string; id: string }>;
+
+/** Narrows an asymmetric matcher so it enters a typed object as `unknown`. */
+function matchingString(substring: string): unknown {
+  return expect.stringContaining(substring);
+}
+
+async function* chunkStream(
+  chunks: readonly GraphInterchangeChunk[],
+): AsyncIterable<GraphInterchangeChunk> {
+  for (const chunk of chunks) {
+    await Promise.resolve();
+    yield chunk;
+  }
+}
+
+/** A history-enabled source with one assertion, one retraction and one re-assertion. */
+async function sourceWithIdentityHistory() {
+  const [source] = await createAdapterStoreWithSchema(
+    graph,
+    createTestBackend(),
+    { history: true },
+  );
+  const alice = await source.nodes.Person.create(
+    { name: "Alice" },
+    { id: "alice" },
+  );
+  const bob = await source.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+  const carol = await source.nodes.Person.create(
+    { name: "Carol" },
+    { id: "carol" },
+  );
+  const first = await source.identity.assertSame(alice, bob);
+  await source.identity.retractAssertion(first.assertion.id);
+  await source.identity.assertSame(alice, carol);
+  return { source };
+}
+
+async function collectArchivalStream(
+  source: Awaited<ReturnType<typeof sourceWithIdentityHistory>>["source"],
+  batchSize?: number,
+): Promise<GraphInterchangeChunk[]> {
+  const chunks: GraphInterchangeChunk[] = [];
+  for await (const chunk of exportGraphStream(source, {
+    identityMode: "archival",
+    includeDeleted: true,
+    ...(batchSize === undefined ? {} : { batchSize }),
+  })) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+async function historyTarget() {
+  const [target] = await createAdapterStoreWithSchema(
+    graph,
+    createTestBackend(),
+    { history: true },
+  );
+  return target;
+}
+
+function isoAt(offsetMs: number): string {
+  return new Date(Date.now() + offsetMs).toISOString();
+}
+
+/** Orders endpoints by code point, as the interchange format requires. */
+function orderPair(left: Ref, right: Ref): readonly [Ref, Ref] {
+  const byKind =
+    left.kind < right.kind ? -1
+    : left.kind > right.kind ? 1
+    : 0;
+  const order =
+    byKind === 0 ?
+      left.id < right.id ? -1
+      : left.id > right.id ? 1
+      : 0
+    : byKind;
+  return order <= 0 ? [left, right] : [right, left];
+}
+
+function transfer(
+  id: string,
+  first: Ref,
+  second: Ref,
+  validFrom: string,
+  validTo?: string,
+): IdentityTransferAssertion {
+  const [a, b] = orderPair(first, second);
+  return {
+    id,
+    relation: "same",
+    a,
+    b,
+    validFrom,
+    ...(validTo === undefined ? {} : { validTo }),
+  };
+}
+
+/**
+ * The identity read API takes graph-typed refs, so the created nodes are
+ * returned alongside the plain refs the interchange format speaks in.
+ */
+async function seedPair<TNativeTransaction>(
+  store: Awaited<
+    ReturnType<typeof createInitializedStore<typeof graph, TNativeTransaction>>
+  >,
+) {
+  const validFrom = isoAt(-4 * HOUR_MS);
+  const person = await store.nodes.Person.create(
+    { name: "Alice" },
+    { id: "alice", validFrom },
+  );
+  const author = await store.nodes.Author.create(
+    { penName: "A." },
+    { id: "author", validFrom },
+  );
+  return {
+    person,
+    author,
+    personRef: { kind: "Person", id: person.id } satisfies Ref,
+    authorRef: { kind: "Author", id: author.id } satisfies Ref,
+  };
+}
+
+// ============================================================
+// Finding 1 — archival window bounds
+// ============================================================
+
+describe("archival identity import window bounds", () => {
+  it("rejects an archival assertion whose validTo is in the future", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { person, personRef, authorRef } = await seedPair(store);
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          transfer(
+            "wedge",
+            personRef,
+            authorRef,
+            isoAt(-HOUR_MS),
+            isoAt(HOUR_MS),
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({ code: "IDENTITY_IMPORT_FUTURE_VALID_TO" }),
+        ]),
+      }),
+    });
+
+    // The rejected row is exactly the one that used to wedge the store: the
+    // snapshot filter would have reported it current with no closure behind it.
+    expect(await store.identity.membersOf(person)).toEqual([personRef]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects an archival open assertion whose validFrom is in the future", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { person, personRef, authorRef } = await seedPair(store);
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [transfer("ahead", personRef, authorRef, isoAt(HOUR_MS))],
+        "archival",
+      ),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_FUTURE_VALID_FROM",
+          }),
+        ]),
+      }),
+    });
+
+    expect(await store.identity.membersOf(person)).toEqual([personRef]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts an ended archival assertion that lies entirely in the past", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { person, author, personRef, authorRef } = await seedPair(store);
+
+    const summary = await storeRuntime(store).importIdentityAssertionsAtTarget(
+      store.backend,
+      [
+        transfer(
+          "historical",
+          personRef,
+          authorRef,
+          isoAt(-2 * HOUR_MS),
+          isoAt(-HOUR_MS),
+        ),
+      ],
+      "archival",
+    );
+
+    expect(summary).toEqual({ created: 1, skipped: 0 });
+    // Ended in the past, so it is history, not current truth.
+    expect(await store.identity.membersOf(person)).toEqual([personRef]);
+    expect(await store.identity.areSame(person, author)).toBe(false);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts a zero-width archival window in the past", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { personRef, authorRef } = await seedPair(store);
+    const instant = isoAt(-HOUR_MS);
+
+    const summary = await storeRuntime(store).importIdentityAssertionsAtTarget(
+      store.backend,
+      [transfer("zero-width", personRef, authorRef, instant, instant)],
+      "archival",
+    );
+
+    expect(summary).toEqual({ created: 1, skipped: 0 });
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reports a duplicate bounded assertion id as an import id conflict", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { personRef, authorRef } = await seedPair(store);
+    const firstStart = isoAt(-3 * HOUR_MS);
+    const boundary = isoAt(-2 * HOUR_MS);
+    const secondEnd = isoAt(-HOUR_MS);
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          transfer(
+            "duplicate-window",
+            personRef,
+            authorRef,
+            firstStart,
+            boundary,
+          ),
+          transfer(
+            "duplicate-window",
+            personRef,
+            authorRef,
+            boundary,
+            secondEnd,
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        code: "IDENTITY_IMPORT_ID_CONFLICT",
+        assertionId: "duplicate-window",
+      },
+    });
+  });
+
+  it("validates a newly imported open window across endpoint and historical truth", async () => {
+    const lateStore = await createInitializedStore(graph, createTestBackend());
+    const latePerson = await lateStore.nodes.Person.create(
+      { name: "Late" },
+      { id: "late", validFrom: "2021-01-01T00:00:00.000Z" },
+    );
+    const earlyAuthor = await lateStore.nodes.Author.create(
+      { penName: "Early" },
+      { id: "early", validFrom: "2019-01-01T00:00:00.000Z" },
+    );
+    await expect(
+      storeRuntime(lateStore).importIdentityAssertionsAtTarget(
+        lateStore.backend,
+        [
+          transfer(
+            "late-open",
+            { kind: "Person", id: latePerson.id },
+            { kind: "Author", id: earlyAuthor.id },
+            "2020-01-01T00:00:00.000Z",
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toMatchObject({ code: "IDENTITY_ENDPOINT_VALIDITY" });
+
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { personRef, authorRef } = await seedPair(store);
+    await storeRuntime(store).importIdentityAssertionsAtTarget(
+      store.backend,
+      [
+        {
+          ...transfer(
+            "past-different",
+            personRef,
+            authorRef,
+            isoAt(-3 * HOUR_MS),
+            isoAt(-HOUR_MS),
+          ),
+          relation: "different",
+        },
+      ],
+      "archival",
+    );
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          transfer(
+            "overlapping-open",
+            personRef,
+            authorRef,
+            isoAt(-2 * HOUR_MS),
+          ),
+        ],
+        "archival",
+      ),
+    ).rejects.toBeInstanceOf(IdentityContradictionError);
+  });
+
+  it("round-trips the store's own archival export, retraction window included", async () => {
+    const source = await createInitializedStore(graph, createTestBackend());
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const author = await source.nodes.Author.create(
+      { penName: "A." },
+      { id: "author" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+
+    // One retracted assertion (its clamped window is what archival import must
+    // still accept) and one still-open assertion.
+    const retracted = await source.identity.assertSame(alice, author);
+    await source.identity.retractAssertion(retracted.assertion.id);
+    await source.identity.assertSame(alice, bob);
+
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    expect(archive.identity?.assertions).toHaveLength(2);
+
+    const target = await createInitializedStore(graph, createTestBackend());
+    const result = await importGraph(target, archive, { onConflict: "skip" });
+
+    expect(result.errors).toEqual([]);
+    expect(result.success).toBe(true);
+    expect(result.identity).toEqual({ created: 2, skipped: 0 });
+    await expect(
+      storeRuntime(target).validateIdentity(),
+    ).resolves.toBeUndefined();
+    const restored = await exportGraph(target, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    expect(restored.identity).toEqual(archive.identity);
+  });
+
+  // An archived transition's `recordedRevision` is read back through
+  // `createRecordedInstant`, so a restore must refuse every value that
+  // function refuses. Accepting one would commit a row no read can return:
+  // `transitionsOf` and `replay` throw for every lineage that reaches it.
+  it.each([
+    { label: "zero", recordedRevision: 0 },
+    { label: "the open ceiling", recordedRevision: RECORDED_MAX_REVISION },
+  ])(
+    "refuses an archived transition whose recordedRevision is $label",
+    async ({ recordedRevision }) => {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const alice = await source.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const bob = await source.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      await source.identity.assertSame(alice, bob);
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const identity = requireDefined(archive.identity);
+      const poisoned = {
+        ...archive,
+        identity: {
+          ...identity,
+          transitions: requireDefined(identity.transitions).map(
+            (transition) => ({ ...transition, recordedRevision }),
+          ),
+        },
+      };
+
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const refusal = await importGraph(target, poisoned, {
+        onConflict: "skip",
+      }).catch((error: unknown) => error);
+      console.info("unreadable recordedRevision", recordedRevision, refusal);
+      expect(refusal).toBeInstanceOf(ValidationError);
+      // Refused before any write: nothing was restored to trip a later read.
+      expect(await target.nodes.Person.count()).toBe(0);
+
+      // The boundary values the reader accepts are still restored.
+      const accepted = await importGraph(
+        target,
+        {
+          ...archive,
+          identity: {
+            ...identity,
+            transitions: requireDefined(identity.transitions).map(
+              (transition, index) => ({
+                ...transition,
+                recordedRevision: index === 0 ? 1 : RECORDED_MAX_REVISION - 1,
+              }),
+            ),
+          },
+        },
+        { onConflict: "skip" },
+      );
+      expect(accepted.errors).toEqual([]);
+      const { transitions } = await target.identity.transitionsOf(alice);
+      expect(transitions.length).toBeGreaterThan(0);
+    },
+  );
+
+  // Load-bearing (L10): the archival round trip carries the transitions
+  // section verbatim and the restore watermark reports the
+  // explanations-without-snapshots seam honestly (identity.md, "Archival
+  // transitions and the retention watermark").
+  it("archival round trip carries transitions and the watermark (L10)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+
+    const first = await source.identity.assertSame(alice, bob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(alice, bob);
+
+    const { transitions: sourceTransitions } =
+      await source.identity.transitionsOf(alice);
+    expect(sourceTransitions.length).toBeGreaterThanOrEqual(3);
+    expect(sourceTransitions.map((transition) => transition.cause)).toEqual(
+      expect.arrayContaining(["assert", "retract"]),
+    );
+
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    expect(archive.identity?.transitions?.length).toBe(
+      sourceTransitions.length,
+    );
+    // Nothing was ever pruned at the source, so no watermark is carried.
+    expect(archive.identity?.retention).toBeUndefined();
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const result = await importGraph(target, archive, { onConflict: "skip" });
+    expect(result.errors).toEqual([]);
+    expect(result.success).toBe(true);
+
+    // `transitionsOf` answers FULLY from a restored archive: every restored
+    // transition is visible by walking from either endpoint's current class
+    // canonical. The target's own set is a SUPERSET of the
+    // restored ids — importing the still-open assertion is itself a genuine
+    // merge on the target, and that generates its own new "assert" note on
+    // top of the transplanted explanatory history, exactly as any other
+    // identity-affecting write would.
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+    const targetTransitionIds = new Set(
+      targetTransitions.map((transition) => transition.transitionId),
+    );
+    for (const sourceTransition of sourceTransitions) {
+      expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+      // Load-bearing (R-S4): the restore marker is PUBLIC on the transition,
+      // so an audit surface can tell an imported explanation (excluded from
+      // `replay`'s steps) from a locally replayable event without inferring
+      // it from a revision comparison — the inference the marker exists to
+      // replace. Mutation check: drop the `restored` spread from
+      // `publicTransition` (src/identity/replay.ts) and this expectation
+      // fails on the first restored id.
+      const restoredHere = targetTransitions.find(
+        (transition) =>
+          transition.transitionId === sourceTransition.transitionId,
+      );
+      expect(restoredHere?.restored?.at).toEqual(expect.any(String));
+      // ...and the SOURCE's own copy of the identical row is not marked:
+      // the marker names where the row was inserted, never what it explains.
+      expect(sourceTransition.restored).toBeUndefined();
+    }
+    // The target's own post-restore note (the import's genuine merge) is
+    // native, so `restored` distinguishes rather than blanketing everything.
+    const nativeTargetTransitions = targetTransitions.filter(
+      (transition) => transition.restored === undefined,
+    );
+    expect(nativeTargetTransitions.length).toBeGreaterThan(0);
+
+    // `replay`, by contrast, reports the seam honestly rather than silently
+    // claiming a complete history: the restored transitions are on the page
+    // but cannot be steps. Nothing was pruned anywhere, so no retention cut
+    // is claimed — a restore truncates nothing on the destination's axis.
+    const targetReplay = await target.identity.replay(alice);
+    expect(truncatedBeforeOf(targetReplay)).toBeUndefined();
+    expect(
+      completenessReason(targetReplay, "restored-not-reconstructed")?.count,
+    ).toBe(sourceTransitions.length);
+  });
+
+  describe("archived decision provenance", () => {
+    const DECISION = {
+      branchId: "branch-a",
+      branchAncestry: [graph.id, "branch-a"],
+      mergePlanDigest: "plan-digest",
+      reviewDigest: "review-digest",
+      sourceId: "source-id",
+    } as const;
+
+    /** An archive whose one governed transition carries {@link DECISION}. */
+    async function archiveWithGovernedTransition() {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      await source.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+      await source.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      await applyIdentityChangesForContext(
+        storeRuntime(source).identityContext(),
+        [],
+        [
+          {
+            id: generateId(),
+            relation: "same",
+            a: { kind: "Person", id: "alice" },
+            b: { kind: "Person", id: "bob" },
+            validFrom: new Date().toISOString(),
+          },
+        ],
+        DECISION,
+      );
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      const transitions = requireDefined(archive.identity?.transitions);
+      const governed = requireDefined(
+        transitions.find((transition) => transition.decision !== undefined),
+      );
+      return { archive, transitions, governed };
+    }
+
+    async function restoreTarget() {
+      const [target] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      return target;
+    }
+
+    it("round-trips every decision field through an archival restore", async () => {
+      const { archive, governed } = await archiveWithGovernedTransition();
+      expect(governed.cause).toBe("reconcile");
+      expect(governed.decision).toEqual(DECISION);
+
+      const target = await restoreTarget();
+      const result = await importGraph(target, archive, { onConflict: "skip" });
+      expect(result.errors).toEqual([]);
+      expect(result.success).toBe(true);
+
+      const { transitions } = await target.identity.transitionsOf({
+        kind: "Person",
+        id: "alice",
+      });
+      const restored = requireDefined(
+        transitions.find(
+          (transition) => transition.transitionId === governed.transitionId,
+        ),
+      );
+      console.info("restored transition", restored);
+      expect(restored.cause).toBe("reconcile");
+      expect(restored.decision).toEqual(DECISION);
+      expect(restored.restored?.at).toEqual(expect.any(String));
+    });
+
+    it("rejects an archive whose decision carries evidence the format does not define, rather than stripping it", async () => {
+      const { archive, transitions, governed } =
+        await archiveWithGovernedTransition();
+      const tampered = {
+        ...archive,
+        identity: {
+          ...requireDefined(archive.identity),
+          transitions: transitions.map((transition) =>
+            transition === governed ?
+              {
+                ...transition,
+                decision: {
+                  ...transition.decision,
+                  policy: { assertion: ["flag"] },
+                },
+              }
+            : transition,
+          ),
+        },
+      } as GraphData;
+
+      const target = await restoreTarget();
+      let refusal: unknown;
+      try {
+        await importGraph(target, tampered, { onConflict: "skip" });
+      } catch (error) {
+        refusal = error;
+      }
+      console.info("archive refusal", refusal);
+      expect(refusal).toBeInstanceOf(Error);
+      expect((refusal as Error).message).toContain(
+        "Invalid identity interchange section",
+      );
+      expect((refusal as Error).message).toContain("policy");
+      // Refused before anything was written.
+      expect(await target.nodes.Person.count()).toBe(0);
+      const { transitions: written } = await target.identity.transitionsOf({
+        kind: "Person",
+        id: "alice",
+      });
+      expect(written).toEqual([]);
+    });
+  });
+
+  it("refuses a state-mode payload naming a transitions section (IDENTITY_STATE_IMPORT_TRANSITIONS)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const stateExport = await exportGraph(source);
+    expect(stateExport.identity?.mode).toBe("state");
+    const archivalExport = await exportGraph(source, {
+      identityMode: "archival",
+    });
+    const archivalTransitions = archivalExport.identity?.transitions;
+    expect(archivalTransitions?.length).toBeGreaterThan(0);
+    const tampered: GraphData = {
+      ...stateExport,
+      identity: {
+        ...requireDefined(stateExport.identity),
+        transitions: archivalTransitions,
+      },
+    };
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraph(target, tampered, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_STATE_IMPORT_TRANSITIONS",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses an archival payload whose recorded revision decreases (IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE)", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const first = await source.identity.assertSame(alice, bob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(alice, bob);
+
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const transitions = requireDefined(archive.identity?.transitions);
+    expect(transitions.length).toBeGreaterThanOrEqual(2);
+    // Reversing preserves every row's own (valid) recordedRevision, but
+    // delivers them out of order — exactly the "same rows, wrong order"
+    // shape defect the monotonicity check exists to catch.
+    const tampered: GraphData = {
+      ...archive,
+      identity: {
+        ...requireDefined(archive.identity),
+        transitions: transitions.toReversed(),
+      },
+    };
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraph(target, tampered, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  // Load-bearing: two rows under one transitionId never came from an export,
+  // and the insert's idempotent re-import clause would keep whichever it met
+  // first and drop the other without a trace. Revert check: drop the
+  // `seenIds` check from `createIdentityTransitionShapeCheck`
+  // (service-interchange-write.ts) and both imports below succeed, keeping
+  // the original row.
+  it("refuses an archival payload naming one transitionId twice (IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID), in a document and across stream chunks", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const transitions = requireDefined(archive.identity?.transitions);
+    const last = requireDefined(transitions.at(-1));
+    // Same id, same revision (so order is satisfied), different content.
+    const impostor = {
+      ...last,
+      cause: last.cause === "fold" ? ("assert" as const) : ("fold" as const),
+    };
+    const duplicateRefusal = {
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_TRANSITIONS_DUPLICATE_ID",
+          }),
+        ]),
+      }),
+    };
+
+    const documentTarget = await historyTarget();
+    await expect(
+      importGraph(
+        documentTarget,
+        {
+          ...archive,
+          identity: {
+            ...requireDefined(archive.identity),
+            transitions: [...transitions, impostor],
+          },
+        },
+        { onConflict: "skip" },
+      ),
+    ).rejects.toMatchObject(duplicateRefusal);
+    // Refused before the first write.
+    await expect(documentTarget.nodes.Person.count()).resolves.toBe(0);
+
+    const chunks = await collectArchivalStream(source);
+    const split = [
+      ...chunks.filter((chunk) => chunk.type !== "identity-transitions"),
+      { type: "identity-transitions" as const, transitions },
+      { type: "identity-transitions" as const, transitions: [impostor] },
+    ];
+    const streamTarget = await historyTarget();
+    await expect(
+      importGraphStream(streamTarget, chunkStream(split), {
+        onConflict: "skip",
+      }),
+    ).rejects.toMatchObject(duplicateRefusal);
+    const restored = await streamTarget.identity.transitionsOf({
+      kind: "Person",
+      id: "alice",
+    });
+    const kept = restored.transitions.filter(
+      (transition) => transition.transitionId === last.transitionId,
+    );
+    console.info("stream duplicate", { kept: kept.map((row) => row.cause) });
+    expect(kept.map((transition) => transition.cause)).toEqual([last.cause]);
+  });
+
+  // Load-bearing: a restore must never write a cut onto the DESTINATION's
+  // own recorded-revision axis — a source-scale number, or a floor read off
+  // the destination's clock, would misclassify the destination's own later,
+  // fully-retained transitions as pruned. Revert check: have
+  // `importIdentityTransitionsIntoTarget` (service-interchange-write.ts)
+  // advance the "pruned" axis to the destination's next revision and this
+  // test's truncation assertion fails.
+  it("does not misclassify the destination's own later transitions as pruned after an archival restore", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    const first = await source.identity.assertSame(sourceAlice, sourceBob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    const targetAssertions = await target.identity.assertionsOf(alice);
+    const openAssertion = requireDefined(
+      targetAssertions.find((assertion) => assertion.validTo === undefined),
+    );
+    // A brand-new transition the TARGET itself records after the restore —
+    // never pruned, never restored, purely this graph's own later history.
+    await target.identity.retractAssertion(openAssertion.id);
+
+    const replay = await target.identity.replay(alice);
+    const retractedNow = requireDefined(
+      replay.steps.find((step) => step.transition.cause === "retract"),
+    );
+    expect(truncatedBeforeOf(replay)).toBeUndefined();
+    await expect(
+      target.identity.replay(alice, {
+        toRecorded: retractedNow.transition.recorded,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  // Load-bearing: a restored transition's row carries the SOURCE graph's own
+  // revision number, which `replay` must never pair with a membership
+  // snapshot reconstructed on the DESTINATION's historical reader — that
+  // pairs a foreign transition with a fabricated before/after that has
+  // nothing to do with it. Revert check: remove the
+  // `!isRestoredTransitionRow(row)` filter (both the `nativeRows` line and
+  // the row-match inside the boundary loop) in `identityReplay` (replay.ts)
+  // and this test's `steps` assertion fails — the restored transitions
+  // reappear as steps despite carrying `restored_at`.
+  it("excludes restored pre-restore boundaries from replay steps", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const sourceTransitions = requireDefined(archive.identity?.transitions);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    // Advance the TARGET's own clock well past every revision number the
+    // archive's transitions carry, so the destination's real floor at
+    // restore time sits above all of them — exactly the case where a
+    // restored boundary and a live one could otherwise collide.
+    for (let index = 0; index < sourceTransitions.length + 5; index += 1) {
+      await target.nodes.Company.create(
+        { name: `filler-${String(index)}` },
+        { id: `filler-${index}` },
+      );
+    }
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    // `transitionsOf` (unaffected by the watermark) still answers fully.
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+
+    const replay = await target.identity.replay(alice);
+    expect(truncatedBeforeOf(replay)).toBeUndefined();
+    // Every restored transition's revision sits strictly below the
+    // destination's own, so none of them may surface as a fabricated replay
+    // step.
+    const restoredTransitionIds = new Set(
+      sourceTransitions.map((transition) => transition.transitionId),
+    );
+    for (const step of replay.steps) {
+      expect(restoredTransitionIds.has(step.transition.transitionId)).toBe(
+        false,
+      );
+    }
+  });
+
+  // Load-bearing: restoring into a brand-new target — no filler writes
+  // inflating its own clock ahead of the archive's revisions, unlike the
+  // test above — is the ORDINARY restore shape, and must not fabricate
+  // replay steps either. A per-row `restored_at` marker (not a revision
+  // comparison against the destination's own low, fresh clock) is what
+  // makes this sound regardless of which side's numbers happen to be
+  // larger. Revert check: drop the `restoredAt` argument from the
+  // `encodeIdentityTransitionRow` call inside `importIdentityTransitionsIntoTarget`
+  // (service-interchange-write.ts) and this test's `steps` assertion fails —
+  // the restored `assert` reappears as a step claiming membership never
+  // changed, when the source's own history shows it did.
+  it("does not fabricate a replay step for a transition restored into a brand-new target", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    // Retract/reassert, exactly like the destination-scoping test above, so
+    // the source's own clock reaches a revision higher than 1 — the
+    // destination's floor the moment it is fresh. A single `assertSame`
+    // alone would not discriminate the bug: on a truly empty source AND
+    // target, both floors coincide at revision 1 by accident.
+    const first = await source.identity.assertSame(sourceAlice, sourceBob);
+    await source.identity.retractAssertion(first.assertion.id);
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const sourceTransitions = requireDefined(archive.identity?.transitions);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    // A genuinely fresh target — no filler writes inflating its own clock
+    // ahead of the archive's revisions beforehand, unlike the test above.
+    // This is what an ordinary restore into a brand-new graph looks like.
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    const alice = { kind: "Person" as const, id: "alice" };
+    // `transitionsOf` still answers fully — the restore itself is complete.
+    // (Archival mode ALSO imports the current assertion as live truth, which
+    // notes one native transition of its own, so this is `>=`, not `==`.)
+    const { transitions: targetTransitions } =
+      await target.identity.transitionsOf(alice);
+    expect(targetTransitions.length).toBeGreaterThanOrEqual(
+      sourceTransitions.length,
+    );
+
+    // None of the RESTORED transitions may surface as a replay step — doing
+    // so would pair a foreign transition with a before/after reconstructed
+    // from the destination's own, unrelated state (the fabrication this test
+    // guards against; e.g. a restored `assert` step falsely claiming
+    // membership did not change).
+    const replay = await target.identity.replay(alice);
+    const restoredTransitionIds = new Set(
+      sourceTransitions.map((transition) => transition.transitionId),
+    );
+    for (const step of replay.steps) {
+      expect(restoredTransitionIds.has(step.transition.transitionId)).toBe(
+        false,
+      );
+    }
+    expect(truncatedBeforeOf(replay)).toBeUndefined();
+  });
+
+  // Load-bearing: an archival restore that brings in unrelated foreign
+  // history — even one the source had pruned — must never erase, exclude, or
+  // report as pruned this graph's OWN already-retained transitions:
+  // restoring is additive, and the archive's cut is a fact about the
+  // restored rows, not about classes the restore never touched. Revert
+  // check: have `importIdentityTransitionsIntoTarget`
+  // (service-interchange-write.ts) advance the "pruned" axis instead of
+  // "restored-pruned" and this test's truncation assertions fail.
+  it("preserves the destination's own retained transitions when restoring an unrelated archive", async () => {
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const carol = await target.nodes.Person.create(
+      { name: "Carol" },
+      { id: "carol" },
+    );
+    const dave = await target.nodes.Person.create(
+      { name: "Dave" },
+      { id: "dave" },
+    );
+    const carolDave = await target.identity.assertSame(carol, dave);
+    await target.identity.retractAssertion(carolDave.assertion.id);
+    const carolReplayBefore = await target.identity.replay(carol);
+    expect(carolReplayBefore.steps.length).toBeGreaterThan(0);
+    expect(truncatedBeforeOf(carolReplayBefore)).toBeUndefined();
+
+    // An archive from a source that never mentions carol or dave.
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    await source.nodes.Person.create({ name: "Erin" }, { id: "erin" });
+    await pruneIdentityTransitions(source, {
+      beforeRecorded: requireDefined(await source.recordedNow()),
+    });
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    expect(archive.identity?.retention).toBeDefined();
+    await importGraph(target, archive, { onConflict: "skip" });
+
+    // Carol's own, fully-retained history survives the unrelated restore
+    // unchanged: same step count, and no false claim of truncation on this
+    // graph's axis.
+    const carolReplayAfter = await target.identity.replay(carol);
+    expect(carolReplayAfter.steps.length).toBe(carolReplayBefore.steps.length);
+    expect(truncatedBeforeOf(carolReplayAfter)).toBeUndefined();
+    expect(
+      truncatedBeforeOf(await target.identity.transitionsOf(carol)),
+    ).toBeUndefined();
+    await expect(
+      target.identity.replay(carol, {
+        toRecorded: requireDefined(carolReplayBefore.steps.at(-1)).transition
+          .recorded,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  // Load-bearing: re-importing the identical archival document —
+  // `importGraph(..., { onConflict: "skip" })` re-run over the same
+  // archive, exactly what a repeated backup restore does — must not crash
+  // with a raw driver UNIQUE-constraint error on `transition_id`. Revert
+  // check: drop `ON CONFLICT (graph_id, transition_id) DO NOTHING` from
+  // `insertIdentityTransitionValues` (transition-log.ts) and the second
+  // `importGraph` call below rejects with a driver error instead of
+  // resolving.
+  it("re-imports the same archival transitions document without crashing", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const sourceAlice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const sourceBob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(sourceAlice, sourceBob);
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const firstImport = await importGraph(target, archive, {
+      onConflict: "skip",
+    });
+    expect(firstImport.success).toBe(true);
+    const alice = { kind: "Person" as const, id: "alice" };
+    const { transitions: transitionsAfterFirst } =
+      await target.identity.transitionsOf(alice);
+
+    const secondImport = await importGraph(target, archive, {
+      onConflict: "skip",
+    });
+    expect(secondImport.success).toBe(true);
+    expect(secondImport.errors).toEqual([]);
+    // Verbatim restore of the SAME rows: re-importing must not duplicate them.
+    const { transitions: transitionsAfterSecond } =
+      await target.identity.transitionsOf(alice);
+    expect(transitionsAfterSecond.length).toBe(transitionsAfterFirst.length);
+  });
+
+  it("refuses to restore archival transitions into a target opened without history: true", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const archive = await exportGraph(source, { identityMode: "archival" });
+    expect(archive.identity?.transitions?.length).toBeGreaterThan(0);
+
+    // A history-off target has no way to ever read these rows back
+    // (`transitionsOf` / `replay` both refuse without `history: true`), so
+    // restoring them here must refuse up front rather than write data the
+    // store's own API can never surface again.
+    const target = await createInitializedStore(graph, createTestBackend());
+    await expect(
+      importGraph(target, archive, { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "IdentityReplayError",
+      details: matchingObject({ code: "IDENTITY_REPLAY_REQUIRES_HISTORY" }),
+    });
+  });
+
+  // Load-bearing: the SAME refusal, on the streaming path, must fire at the
+  // header — before any node, edge, or identity-assertion chunk is applied —
+  // not from the last import section, after those chunks already committed.
+  // Revert check: delete the `assertIdentityTransitionsRestoreSupported`
+  // call from the "header" chunk arm of `importGraphStream`
+  // (interchange/import.ts) and this test's node-count assertion fails —
+  // the refusal still fires (store.ts's backstop still catches it), but only
+  // after Alice and Bob are already durably written.
+  it("refuses an archival-transitions restore via importGraphStream before writing any node", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+    const header = requireDefined(
+      chunks.find((chunk) => chunk.type === "header"),
+    );
+    // The header carries the announcement the refusal reads — proving this
+    // test actually exercises the header-time signal, not a coincidence.
+    expect(header.header.identity?.hasTransitions).toBe(true);
+
+    const target = await createInitializedStore(graph, createTestBackend());
+    await expect(
+      importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "IdentityReplayError",
+      details: matchingObject({ code: "IDENTITY_REPLAY_REQUIRES_HISTORY" }),
+    });
+
+    // Nothing from the stream was ever applied — the refusal fired before
+    // the "nodes" chunk, not after it.
+    await expect(target.nodes.Person.count()).resolves.toBe(0);
+  });
+
+  it("streams the identity-transitions chunk through exportGraphStream / importGraphStream", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+    const { transitions: sourceTransitions } =
+      await source.identity.transitionsOf(alice);
+    expect(sourceTransitions.length).toBeGreaterThan(0);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(chunk);
+    }
+    expect(chunks.some((chunk) => chunk.type === "identity-transitions")).toBe(
+      true,
+    );
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const result = await importGraphStream(target, chunkStream(chunks), {
+      onConflict: "skip",
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.success).toBe(true);
+
+    const { transitions: targetStreamedTransitions } =
+      await target.identity.transitionsOf(alice);
+    const targetTransitionIds = new Set(
+      targetStreamedTransitions.map((transition) => transition.transitionId),
+    );
+    for (const sourceTransition of sourceTransitions) {
+      expect(targetTransitionIds.has(sourceTransition.transitionId)).toBe(true);
+    }
+  });
+
+  it("refuses an identity-transitions chunk its header never announced", async () => {
+    const [source] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    const alice = await source.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const bob = await source.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob" },
+    );
+    await source.identity.assertSame(alice, bob);
+
+    const chunks: GraphInterchangeChunk[] = [];
+    for await (const chunk of exportGraphStream(source, {
+      identityMode: "archival",
+    })) {
+      chunks.push(
+        chunk.type === "header" && chunk.header.identity !== undefined ?
+          {
+            ...chunk,
+            header: {
+              ...chunk.header,
+              identity: { ...chunk.header.identity, hasTransitions: false },
+            },
+          }
+        : chunk,
+      );
+    }
+    expect(chunks.some((chunk) => chunk.type === "identity-transitions")).toBe(
+      true,
+    );
+
+    const [target] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await expect(
+      importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+    ).rejects.toThrow(/did not announce/);
+  });
+
+  it("refuses a stream whose header announces a transition restore that never arrives", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const whole = await collectArchivalStream(source);
+    expect(
+      requireDefined(whole.find((chunk) => chunk.type === "header")).header
+        .identity?.hasTransitions,
+    ).toBe(true);
+
+    const target = await historyTarget();
+    await expect(
+      importGraphStream(
+        target,
+        chunkStream(
+          whole.filter((chunk) => chunk.type !== "identity-transitions"),
+        ),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_STREAM_TRANSITIONS_MISSING",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses a stream whose header carries a pruned watermark but no transitions chunk", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    await pruneIdentityTransitions(source, {
+      beforeRecorded: requireDefined(await source.recordedNow()),
+    });
+    const whole = await collectArchivalStream(source);
+    const header = requireDefined(
+      whole.find((chunk) => chunk.type === "header"),
+    ).header;
+    expect(header.identity?.retention?.prunedBeforeRevision).toBeGreaterThan(0);
+
+    // The whole stream restores the watermark...
+    const complete = await historyTarget();
+    await importGraphStream(complete, chunkStream(whole), {
+      onConflict: "skip",
+    });
+    const restored = await storeRuntime(
+      complete,
+    ).identityTransitionRetentionAtTarget(storeBackend(complete));
+    expect(restored.restoredPruned?.revision).toBe(
+      header.identity?.retention?.prunedBeforeRevision,
+    );
+
+    // ...so the same stream cut before its transitions chunk is refused
+    // rather than reporting success with no watermark.
+    const truncated = await historyTarget();
+    await expect(
+      importGraphStream(
+        truncated,
+        chunkStream(
+          whole.filter((chunk) => chunk.type !== "identity-transitions"),
+        ),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toThrow(/ended without the identity transitions its header/);
+  });
+
+  it("holds streamed transitions to one non-decreasing order across chunks", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const chunks = await collectArchivalStream(source, 1);
+    const transitionChunks = chunks.filter(
+      (chunk) => chunk.type === "identity-transitions",
+    );
+    expect(transitionChunks.length).toBeGreaterThan(1);
+    const reordered = [
+      ...chunks.filter((chunk) => chunk.type !== "identity-transitions"),
+      ...transitionChunks.toReversed(),
+    ];
+
+    const target = await historyTarget();
+    await expect(
+      importGraphStream(target, chunkStream(reordered), { onConflict: "skip" }),
+    ).rejects.toMatchObject({
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({
+            code: "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it("refuses a state-mode payload carrying a retention watermark, on either entry point", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    await pruneIdentityTransitions(source, {
+      beforeRecorded: requireDefined(await source.recordedNow()),
+    });
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const identity = requireDefined(archive.identity);
+    const stateWithRetention: GraphData = {
+      ...archive,
+      identity: {
+        profile: identity.profile,
+        mode: "state",
+        assertions: identity.assertions.filter(
+          (assertion) => assertion.validTo === undefined,
+        ),
+        retention: requireDefined(identity.retention),
+      },
+    };
+    const refusal = {
+      name: "ValidationError",
+      details: matchingObject({
+        issues: matchingArray([
+          expect.objectContaining({ code: "IDENTITY_STATE_IMPORT_RETENTION" }),
+        ]),
+      }),
+    };
+    await expect(
+      importGraph(await historyTarget(), stateWithRetention, {
+        onConflict: "skip",
+      }),
+    ).rejects.toMatchObject(refusal);
+
+    const streamed = await collectArchivalStream(source);
+    const header = requireDefined(
+      streamed.find((chunk) => chunk.type === "header"),
+    ).header;
+    const stateHeader: GraphDataHeader = {
+      ...header,
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        retention: requireDefined(header.identity?.retention),
+      },
+    };
+    const streamTarget = await historyTarget();
+    await expect(
+      importGraphStream(
+        streamTarget,
+        chunkStream([
+          { type: "header", header: stateHeader },
+          { type: "nodes", nodes: archive.nodes },
+        ]),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toMatchObject(refusal);
+    await expect(streamTarget.nodes.Person.count()).resolves.toBe(0);
+  });
+
+  // The shape checks need only the payload in hand, so they run before the
+  // import opens its write transaction; on a backend that writes without one,
+  // a refusal after the node writes would leave them committed.
+  it("refuses a misordered or state-mode transitions payload before opening a write transaction", async () => {
+    const { source } = await sourceWithIdentityHistory();
+    const archive = await exportGraph(source, {
+      identityMode: "archival",
+      includeDeleted: true,
+    });
+    const identity = requireDefined(archive.identity);
+    const transitions = requireDefined(identity.transitions);
+    expect(transitions.length).toBeGreaterThanOrEqual(2);
+    const misordered: GraphData = {
+      ...archive,
+      identity: { ...identity, transitions: transitions.toReversed() },
+    };
+    const stateWithTransitions: GraphData = {
+      ...archive,
+      identity: {
+        profile: identity.profile,
+        mode: "state",
+        assertions: [],
+        transitions,
+      },
+    };
+
+    const base = createTestBackend();
+    let transactionsOpened = 0;
+    const counting = deriveBackend(base, {
+      transaction: (fn, options) => {
+        transactionsOpened += 1;
+        return base.transaction(fn, options);
+      },
+    });
+    const [target] = await createAdapterStoreWithSchema(graph, counting, {
+      history: true,
+    });
+    for (const [document, code] of [
+      [misordered, "IDENTITY_IMPORT_TRANSITIONS_NOT_MONOTONE"],
+      [stateWithTransitions, "IDENTITY_STATE_IMPORT_TRANSITIONS"],
+    ] as const) {
+      transactionsOpened = 0;
+      await expect(
+        importGraph(target, document, { onConflict: "skip" }),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          issues: matchingArray([expect.objectContaining({ code })]),
+        }),
+      });
+      expect(transactionsOpened).toBe(0);
+    }
+  });
+
+  it("treats a zero retention watermark as no restore", async () => {
+    const { formatVersion } = await exportGraph(await historyTarget());
+    const zeroWatermark: GraphData = {
+      formatVersion,
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "zero watermark" },
+      nodes: [{ kind: "Person", id: "p1", properties: { name: "A" } }],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [],
+        retention: {
+          prunedBeforeRevision: 0,
+          prunedBeforeRecordedAt: new Date().toISOString(),
+        },
+      },
+    };
+    const withoutHistory = await createInitializedStore(
+      graph,
+      createTestBackend(),
+    );
+    const result = await importGraph(withoutHistory, zeroWatermark, {
+      onConflict: "error",
+    });
+    expect(result.errors).toEqual([]);
+    await expect(withoutHistory.nodes.Person.count()).resolves.toBe(1);
+  });
+
+  // A restore records the archive's retention as the destination's restored
+  // cut and leaves the destination's own watermark alone. `importGraph` and
+  // `importGraphStream` must reach the same answer for the same archive.
+  it.each([
+    { label: "an unpruned archive", pruneSource: false },
+    { label: "a pruned archive", pruneSource: true },
+  ])(
+    "importGraph and importGraphStream leave the same retention for $label",
+    async ({ pruneSource }) => {
+      const [source] = await createAdapterStoreWithSchema(
+        graph,
+        createTestBackend(),
+        { history: true },
+      );
+      const alice = await source.nodes.Person.create(
+        { name: "Alice" },
+        { id: "alice" },
+      );
+      const bob = await source.nodes.Person.create(
+        { name: "Bob" },
+        { id: "bob" },
+      );
+      const first = await source.identity.assertSame(alice, bob);
+      const cut = requireDefined(await source.recordedNow());
+      if (pruneSource) {
+        await pruneIdentityTransitions(source, { beforeRecorded: cut });
+      }
+      await source.identity.retractAssertion(first.assertion.id);
+      await source.identity.assertSame(alice, bob);
+
+      const archive = await exportGraph(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      });
+      expect(archive.identity?.retention).toEqual(
+        pruneSource ?
+          {
+            prunedBeforeRevision: recordedInstantRevision(cut),
+            prunedBeforeRecordedAt: recordedInstantWallTime(cut),
+          }
+        : undefined,
+      );
+      const chunks: GraphInterchangeChunk[] = [];
+      for await (const chunk of exportGraphStream(source, {
+        identityMode: "archival",
+        includeDeleted: true,
+      })) {
+        chunks.push(chunk);
+      }
+
+      async function restoredRetention(
+        restore: (target: typeof source) => Promise<ImportResult>,
+      ) {
+        const [target] = await createAdapterStoreWithSchema(
+          graph,
+          createTestBackend(),
+          { history: true },
+        );
+        const result = await restore(target);
+        expect(result.errors).toEqual([]);
+        return storeRuntime(target).identityTransitionRetentionAtTarget(
+          storeBackend(target),
+        );
+      }
+
+      const viaDocument = await restoredRetention((target) =>
+        importGraph(target, archive, { onConflict: "skip" }),
+      );
+      const viaStream = await restoredRetention((target) =>
+        importGraphStream(target, chunkStream(chunks), { onConflict: "skip" }),
+      );
+
+      console.info("restored retention", { viaDocument, viaStream });
+      expect(viaDocument).toEqual({
+        pruned: undefined,
+        restoredPruned:
+          pruneSource ?
+            {
+              revision: recordedInstantRevision(cut),
+              recordedAt: recordedInstantWallTime(cut),
+            }
+          : undefined,
+      });
+      expect(viaStream).toEqual(viaDocument);
+    },
+  );
+});
+
+// ============================================================
+// Finding 2 — importGraph records identity failures
+// ============================================================
+
+function documentAssertingOverNodes(
+  invalidNodeId: string,
+  validNodeId: string,
+): GraphData {
+  return {
+    formatVersion: "2.0",
+    exportedAt: CANONICAL_TIMESTAMP,
+    source: { type: "external" },
+    nodes: [
+      // Fails schema validation: `name` must be a string.
+      { kind: "Person", id: invalidNodeId, properties: { name: 42 } },
+      { kind: "Person", id: validNodeId, properties: { name: "Valid" } },
+    ],
+    edges: [],
+    identity: {
+      profile: IDENTITY_PROFILE,
+      mode: "state",
+      assertions: [
+        {
+          id: "assertion-over-missing",
+          relation: "same",
+          ...(() => {
+            const [a, b] = orderPair(
+              { kind: "Person", id: invalidNodeId },
+              { kind: "Person", id: validNodeId },
+            );
+            return { a, b };
+          })(),
+          validFrom: CANONICAL_TIMESTAMP,
+        },
+      ],
+    },
+  };
+}
+
+function documentWithAssertion(
+  mode: "state" | "archival",
+  assertion: Readonly<{
+    id: string;
+    a: Ref;
+    b: Ref;
+    validFrom: string;
+    validTo?: string;
+  }>,
+): GraphData {
+  const [a, b] = orderPair(assertion.a, assertion.b);
+  return {
+    formatVersion: "2.0",
+    exportedAt: CANONICAL_TIMESTAMP,
+    source: { type: "external" },
+    nodes: [
+      {
+        kind: "Person",
+        id: a.id,
+        properties: { name: "A" },
+        validFrom: assertion.validFrom,
+      },
+      {
+        kind: "Person",
+        id: b.id,
+        properties: { name: "B" },
+        validFrom: assertion.validFrom,
+      },
+    ],
+    edges: [],
+    identity: {
+      profile: IDENTITY_PROFILE,
+      mode,
+      assertions: [{ ...assertion, relation: "same", a, b }],
+    },
+  };
+}
+
+describe("importGraph identity failure reporting", () => {
+  it("records an identity failure in result.errors instead of throwing", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+
+    const result = await importGraph(
+      store,
+      documentAssertingOverNodes("rejected", "kept"),
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toHaveLength(2);
+    // The node failure and the identity failure are distinguishable by
+    // entityType, and the identity entry is keyed by the assertion, not by a
+    // node standing in for it.
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "node",
+          kind: "Person",
+          id: "rejected",
+        }),
+        expect.objectContaining({
+          entityType: "identity",
+          kind: "same",
+          id: "assertion-over-missing",
+          error: matchingString("identity.assertions[assertion-over-missing]"),
+        }),
+      ]),
+    );
+
+    // The valid node work still committed; only the identity section was skipped.
+    expect(result.nodes.created).toBe(1);
+    expect(await store.nodes.Person.getById("kept" as never)).toBeDefined();
+    expect(
+      await store.nodes.Person.getById("rejected" as never),
+    ).toBeUndefined();
+    expect(result.identity).toEqual({ created: 0, skipped: 0 });
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("records an assertion id that already identifies different truth", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const first = await store.nodes.Person.create(
+      { name: "First" },
+      { id: "first" },
+    );
+    const second = await store.nodes.Person.create(
+      { name: "Second" },
+      { id: "second" },
+    );
+    const third = await store.nodes.Person.create(
+      { name: "Third" },
+      { id: "third" },
+    );
+    const existing = await store.identity.assertSame(first, second);
+
+    const [a, b] = orderPair(
+      { kind: "Person", id: first.id },
+      { kind: "Person", id: third.id },
+    );
+    const result = await importGraph(
+      store,
+      {
+        formatVersion: "2.0",
+        exportedAt: CANONICAL_TIMESTAMP,
+        source: { type: "external" },
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: IDENTITY_PROFILE,
+          mode: "state",
+          assertions: [
+            {
+              id: existing.assertion.id,
+              relation: "same",
+              a,
+              b,
+              validFrom: CANONICAL_TIMESTAMP,
+            },
+          ],
+        },
+      },
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        entityType: "identity",
+        kind: "same",
+        id: existing.assertion.id,
+        error: matchingString("already identifies different truth"),
+      }),
+    ]);
+  });
+
+  it("records a contradiction against the target graph's ontology", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const person = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice", validFrom: CANONICAL_TIMESTAMP },
+    );
+    const company = await store.nodes.Company.create(
+      { name: "Acme" },
+      { id: "acme", validFrom: CANONICAL_TIMESTAMP },
+    );
+    const [a, b] = orderPair(
+      { kind: "Person", id: person.id },
+      { kind: "Company", id: company.id },
+    );
+
+    const result = await importGraph(
+      store,
+      {
+        formatVersion: "2.0",
+        exportedAt: CANONICAL_TIMESTAMP,
+        source: { type: "external" },
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: IDENTITY_PROFILE,
+          mode: "state",
+          assertions: [
+            {
+              id: "disjoint-merge",
+              relation: "same",
+              a,
+              b,
+              validFrom: CANONICAL_TIMESTAMP,
+            },
+          ],
+        },
+      },
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        entityType: "identity",
+        kind: "same",
+        id: "disjoint-merge",
+        error: matchingString("Identity contradiction"),
+      }),
+    ]);
+    expect(await store.identity.areSame(person, company)).toBe(false);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("names identity assertions in the stream ordering error", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const header: GraphDataHeader = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      identity: { profile: IDENTITY_PROFILE, mode: "state" },
+    };
+    await expect(
+      importGraphStream(
+        store,
+        chunkStream([
+          { type: "header", header },
+          { type: "identity", assertions: [] },
+          {
+            type: "nodes",
+            nodes: [
+              { kind: "Person", id: "late", properties: { name: "Late" } },
+            ],
+          },
+        ]),
+        { onConflict: "skip" },
+      ),
+    ).rejects.toThrow(
+      "Graph interchange stream cannot emit nodes after identity assertions.",
+    );
+  });
+
+  it("records a state-mode ended assertion as an identity error", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const result = await importGraph(
+      store,
+      documentWithAssertion("state", {
+        id: "ended-in-state",
+        a: { kind: "Person", id: "ended-a" },
+        b: { kind: "Person", id: "ended-b" },
+        validFrom: CANONICAL_TIMESTAMP,
+        validTo: CANONICAL_TIMESTAMP,
+      }),
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "ended-in-state",
+          error: matchingString("cannot contain ended assertions"),
+        }),
+      ]),
+    );
+    // Node work committed; the semantically invalid section was skipped.
+    expect(result.nodes.created).toBe(2);
+    expect(result.identity).toEqual({ created: 0, skipped: 0 });
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("records a future archival validity bound as an identity error", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const result = await importGraph(
+      store,
+      documentWithAssertion("archival", {
+        id: "future-window",
+        a: { kind: "Person", id: "future-a" },
+        b: { kind: "Person", id: "future-b" },
+        validFrom: CANONICAL_TIMESTAMP,
+        validTo: isoAt(60_000),
+      }),
+      { onConflict: "skip" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "future-window",
+          error: matchingString("validTo is in the future"),
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(2);
+  });
+
+  it("records a self-assertion as an identity error instead of throwing", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const selfRef: Ref = { kind: "Person", id: "narcissus" };
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [
+        { kind: "Person", id: "narcissus", properties: { name: "Self" } },
+      ],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "self-loop",
+            relation: "same",
+            a: selfRef,
+            b: selfRef,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "self-loop",
+          error: matchingString("relates a node to itself"),
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(1);
+
+    const streamed = await importGraphStream(
+      store,
+      chunkStream([
+        {
+          type: "header",
+          header: {
+            formatVersion: "2.0",
+            exportedAt: CANONICAL_TIMESTAMP,
+            source: { type: "external" },
+            identity: { profile: IDENTITY_PROFILE, mode: "state" },
+          },
+        },
+        {
+          type: "identity",
+          assertions: requireDefined(document.identity).assertions,
+        },
+      ]),
+      { onConflict: "skip", onStreamChunkError: "continue" },
+    );
+    expect(streamed.success).toBe(false);
+    expect(streamed.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "self-loop" }),
+      ]),
+    );
+  });
+
+  it("attributes an identity error by structural id, not by message text", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    // Two assertions whose ids collide inside human-readable text: the
+    // failing one is "x", and a valid one is literally named "Assertion x" —
+    // the exact string a message-substring heuristic would prefer.
+    const [decoyA, decoyB] = orderPair(
+      { kind: "Person", id: "decoy-a" },
+      { kind: "Person", id: "decoy-b" },
+    );
+    const [endedA, endedB] = orderPair(
+      { kind: "Person", id: "ended-a" },
+      { kind: "Person", id: "ended-b" },
+    );
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [decoyA, decoyB, endedA, endedB].map((ref) => ({
+        kind: ref.kind,
+        id: ref.id,
+        properties: { name: ref.id },
+      })),
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "Assertion x",
+            relation: "same",
+            a: decoyA,
+            b: decoyB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // Fails: ended assertion in state mode.
+            id: "x",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: CANONICAL_TIMESTAMP,
+            validTo: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "x" }),
+      ]),
+    );
+  });
+
+  it("rejects ended assertions whose endpoints never existed", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const a = await store.nodes.Person.create({ name: "A" }, { id: "real-a" });
+    const b = await store.nodes.Person.create({ name: "B" }, { id: "real-b" });
+    // Two ended assertions bridging through Person/phantom, which no one ever
+    // wrote: without structural endpoint validation the historical CTE
+    // conducts identity through the phantom, and asOf reports areSame(a, b).
+    const phantom: Ref = { kind: "Person", id: "phantom" };
+    const bridge = (id: string, endpoint: Ref): GraphData => ({
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [
+          (() => {
+            const [left, right] = orderPair(endpoint, phantom);
+            return {
+              id,
+              relation: "same" as const,
+              a: left,
+              b: right,
+              validFrom: isoAt(-2 * HOUR_MS),
+              validTo: isoAt(-HOUR_MS),
+            };
+          })(),
+        ],
+      },
+    });
+
+    const first = await importGraph(
+      store,
+      bridge("bridge-a", { kind: "Person", id: "real-a" }),
+      { onConflict: "skip" },
+    );
+    expect(first.success).toBe(false);
+    expect(first.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "bridge-a" }),
+      ]),
+    );
+    const second = await importGraph(
+      store,
+      bridge("bridge-b", { kind: "Person", id: "real-b" }),
+      { onConflict: "skip" },
+    );
+    expect(second.success).toBe(false);
+
+    const past = store.asOf(isoAt(-90 * 60 * 1000));
+    expect(await past.identity.areSame(a, b)).toBe(false);
+  });
+
+  it("accepts ended assertions over soft-deleted endpoints", async () => {
+    // Structural existence, not liveness: an archival export legitimately
+    // carries ended assertions whose endpoints were later soft-deleted (the
+    // rows still exist), so those must import.
+    const store = await createInitializedStore(graph, createTestBackend());
+    const validFrom = isoAt(-3 * HOUR_MS);
+    await store.nodes.Person.create(
+      { name: "Gone" },
+      { id: "gone", validFrom },
+    );
+    await store.nodes.Person.create(
+      { name: "Stays" },
+      { id: "stays", validFrom },
+    );
+    await store.nodes.Person.delete("gone" as never);
+
+    const [left, right] = orderPair(
+      { kind: "Person", id: "gone" },
+      { kind: "Person", id: "stays" },
+    );
+    const result = await importGraph(
+      store,
+      {
+        formatVersion: "2.0",
+        exportedAt: CANONICAL_TIMESTAMP,
+        source: { type: "external" },
+        nodes: [],
+        edges: [],
+        identity: {
+          profile: IDENTITY_PROFILE,
+          mode: "archival",
+          assertions: [
+            {
+              id: "ended-over-deleted",
+              relation: "same",
+              a: left,
+              b: right,
+              validFrom: isoAt(-2 * HOUR_MS),
+              validTo: isoAt(-HOUR_MS),
+            },
+          ],
+        },
+      },
+      { onConflict: "skip" },
+    );
+    expect(result.success).toBe(true);
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+  });
+
+  it("attributes a contradiction to the failing assertion, not the first pair-mate", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const [a, b] = orderPair(
+      { kind: "Person", id: "contra-a" },
+      { kind: "Person", id: "contra-b" },
+    );
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [a, b].map((ref) => ({
+        kind: ref.kind,
+        id: ref.id,
+        properties: { name: ref.id },
+        validFrom: CANONICAL_TIMESTAMP,
+      })),
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [
+          {
+            id: "same-first",
+            relation: "same",
+            a,
+            b,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // Contradicts same-first over the SAME endpoints: the endpoint
+            // heuristic would attribute the failure to same-first.
+            id: "different-fails",
+            relation: "different",
+            a,
+            b,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "different-fails",
+        }),
+      ]),
+    );
+    // The assertion applied before the failing one stays committed and must be
+    // counted. Replacing the progress-bearing error tag with the old bare
+    // rethrow makes this assertion fail while the ledger assertion below still
+    // proves the partial write itself survived.
+    expect(result.identity).toEqual({ created: 1, skipped: 0 });
+    expect(
+      await store.identity.areSame(
+        { kind: "Person", id: "contra-a" },
+        { kind: "Person", id: "contra-b" },
+      ),
+    ).toBe(true);
+  });
+
+  it("counts assertions skipped before a later assertion fails", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const { person, author } = await seedPair(store);
+    await store.identity.assertSame(person, author);
+    const exported = await exportGraph(store);
+    const existing = requireDefined(exported.identity?.assertions[0]);
+    const conflicting: IdentityTransferAssertion = {
+      id: "different-after-skip",
+      relation: "different",
+      a: existing.a,
+      b: existing.b,
+      validFrom: existing.validFrom,
+    };
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "state",
+        assertions: [existing, conflicting],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    // Removing `skipped` from the progress tag makes this report zero even
+    // though the first assertion was recognized and skipped before failure.
+    expect(result.identity).toEqual({ created: 0, skipped: 1 });
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "different-after-skip",
+        }),
+      ]),
+    );
+  });
+
+  it("refuses a same assertion that an earlier assertion in the same batch forbids", async () => {
+    // The import applies a batch inside ONE transaction, repairing the derived
+    // identity relations after each accepted assertion so the next one
+    // validates against the batch's own effects. Both effects are load-bearing
+    // here: the fuse RE-KEYS the class onto `aaron` (the code-point-least
+    // member), and the separation that follows is recorded under that new key —
+    // so the third assertion is refused only if the validation reads both.
+    const store = await createInitializedStore(graph, createTestBackend());
+    const aaron = { kind: "Person", id: "batch-aaron" } as const;
+    const alice = { kind: "Person", id: "batch-alice" } as const;
+    const rival = { kind: "Person", id: "batch-rival" } as const;
+    const [fuseA, fuseB] = orderPair(alice, aaron);
+    const [separatorA, separatorB] = orderPair(alice, rival);
+    const [forbiddenA, forbiddenB] = orderPair(aaron, rival);
+
+    for (const ref of [aaron, alice, rival]) {
+      await store.nodes.Person.create(
+        { name: ref.id },
+        { id: ref.id, validFrom: CANONICAL_TIMESTAMP },
+      );
+    }
+
+    await expect(
+      storeRuntime(store).importIdentityAssertionsAtTarget(
+        store.backend,
+        [
+          {
+            id: "batch-fuse",
+            relation: "same",
+            a: fuseA,
+            b: fuseB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            id: "batch-separate",
+            relation: "different",
+            a: separatorA,
+            b: separatorB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+          {
+            // `aaron` and `rival` carry no assertion between them; they are
+            // held apart only through the class `aaron` was fused into, so the
+            // refusal has to name the separation the batch itself wrote.
+            id: "batch-forbidden",
+            relation: "same",
+            a: forbiddenA,
+            b: forbiddenB,
+            validFrom: CANONICAL_TIMESTAMP,
+          },
+        ],
+        "state",
+      ),
+    ).rejects.toMatchObject({
+      name: "IdentityContradictionError",
+      details: {
+        operation: "import",
+        reason: "different-assertion",
+        conflictingAssertionId: "batch-separate",
+      },
+    });
+
+    expect(await store.identity.areSame(aaron, alice)).toBe(true);
+    expect(await store.identity.areDifferent(aaron, rival)).toBe(true);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("attributes a missing endpoint to the open assertion that required it", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const present = await store.nodes.Person.create(
+      { name: "Present" },
+      { id: "present" },
+    );
+    void present;
+    const missingRef: Ref = { kind: "Person", id: "missing" };
+    const [endedA, endedB] = orderPair(missingRef, {
+      kind: "Person",
+      id: "present",
+    });
+    const document: GraphData = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      nodes: [],
+      edges: [],
+      identity: {
+        profile: IDENTITY_PROFILE,
+        mode: "archival",
+        assertions: [
+          {
+            // Ended rows skip the endpoint-liveness check entirely, so this
+            // one is NOT the failure even though it names the missing node
+            // first.
+            id: "ended-touches-missing",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: isoAt(-2 * HOUR_MS),
+            validTo: isoAt(-HOUR_MS),
+          },
+          {
+            id: "open-fails",
+            relation: "same",
+            a: endedA,
+            b: endedB,
+            validFrom: isoAt(-HOUR_MS),
+          },
+        ],
+      },
+    };
+
+    const result = await importGraph(store, document, { onConflict: "skip" });
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({ entityType: "identity", id: "open-fails" }),
+      ]),
+    );
+  });
+
+  it("records semantic identity failures on the streaming path too", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const document = documentWithAssertion("state", {
+      id: "streamed-ended",
+      a: { kind: "Person", id: "stream-a" },
+      b: { kind: "Person", id: "stream-b" },
+      validFrom: CANONICAL_TIMESTAMP,
+      validTo: CANONICAL_TIMESTAMP,
+    });
+    const header: GraphDataHeader = {
+      formatVersion: "2.0",
+      exportedAt: CANONICAL_TIMESTAMP,
+      source: { type: "external" },
+      identity: { profile: IDENTITY_PROFILE, mode: "state" },
+    };
+
+    const result = await importGraphStream(
+      store,
+      chunkStream([
+        { type: "header", header },
+        { type: "nodes", nodes: document.nodes },
+        {
+          type: "identity",
+          assertions: requireDefined(document.identity).assertions,
+        },
+      ]),
+      // The stream default aborts once a chunk reports errors (documented);
+      // "continue" surfaces the recorded identity error in the result, which
+      // is what this test pins — the failure is an error entry, not a throw.
+      { onConflict: "skip", onStreamChunkError: "continue" },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errors).toEqual(
+      matchingArray([
+        expect.objectContaining({
+          entityType: "identity",
+          id: "streamed-ended",
+        }),
+      ]),
+    );
+    expect(result.nodes.created).toBe(2);
+  });
+});
+
+// ============================================================
+// Finding 3 — disjointness detection over kind sets
+// ============================================================
+
+describe("disjoint-kind contradiction detection", () => {
+  it("detects a disjoint kind reached only through a multi-member class", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    const author = await store.nodes.Author.create(
+      { penName: "M." },
+      { id: "mmm" },
+    );
+    const person = await store.nodes.Person.create(
+      { name: "N" },
+      { id: "nnn" },
+    );
+    const company = await store.nodes.Company.create(
+      { name: "Z" },
+      { id: "zzz" },
+    );
+    // The Author member is scanned first and is NOT disjoint with Company; the
+    // conflict is only reachable through the class's second kind.
+    await store.identity.assertSame(author, person);
+
+    await expect(
+      store.identity.assertSame(person, company),
+    ).rejects.toMatchObject({
+      name: "IdentityContradictionError",
+      details: matchingObject({
+        reason: "disjoint-kinds",
+        conflictingKinds: ["Company", "Person"],
+      }),
+    });
+
+    // Argument order is normalized before the class lookup, so the reported
+    // pair is identical in the other direction.
+    await expect(
+      store.identity.assertSame(company, person),
+    ).rejects.toMatchObject({
+      name: "IdentityContradictionError",
+      details: matchingObject({
+        reason: "disjoint-kinds",
+        conflictingKinds: ["Company", "Person"],
+      }),
+    });
+
+    expect(await store.identity.areDifferent(person, company)).toBe(true);
+    expect(await store.identity.areDifferent(author, company)).toBe(true);
+  });
+
+  it("reports the disjoint kinds inside a stored multi-member class", async () => {
+    const store = await createInitializedStore(graph, createTestBackend());
+    await store.nodes.Author.create({ penName: "M." }, { id: "mmm" });
+    await store.nodes.Person.create({ name: "N" }, { id: "nnn" });
+    await store.nodes.Company.create({ name: "Z" }, { id: "zzz" });
+
+    // Write the contradiction straight into the ledger, past the assert-time
+    // validation, so snapshot verification is the thing under test.
+    const schema = createSqlSchema(store.backend.tableNames);
+    const executeStatement = requireDefined(
+      store.backend.executeStatement,
+      "test backend must execute statements",
+    );
+    const rows: readonly (readonly [string, Ref, Ref])[] = [
+      ["m-n", { kind: "Author", id: "mmm" }, { kind: "Person", id: "nnn" }],
+      ["n-z", { kind: "Company", id: "zzz" }, { kind: "Person", id: "nnn" }],
+    ];
+    for (const [id, a, b] of rows) {
+      await executeStatement(
+        asCompiledStatementSql(sql`
+          INSERT INTO ${schema.identityAssertionsTable} (
+            graph_id, id, rel, a_kind, a_id, b_kind, b_id,
+            valid_from, valid_to, created_at, updated_at, deleted_at
+          ) VALUES (
+            ${store.graphId}, ${id}, 'same', ${a.kind}, ${a.id},
+            ${b.kind}, ${b.id}, ${CANONICAL_TIMESTAMP}, NULL,
+            ${CANONICAL_TIMESTAMP}, ${CANONICAL_TIMESTAMP}, NULL
+          )
+        `),
+      );
+    }
+
+    await expect(storeRuntime(store).validateIdentity()).rejects.toMatchObject({
+      name: "ConfigurationError",
+      details: matchingObject({
+        code: "IDENTITY_SCHEMA_CONTRADICTION",
+        conflictingKinds: ["Company", "Person"],
+      }),
+    });
+  });
+});
+
+// ============================================================
+// Finding 4 — identity-free deletes skip the closure repair
+// ============================================================
+
+type ClosureCounts = Readonly<{
+  /** Statements naming the materialized closure table. */
+  closureStatements: number;
+  /** Closure rewrites (the expensive half of a closure repair). */
+  closureDeletes: number;
+}>;
+
+// Table names arrive as identifier chunks, not literal SQL text.
+function fragmentText(compiled: SqlFragment): string {
+  return compiled.chunks
+    .map((chunk) =>
+      chunk.kind === "text" || chunk.kind === "identifier" ? chunk.value : "",
+    )
+    .join(" ");
+}
+
+/** Reads the closure table name out of the backend's own resolved schema. */
+function closureTableName(backend: GraphBackend): string {
+  const schema = createSqlSchema(backend.tableNames);
+  for (const chunk of schema.identityClosureTable.chunks) {
+    if (chunk.kind === "identifier") return chunk.value;
+  }
+  throw new Error("Closure table fragment carries no identifier chunk.");
+}
+
+function closureCountingBackend(): Readonly<{
+  backend: GraphBackend;
+  counts: ClosureCounts;
+  reset: () => void;
+}> {
+  const base = createTestBackend();
+  const closureTable = closureTableName(base);
+  const counts = { closureStatements: 0, closureDeletes: 0 };
+
+  function count(compiled: SqlFragment): void {
+    const text = fragmentText(compiled);
+    if (!text.includes(closureTable)) return;
+    counts.closureStatements += 1;
+    if (text.includes("DELETE FROM")) counts.closureDeletes += 1;
+  }
+
+  // A Proxy rather than a spread for TRANSACTION targets: their methods live on
+  // a prototype that spreading would drop, and a transaction-scoped backend is
+  // unaudited by construction, so a fresh object loses nothing.
+  function countTransactionStatements(
+    target: TransactionBackend,
+  ): TransactionBackend {
+    return new Proxy(target, {
+      get(source, property, receiver) {
+        const value: unknown = Reflect.get(source, property, receiver);
+        if (typeof value !== "function") return value;
+        const method = value as (...args: unknown[]) => unknown;
+        if (property !== "execute" && property !== "executeStatement") {
+          return value;
+        }
+        return (...args: unknown[]) => {
+          count(args[0] as SqlFragment);
+          return method.apply(source, args);
+        };
+      },
+    });
+  }
+
+  // The ROOT backend goes through the seam instead of a second Proxy. A
+  // hand-rolled Proxy is a distinct object and the serialized-resource audit is
+  // WeakMap-keyed, so wrapping a derived backend in one discards the verdict
+  // `deriveBackend` just carried — exactly the loss the spread had.
+  const baseExecuteStatement = requireDefined(base.executeStatement);
+  const backend: GraphBackend = deriveBackend(base, {
+    execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+      count(query);
+      return base.execute<T>(query);
+    },
+    executeStatement: (query: CompiledStatementSql): Promise<void> => {
+      count(query);
+      return baseExecuteStatement(query);
+    },
+    transaction: (fn, options) =>
+      base.transaction((tx) => fn(countTransactionStatements(tx)), options),
+  });
+
+  return {
+    backend,
+    counts,
+    reset: () => {
+      counts.closureStatements = 0;
+      counts.closureDeletes = 0;
+    },
+  };
+}
+
+describe("the closure-counting double itself", () => {
+  it("stays on the base's serialized resource", () => {
+    // The double is what the cases below run against, so if it reads as unowned
+    // the suite exercises an import guard that has lost its subject. Neither
+    // the `tests/**` lint block nor the type-aware scanner can see the shape
+    // that loses it — a hand-rolled Proxy over the derived backend is a
+    // distinct object and the audit is WeakMap-keyed — so the verdict is
+    // asserted at runtime here.
+    const { backend } = closureCountingBackend();
+    expect(expectAuditedBackend(backend)).toBe("serialized");
+  });
+});
+
+describe("deleting a node without identity", () => {
+  it("skips the closure repair and leaves identity state untouched", async () => {
+    const { backend, counts, reset } = closureCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+
+    const alice = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const author = await store.nodes.Author.create(
+      { penName: "A." },
+      { id: "author" },
+    );
+    await store.identity.assertSame(alice, author);
+    const solo = await store.nodes.Person.create(
+      { name: "Solo" },
+      { id: "solo" },
+    );
+
+    reset();
+    await store.nodes.Person.delete(solo.id);
+
+    // One indexed probe, and none of the repair's rewrites.
+    expect(counts.closureDeletes).toBe(0);
+    expect(counts.closureStatements).toBe(1);
+
+    expect(await store.identity.membersOf(alice)).toEqual([
+      { kind: "Author", id: author.id },
+      { kind: "Person", id: alice.id },
+    ]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still repairs the closure when the deleted node carries identity", async () => {
+    const { backend, counts, reset } = closureCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+
+    const alice = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice" },
+    );
+    const author = await store.nodes.Author.create(
+      { penName: "A." },
+      { id: "author" },
+    );
+    await store.identity.assertSame(alice, author);
+
+    reset();
+    await store.nodes.Person.delete(alice.id);
+
+    expect(counts.closureDeletes).toBeGreaterThan(0);
+    expect(
+      await store.identity.membersOf({ kind: "Author", id: author.id }),
+    ).toEqual([{ kind: "Author", id: author.id }]);
+    await expect(
+      storeRuntime(store).validateIdentity(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("skips the closure repair for a hard delete with no identity history", async () => {
+    const { backend, counts, reset } = closureCountingBackend();
+    const store = await createInitializedStore(graph, backend);
+    const solo = await store.nodes.Person.create(
+      { name: "Solo" },
+      { id: "solo" },
+    );
+
+    reset();
+    await store.nodes.Person.hardDelete(solo.id);
+
+    expect(counts.closureDeletes).toBe(0);
+    expect(counts.closureStatements).toBe(1);
+    const schema = createSqlSchema(backend.tableNames);
+    const remaining = await backend.execute<{ total: number }>(
+      asCompiledRowsSql(sql`
+        SELECT COUNT(*) AS total
+        FROM ${schema.identityClosureTable}
+        WHERE graph_id = ${store.graphId}
+      `),
+    );
+    expect(requireDefined(remaining[0]).total).toBe(0);
+  });
+});

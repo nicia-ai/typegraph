@@ -6,6 +6,8 @@
  * implementing this interface.
  */
 import { type VectorMetric } from "../../backend/types";
+import { type JsonScalar, type JsonValue } from "../../core/types";
+import { type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
@@ -29,6 +31,18 @@ export type DialectRecursiveQueryStrategy = "recursive_cte";
  * Strategy for handling vector predicates.
  */
 export type DialectVectorPredicateStrategy = "native" | "unsupported";
+
+/**
+ * Strategy for computing subgraph reachable-node membership.
+ *
+ * `"materialized-ids"` fetches the traversal closure's (kind, id) pairs in one
+ * extra round trip and filters the node/edge fetches against those
+ * materialized arrays. `"inline-cte"` embeds the recursive traversal CTE directly in each
+ * fetch statement instead. This is a control-flow and prepared-plan choice,
+ * not SQL text a token could express identically on both engines.
+ */
+export type DialectSubgraphMembershipStrategy =
+  "materialized-ids" | "inline-cte";
 
 /**
  * Capability and strategy profile for a SQL dialect.
@@ -59,7 +73,17 @@ export type DialectCapabilities = Readonly<{
   emitNotMaterializedHint: boolean;
 
   /**
-   * Whether recursive CTEs should enforce worktable-first join ordering.
+   * Whether a traversal must pin its frontier ahead of the edge table with
+   * `CROSS JOIN`, because the engine reads FROM order as a join-order directive
+   * rather than costing the orderings itself.
+   *
+   * Set for engines whose planner has no useful statistics for the driving
+   * relation and can therefore choose to enumerate candidate edges instead —
+   * once per frontier row. Two traversal shapes need the pin: a recursive term,
+   * whose driving relation is the worktable, and an identity-expanded step,
+   * which reaches the edge through `COALESCE` over an outer join and so exposes
+   * no direct frontier-to-edge equality. Every other traversal joins on the
+   * frontier's own columns and is left to the planner.
    */
   forceRecursiveWorktableOuterJoinOrder: boolean;
 
@@ -84,6 +108,49 @@ export type DialectCapabilities = Readonly<{
    * Whether the dialect supports fulltext MATCH predicates.
    */
   supportsFulltext: boolean;
+
+  /**
+   * Subgraph reachable-node membership strategy — see
+   * {@link DialectSubgraphMembershipStrategy}.
+   */
+  subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
+
+  /** Maximum recursive stages, historical identity reconstructions, and combined subgraph plans in batchOnce. */
+  maxRecursiveBatchPlans?: number;
+
+  /**
+   * Whether every index over a text column is kept in byte order, the order
+   * {@link DialectAdapter.binaryText} imposes, so a byte-order bound is an
+   * index range on any text index. SQLite is. PostgreSQL keeps text indexes in
+   * the database collation, so a byte-order bound is an index range only on an
+   * index declared `COLLATE "C"`; a read that wants one must check the catalog
+   * for it (see the graph id listing).
+   */
+  textIndexOrderIsBinary: boolean;
+
+  /**
+   * Whether every read inside one interactive transaction sees one snapshot
+   * whatever isolation level was requested, so a multi-statement read needs no
+   * evidence beyond running inside the transaction. SQLite does: its readers
+   * see the database as of the transaction's first read. PostgreSQL does not:
+   * the default `read committed` takes a fresh snapshot per statement, so the
+   * effective isolation level has to be observed on the session that runs the
+   * reads (see the graph storage inventory).
+   */
+  transactionReadsShareOneSnapshot: boolean;
+}>;
+
+/**
+ * Shape of a list-valued `IN` parameter, resolved at compile time.
+ */
+export type InListParameterOptions = Readonly<{
+  /** Whether the predicate is `notIn` rather than `in`. */
+  negated: boolean;
+  /**
+   * The value type the left operand was compiled for. `undefined` when the
+   * schema declares nothing usable, in which case the comparison is textual.
+   */
+  elementType: ValueType | undefined;
 }>;
 
 /**
@@ -94,6 +161,13 @@ export type DialectCapabilities = Readonly<{
  * together and rendered by a backend adapter.
  */
 export interface DialectAdapter {
+  /** Converts strict finite decimal text to a number, returning SQL NULL otherwise. */
+  readonly safeNumericConversion: (
+    this: void,
+    expression: SqlFragment,
+  ) => SqlFragment;
+  /** Token for an unlimited result bound when OFFSET requires a LIMIT. */
+  unboundedLimit(): SqlFragment;
   /**
    * The dialect name this adapter handles.
    */
@@ -135,6 +209,61 @@ export interface DialectAdapter {
     this: void,
     workingMemory: string,
   ) => SqlFragment | undefined;
+
+  /**
+   * Aggregates an ordered derived-table row set into one JSON array value.
+   *
+   * `columns` are the public columns to retain; `orderColumn` is an internal
+   * ordinal and must not appear in the JSON objects. This is the token-level
+   * dialect seam used by one-statement batches: PostgreSQL can convert a whole
+   * record to JSON, while SQLite must spell every `json_object` key.
+   */
+  readonly orderedRowsJsonArray: (
+    this: void,
+    rowAlias: string,
+    columns: readonly string[],
+    orderColumn: string,
+  ) => SqlFragment;
+
+  /** Returns one payload row per partition, preserving the ordinal within each JSON array. */
+  readonly partitionedRowsJsonArrays?: (
+    this: void,
+    rowAlias: string,
+    columns: readonly string[],
+    orderColumn: string,
+    partitionColumn: string,
+  ) => SqlFragment;
+
+  /**
+   * Aggregates scalar values into an ordered JSON array.
+   *
+   * A filter admits only rows for which SQL evaluates it to TRUE; FALSE and
+   * NULL are excluded. Admitted NULL values remain array elements, and an
+   * empty input produces an empty array.
+   */
+  readonly orderedScalarJsonArray: (
+    this: void,
+    options: Readonly<{
+      value: SqlFragment;
+      valueType: ValueType;
+      orderBy: readonly SqlFragment[];
+      filter: SqlFragment | undefined;
+    }>,
+  ) => SqlFragment;
+
+  /** Aggregates flat named scalar values into ordered JSON object rows. */
+  readonly orderedRecordJsonArray: (
+    this: void,
+    options: Readonly<{
+      fields: readonly Readonly<{
+        name: string;
+        value: SqlFragment;
+        valueType: ValueType;
+      }>[];
+      orderBy: readonly SqlFragment[];
+      filter: SqlFragment | undefined;
+    }>,
+  ) => SqlFragment;
 
   // ============================================================
   // JSON Path Operations
@@ -259,6 +388,27 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /**
+   * Checks whether a JSON array contains a value supplied by another SQL
+   * expression. Unlike {@link jsonArrayContains}, the value is never encoded
+   * as a JSON literal, so field references and correlated outer references
+   * retain their row-by-row meaning.
+   */
+  readonly jsonArrayContainsExpression?: (
+    this: void,
+    column: SqlFragment,
+    value: SqlFragment,
+    valueType: ValueType,
+  ) => SqlFragment;
+
+  /** Emits a row-value comparison for compatible lexicographic cursor keys. */
+  readonly rowValueComparison?: (
+    this: void,
+    operator: ">" | "<",
+    left: readonly SqlFragment[],
+    right: readonly SqlFragment[],
+  ) => SqlFragment;
+
+  /**
    * Checks if a JSON array contains all specified values.
    *
    * @example
@@ -331,6 +481,19 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /**
+   * Compares one JSON scalar by exact JSON type and value. Unlike text
+   * extraction this preserves the distinction between strings, numbers,
+   * booleans, and the JSON `null` literal without introducing a separate
+   * per-dialect structural-comparison strategy.
+   */
+  readonly jsonScalarPathEquals: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+    value: JsonScalar,
+  ) => SqlFragment;
+
+  /**
    * Checks if the JSON value at a path exists and is a JSON number.
    *
    * Never evaluates to SQL NULL: a missing path yields FALSE, so the
@@ -344,6 +507,19 @@ export interface DialectAdapter {
     this: void,
     column: SqlFragment,
     pointer: JsonPointer,
+  ) => SqlFragment;
+
+  /**
+   * Replaces top-level JSON object properties while preserving explicit JSON
+   * null values. This is the token-level dialect seam used by set-based node
+   * mutation; callers validate the patch against the node schema before SQL
+   * compilation.
+   */
+  readonly jsonSetProperties: (
+    this: void,
+    column: SqlFragment,
+    patch: Readonly<Record<string, JsonValue>>,
+    unsetProperties?: readonly string[],
   ) => SqlFragment;
 
   // ============================================================
@@ -383,12 +559,69 @@ export interface DialectAdapter {
     negated: boolean,
   ) => SqlFragment;
 
+  /**
+   * Tests scalar membership in a list supplied as a SINGLE bound parameter —
+   * the `field.in(param("ids"))` form.
+   *
+   * The emitted SQL must not depend on how many elements the list holds, so a
+   * prepared statement compiles once and serves every arity from the same
+   * cached template. Both bundled dialects therefore unpack a JSON-encoded
+   * array (produced by {@link DialectAdapter.packListValue}) into a one-column
+   * relation instead of emitting one placeholder per element.
+   *
+   * `elementType` is the value type the left operand was compiled for, so a
+   * dialect that extracts JSON as text can cast the unpacked elements to the
+   * same type; `undefined` means text.
+   *
+   * @example
+   * SQLite: left IN (SELECT value FROM json_each(?))
+   * PostgreSQL: left IN (SELECT e.value::numeric FROM jsonb_array_elements_text($1::jsonb) AS e(value))
+   */
+  readonly inListParameter: (
+    this: void,
+    left: SqlFragment,
+    packedValues: SqlFragment,
+    options: InListParameterOptions,
+  ) => SqlFragment;
+
+  /**
+   * Packs the scalar list bound to an `in()`/`notIn()` parameter into the
+   * single driver value {@link DialectAdapter.inListParameter} unpacks.
+   * Elements arrive as plain JavaScript scalars and must be bound with the
+   * same rules a literal of that type would be (SQLite booleans as 0/1, dates
+   * as ISO text), so the parameterized and literal forms match row for row.
+   *
+   * Every element is guaranteed to match the compiled element type, and to be
+   * a finite number when that type is numeric: `PreparedQuery` validates the
+   * binding before it reaches this method. Implementations therefore do not
+   * need to normalize or reject anything — and must not paper over a mismatch,
+   * since doing so is what would let one dialect quietly disagree with
+   * another.
+   */
+  readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
+
   // ============================================================
   // String Operations
   // ============================================================
 
   /**
-   * Case-insensitive LIKE comparison.
+   * Case-sensitive LIKE comparison, with backslash as the escape character.
+   *
+   * @example
+   * SQLite: column GLOB <pattern translated to GLOB> (SQLite's LIKE ignores
+   * ASCII case)
+   * PostgreSQL: column LIKE pattern ESCAPE '\'
+   */
+  readonly like: (
+    this: void,
+    column: SqlFragment,
+    pattern: SqlFragment,
+  ) => SqlFragment;
+
+  /**
+   * Case-insensitive LIKE comparison. Case folding is the engine's: SQLite's
+   * built-in `LOWER()` folds ASCII only (unless the ICU extension is loaded),
+   * and PostgreSQL folds per the database's `LC_CTYPE`.
    *
    * @example
    * SQLite: LOWER(column) LIKE LOWER(pattern)
@@ -427,17 +660,35 @@ export interface DialectAdapter {
   /**
    * Creates the initial path value for cycle detection.
    *
+   * A token may hold any character, so a dialect whose path is a delimited
+   * string escapes each token (see `SQLITE_PATH_TOKEN_ESCAPES`) and
+   * `normalizePath` decodes it; the same escaped token must reach
+   * `extendPath` and `cycleCheck`.
+   *
    * @example
-   * SQLite: '|' || id || '|'
+   * SQLite: '|' || esc(id) || '|'
    * PostgreSQL: ARRAY[id]
    */
   readonly initializePath: (this: void, nodeId: SqlFragment) => SqlFragment;
+
+  /** Creates a JSON array of text scalar expressions, preserving delimiters verbatim. */
+  readonly textJsonArray: (
+    this: void,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
+
+  /** Appends text scalar expressions to a JSON array. */
+  readonly appendTextJsonArray: (
+    this: void,
+    array: SqlFragment,
+    values: readonly SqlFragment[],
+  ) => SqlFragment;
 
   /**
    * Extends a path with a new node ID.
    *
    * @example
-   * SQLite: path || id || '|'
+   * SQLite: path || esc(id) || '|'
    * PostgreSQL: path || id
    */
   readonly extendPath: (
@@ -451,7 +702,7 @@ export interface DialectAdapter {
    * Returns a condition that is TRUE if there is no cycle.
    *
    * @example
-   * SQLite: INSTR(path, '|' || id || '|') = 0
+   * SQLite: INSTR(path, '|' || esc(id) || '|') = 0
    * PostgreSQL: id != ALL(path)
    */
   readonly cycleCheck: (
@@ -526,3 +777,7 @@ export interface DialectAdapter {
    */
   readonly fulltext: FulltextStrategy | undefined;
 }
+
+/** Bundled dialects must support every operation consumed by the batch compiler. */
+export type BuiltinDialectAdapter = DialectAdapter &
+  Required<Pick<DialectAdapter, "partitionedRowsJsonArrays">>;

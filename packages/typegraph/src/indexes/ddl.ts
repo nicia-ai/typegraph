@@ -18,6 +18,8 @@ import {
 export type GenerateIndexDdlOptions = Readonly<{
   nodesTableName?: string | undefined;
   edgesTableName?: string | undefined;
+  /** Physical identifier; the declaration's logical name remains unchanged. */
+  physicalName?: string | undefined;
   ifNotExists?: boolean | undefined;
   /**
    * Emit `CREATE INDEX CONCURRENTLY` (Postgres only). Required for
@@ -123,7 +125,7 @@ function generateTableIndexDDL(
 
   const whereClause = whereSql ? ` WHERE ${whereSql}` : "";
 
-  return `CREATE ${unique}INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} (${keySql})${whereClause};`;
+  return `CREATE ${unique}INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(options.physicalName ?? index.name)} ON ${quoteIdentifier(tableName)} (${keySql})${whereClause};`;
 }
 
 /**
@@ -164,7 +166,7 @@ function generateGinFamilyIndexDDL(
     index.method === "gin" ? "jsonb_path_ops" : "gin_trgm_ops";
   const concurrent = options.concurrent === true ? "CONCURRENTLY " : "";
   const ifNotExistsSql = (options.ifNotExists ?? true) ? "IF NOT EXISTS " : "";
-  return `CREATE INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(index.name)} ON ${quoteIdentifier(tableName)} USING GIN ((${renderSqlInline(expression, dialect)}) ${operatorClass});`;
+  return `CREATE INDEX ${concurrent}${ifNotExistsSql}${quoteIdentifier(options.physicalName ?? index.name)} ON ${quoteIdentifier(tableName)} USING GIN ((${renderSqlInline(expression, dialect)}) ${operatorClass});`;
 }
 
 function quoteIdentifier(identifier: string): string {

@@ -8,8 +8,33 @@ transitive dependencies of a package, or everyone reachable within six degrees o
 relational database, each depth level requires another self-join — and you have to know the depth
 ahead of time. Recursive traversals solve this by walking edges until a stopping condition is met.
 
-TypeGraph compiles `.recursive()` into a SQL `WITH RECURSIVE` CTE. The database engine handles the
-iteration, so you get the full performance of native recursive SQL without writing it by hand.
+When the backend advertises recursive traversal support, TypeGraph compiles `.recursive()` into a
+SQL `WITH RECURSIVE` CTE. The database engine handles the iteration, so you get the full
+performance of native recursive SQL without writing it by hand.
+
+## Backend Support
+
+The bundled SQLite and PostgreSQL backends support recursive traversal. A custom backend that
+cannot compute a bounded transitive closure in one round trip must declare:
+
+```typescript
+const capabilities = {
+  recursiveTraversal: {
+    supported: false,
+    reason: "engine has no WITH RECURSIVE or graph-native equivalent",
+  },
+} satisfies Partial<BackendCapabilities>;
+```
+
+Calling `.recursive()` through that backend throws `ConfigurationError` with
+`details.code: "RECURSIVE_TRAVERSAL_UNSUPPORTED"`. `details.operation` identifies the refusing
+query path and `details.reason` contains the backend's declaration. This refusal also applies when
+the recursive query is nested inside `union()`, `intersect()`, or `except()`.
+
+An absent `recursiveTraversal` declaration means supported for backward compatibility with custom
+backends that already execute recursive SQL. See
+[Recursive traversal capability](/backend-setup#recursive-traversal-capability) for the complete
+backend-author contract and the other operations governed by this capability.
 
 ## How It Works
 
@@ -56,15 +81,15 @@ const allManagers = await store
 .recursive(options?)
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `minHops` | `number` | `1` | Minimum traversal depth before including results |
-| `maxHops` | `number` | `100`* | Maximum traversal depth |
-| `cyclePolicy` | `"prevent" \| "allow"` | `"prevent"` | How to handle cycles |
-| `depth` | `boolean \| string` | — | Expose hop count in `select()` context |
-| `path` | `boolean \| string` | — | Expose node ID path in `select()` context |
+| Option        | Type                                                              | Default     | Description                                      |
+| ------------- | ----------------------------------------------------------------- | ----------- | ------------------------------------------------ |
+| `minHops`     | `number`                                                          | `1`         | Minimum traversal depth before including results |
+| `maxHops`     | `number`                                                          | `10`*       | Maximum traversal depth                          |
+| `cyclePolicy` | `"prevent" \| "allow"`                                            | `"prevent"` | How to handle cycles                             |
+| `depth`       | `boolean \| string`                                               | —           | Expose hop count in `select()` context           |
+| `path`        | `boolean \| string \| { format: "qualified"; alias?: string }` | —           | Expose an ID or qualified path                   |
 
-*When `maxHops` is omitted, an implicit cap of 100 is applied. See [Depth Limits](#depth-limits).
+*When `maxHops` is omitted, an implicit cap of 10 is applied. See [Depth Limits](#depth-limits).
 
 ## Controlling Depth
 
@@ -117,8 +142,8 @@ const distantConnections = await store
 ## Tracking Depth and Path
 
 When `depth` or `path` are enabled, they become available as properties on the `select()` context.
-Pass a string to control the property name; pass `true` to use the default names (`"depth"` and
-`"path"`).
+Pass a string to control the property name. Pass `true` to derive the default name from the target
+alias: `${targetAlias}_depth` or `${targetAlias}_path`.
 
 ### depth
 
@@ -135,7 +160,7 @@ const orgChart = await store
   .select((ctx) => ({
     ceo: ctx.ceo.name,
     employee: ctx.employee.name,
-    level: ctx.level,             // 1 = direct report, 2 = skip-level, etc.
+    level: ctx.level, // 1 = direct report, 2 = skip-level, etc.
   }))
   .execute();
 ```
@@ -158,7 +183,7 @@ const pathsToRoot = await store
   .select((ctx) => ({
     category: ctx.cat.name,
     ancestor: ctx.ancestor.name,
-    trail: ctx.trail,             // Array of node IDs from start to ancestor
+    trail: ctx.trail, // Array of node IDs from start to ancestor
   }))
   .execute();
 ```
@@ -180,19 +205,128 @@ const networkAnalysis = await store
   .select((ctx) => ({
     person: ctx.p.name,
     connection: ctx.connection.name,
-    distance: ctx.distance,       // number
-    route: ctx.route,             // string[] of node IDs
+    distance: ctx.distance, // number
+    route: ctx.route, // string[] of node IDs
   }))
   .execute();
 ```
 
+For a path that identifies both nodes and traversed edges, request the qualified format:
+
+```typescript
+const routes = await store
+  .query()
+  .from("Person", "person")
+  .traverse("knows", "connection")
+  .recursive({
+    maxHops: 4,
+    path: { alias: "route", format: "qualified" },
+  })
+  .to("Person", "friend")
+  .select((ctx) => ctx.route)
+  .execute();
+```
+
+Each route alternates node and edge references, starting and ending with a node:
+
+```typescript
+[
+  { type: "node", kind: "Person", id: "alice" },
+  { type: "edge", kind: "knows", id: "edge-1", direction: "out" },
+  { type: "node", kind: "Person", id: "bob" },
+];
+```
+
+`direction` records how the edge was followed relative to its stored endpoints: `"out"` follows
+`from` to `to`, while `"in"` follows `to` to `from`. Qualified paths contain references only; they
+do not hydrate node or edge properties. Legacy `path: true` and `path: "alias"` continue to return
+node ID arrays.
+
+To keep only the paths that end at particular nodes, filter the endpoint with `.where(...)`. A
+`whereNode()` on the target alias constrains every hop, so a path through a node that fails it is
+never extended (see [Expansion and completed-result filters](#expansion-and-completed-result-filters)).
+
+## Chaining Fixed and Recursive Traversals
+
+Fixed-hop and recursive traversals compose from left to right. Each later stage expands from the
+completed identities produced by its `from` alias, then rejoins those results to the earlier rows.
+This preserves upstream multiplicity while avoiding repeated expansion of the same `(kind, id)`
+source within a stage.
+
+```typescript
+import { expr } from "@nicia-ai/typegraph";
+
+const routes = await store
+  .query()
+  .from("Person", "root")
+  .traverse("manages", "management")
+  .recursive({ maxHops: 3, depth: "managementDepth" })
+  .to("Person", "manager")
+  .traverse("worksAt", "employment", { from: "manager" })
+  .recursive({ maxHops: 2, path: "organizationPath" })
+  .to("Organization", "organization")
+  .where((fields) => expr.eq(fields.organization.active, expr.literal(true)))
+  .orderBy("organization", "name")
+  .limit(20)
+  .select((ctx) => ({
+    manager: ctx.manager.name,
+    organization: ctx.organization.name,
+    managementDepth: ctx.managementDepth,
+    organizationPath: ctx.organizationPath,
+  }))
+  .execute();
+```
+
+The `minHops`, `maxHops`, `cyclePolicy`, `stopExpansion`, `path`, and `depth` settings apply to
+their own recursive stage. An `optionalTraverse()`, including the first stage, retains the earlier row
+when it finds no match; its target, path, and depth values are `undefined`. A completed `.where()`,
+final ordering, and final limit apply after every stage. The `from` option may also branch from any
+earlier materialized node alias.
+
+### Mixing fixed hops with recursion
+
+A fixed hop can precede or follow recursion. Fixed-hop edges retain their ordinary property bindings;
+recursive edges are represented by path references.
+
+```typescript
+const reports = await store.query()
+  .from("Person", "root")
+  .traverse("manages", "directManagement")
+  .to("Person", "directReport")
+  .traverse("manages", "management")
+  .recursive({ minHops: 0, maxHops: 3, depth: "depth" })
+  .to("Person", "report")
+  .traverse("worksAt", "employment")
+  .to("Organization", "organization")
+  .select((ctx) => ({
+    report: ctx.report.name,
+    organization: ctx.organization.name,
+    employment: ctx.employment,
+    depth: ctx.depth,
+  }))
+  .execute();
+```
+
+### An optional first recursive stage
+
+Use `optionalTraverse()` before `.recursive()` to retain roots that have no eligible endpoint.
+With a positive `minHops`, a root with no matching path returns `undefined` for its target, depth,
+and path. With `minHops: 0`, an eligible root is a real zero-hop match: depth `0` and a one-node
+path. Endpoint eligibility includes `stopExpansion()` and its `emitStopNode` setting.
+
+Match constraints can remove every endpoint while retaining the optional row. A completed `.where()`
+comparison against the absent target removes that row unless its predicate explicitly allows absence.
+A subsequent required traversal from an absent target produces no match; a subsequent optional traversal
+preserves absence. You can still branch from a present earlier alias using the `from` option.
+
 ### Boolean shorthand
 
-Pass `true` instead of a string to use the default alias names:
+Pass `true` instead of a string to derive output names from the target alias:
 
 ```typescript
 .recursive({ depth: true, path: true })
-// ctx.depth and ctx.path are available in select()
+.to("Person", "target")
+// ctx.target_depth and ctx.target_path are available in select()
 ```
 
 ## Cycle Detection
@@ -211,7 +345,7 @@ const allReachable = await store
   .query()
   .from("Node", "start")
   .traverse("linkedTo", "e")
-  .recursive()                    // cyclePolicy: "prevent" is the default
+  .recursive() // cyclePolicy: "prevent" is the default
   .to("Node", "reachable")
   .select((ctx) => ctx.reachable.id)
   .execute();
@@ -220,6 +354,10 @@ const allReachable = await store
 Under the hood, the compiled SQL maintains a path structure at each recursive step and checks
 whether the next node has already been visited. On PostgreSQL this uses `ARRAY` operations; on
 SQLite it uses string-delimited path tracking.
+
+A node is identified by its kind and id together, so when a traversal can visit more than one
+kind, two nodes of different kinds that share an id are distinct: reaching the second is not a
+revisit. The `path` output still lists bare node ids.
 
 ### cyclePolicy: "allow"
 
@@ -243,11 +381,11 @@ const ancestors = await store
 
 :::caution
 With `cyclePolicy: "allow"` on a cyclic graph, the traversal **will** revisit nodes until it
-hits `maxHops`. If `maxHops` is not set, the implicit cap of 100 prevents infinite recursion,
+hits `maxHops`. If `maxHops` is not set, the implicit cap of 10 prevents infinite recursion,
 but you may get many duplicate results.
 :::
 
-## Filtering During Recursion
+## Expansion and completed-result filters
 
 Predicates placed on the target node or edge apply **at every step** of the recursion — not just
 the final results. This lets you prune paths early:
@@ -271,6 +409,59 @@ Source node predicates (on `"p"` above) apply only to the starting set. Edge and
 predicates are included in the recursive CTE, so unreachable branches are pruned at each level
 rather than filtered after the fact.
 
+Use `.where()` to filter completed matches without pruning intermediate nodes. In this example,
+inactive intermediate nodes can still lead to an active endpoint:
+
+```typescript
+const activeEndpoints = await store
+  .query()
+  .from("Person", "p")
+  .whereNode("p", (p) => p.name.eq("Alice"))
+  .traverse("knows", "e")
+  .recursive({ maxHops: 5 })
+  .to("Person", "connection")
+  .where((fields) => expr.eq(fields.connection.active, expr.literal(true)))
+  .select((ctx) => ctx.connection.name)
+  .execute();
+```
+
+`whereNode("connection", ...)` is an every-hop constraint. `.where(...)` is an endpoint/result
+constraint applied after recursive expansion and the minimum-depth check.
+
+## Stop expansion at a boundary
+
+`stopExpansion()` prevents a matching endpoint from becoming the next recursive frontier. The
+stopping node is included by default:
+
+```typescript
+const managersThroughDirectors = await store
+  .query()
+  .from("Person", "employee")
+  .traverse("reportsTo", "edge")
+  .recursive({ maxHops: 10 })
+  .to("Person", "manager")
+  .stopExpansion("manager", (manager) => manager.role.eq("Director"))
+  .select((ctx) => ctx.manager.name)
+  .execute();
+```
+
+This emits the matching director but does not follow that director's outgoing `reportsTo` edge.
+Pass `{ emitStopNode: false }` to omit the director as well:
+
+```typescript
+.stopExpansion(
+  "manager",
+  (manager) => manager.role.eq("Director"),
+  { emitStopNode: false },
+)
+```
+
+A stop predicate can use ordinary fields from the recursive target alias. Subqueries, aggregate
+predicates, ranked search predicates, and fields from other aliases are refused. Only the matching
+branch stops; other recursive branches continue. With `minHops: 0`, the source node is also the
+depth-zero target, so a matching source is emitted or omitted according to `emitStopNode` and its
+branch does not expand. SQL `NULL` does not stop a branch.
+
 ## Duplicate Results
 
 When a node is reachable via multiple paths, it appears once per path:
@@ -292,44 +483,252 @@ const results = await store
 
 To get unique nodes, deduplicate in your application or use [set operations](/queries/combine).
 
+## Pagination
+
+A query with a recursive traversal cannot be paged with `paginate()`, `page()` or `stream()`: a
+cursor cannot position itself inside the rows one start node fans out into, so those calls refuse it
+with a `ConfigurationError` (`details.code` is `RECURSIVE_PAGINATION_UNSUPPORTED`) before running
+any statement. Read the walk with `execute()` and a `limit()` or `maxHops` you choose, or page the
+start nodes in a query without the recursive traversal and run the walk for each page. See
+[Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated).
+The one-hop composition shortcut is not recursive and does page; see
+[Paging direct parts](#paging-direct-parts).
+
 ## Depth Limits
 
 Two safety caps prevent runaway recursion:
 
-| Constant | Value | When it applies |
-|----------|-------|-----------------|
-| `MAX_RECURSIVE_DEPTH` | 10 | `maxHops` is omitted |
-| `MAX_EXPLICIT_RECURSIVE_DEPTH` | 1000 | Upper bound for explicit `maxHops` |
+| Constant                       | Value | When it applies                    |
+| ------------------------------ | ----- | ---------------------------------- |
+| `MAX_RECURSIVE_DEPTH`          | 10    | `maxHops` is omitted               |
+| `MAX_EXPLICIT_RECURSIVE_DEPTH` | 1000  | Upper bound for explicit `maxHops` |
 
 Graphs with branching factor *B* produce O(*B*^depth) rows before cycle detection
 can prune them. The default of 10 covers typical neighborhood, shortest-path, and
-hierarchy queries without risking exponential blowup on dense graphs. Use `.maxHops(N)`
-to opt in to deeper traversals when you know the graph structure.
+hierarchy queries without risking exponential blowup on dense graphs. Pass
+`maxHops` to `.recursive({ maxHops: N })` to opt in to deeper traversals when you know
+the graph structure.
 
 ```typescript
 import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
   MAX_RECURSIVE_DEPTH,
-} from "@nicia-ai/typegraph";
+} from "@nicia-ai/typegraph/query";
 
 .recursive()                  // Implicitly capped at 10
 .recursive({ maxHops: 50 })   // Honored (≤ 1000)
-.recursive({ maxHops: 2000 }) // Throws UnsupportedPredicateError
+.recursive({ maxHops: 2000 }) // Refused before SQL compilation
 ```
 
 :::note[Breaking change in v0.14]
 The default depth was lowered from 100 to 10. If your traversals relied on the
-implicit 100-hop cap, add an explicit `.maxHops(100)` call.
+implicit 100-hop cap, add `.recursive({ maxHops: 100 })`.
 :::
+
+## Composition Shortcuts: `parts()` and `wholes()`
+
+A `.traverse(edgeKind, "e").recursive().to(kind, "x")` chain is the general
+tool for "follow this edge to unknown depth". When the edge you'd name is a
+declared [composition](/ontology#composition) relation (`partOf` / `hasPart`),
+`parts()` and `wholes()` are shorter and stay correct as the relation grows:
+
+```typescript
+// Instead of naming the realizing edge kind and recursing over it by hand:
+const segments = await store
+  .query()
+  .from("Episode", "e")
+  .whereNode("e", (e) => e.id.eq(episodeId))
+  .traverse("segmentOf", "seg_edge", { direction: "in" })
+  .recursive()
+  .toDynamic("Segment", "s")
+  .select((ctx) => ctx.s)
+  .execute();
+
+// parts() derives the edge kind(s) and direction(s) from the registry:
+const parts = await store
+  .query()
+  .from("Episode", "e")
+  .whereNode("e", (e) => e.id.eq(episodeId))
+  .parts("x")
+  .select((ctx) => ctx.x)
+  .execute();
+```
+
+The difference is not just brevity. A composition relation can be realized by
+**more than one edge kind** across levels — a Podcast whose Episodes attach
+via `episodeOf` and whose Segments attach via `segmentOf` — and those levels
+can even mix orientation, a `partOf` (`part -> whole`) edge at one level and a
+`hasPart` (`whole -> part`, the `has_*` convention) edge at another.
+`parts()`/`wholes()` follow the whole declared structure in one call; spelling
+the equivalent by hand would mean naming every realizing edge kind and getting
+each one's direction right.
+
+```typescript
+partOf(Episode, Podcast, { via: episodeOf });
+partOf(Segment, Episode, { via: segmentOf });
+
+// One call reaches both levels, regardless of how many edge kinds realize them:
+const parts = await store
+  .query()
+  .from("Podcast", "p")
+  .whereNode("p", (p) => p.id.eq(podcastId))
+  .parts("x")
+  .select((ctx) => ctx.x)
+  .execute();
+// parts includes every Episode AND every Segment transitively under the Podcast.
+
+// wholes() is the mirror — the ancestor chain from a part:
+const ancestors = await store
+  .query()
+  .from("Segment", "s")
+  .whereNode("s", (s) => s.id.eq(segmentId))
+  .wholes("x")
+  .select((ctx) => ctx.x)
+  .execute();
+// ancestors includes the Segment's Episode and that Episode's Podcast.
+```
+
+**Direction is derived, not declared.** `registry.compositionPartSide` decides
+per realizing edge kind: a `part -> whole` edge is followed reversed (`"in"`)
+by `parts()` (forward, `"out"`, by `wholes()`), and a `whole -> part` (`has_*`)
+edge is followed in its own direction (`"out"` by `parts()`, reversed, `"in"`,
+by `wholes()`). When a relation mixes both orientations across levels, the
+step compiles to one traversal whose direct and inverse edge-kind sets union
+via the same mechanism `{ expand: "inverse" }` already uses — no extra query,
+no extra call.
+
+**Recursion is the default**, matching the value proposition over `traverse()`:
+`parts()`/`wholes()` reach the full transitive closure unless you pass
+`maxHops: 1` for the direct level only. Unlike a bare `.recursive()`, which
+stops at 10 hops unless told otherwise, an omitted `maxHops` here applies no
+hop ceiling: the walk ends where the composition ends, so a chain of any
+length comes back whole, on every backend. A `maxHops` you state bounds the
+walk exactly as given (up to 1000, as for any recursive step). The unbounded
+walk tracks each row's path to prevent cycles, so on a chain thousands of
+levels deep its cost grows faster than that of
+`store.subgraph(root, { composition: true })`, which reads the owned unit with a
+set-semantics walk; the rows returned are complete either way. `depth` and
+`path` behave exactly as they do for `.recursive({ depth, path })`. Like any recursive step, they chain
+after earlier fixed or recursive traversals as a later stage (see
+[Chaining Fixed and Recursive Traversals](#chaining-fixed-and-recursive-traversals)).
+
+```typescript
+const directChildren = await store
+  .query()
+  .from("Section", "s")
+  .whereNode("s", (s) => s.id.eq(sectionId))
+  .parts("x", { maxHops: 1 }) // direct sub-sections only, no recursion
+  .select((ctx) => ctx.x)
+  .execute();
+```
+
+### Paging direct parts
+
+`parts()` and `wholes()` with `maxHops: 1` and neither `depth` nor `path` compile to a fixed one-hop
+step rather than a recursive one, so `paginate()`, `page()` and `stream()` accept them, with every
+realizing edge kind and orientation of that level in one result. This is the way to list one level
+of a part tree at a time, however many children a node has:
+
+```typescript
+const children = store
+  .query()
+  .from("Folder", "f")
+  .whereNode("f", (f) => f.id.eq(folderId))
+  .parts("child", { maxHops: 1 })
+  .orderBy("f", "name", "asc")
+  .select((ctx) => ({ kind: ctx.child.kind, id: ctx.child.id }));
+
+let after: string | undefined;
+do {
+  const page = await children.paginate({
+    first: 50,
+    ...(after === undefined ? {} : { after }),
+  });
+  // render `page.data`
+  after = page.nextCursor;
+} while (after !== undefined);
+
+for await (const child of children.stream({ batchSize: 500 })) {
+  // one row per direct part
+}
+```
+
+Asking for `depth` or `path`, or for any `maxHops` above 1, makes the step recursive again, and the
+pagination surfaces refuse it as described in [Pagination](#pagination).
+
+**`via` narrows the walk to one realizing edge.** `parts("x", { via: episodeOf })`
+on the Podcast above follows `episodeOf` alone, so it returns the Episodes and
+not their Segments; pass the edge's type or its kind string. A `via` that
+realizes no pair at the source alias itself, such as `segmentOf` on a Podcast,
+is refused with `CompositionConfigurationError` (`COMPOSITION_VIA_NOT_DECLARED`), and
+`details.declaredVia` lists the edges that would work.
+
+**They follow ownership, not validity.** A composition step follows the
+edges that bind a part to its whole — the same membership the delete cascade
+counts — rather than the edge's validity window. An ended `population: "one"` edge still binds
+its part, because a `one` binding holds for the row's whole life, so it is
+still walked and its row still carries its `validTo`. An ended
+`population: "oneActive"` edge is the history a `reparent` leaves behind and
+is not walked. The query's temporal mode sets the instant:
+
+- A current query, and an `includeEnded` or `includeTombstones` query, walks
+  what is owned now. Those modes widen which nodes and which other edges a
+  query sees, not what a whole owns.
+- `store.asOf(t)` walks what was owned at `t`: an edge that existed at `t`
+  and, for `"oneActive"`, had not yet ended. A `"one"` edge ended before `t`
+  still binds at `t`.
+- `store.asOfRecorded(...)` walks the ownership its pinned revision recorded.
+
+That rule is for the edges. Nodes still follow the query's temporal filter at
+every hop, so a part whose own validity window has ended (or not yet started)
+is not returned, and neither is anything reachable only through it, although
+the whole owns them and a delete would remove them. To list what a delete
+removes, use [`planDelete`](/ontology#previewing-a-delete). A plain
+`.traverse()` over a realizing edge kind is not a composition step and keeps
+the edge's validity window.
+
+**The result alias is untyped** (reached via `.field(name)`, like
+[`fromDynamic`](/queries/source#runtime-declared-kinds)): the parts or wholes
+closure under a kind is registry data — it may span more than one node kind
+with different schemas — not a single kind the graph's static type can name.
+
+**`parts()` on a kind declaring no composition parts refuses** rather than
+returning zero rows — an accepted call that cannot mean anything is an error,
+not a silently empty result:
+
+```typescript
+await store.query().from("Segment", "s").parts("x");
+// throws CompositionConfigurationError, code: "COMPOSITION_NO_PARTS_DECLARED"
+// (Segment has no partOf/hasPart relation declaring parts of its own)
+```
+
+`wholes()` refuses the same way with `COMPOSITION_NO_WHOLES_DECLARED` on a
+kind declaring no composition wholes. `expand` is not accepted on either
+step: it means "same relation, more members" (ontology implying/inverse
+expansion), and the edge-kind set here is derived from the composition
+relation, not from an expansion mode. Both steps accept exactly `from`,
+`maxHops`, `depth`, `path` and `via`; any other key — `expand`, or a
+misspelled `maxHop` that would otherwise leave the walk unbounded — is
+refused with `ValidationError` (issue path `options.<key>`, code
+`unrecognized_keys`), including when the options object is built at runtime
+where TypeScript's excess-property check does not reach.
+
+For the whole-plus-parts *export* shape (rather than a query result), see
+[`subgraph({ composition: true })`](/schemas-stores#composition-export).
 
 ## Limitations
 
-- **One recursive traversal per query.** A query with multiple `.recursive()` calls throws
-  `UnsupportedPredicateError`. If you need multiple recursive paths, run separate queries or
-  use [set operations](/queries/combine) to merge results.
-- **Edge properties are not projected** in recursive results. You can filter on edge properties
-  with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
-  any depth/path aliases.
+- **Match predicates in a staged query can reference only the alias they constrain.** Cross-alias match
+  predicates are refused before execution. Use completed-row `.where()` for comparisons between aliases;
+  remember that a completed-row comparison can remove an unmatched optional row.
+
+- **Recursive queries cannot be aggregated in place yet.** `groupBy()`, aggregate projections,
+  aggregate ordering, and `having()` are refused. Project node columns with `project()`, then use
+  `asRelation()` to aggregate that completed relation.
+- **Recursive edge properties are not projected.** You can filter them with `whereEdge()`. Fixed-hop
+  edge properties remain selectable when fixed hops and recursion appear in the same query.
+- **Recursive edges are not materialized in the result.** Qualified paths expose edge references,
+  but selected recursive edge fields are refused.
 
 ## Real-World Examples
 
@@ -351,8 +750,10 @@ const allReports = await store
     level: ctx.level,
     department: ctx.report.department,
   }))
-  .orderBy("level", "asc")
   .execute();
+
+// `orderBy()` names an alias and a field, so it cannot sort by a depth value; sort the rows.
+const byLevel = [...allReports].sort((a, b) => a.level - b.level);
 ```
 
 ### Dependency Graph
@@ -370,12 +771,13 @@ const dependencies = await store
   .select((ctx) => ({
     package: ctx.pkg.name,
     dependency: ctx.dep.name,
-    version: ctx.dep.version,
+    version: ctx.dep.meta.version,
     depth: ctx.depth,
     chain: ctx.chain,
   }))
-  .orderBy("depth", "asc")
   .execute();
+
+const nearestFirst = [...dependencies].sort((a, b) => a.depth - b.depth);
 ```
 
 ### Social Network — Friends of Friends
@@ -411,8 +813,9 @@ const breadcrumbs = await store
     slug: ctx.ancestor.slug,
     depth: ctx.depth,
   }))
-  .orderBy("depth", "desc")
   .execute();
+
+const deepestFirst = [...breadcrumbs].sort((a, b) => b.depth - a.depth);
 
 // Returns: [{ name: "Root", depth: 3 }, { name: "Electronics", depth: 2 }, { name: "Phones", depth: 1 }]
 ```

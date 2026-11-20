@@ -4,12 +4,44 @@
  * Implements dialect-specific SQL generation for SQLite databases.
  * Uses SQLite's JSON1 extension for JSON operations.
  */
+import {
+  SQLITE_PATH_DELIMITER,
+  SQLITE_PATH_TOKEN_ESCAPES,
+} from "../../constants";
 import { type JsonPointer, parseJsonPointer } from "../json-pointer";
-import { sql } from "../sql-fragment";
+import { sql, type SqlFragment } from "../sql-fragment";
+import { applyAggregateFilter } from "./aggregate-filter";
 import { fts5Strategy } from "./fulltext-strategy";
-import { likeEscapeClause } from "./like-escape";
-import { getSqlDialectProfile } from "./profile";
-import { type DialectAdapter } from "./types";
+import { likeEscapeClause, sqliteGlobFromLikePattern } from "./like-escape";
+import {
+  DOUBLE_OVERFLOW_BOUNDARY,
+  MAXIMUM_FINITE_DOUBLE_INTEGER,
+  MAXIMUM_FINITE_DOUBLE_TEXT,
+} from "./numeric-conversion";
+import { getSqlDialectProfile, packSqlListValue } from "./profile";
+import { type BuiltinDialectAdapter } from "./types";
+
+function buildRowsJsonObject(
+  rowAlias: string,
+  columns: readonly string[],
+): SqlFragment {
+  const row = sql.identifier(rowAlias);
+  const objectParts = Array.from(
+    { length: Math.ceil(columns.length / JSON_OBJECT_PAIRS_PER_CALL) },
+    (_, index) => {
+      const slice = columns.slice(
+        index * JSON_OBJECT_PAIRS_PER_CALL,
+        (index + 1) * JSON_OBJECT_PAIRS_PER_CALL,
+      );
+      const pairs = slice.flatMap((column) => [
+        sql`${column}`,
+        sql`${row}.${sql.identifier(column)}`,
+      ]);
+      return sql`json_object(${sql.join(pairs, sql`, `)})`;
+    },
+  );
+  return mergeJsonObjects(objectParts);
+}
 
 /**
  * Escapes a string for use in a SQLite string literal.
@@ -17,6 +49,22 @@ import { type DialectAdapter } from "./types";
  */
 function escapeSqliteLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+const PATH_DELIMITER = sql.raw(escapeSqliteLiteral(SQLITE_PATH_DELIMITER));
+
+/**
+ * Escapes a recursive path token so it cannot contain the path delimiter: a
+ * node id like `x|y` would otherwise read as two tokens, so the delimited
+ * cycle check would match `y` and `path` output would split the id.
+ * `parseSqlitePath` reverses it.
+ */
+function encodePathToken(token: SqlFragment): SqlFragment {
+  let encoded = token;
+  for (const escape of SQLITE_PATH_TOKEN_ESCAPES) {
+    encoded = sql`replace(${encoded}, ${sql.raw(escapeSqliteLiteral(escape.raw))}, ${sql.raw(escapeSqliteLiteral(escape.encoded))})`;
+  }
+  return encoded;
 }
 
 /**
@@ -48,6 +96,30 @@ function toSqlitePath(pointer: JsonPointer): string {
 }
 
 /**
+ * Returns a JSON path for an object property, even when the property name is a
+ * numeric string. `toSqlitePath()` interprets numeric pointer segments as
+ * array indexes, which is correct for query pointers but not for the
+ * top-level object keys accepted by set-based patches.
+ */
+function toSqliteObjectPropertyPath(property: string): string {
+  return `$.${JSON.stringify(property)}`;
+}
+
+// SQLite builds before 3.48 default to 127 function arguments. Each json_set
+// replacement consumes a path/value pair in addition to the input document, so
+// compose bounded calls instead of making schema breadth an engine-version
+// dependency.
+const JSON_SET_REPLACEMENTS_PER_CALL = 50;
+const JSON_OBJECT_PAIRS_PER_CALL = 40;
+
+function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
+  const [first, ...rest] = parts;
+  if (first === undefined) return sql`json('{}')`;
+  if (rest.length === 0) return first;
+  return sql`json_patch(${first}, ${mergeJsonObjects(rest)})`;
+}
+
+/**
  * Checks if a JSON pointer segment is an array index.
  */
 function isArrayIndex(segment: string): boolean {
@@ -57,7 +129,35 @@ function isArrayIndex(segment: string): boolean {
 /**
  * SQLite dialect adapter implementation.
  */
-export const sqliteDialect: DialectAdapter = {
+export const sqliteDialect: BuiltinDialectAdapter = {
+  safeNumericConversion(expression) {
+    const trimmed = sql`trim(${expression})`;
+    const wrapped = sql`'[' || ${trimmed} || ']'`;
+    const exponentPosition = sql`instr(lower(${trimmed}), 'e')`;
+    const exponent = sql`substr(${trimmed}, ${exponentPosition} + 1)`;
+    const exponentDigits = sql`CASE WHEN substr(${exponent}, 1, 1) IN ('+', '-') THEN substr(${exponent}, 2) ELSE ${exponent} END`;
+    const converted = sql`CAST(${trimmed} AS REAL)`;
+    // Linux libSQL can parse decimal text between the exact maximum and the
+    // binary64 overflow boundary as Infinity even though round-to-nearest must
+    // produce Number.MAX_VALUE. Classify that narrow interval from the decimal
+    // text so the fallback does not depend on another floating-point parse.
+    const unsigned = sql`CASE WHEN substr(${trimmed}, 1, 1) = '-' THEN substr(${trimmed}, 2) ELSE ${trimmed} END`;
+    const unsignedExponentPosition = sql`instr(lower(${unsigned}), 'e')`;
+    const mantissa = sql`CASE WHEN ${unsignedExponentPosition} = 0 THEN ${unsigned} ELSE substr(${unsigned}, 1, ${unsignedExponentPosition} - 1) END`;
+    const explicitExponent = sql`CASE WHEN ${unsignedExponentPosition} = 0 THEN 0 ELSE CAST(substr(${unsigned}, ${unsignedExponentPosition} + 1) AS INTEGER) END`;
+    const decimalPosition = sql`instr(${mantissa}, '.')`;
+    const integerDigits = sql`CASE WHEN ${decimalPosition} = 0 THEN length(${mantissa}) ELSE ${decimalPosition} - 1 END`;
+    const digits = sql`replace(${mantissa}, '.', '')`;
+    const significantDigits = sql`ltrim(${digits}, '0')`;
+    const magnitudeExponent = sql`${explicitExponent} + ${integerDigits} - 1 - (length(${digits}) - length(${significantDigits}))`;
+    const boundaryDigits = sql`substr(${significantDigits} || printf('%0309d', 0), 1, 309)`;
+    const belowOverflowBoundary = sql`${significantDigits} = '' OR ${magnitudeExponent} < 308 OR (${magnitudeExponent} = 308 AND ${boundaryDigits} < ${DOUBLE_OVERFLOW_BOUNDARY})`;
+    const roundsToMaximum = sql`${magnitudeExponent} = 308 AND ${boundaryDigits} >= ${MAXIMUM_FINITE_DOUBLE_INTEGER} AND ${boundaryDigits} < ${DOUBLE_OVERFLOW_BOUNDARY}`;
+    const maximumFinite = sql`CAST(${MAXIMUM_FINITE_DOUBLE_TEXT} AS REAL)`;
+    const signedMaximum = sql`CASE WHEN substr(${trimmed}, 1, 1) = '-' THEN -${maximumFinite} ELSE ${maximumFinite} END`;
+    const finiteConversion = sql`CASE WHEN NOT (${belowOverflowBoundary}) THEN NULL WHEN abs(${converted}) <= ${maximumFinite} THEN ${converted} WHEN ${roundsToMaximum} THEN ${signedMaximum} ELSE NULL END`;
+    return sql`CASE WHEN length(${trimmed}) <= 400 AND json_valid(${wrapped}) THEN CASE WHEN json_array_length(${wrapped}) = 1 AND json_type(${wrapped}, '$[0]') IN ('integer', 'real') AND (${exponentPosition} = 0 OR length(${exponentDigits}) BETWEEN 1 AND 3) THEN ${finiteConversion} ELSE NULL END ELSE NULL END`;
+  },
   name: "sqlite",
   capabilities: {
     standardQueryStrategy: "cte_project",
@@ -68,6 +168,9 @@ export const sqliteDialect: DialectAdapter = {
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2"] as const,
     supportsFulltext: true,
+    subgraphMembershipStrategy: "inline-cte",
+    textIndexOrderIsBinary: true,
+    transactionReadsShareOneSnapshot: true,
   },
 
   binaryText(expression) {
@@ -81,6 +184,48 @@ export const sqliteDialect: DialectAdapter = {
   setTransactionWorkingMemory(): undefined {
     // SQLite has no per-transaction working-memory budget to raise.
     return;
+  },
+
+  orderedRowsJsonArray(rowAlias, columns, orderColumn) {
+    const row = sql.identifier(rowAlias);
+    const object = buildRowsJsonObject(rowAlias, columns);
+    return sql`COALESCE((SELECT json_group_array(json(batch_json)) FROM (SELECT ${object} AS batch_json FROM ${row} ORDER BY ${row}.${sql.identifier(orderColumn)})), json('[]'))`;
+  },
+
+  partitionedRowsJsonArrays(rowAlias, columns, orderColumn, partitionColumn) {
+    const row = sql.identifier(rowAlias);
+    const object = buildRowsJsonObject(rowAlias, columns);
+    // Preserve JSON objects even on SQLite 3.44, whose aggregate ORDER BY
+    // loses JSON subtypes. Match orderedRecordJsonArray's text assembly.
+    return sql`SELECT json('[' || group_concat(${object} ORDER BY ${row}.${sql.identifier(orderColumn)}) || ']') AS payload FROM ${row} GROUP BY ${row}.${sql.identifier(partitionColumn)}`;
+  },
+
+  orderedScalarJsonArray({ filter, orderBy, value, valueType }) {
+    void valueType;
+    const aggregate = sql`json_group_array(${value} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    const filteredAggregate = applyAggregateFilter(aggregate, filter);
+    return sql`COALESCE(${filteredAggregate}, json('[]'))`;
+  },
+
+  orderedRecordJsonArray({ fields, filter, orderBy }) {
+    // json_patch treats null fields as deletion. Splice bounded JSON objects
+    // by removing only their outer braces; bound names remain JSON-escaped.
+    const chunks: SqlFragment[] = [];
+    for (
+      let index = 0;
+      index < fields.length;
+      index += JSON_OBJECT_PAIRS_PER_CALL
+    ) {
+      const chunk = fields.slice(index, index + JSON_OBJECT_PAIRS_PER_CALL);
+      const pairs = chunk.flatMap((field) => [sql`${field.name}`, field.value]);
+      const object = sql`json_object(${sql.join(pairs, sql`, `)})`;
+      chunks.push(sql`substr(${object}, 2, length(${object}) - 2)`);
+    }
+    const record = sql`json('{' || ${sql.join(chunks, sql` || ',' || `)} || '}')`;
+    // SQLite versions before 3.45 lose the JSON subtype through aggregate
+    // ORDER BY, so json_group_array would quote each record as a string.
+    const aggregate = sql`group_concat(${record} ORDER BY ${sql.join(orderBy, sql`, `)})`;
+    return sql`json('[' || COALESCE(${applyAggregateFilter(aggregate, filter)}, '') || ']')`;
   },
 
   // ============================================================
@@ -140,6 +285,14 @@ export const sqliteDialect: DialectAdapter = {
 
   jsonArrayContains(column, value) {
     return sql`EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value})`;
+  },
+
+  jsonArrayContainsExpression(column, value) {
+    return sql`CASE WHEN json_valid(${column}) THEN CASE WHEN json_type(${column}) = 'array' THEN EXISTS (SELECT 1 FROM json_each(${column}) WHERE json_each.value = ${value}) ELSE FALSE END ELSE FALSE END`;
+  },
+
+  rowValueComparison(operator, left, right) {
+    return sql`(${sql.join(left, sql`, `)}) ${sql.raw(operator)} (${sql.join(right, sql`, `)})`;
   },
 
   jsonArrayContainsAll(column, values) {
@@ -202,6 +355,44 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
   },
 
+  jsonScalarPathEquals(column, pointer, value) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    if (value === null) {
+      return sql`json_type(${column}, ${pathSql}) = 'null'`;
+    }
+    if (typeof value === "boolean") {
+      return sql`json_type(${column}, ${pathSql}) IN ('true', 'false') AND json_extract(${column}, ${pathSql}) = ${value ? 1 : 0}`;
+    }
+    if (typeof value === "number") {
+      return sql`json_type(${column}, ${pathSql}) IN ('integer', 'real') AND json_extract(${column}, ${pathSql}) = ${value}`;
+    }
+    return sql`json_type(${column}, ${pathSql}) = 'text' AND json_extract(${column}, ${pathSql}) = ${value}`;
+  },
+
+  jsonSetProperties(column, patch, unsetProperties = []) {
+    const entries = Object.entries(patch);
+    let patchedColumn = column;
+    for (
+      let offset = 0;
+      offset < entries.length;
+      offset += JSON_SET_REPLACEMENTS_PER_CALL
+    ) {
+      const replacements = entries
+        .slice(offset, offset + JSON_SET_REPLACEMENTS_PER_CALL)
+        .flatMap(([property, value]) => [
+          sql.raw(escapeSqliteLiteral(toSqliteObjectPropertyPath(property))),
+          sql`json(${JSON.stringify(value)})`,
+        ]);
+      patchedColumn = sql`json_set(${patchedColumn}, ${sql.join(replacements, sql`, `)})`;
+    }
+    if (unsetProperties.length === 0) return patchedColumn;
+    const removalPaths = unsetProperties.map((property) =>
+      sql.raw(escapeSqliteLiteral(toSqliteObjectPropertyPath(property))),
+    );
+    return sql`json_remove(${patchedColumn}, ${sql.join(removalPaths, sql`, `)})`;
+  },
+
   // ============================================================
   // Comparison Operations
   // ============================================================
@@ -218,15 +409,35 @@ export const sqliteDialect: DialectAdapter = {
     return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
   },
 
+  inListParameter(left, packedValues, { negated }) {
+    const operator = negated ? sql.raw("NOT IN") : sql.raw("IN");
+    // Same packed shape as the literal `inList` above, with the JSON text
+    // supplied by the caller's binding instead of baked in. SQLite's dynamic
+    // typing makes `json_each.value` compare correctly against every extracted
+    // column type, so the element type needs no cast here.
+    return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
+  },
+
+  packListValue(values) {
+    return packSqlListValue(values, "sqlite");
+  },
+
   // ============================================================
   // String Operations
   // ============================================================
 
+  like(column, pattern) {
+    // SQLite's LIKE ignores ASCII case; GLOB is case-sensitive, so the same
+    // pattern, translated to GLOB syntax, gives PostgreSQL's LIKE semantics.
+    return sql`${column} GLOB ${sqliteGlobFromLikePattern(pattern)}`;
+  },
+
   ilike(column, pattern) {
-    // SQLite LIKE is case-insensitive for ASCII by default, but we use
-    // LOWER() for consistency with non-ASCII characters. SQLite has no default
-    // LIKE escape character, so declare backslash explicitly to honor the
-    // escaping the compiler applies to the pattern (parity with Postgres).
+    // LOWER() on both sides makes the match case-insensitive. SQLite's
+    // built-in LOWER() folds ASCII only (unless the ICU extension is loaded);
+    // that limit is documented, not emulated. SQLite has no default LIKE
+    // escape character, so declare backslash explicitly to honor the escaping
+    // the compiler applies to the pattern (parity with Postgres).
     return sql`LOWER(${column}) LIKE LOWER(${pattern}) ${likeEscapeClause}`;
   },
 
@@ -244,20 +455,26 @@ export const sqliteDialect: DialectAdapter = {
   // Recursive CTE Path Operations
   // ============================================================
 
+  textJsonArray(values) {
+    return sql`json_array(${sql.join(values, sql`, `)})`;
+  },
+
+  appendTextJsonArray(array, values) {
+    const arguments_ = values.flatMap((value) => [sql`'$[#]'`, value]);
+    return sql`json_insert(${array}, ${sql.join(arguments_, sql`, `)})`;
+  },
+
   initializePath(nodeId) {
-    // SQLite uses string-based paths with delimiters: '|id|'
-    return sql`'|' || ${nodeId} || '|'`;
+    return sql`${PATH_DELIMITER} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}`;
   },
 
   extendPath(currentPath, nodeId) {
-    // Append: path || id || '|'
-    return sql`${currentPath} || ${nodeId} || '|'`;
+    return sql`${currentPath} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}`;
   },
 
   cycleCheck(nodeId, path) {
-    // Check that id is NOT in path using INSTR
-    // Returns TRUE if no cycle (id not found in path)
-    return sql`INSTR(${path}, '|' || ${nodeId} || '|') = 0`;
+    // TRUE when the delimited token is absent from the path, i.e. no cycle.
+    return sql`INSTR(${path}, ${PATH_DELIMITER} || ${encodePathToken(nodeId)} || ${PATH_DELIMITER}) = 0`;
   },
 
   // ============================================================
@@ -266,6 +483,10 @@ export const sqliteDialect: DialectAdapter = {
 
   bindValue(value) {
     return getSqlDialectProfile("sqlite").bindValue(value);
+  },
+
+  unboundedLimit() {
+    return sql.raw("-1");
   },
 
   booleanLiteral(value) {

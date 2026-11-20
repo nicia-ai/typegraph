@@ -1,0 +1,103 @@
+---
+import { Image } from "astro:assets";
+
+import type { BlogPostSummary } from "../../lib/blog-posts";
+
+interface Props {
+  posts: readonly BlogPostSummary[];
+}
+
+const { posts } = Astro.props;
+
+// Frontmatter dates are calendar dates parsed as UTC midnight; format them in
+// UTC so a reader west of Greenwich doesn't see the previous day.
+const dateFormat = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+// Excerpts are plain text apart from `inline code`; odd-indexed segments of a
+// backtick split are the code spans.
+function excerptSegments(excerpt: string) {
+  return excerpt
+    .split("`")
+    .map((text, index) => ({ text, isCode: index % 2 === 1 }));
+}
+---
+
+{posts.length > 0 && (
+  <section class="py-20" aria-labelledby="latest-posts-heading">
+    <div class="flex flex-wrap items-end justify-between gap-4 mb-10">
+      <div>
+        <p class="text-sm font-mono uppercase tracking-[0.24em] text-primary mb-4">
+          From the blog
+        </p>
+        <h2 id="latest-posts-heading" class="text-4xl font-extrabold">
+          Notes from building TypeGraph
+        </h2>
+      </div>
+      <a
+        href="/blog"
+        class="group inline-flex items-center gap-1 text-primary font-semibold no-underline"
+      >
+        All posts
+        <span
+          class="transition-transform duration-200 group-hover:translate-x-1"
+          aria-hidden="true"
+        >
+          →
+        </span>
+      </a>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {/* eslint-disable @typescript-eslint/no-unsafe-return -- astro-eslint-parser
+          can't resolve the type of a template expression returned from `.map()`
+          (see the FAQ list in src/pages/index.astro); `astro check` type-checks
+          this file cleanly. */}
+      {posts.map((post) => (
+        <a
+          href={post.href}
+          class="group flex flex-col bg-bg-card border border-border rounded-lg overflow-hidden no-underline hover:-translate-y-1 hover:border-primary transition-all duration-200"
+        >
+          {post.cover && (
+            <Image
+              src={post.cover.image}
+              alt=""
+              width={1200}
+              height={630}
+              loading="lazy"
+              class="block w-full h-auto aspect-[1200/630] object-cover border-b border-border"
+            />
+          )}
+          <div class="flex flex-col grow p-6">
+            <time
+              datetime={post.date.toISOString().slice(0, 10)}
+              class="text-xs font-mono uppercase tracking-[0.18em] text-primary mb-3"
+            >
+              {dateFormat.format(post.date)}
+            </time>
+            <h3 class="text-xl font-bold leading-snug text-text-main mb-3">
+              {post.title}
+            </h3>
+            {post.excerpt && (
+              <p class="text-text-muted leading-relaxed mb-6 line-clamp-5">
+                {excerptSegments(post.excerpt).map((segment) =>
+                  segment.isCode ?
+                    <code class="font-mono text-[0.9em]">{segment.text}</code>
+                  : segment.text,
+                )}
+              </p>
+            )}
+            <span class="mt-auto inline-flex text-primary font-semibold transition-transform duration-200 group-hover:translate-x-1">
+              Read the post →
+            </span>
+          </div>
+        </a>
+      ))}
+      {/* eslint-enable @typescript-eslint/no-unsafe-return */}
+    </div>
+  </section>
+)}

@@ -29,6 +29,7 @@ import {
   isEmbeddingSchema,
   type ResolvedEmbeddingIndex,
 } from "../core/embedding";
+import { objectSchemaShape } from "../core/kind-schema";
 import { type NodeRegistration } from "../core/types";
 import { type IndexDeclaration, type VectorIndexDeclaration } from "./types";
 
@@ -54,7 +55,7 @@ export function autoDeriveVectorIndexes(
   const out: VectorIndexDeclaration[] = [];
   for (const registration of Object.values(nodes)) {
     const node = registration.type;
-    const shape = readObjectShape(node.schema);
+    const shape = objectSchemaShape(node.schema);
     if (shape === undefined) continue;
     for (const [fieldName, fieldSchema] of Object.entries(shape)) {
       const config = readEmbeddingIndex(fieldSchema);
@@ -126,14 +127,6 @@ function buildAutoDerived(
 
 function sanitize(value: string): string {
   return value.replaceAll(/[^a-zA-Z0-9]/g, "_").toLowerCase();
-}
-
-function readObjectShape(
-  schema: z.ZodType,
-): Record<string, z.ZodType> | undefined {
-  if ((schema as { type?: string }).type !== "object") return undefined;
-  const shape = (schema.def as { shape?: Record<string, z.ZodType> }).shape;
-  return shape;
 }
 
 function readEmbeddingIndex(

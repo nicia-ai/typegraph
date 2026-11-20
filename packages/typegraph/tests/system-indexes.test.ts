@@ -19,8 +19,6 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
-  SYSTEM_INDEX_DECLARATIONS,
 } from "../src";
 import {
   createPostgresTables,
@@ -29,7 +27,14 @@ import {
 import { createSqliteTables, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { type GraphBackend } from "../src/backend/types";
-import { systemIndexName } from "../src/indexes/system";
+import { defineNodeIndex, SYSTEM_INDEX_DECLARATIONS } from "../src/indexes";
+import {
+  generateGraphIdOrderIndexDDL,
+  generateSystemIndexDDL,
+  graphIdOrderIndexName,
+  systemIndexDeclarationsFor,
+  systemIndexName,
+} from "../src/indexes/system";
 import { renderSqlInline, sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
@@ -50,6 +55,7 @@ type ExtractedIndex = Readonly<{
   table: string;
   columns: string;
   unique: boolean;
+  where: string | undefined;
 }>;
 
 /**
@@ -60,7 +66,7 @@ type ExtractedIndex = Readonly<{
  */
 function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
   const pattern =
-    /CREATE (UNIQUE )?INDEX IF NOT EXISTS "([^"]+)" ON "([^"]+)" \(([^;]*)\)(?: WHERE .*)?;/u;
+    /CREATE (UNIQUE )?INDEX IF NOT EXISTS "([^"]+)" ON "([^"]+)" \(([^;]*?)\)(?: WHERE (.*))?;/u;
   const extracted: ExtractedIndex[] = [];
   for (const statement of statements) {
     const match = pattern.exec(statement);
@@ -70,13 +76,35 @@ function extractIndexes(statements: readonly string[]): ExtractedIndex[] {
       name: requireDefined(match[2]),
       table: requireDefined(match[3]),
       columns: requireDefined(match[4]),
+      where: match[5],
     });
   }
   return extracted;
 }
 
+/**
+ * The deliberate asymmetries in the index set, stated literally rather than
+ * derived from the declarations under test:
+ * - PostgreSQL keeps text indexes in the database collation, so the graph id
+ *   listing's byte-order seeks need `COLLATE "C"` indexes there. SQLite's text
+ *   indexes are already in byte order.
+ * - PostgreSQL does not treat `deleted_at IS NULL` as an ordering equality, so
+ *   the live listing order needs partial `live_created_idx` indexes there.
+ *   SQLite serves it from `kind_created_idx`.
+ */
+/** The dialects spell a boolean literal differently: `= 1` / `= TRUE`. */
+const BOOLEAN_TRUE_LITERAL = /= TRUE$/u;
+
+const POSTGRES_ONLY_INDEXES = [
+  'typegraph_edges.typegraph_edges_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_edges.typegraph_edges_live_created_idx("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL',
+  'typegraph_nodes.typegraph_nodes_graph_id_bytes_idx("graph_id" COLLATE "C")',
+  'typegraph_nodes.typegraph_nodes_live_created_idx("graph_id", "kind", "created_at", "id") WHERE "deleted_at" IS NULL',
+  'typegraph_schema_versions.typegraph_schema_versions_graph_id_bytes_idx("graph_id" COLLATE "C")',
+] as const;
+
 describe("system-index dialect parity", () => {
-  it("emits the same index set (names, columns, uniqueness) on both dialects", () => {
+  it("emits the same index set (names, columns, uniqueness, predicates) on both dialects, bar PostgreSQL's byte-ordered graph_id and live listing indexes", () => {
     const sqliteIndexes = extractIndexes(
       generateSqliteDDL(createSqliteTables()),
     );
@@ -90,29 +118,58 @@ describe("system-index dialect parity", () => {
         .filter((index) => index.table !== fulltextTable)
         .map(
           (index) =>
-            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.columns})`,
+            `${index.unique ? "unique " : ""}${index.table}.${index.name}(${index.name.includes("_adjacency_") ? index.columns.replaceAll(' COLLATE "C"', "") : index.columns})${index.where === undefined ? "" : ` WHERE ${index.where.replace(BOOLEAN_TRUE_LITERAL, "= 1")}`}`,
         )
         .toSorted((a, b) => a.localeCompare(b));
 
     const sqliteSet = normalize(sqliteIndexes);
     const postgresSet = normalize(postgresIndexes);
-    expect(sqliteSet).toEqual(postgresSet);
+    const postgresOnly = postgresSet.filter(
+      (entry) =>
+        entry.includes("_graph_id_bytes_idx") ||
+        entry.includes("_live_created_idx"),
+    );
+    expect(postgresOnly).toEqual([...POSTGRES_ONLY_INDEXES]);
+    expect(
+      sqliteSet.some(
+        (entry) =>
+          entry.includes("_graph_id_bytes_idx") ||
+          entry.includes("_live_created_idx"),
+      ),
+    ).toBe(false);
+    expect(
+      postgresSet.filter((entry) => !postgresOnly.includes(entry)),
+    ).toEqual(sqliteSet);
     expect(sqliteSet.length).toBeGreaterThan(0);
   });
 
-  it("covers every declaration in both dialects' generated DDL", () => {
-    const scripts = [
-      generateSqliteDDL(createSqliteTables()).join("\n"),
-      generatePostgresDDL(createPostgresTables()).join("\n"),
-    ];
-    for (const script of scripts) {
+  it("emits each dialect's declarations in its generated DDL byte-for-byte as the runtime DDL, and no other dialect's", () => {
+    const scripts = {
+      sqlite: generateSqliteDDL(createSqliteTables()),
+      postgres: generatePostgresDDL(createPostgresTables()),
+    } as const;
+    for (const [dialect, statements] of Object.entries(scripts) as [
+      keyof typeof scripts,
+      readonly string[],
+    ][]) {
+      const carried = systemIndexDeclarationsFor(dialect);
       for (const declaration of SYSTEM_INDEX_DECLARATIONS) {
-        const columns = declaration.columns
-          .map((column) => `"${column}"`)
-          .join(", ");
-        expect(script).toContain(`(${columns})`);
+        const ddl = generateSystemIndexDDL(
+          declaration,
+          declaration.table === "nodes" ? "typegraph_nodes"
+          : declaration.table === "edges" ? "typegraph_edges"
+          : declaration.table === "recordedNodes" ? "typegraph_recorded_nodes"
+          : "typegraph_recorded_edges",
+          { concurrent: false, dialect },
+        );
+        expect(statements.includes(ddl), `${dialect}: ${ddl}`).toBe(
+          carried.includes(declaration),
+        );
       }
     }
+    expect(systemIndexDeclarationsFor("sqlite").length).toBeLessThan(
+      systemIndexDeclarationsFor("postgres").length,
+    );
   });
 });
 
@@ -120,14 +177,12 @@ describe("system-index identifier bounds", () => {
   it("keeps every generated name distinct and within 63 characters for long custom table names", () => {
     // A valid 58-char custom table name: naive `${table}_${suffix}` names
     // would exceed PostgreSQL's 63-byte identifier bound, get silently
-    // truncated by the engine, and collide (kind_idx vs kind_created_idx
-    // share their first 63 chars).
+    // truncated by the engine, and collide whenever two suffixes share
+    // their first characters.
     const longBase = `t${"x".repeat(57)}`;
     // Distinctness matters within one physical table (suffixes repeat
     // across tables by design — their physical names differ in practice).
-    // Edges carries the largest suffix set, including the kind_idx /
-    // kind_created_idx pair whose first 63 chars collide when naively
-    // truncated.
+    // Edges carries the largest suffix set.
     const edgeNames = SYSTEM_INDEX_DECLARATIONS.filter(
       (declaration) => declaration.table === "edges",
     ).map((declaration) => systemIndexName(longBase, declaration.suffix));
@@ -137,8 +192,8 @@ describe("system-index identifier bounds", () => {
     expect(new Set(edgeNames).size).toBe(edgeNames.length);
     // Deterministic: the same inputs must resolve to the same name (the
     // Drizzle builders, runtime DDL, and catalog probes all derive it).
-    expect(systemIndexName(longBase, "kind_idx")).toBe(
-      systemIndexName(longBase, "kind_idx"),
+    expect(systemIndexName(longBase, "kind_created_idx")).toBe(
+      systemIndexName(longBase, "kind_created_idx"),
     );
     // Short names stay exactly as before — no gratuitous hashing.
     expect(systemIndexName("typegraph_nodes", "id_idx")).toBe(
@@ -150,9 +205,43 @@ describe("system-index identifier bounds", () => {
     const longNodes = `n${"x".repeat(57)}`;
     const ddl = generateSqliteDDL(createSqliteTables({ nodes: longNodes }));
     const script = ddl.join("\n");
-    expect(script).toContain(`"${systemIndexName(longNodes, "kind_idx")}"`);
+    expect(script).toContain(`"${systemIndexName(longNodes, "id_idx")}"`);
     expect(script).toContain(
       `"${systemIndexName(longNodes, "kind_created_idx")}"`,
+    );
+  });
+});
+
+describe("byte-ordered graph_id index", () => {
+  it("adopts byte-for-byte the DDL the PostgreSQL schema factory declares", () => {
+    const tables = {
+      nodes: "n_custom",
+      edges: "e_custom",
+      schemaVersions: "sv_custom",
+    };
+    const generated = generatePostgresDDL(createPostgresTables(tables));
+    for (const table of Object.values(tables)) {
+      expect(generated).toContain(generateGraphIdOrderIndexDDL(table));
+    }
+  });
+
+  it("stays within the identifier bound and distinct for a long custom table name", () => {
+    const longTable = `t${"x".repeat(57)}`;
+    const name = graphIdOrderIndexName(longTable);
+    expect(name.length).toBeLessThanOrEqual(63);
+    expect(name).not.toBe(graphIdOrderIndexName(`${longTable}y`));
+  });
+
+  it("is reserved: a graph-declared index cannot take its name", () => {
+    const colliding = defineNodeIndex(Person, {
+      fields: ["name"],
+      name: "typegraph_nodes_graph_id_bytes_idx",
+    });
+    expect(() => createPostgresTables({}, { indexes: [colliding] })).toThrow(
+      /collides with a TypeGraph system index/,
+    );
+    expect(() => createSqliteTables({}, { indexes: [colliding] })).toThrow(
+      /collides with a TypeGraph system index/,
     );
   });
 });
@@ -217,7 +306,10 @@ describe("materializeSystemIndexes", () => {
       const [store] = await createStoreWithSchema(graph, backend);
 
       // Simulate a database initialized by an older library version: the
-      // index does not exist and no materialization was ever recorded.
+      // index does not exist and no materialization was ever recorded. A
+      // database initialized before `since_idx` existed adopts it through
+      // this exact same materializeSystemIndexes path as `id_idx`, not a
+      // bootstrap-only DDL a pre-upgrade database never sees.
       db.run(
         renderSqlInline(sql`DROP INDEX "typegraph_nodes_id_idx"`, "sqlite"),
       );
@@ -229,14 +321,37 @@ describe("materializeSystemIndexes", () => {
       );
       db.run(
         renderSqlInline(
-          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx')`,
+          sql`DROP INDEX "typegraph_recorded_nodes_since_idx"`,
+          "sqlite",
+        ),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DROP INDEX "typegraph_recorded_edges_since_idx"`,
+          "sqlite",
+        ),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx', 'typegraph_recorded_nodes_since_idx', 'typegraph_recorded_edges_since_idx')`,
           "sqlite",
         ),
       );
       expect(await indexNames(backend)).not.toContain("typegraph_nodes_id_idx");
+      expect(await indexNames(backend)).not.toContain(
+        "typegraph_recorded_nodes_since_idx",
+      );
+      expect(await indexNames(backend)).not.toContain(
+        "typegraph_recorded_edges_since_idx",
+      );
 
       const { results } = await store.materializeSystemIndexes();
-      expect(results).toHaveLength(SYSTEM_INDEX_DECLARATIONS.length);
+      expect(results).toHaveLength(systemIndexDeclarationsFor("sqlite").length);
+      expect(
+        results.filter((result) =>
+          result.indexName.includes("_live_created_idx"),
+        ),
+      ).toEqual([]);
       // Every entry either created its index or found the recorded boot
       // materialization; none may fail or be skipped on the bundled backend.
       for (const result of results) {
@@ -247,6 +362,8 @@ describe("materializeSystemIndexes", () => {
       const adopted = await indexNames(backend);
       expect(adopted).toContain("typegraph_nodes_id_idx");
       expect(adopted).toContain("typegraph_recorded_edges_from_idx");
+      expect(adopted).toContain("typegraph_recorded_nodes_since_idx");
+      expect(adopted).toContain("typegraph_recorded_edges_since_idx");
 
       // Status rows carry the system entity and the relation key.
       const statusRows = await backend.execute<{
@@ -435,5 +552,42 @@ describe("materializeSystemIndexes", () => {
     } finally {
       await backend.close();
     }
+  });
+});
+
+describe("collation-sensitive runtime system index DDL", () => {
+  it("requires an explicit dialect for byte ordering and preserves plain-index callers", () => {
+    const adjacency = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "adjacency_from_idx",
+      ),
+    );
+    expect(() =>
+      generateSystemIndexDDL(adjacency, "history", { concurrent: false }),
+    ).toThrow(
+      expect.objectContaining({
+        details: { code: "SYSTEM_INDEX_DIALECT_REQUIRED" },
+      }),
+    );
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "postgres",
+      }),
+    ).toContain('"kind" COLLATE "C", "recorded_from"');
+    expect(
+      generateSystemIndexDDL(adjacency, "history", {
+        concurrent: false,
+        dialect: "sqlite",
+      }),
+    ).not.toContain('COLLATE "C"');
+    const plain = requireDefined(
+      SYSTEM_INDEX_DECLARATIONS.find(
+        (declaration) => declaration.suffix === "since_idx",
+      ),
+    );
+    expect(
+      generateSystemIndexDDL(plain, "history", { concurrent: false }),
+    ).toContain('"graph_id", "recorded_from"');
   });
 });

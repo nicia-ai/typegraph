@@ -1,14 +1,13 @@
 /**
- * Pins the contract for backends that report `transactions: false`
+ * Pins the contract for backends that report no interactive transactions
  * (e.g. `drizzle-orm/neon-http`, Cloudflare D1).
  *
- * Wraps a real in-memory SQLite backend, flips `capabilities.transactions`
- * off, and makes `backend.transaction(...)` throw — then walks every
- * code path that historically wrapped its work in a transaction and
- * asserts it now completes via the sequential fall-through instead of
- * throwing. If a future change re-introduces an unconditional
- * `backend.transaction(...)` in any of these paths, the corresponding
- * test will fail with the synthetic transaction-disabled error.
+ * Wraps a real in-memory SQLite backend, disables `execution.interactiveTransactions`
+ * and makes `backend.transaction(...)` throw, then verifies that
+ * Store transaction callbacks fail closed before user code runs. Other
+ * APIs that intentionally use sequential execution remain covered by
+ * their own tests. If a future change accidentally invokes a callback on
+ * this backend, the assertions below will catch the contract regression.
  */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -17,6 +16,7 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
+  createStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -28,8 +28,10 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import {
   createInitializedStore,
+  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
+  matchingObject,
 } from "./test-utils";
 
 // The message the shared `disableTransactions` helper rejects with; asserted by
@@ -68,7 +70,14 @@ const graph = defineGraph({
   },
 });
 
-describe("backends with transactions: false fall through to sequential execution", () => {
+const identityGraph = defineGraph({
+  id: "no_tx_identity_refusal",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+describe("backends without interactive transactions fail closed at Store transactions", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -81,7 +90,18 @@ describe("backends with transactions: false fall through to sequential execution
     await expect(
       backend.transaction(() => Promise.resolve("unreachable")),
     ).rejects.toThrow(TRANSACTIONS_DISABLED_MESSAGE);
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+  });
+
+  it("schema-managed Store writes fail closed before any write", async () => {
+    const store = await createInitializedStore(graph, backend);
+
+    await expect(
+      store.nodes.Person.create({ name: "Blocked" }),
+    ).rejects.toMatchObject({
+      details: { code: "SCHEMA_WRITE_FENCE_UNSUPPORTED", graphId: graph.id },
+    });
+    await expect(store.nodes.Person.find()).resolves.toEqual([]);
   });
 
   // Note: schema commits are NOT a fall-through path — they refuse on
@@ -91,48 +111,48 @@ describe("backends with transactions: false fall through to sequential execution
   // and can't reach into the backend's closure-scoped transaction
   // config.
 
-  it("store.transaction(fn) executes fn against the main backend", async () => {
-    const store = await createInitializedStore(graph, backend);
-
-    const result = await store.transaction(async (tx) => {
-      const person = await tx.nodes.Person.create({ name: "Alice" });
-      const company = await tx.nodes.Company.create({ name: "Acme" });
-      const edge = await tx.edges.worksAt.create(person, company, {
-        role: "Engineer",
-      });
-      return { personId: person.id, companyId: company.id, edgeId: edge.id };
-    });
-
-    // Writes are visible after the (non-atomic) callback returns.
-    const person = await store.nodes.Person.getById(result.personId);
-    expect(person?.name).toBe("Alice");
-    const company = await store.nodes.Company.getById(result.companyId);
-    expect(company?.name).toBe("Acme");
-  });
-
-  it("store.transaction errors propagate without rollback", async () => {
-    const store = await createInitializedStore(graph, backend);
-    const persisted = await store.nodes.Person.create({ name: "Persisted" });
+  it("store.transaction(fn) refuses before invoking the callback", async () => {
+    const store = await createRawInitializedStore(graph, backend);
+    let invoked = false;
 
     await expect(
       store.transaction(async (tx) => {
-        await tx.nodes.Person.create({ name: "AlsoPersisted" });
-        throw new Error("boom");
+        invoked = true;
+        await tx.nodes.Person.create({ name: "must-not-persist" });
+        throw new Error("callback must not run");
       }),
-    ).rejects.toThrow("boom");
+    ).rejects.toMatchObject({
+      name: "UnsupportedBackendCapabilityError",
+      details: {
+        graphId: graph.id,
+        capability: "execution.interactiveTransactions",
+      },
+    });
+    expect(invoked).toBe(false);
+    await expect(store.nodes.Person.find()).resolves.toEqual([]);
+  });
 
-    // Without transactions, prior writes inside the callback are NOT
-    // rolled back. This is the documented contract.
-    const allPeople = await store.nodes.Person.find();
-    expect(allPeople.map((person) => person.name).toSorted()).toEqual([
-      "AlsoPersisted",
-      "Persisted",
-    ]);
-    expect(persisted.id).toBeDefined();
+  it("transactionWithReceipt refuses before invoking the callback", async () => {
+    const store = await createRawInitializedStore(graph, backend);
+    let invoked = false;
+
+    await expect(
+      store.transactionWithReceipt(() => {
+        invoked = true;
+        return Promise.resolve();
+      }),
+    ).rejects.toMatchObject({
+      name: "UnsupportedBackendCapabilityError",
+      details: {
+        graphId: graph.id,
+        capability: "execution.interactiveTransactions",
+      },
+    });
+    expect(invoked).toBe(false);
   });
 
   it("store.batch returns per-query results without throwing", async () => {
-    const store = await createInitializedStore(graph, backend);
+    const store = await createRawInitializedStore(graph, backend);
 
     await store.nodes.Person.create({ name: "Alice" });
     await store.nodes.Person.create({ name: "Bob" });
@@ -156,7 +176,7 @@ describe("backends with transactions: false fall through to sequential execution
   it("store.search.rebuildFulltext completes via sequential page writes", async () => {
     // The fulltext rebuild path used to wrap each page's upserts/deletes
     // in backend.transaction(...). Verify it now runs the writes
-    // sequentially when the backend reports transactions: false.
+    // sequentially when the backend reports no interactive transactions.
     const Document = defineNode("Document", {
       schema: z.object({
         title: searchable({ language: "english" }),
@@ -168,7 +188,7 @@ describe("backends with transactions: false fall through to sequential execution
       nodes: { Document: { type: Document } },
       edges: {},
     });
-    const store = await createInitializedStore(documentGraph, backend);
+    const store = await createRawInitializedStore(documentGraph, backend);
 
     await store.nodes.Document.create({
       title: "First",
@@ -187,7 +207,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 });
 
-describe("backends with transactions: false refuse schema commits", () => {
+describe("backends without interactive transactions refuse schema commits", () => {
   // Genuine non-transactional configuration via the SQLite execution
   // profile, so the closure-scoped transactionMode inside the backend
   // observes "none" — the production code path for D1 / DurableObjects.
@@ -207,6 +227,18 @@ describe("backends with transactions: false refuse schema commits", () => {
 
   afterEach(() => {
     sqlite.close();
+  });
+
+  it("refuses Operational Identity with the stable driver capability code", () => {
+    expect(() => createStore(identityGraph, nonTxBackend)).toThrow(
+      expect.objectContaining({
+        name: "ConfigurationError",
+        details: matchingObject({
+          code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+          interactiveTransactions: false,
+        }),
+      }),
+    );
   });
 
   it("commitSchemaVersion throws ConfigurationError", async () => {

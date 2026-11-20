@@ -30,6 +30,7 @@ import { requireDefined } from "../utils/presence";
  *   clustering in P0.
  */
 import type { CandidateEdge } from "./candidate-gen";
+import type { MatchEvidence } from "./evidence";
 import { compareMergeKeys, type MergeKey } from "./node-key";
 import { compareCandidateEdges } from "./scoring";
 import { UnionFind } from "./union-find";
@@ -219,6 +220,12 @@ function weakestEdge(edges: readonly CandidateEdge[]): CandidateEdge {
  * splittable offending components (those with an edge to drop), so an edgeless
  * offending sibling can never leave another offending component unsplit.
  */
+type SplitResult = Readonly<{
+  clusters: readonly ClusterResult[];
+  survivingEdges: readonly CandidateEdge[];
+  removedEdges: readonly CandidateEdge[];
+}>;
+
 function splitUntil(
   members: readonly AnyNodeId[],
   edges: readonly CandidateEdge[],
@@ -226,10 +233,11 @@ function splitUntil(
     members: readonly AnyNodeId[],
     surviving: readonly CandidateEdge[],
   ) => boolean,
-): ClusterResult[] {
+): SplitResult {
   // `surviving` starts in canonical `(a, b)` order and `.filter` preserves it, so
   // every iteration can pass it to `buildComponents` pre-sorted.
   let surviving = internalEdges(members, edges);
+  const removedEdges: CandidateEdge[] = [];
 
   for (;;) {
     const components = buildComponents(surviving, members, true);
@@ -237,7 +245,7 @@ function splitUntil(
       isOffending(component.members, surviving),
     );
     if (offending.length === 0) {
-      return components;
+      return { clusters: components, survivingEdges: surviving, removedEdges };
     }
     // Prefer to keep dropping the weakest edge of an offending component that still has
     // one; only when EVERY offending component is edgeless do we degrade them all.
@@ -253,13 +261,18 @@ function splitUntil(
     }
     if (splittable === undefined) {
       const offendingSet = new Set(offending);
-      return components.flatMap((component) =>
-        offendingSet.has(component) ?
-          component.members.map((id) => ({ members: [id] }))
-        : [component],
-      );
+      return {
+        clusters: components.flatMap((component) =>
+          offendingSet.has(component) ?
+            component.members.map((id) => ({ members: [id] }))
+          : [component],
+        ),
+        survivingEdges: surviving,
+        removedEdges,
+      };
     }
     const weakest = weakestEdge(splittable);
+    removedEdges.push(weakest);
     surviving = surviving.filter((edge) => edge !== weakest);
   }
 }
@@ -272,7 +285,7 @@ function splitByDropWeakest(
   members: readonly AnyNodeId[],
   edges: readonly CandidateEdge[],
   maxDiameter: number,
-): ClusterResult[] {
+): SplitResult {
   return splitUntil(members, edges, (componentMembers, surviving) =>
     exceedsDiameter(componentMembers, surviving, maxDiameter),
   );
@@ -313,17 +326,52 @@ export function enforceDiameter(
   candidateEdges: readonly CandidateEdge[],
   clusterMaxDiameter: number,
 ): readonly ClusterResult[] {
+  return enforceDiameterWithEdges(clusters, candidateEdges, clusterMaxDiameter)
+    .clusters;
+}
+
+export type ExcludedCandidateEdge = Readonly<{
+  edge: CandidateEdge;
+  reason: "diameter" | "baseAmbiguity";
+}>;
+
+export type GuardedClusters = Readonly<{
+  clusters: readonly ClusterResult[];
+  survivingEdges: readonly CandidateEdge[];
+  excludedEdges: readonly ExcludedCandidateEdge[];
+}>;
+
+/** Diameter guard variant that preserves the exact post-split edge graph. */
+export function enforceDiameterWithEdges(
+  clusters: readonly ClusterResult[],
+  candidateEdges: readonly CandidateEdge[],
+  clusterMaxDiameter: number,
+): GuardedClusters {
   const guarded: ClusterResult[] = [];
+  let survivingEdges = [...candidateEdges];
+  const excludedEdges: ExcludedCandidateEdge[] = [];
   for (const component of clusters) {
     if (
       exceedsDiameter(component.members, candidateEdges, clusterMaxDiameter)
     ) {
-      guarded.push(
-        ...splitByDropWeakest(
-          component.members,
-          candidateEdges,
-          clusterMaxDiameter,
+      const split = splitByDropWeakest(
+        component.members,
+        survivingEdges,
+        clusterMaxDiameter,
+      );
+      guarded.push(...split.clusters);
+      const memberSet = new Set(component.members);
+      survivingEdges = [
+        ...survivingEdges.filter(
+          (edge) => !(memberSet.has(edge.a) && memberSet.has(edge.b)),
         ),
+        ...split.survivingEdges,
+      ].sort((left, right) => compareCandidateEdges(left, right));
+      excludedEdges.push(
+        ...split.removedEdges.map((edge) => ({
+          edge,
+          reason: "diameter" as const,
+        })),
       );
     } else {
       guarded.push(component);
@@ -335,7 +383,7 @@ export function enforceDiameter(
       requireDefined(right.members[0]),
     ),
   );
-  return guarded;
+  return { clusters: guarded, survivingEdges, excludedEdges };
 }
 
 /** Count of a component's members that are committed BASE nodes. */
@@ -363,7 +411,7 @@ function splitByBaseMultiplicity(
   members: readonly AnyNodeId[],
   edges: readonly CandidateEdge[],
   baseIds: ReadonlySet<AnyNodeId>,
-): ClusterResult[] {
+): SplitResult {
   return splitUntil(
     members,
     edges,
@@ -411,13 +459,24 @@ export function enforceBaseGuard(
 ): Readonly<{
   clusters: readonly ClusterResult[];
   events: readonly BaseMultiplicityEvent[];
+  survivingEdges: readonly CandidateEdge[];
+  excludedEdges: readonly ExcludedCandidateEdge[];
 }> {
   if (baseIds.size === 0) {
-    return { clusters, events: [] };
+    return {
+      clusters,
+      events: [],
+      survivingEdges: [...candidateEdges].sort((left, right) =>
+        compareCandidateEdges(left, right),
+      ),
+      excludedEdges: [],
+    };
   }
 
   const result: ClusterResult[] = [];
   const events: BaseMultiplicityEvent[] = [];
+  let survivingEdges = [...candidateEdges];
+  const excludedEdges: ExcludedCandidateEdge[] = [];
   for (const cluster of clusters) {
     const clusterBaseIds = cluster.members.filter((id) => baseIds.has(id));
     if (clusterBaseIds.length < 2) {
@@ -434,8 +493,24 @@ export function enforceBaseGuard(
     });
     // Always REFUSE the base↔base collapse: split for containment so both committed
     // entities survive separately (§6.4-A). A deliberate collapse is deferred (§6.4-C).
-    result.push(
-      ...splitByBaseMultiplicity(cluster.members, candidateEdges, baseIds),
+    const split = splitByBaseMultiplicity(
+      cluster.members,
+      survivingEdges,
+      baseIds,
+    );
+    result.push(...split.clusters);
+    const memberSet = new Set(cluster.members);
+    survivingEdges = [
+      ...survivingEdges.filter(
+        (edge) => !(memberSet.has(edge.a) && memberSet.has(edge.b)),
+      ),
+      ...split.survivingEdges,
+    ].sort((left, right) => compareCandidateEdges(left, right));
+    excludedEdges.push(
+      ...split.removedEdges.map((edge) => ({
+        edge,
+        reason: "baseAmbiguity" as const,
+      })),
     );
   }
   result.sort((left, right) =>
@@ -444,5 +519,28 @@ export function enforceBaseGuard(
       requireDefined(right.members[0]),
     ),
   );
-  return { clusters: result, events };
+  return { clusters: result, events, survivingEdges, excludedEdges };
+}
+
+/**
+ * Selects a deterministic minimal connectivity witness for a final cluster.
+ * Canonical Kruskal selection over the post-guard edge set yields N-1 evidence
+ * edges for every connected N-member cluster and can never cite a removed edge.
+ */
+export function decisiveEdgesForCluster(
+  cluster: ClusterResult,
+  survivingEdges: readonly CandidateEdge[],
+): readonly MatchEvidence[] {
+  const members = new Set(cluster.members);
+  const forest = new UnionFind<AnyNodeId>(compareMergeKeys);
+  for (const member of cluster.members) forest.add(member);
+
+  const decisive: MatchEvidence[] = [];
+  for (const edge of internalEdges(cluster.members, survivingEdges)) {
+    if (!members.has(edge.a) || !members.has(edge.b)) continue;
+    if (forest.find(edge.a) === forest.find(edge.b)) continue;
+    forest.union(edge.a, edge.b);
+    decisive.push(edge.evidence);
+  }
+  return decisive;
 }

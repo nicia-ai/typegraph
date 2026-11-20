@@ -18,8 +18,8 @@
  * Built on the public `Store` surface (plus one internal sealed-query
  * seam), so it composes the same reads `branch()` / `merge()` consume.
  */
+import { assertRecordedInstantOwnershipMatch } from "../backend/capabilities/recorded-time-ownership";
 import {
-  type AllNodeTypes,
   type EdgeKinds,
   type GraphDef,
   type NodeKinds,
@@ -34,11 +34,11 @@ import {
 } from "../core/temporal";
 import {
   type AnyEdgeType,
-  type NodeId,
   type NodeType,
   type TemporalMode,
 } from "../core/types";
-import { ConfigurationError } from "../errors";
+import { ConfigurationError, ValidationError } from "../errors";
+import { type IdentityReadFacade } from "../identity/types";
 import { type InitialQueryBuilder } from "../query/builder";
 import { requireDefined } from "../utils/presence";
 import {
@@ -70,22 +70,41 @@ import {
   type RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
 import {
+  type InternalReadParams,
   withCoordinate,
   withValidCoordinate,
 } from "./collections/temporal-read-params";
+import {
+  type NodeByIdReader,
+  readNodeByReference,
+} from "./node-reference-read";
 import { storeRuntime } from "./runtime-port";
 import { type StoreSearch } from "./search-facade";
-import { type Store } from "./store";
+import { type Store, type ViewIdentityAccess } from "./store";
 import {
   type InternalSubgraphOptions,
+  type SubgraphCompositionSelection,
   type SubgraphOptions,
-  type SubgraphProject,
+  type SubgraphProjectFor,
   type SubgraphResult,
+  type SubgraphResultEdgeKinds,
 } from "./subgraph";
 import {
+  type BulkFindEdgesFromParams,
+  type BulkFindEdgesFromResult,
+  type BulkFindEdgesToParams,
+  type BulkFindEdgesToResult,
+  type DynamicStoreViewEdgeCollection,
+  type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
+  type GraphNodeForKinds,
+  type GraphNodeReferenceInput,
+  type Node,
   type NodeCollection,
   type NodeCurrentReads,
+  type RecordedAdjacencyEntry,
+  type RecordedAdjacencyOptions,
+  type RecordedAdjacencyPage,
   type RecordedStoreViewEdgeCollection,
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
@@ -120,9 +139,10 @@ export type StoreViewSubgraphOptions<
   G extends GraphDef,
   EK extends EdgeKinds<G>,
   NK extends NodeKinds<G>,
-  P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
 > = Omit<
-  SubgraphOptions<G, EK, NK, P>,
+  SubgraphOptions<G, EK, NK, P, C>,
   "temporalMode" | "asOf" | "recordedAsOf"
 >;
 
@@ -255,6 +275,65 @@ const NON_KIND_KEYS: ReadonlySet<string> = new Set([
   "toJSON",
 ]);
 
+/** The option keys a read states its own temporal coordinate with. */
+const STATED_COORDINATE_KEYS = [
+  "temporalMode",
+  "asOf",
+  "recordedAsOf",
+] as const;
+
+/**
+ * Refuses a read that states its own temporal coordinate.
+ *
+ * The view's option types omit the temporal keys, but an untyped caller (or
+ * a cast) can still state them. Answering at the pin anyway would drop a
+ * stated value without a word, and honoring it would break the seal, so the
+ * read is refused — the same answer `view.query().temporal(...)` gives, on a
+ * `current` view and an `asOf` view alike. `stated` is whatever argument sits
+ * where the live collection would take its options.
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function assertNoStatedCoordinate(
+  method: string,
+  stated: unknown,
+  coordinate: ReadCoordinate,
+): void {
+  if (typeof stated !== "object" || stated === null) return;
+  const statedKeys = STATED_COORDINATE_KEYS.filter(
+    (key) => (stated as Readonly<Record<string, unknown>>)[key] !== undefined,
+  );
+  if (statedKeys.length === 0) return;
+  throw new ConfigurationError(
+    `'${method}' on a StoreView does not accept ${statedKeys.map((key) => `\`${key}\``).join(", ")} — the view's ` +
+      `temporal coordinate (${describeCoordinate(coordinate)}) is sealed. ` +
+      `Read at another coordinate through the live Store or store.view(...).`,
+    {
+      code: "STORE_VIEW_SEALED_COORDINATE",
+      method,
+      stated: statedKeys,
+      ...coordinateContext(coordinate),
+    },
+  );
+}
+
+/**
+ * A view read's options with the view's coordinate applied: the one place a
+ * pinned read merges the two, so no read can spread the pin over a
+ * coordinate its caller stated ({@link assertNoStatedCoordinate}).
+ *
+ * @throws ConfigurationError (`STORE_VIEW_SEALED_COORDINATE`)
+ */
+function pinnedOptions<Options extends object, Pin extends object>(
+  method: string,
+  options: Options | undefined,
+  coordinate: ReadCoordinate,
+  pin: Pin,
+): Options & Pin {
+  assertNoStatedCoordinate(method, options, coordinate);
+  return { ...options, ...pin } as Options & Pin;
+}
+
 /**
  * Returns a function that refuses a write or unsupported-read method on a
  * read-only view with a descriptive error, rather than silently ignoring
@@ -310,8 +389,8 @@ function createCurrentOnlyRefusal(
 /**
  * Returns a function that refuses a deferred edge batch read
  * ({@link EDGE_BATCH_READ_NAMES}) on a read-only view. These reads are *reads*,
- * not writes, but they resolve through `store.batch(...)` — a DataLoader context
- * a view does not expose — so the view cannot honor them. The refusal is
+ * not writes, but they only resolve through `store.batch(...)`, which a view
+ * does not expose — so the view cannot honor them. The refusal is
  * synchronous because the live method returns a `BatchableQuery` synchronously
  * (it is invoked, not awaited), so a misuse fail-louds at the call site instead
  * of being routed through the write-refusal fallthrough and mislabeled a write.
@@ -325,7 +404,7 @@ function createBatchReadRefusal(
     throw new ConfigurationError(
       `'${method}' is not available on a read-only StoreView (${describeCoordinate(coordinate)}). ` +
         `Batch endpoint reads resolve through store.batch(...), which a view does not expose — ` +
-        `use the live Store's batch loader, or the view's findFrom / findTo / findByEndpoints for single reads.`,
+        `use the live Store's batch(...), or the view's findFrom / findTo / findByEndpoints for single reads.`,
       {
         code: "STORE_VIEW_BATCH_UNAVAILABLE",
         entity,
@@ -484,10 +563,22 @@ function pinnedNodeCollection(
         Method in (typeof NODE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: () => live.count(temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(temporal);
+    },
   };
   return readOnlyCollectionProxy(
     reads,
@@ -508,14 +599,45 @@ function pinnedEdgeCollection(
         Method in (typeof EDGE_TEMPORAL_READ_NAMES)[number]
       ]: StoreViewEdgeCollection<AnyEdgeType, NodeType, NodeType>[Method];
     }> = {
-    getById: (id) => live.getById(id, temporal),
-    getByIds: (ids) => live.getByIds(ids, temporal),
-    find: (filter) => live.find(filter, temporal),
-    count: (filter) => live.count(filter, temporal),
-    findFrom: (from) => live.findFrom(from, temporal),
-    findTo: (to) => live.findTo(to, temporal),
-    findByEndpoints: (from, to, options) =>
-      live.findByEndpoints(from, to, options, temporal),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return live.getById(id, temporal);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return live.getByIds(ids, temporal);
+    },
+    find: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("find", stated, coordinate);
+      return live.find(filter, temporal);
+    },
+    count: async (filter, stated?: unknown) => {
+      assertNoStatedCoordinate("count", stated, coordinate);
+      return live.count(filter, temporal);
+    },
+    findFrom: async (from, stated?: unknown) => {
+      assertNoStatedCoordinate("findFrom", stated, coordinate);
+      return live.findFrom(from, temporal);
+    },
+    findTo: async (to, stated?: unknown) => {
+      assertNoStatedCoordinate("findTo", stated, coordinate);
+      return live.findTo(to, temporal);
+    },
+    bulkFindFrom: async (froms, options) =>
+      live.bulkFindFrom(
+        froms,
+        pinnedOptions("bulkFindFrom", options, coordinate, temporal),
+      ),
+    bulkFindTo: async (tos, options) =>
+      live.bulkFindTo(
+        tos,
+        pinnedOptions("bulkFindTo", options, coordinate, temporal),
+      ),
+    findByEndpoints: async (from, to, options, stated?: unknown) => {
+      assertNoStatedCoordinate("findByEndpoints", options, coordinate);
+      assertNoStatedCoordinate("findByEndpoints", stated, coordinate);
+      return live.findByEndpoints(from, to, options, temporal);
+    },
   };
   return readOnlyCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -608,12 +730,18 @@ function recordedNodeCollection<G extends GraphDef>(
         Method in (typeof RECORDED_POINT_READ_NAMES)[number]
       ]: RecordedStoreViewNodeCollection<NodeType>[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedNodeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedNodeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedNodeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedNodeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "node");
 }
@@ -638,12 +766,18 @@ function recordedEdgeCollection<G extends GraphDef>(
         NodeType
       >[Method];
     }> = {
-    getById: (id) =>
-      storeRuntime(store).recordedEdgeGetById(kind, id, coordinate),
-    getByIds: (ids) =>
-      storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate),
-    scan: (options) =>
-      storeRuntime(store).recordedEdgeScan(kind, coordinate, options),
+    getById: async (id, stated?: unknown) => {
+      assertNoStatedCoordinate("getById", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetById(kind, id, coordinate);
+    },
+    getByIds: async (ids, stated?: unknown) => {
+      assertNoStatedCoordinate("getByIds", stated, coordinate);
+      return storeRuntime(store).recordedEdgeGetByIds(kind, ids, coordinate);
+    },
+    scan: async (options) => {
+      assertNoStatedCoordinate("scan", options, coordinate);
+      return storeRuntime(store).recordedEdgeScan(kind, coordinate, options);
+    },
   };
   return recordedCollectionProxy(reads, live, coordinate, "edge");
 }
@@ -821,6 +955,31 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   constructor(store: Store<G>, coordinate: ReadCoordinate) {
     this.store = store;
     this.coordinate = coordinate;
+
+    // `identity` is typed by {@link ViewIdentityAccess} on the view aliases, so
+    // it is present only for graphs that declared `identity: { ... }` — a class
+    // member could not be conditional that way. Installing it here keeps the
+    // runtime accessor (and its IDENTITY_NOT_ENABLED refusal for JS callers)
+    // while leaving the class type free of an always-present member. Mirrors
+    // the `search` backstop on RecordedStoreView.
+    Object.defineProperty(this, "identity", {
+      enumerable: false,
+      get: (): IdentityReadFacade<G> =>
+        storeRuntime(this.store).identityAtCoordinate(this.coordinate),
+    });
+  }
+
+  /** This view's read options with its coordinate applied ({@link pinnedOptions}). */
+  #pinned<Options extends object>(
+    method: string,
+    options: Options | undefined,
+  ): Options & InternalReadParams {
+    return pinnedOptions(
+      method,
+      options,
+      this.coordinate,
+      withCoordinate(this.coordinate),
+    );
   }
 
   /** The temporal mode this view reads in. */
@@ -841,6 +1000,29 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   query(): InitialQueryBuilder<G, "sealed"> {
     return storeRuntime(this.store).sealedQuery(this.coordinate);
   }
+
+  /**
+   * Reads the node a `{ kind, id }` reference names at this view's
+   * coordinate, mirroring `Store.getNodeByRef`.
+   */
+  getNodeByRef<const K extends NodeKinds<G>>(
+    reference: Readonly<{ kind: K; id: string }>,
+  ): Promise<GraphNodeForKinds<G, K> | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<GraphNodeForKinds<G, NodeKinds<G>> | Node | undefined>;
+  getNodeByRef(
+    reference: Readonly<{ kind: string; id: string }>,
+  ): Promise<unknown> {
+    return readNodeByReference(
+      this.store.graph,
+      (kind) => (this.nodes as Readonly<Record<string, NodeByIdReader>>)[kind],
+      reference,
+    );
+  }
+
+  /** The view's pinned node collections, keyed by kind. */
+  abstract get nodes(): object;
 
   protected internalAlgorithms(): InternalGraphAlgorithms<G> {
     this.#internalAlgorithms ??= storeRuntime(
@@ -869,131 +1051,128 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
   }
 
   /** Extracts a subgraph at this view's pinned coordinate. */
-  subgraph<
+  async subgraph<
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
-    const P extends SubgraphProject<G, NK, EK> | undefined = undefined,
+    const P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+    const C extends SubgraphCompositionSelection | undefined = undefined,
   >(
-    rootId: NodeId<AllNodeTypes<G>>,
-    options: StoreViewSubgraphOptions<G, EK, NK, P>,
-  ): Promise<SubgraphResult<G, NK, EK, P>> {
-    const internalOptions = {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    } as InternalSubgraphOptions<G, EK, NK, P>;
-    return storeRuntime(this.store).subgraphAtCoordinate(
-      rootId,
-      internalOptions,
-    );
+    root: GraphNodeReferenceInput<G>,
+    options: StoreViewSubgraphOptions<G, EK, NK, P, C>,
+  ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+    const internalOptions = this.#pinned(
+      "subgraph",
+      options,
+    ) as InternalSubgraphOptions<G, EK, NK, P, C>;
+    return storeRuntime(this.store).subgraphAtCoordinate(root, internalOptions);
   }
 
   /** Shortest path between two nodes at this view's pinned coordinate. */
-  shortestPath(
+  async shortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewShortestPathOptions<G>,
   ): Promise<ShortestPathResult | undefined> {
-    return this.internalAlgorithms().shortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().shortestPath(
+      from,
+      to,
+      this.#pinned("shortestPath", options),
+    );
   }
 
   /** Minimum-total-weight path at this view's pinned coordinate. */
-  weightedShortestPath(
+  async weightedShortestPath(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewWeightedShortestPathOptions<G>,
   ): Promise<WeightedShortestPathResult | undefined> {
-    return this.internalAlgorithms().weightedShortestPath(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weightedShortestPath(
+      from,
+      to,
+      this.#pinned("weightedShortestPath", options),
+    );
   }
 
   /** Nodes reachable from `from` at this view's pinned coordinate. */
-  reachable(
+  async reachable(
     from: NodeIdentifier,
     options: StoreViewReachableOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().reachable(from, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().reachable(
+      from,
+      this.#pinned("reachable", options),
+    );
   }
 
   /** Whether `to` is reachable from `from` at this view's pinned coordinate. */
-  canReach(
+  async canReach(
     from: NodeIdentifier,
     to: NodeIdentifier,
     options: StoreViewCanReachOptions<G>,
   ): Promise<boolean> {
-    return this.internalAlgorithms().canReach(from, to, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().canReach(
+      from,
+      to,
+      this.#pinned("canReach", options),
+    );
   }
 
   /** The k-hop neighborhood of `node` at this view's pinned coordinate. */
-  neighbors(
+  async neighbors(
     node: NodeIdentifier,
     options: StoreViewNeighborsOptions<G>,
   ): Promise<readonly ReachableNode[]> {
-    return this.internalAlgorithms().neighbors(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().neighbors(
+      node,
+      this.#pinned("neighbors", options),
+    );
   }
 
   /** Counts active edges incident to `node` at this view's pinned coordinate. */
-  degree(
+  async degree(
     node: NodeIdentifier,
     options?: StoreViewDegreeOptions<G>,
   ): Promise<number> {
-    return this.internalAlgorithms().degree(node, {
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().degree(
+      node,
+      this.#pinned("degree", options),
+    );
   }
 
   /** Deterministic label-propagation memberships at this view's coordinate. */
-  labelPropagation(
+  async labelPropagation(
     options: StoreViewLabelPropagationOptions<G>,
   ): Promise<readonly LabelPropagationMembership[]> {
-    return this.internalAlgorithms().labelPropagation({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().labelPropagation(
+      this.#pinned("labelPropagation", options),
+    );
   }
 
   /** Exact WCC memberships at this view's pinned coordinate. */
-  weaklyConnectedComponents(
+  async weaklyConnectedComponents(
     options: StoreViewWeaklyConnectedComponentsOptions<G>,
   ): Promise<readonly WeaklyConnectedComponentMembership[]> {
-    return this.internalAlgorithms().weaklyConnectedComponents({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().weaklyConnectedComponents(
+      this.#pinned("weaklyConnectedComponents", options),
+    );
   }
 
   /** Global PageRank scores at this view's pinned coordinate. */
-  pageRank(
+  async pageRank(
     options: StoreViewPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().pageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().pageRank(
+      this.#pinned("pageRank", options),
+    );
   }
 
   /** Personalized PageRank scores at this view's pinned coordinate. */
-  personalizedPageRank(
+  async personalizedPageRank(
     options: StoreViewPersonalizedPageRankOptions<G>,
   ): Promise<readonly PageRankScore[]> {
-    return this.internalAlgorithms().personalizedPageRank({
-      ...options,
-      ...withCoordinate(this.coordinate),
-    });
+    return this.internalAlgorithms().personalizedPageRank(
+      this.#pinned("personalizedPageRank", options),
+    );
   }
 }
 
@@ -1001,20 +1180,10 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
 // StoreView
 // ============================================================
 
-/**
- * A read-only `(mode, asOf)` lens over a {@link Store}. Construct one via
- * {@link Store.asOf} (valid-time) or {@link Store.view} (any public
- * mode), never directly.
- *
- * @example
- * ```typescript
- * const past = store.asOf("2026-01-01T00:00:00.000Z");
- * const alice = await past.nodes.Person.getById(aliceId);
- * const jobs = await past.edges.worksAt.findFrom(alice!);
- * const reach = await past.reachable(alice!, { edges: ["knows"] });
- * ```
- */
-export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
+/** The runtime half of {@link StoreView}; see that alias for the contract. */
+class StoreViewImplementation<
+  G extends GraphDef,
+> extends CoordinatePinnedView<G> {
   #nodes: StoreViewNodeCollections<G> | undefined;
   #edges: StoreViewEdgeCollections<G> | undefined;
   #search: StoreSearch<G> | undefined;
@@ -1033,6 +1202,16 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
         )
       ),
     );
+  }
+
+  /** Dynamic endpoint reads remain bound to this view's coordinate. */
+  getEdgeCollection<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicStoreViewEdgeCollection<G["edges"][K]["type"]> | undefined;
+  getEdgeCollection(kind: string): DynamicStoreViewEdgeCollection | undefined;
+  getEdgeCollection(kind: string): unknown {
+    if (this.store.getEdgeCollection(kind) === undefined) return undefined;
+    return this.edges[kind as EdgeKinds<G>];
   }
 
   /** Adds a recorded-time pin, returning the narrow reconstructing view. */
@@ -1068,6 +1247,38 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
     return this.#edges;
   }
 
+  /** Heterogeneous multi-kind edge read pinned to this view's coordinate. */
+  async bulkFindEdgesFrom<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesFromParams<G, K>,
+    options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
+  ): Promise<readonly BulkFindEdgesFromResult<G, K>[]> {
+    return this.store.bulkFindEdgesFrom(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesFrom",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
+  }
+
+  /** Inbound multi-kind edge read pinned to this view's coordinate. */
+  async bulkFindEdgesTo<const K extends EdgeKinds<G>>(
+    params: BulkFindEdgesToParams<G, K>,
+    options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">,
+  ): Promise<readonly BulkFindEdgesToResult<G, K>[]> {
+    return this.store.bulkFindEdgesTo(
+      params,
+      pinnedOptions(
+        "bulkFindEdgesTo",
+        options,
+        this.coordinate,
+        withValidCoordinate(this.coordinate),
+      ),
+    );
+  }
+
   /**
    * Read-only search facade. On a `current` view the read methods
    * (`fulltext` / `vector` / `hybrid`) delegate to the live `store.search`,
@@ -1083,13 +1294,39 @@ export class StoreView<G extends GraphDef> extends CoordinatePinnedView<G> {
 }
 
 /**
- * A narrow recorded-time read lens. It preserves the valid-time coordinate
- * carried by the source view and adds a recorded/system-time pin. Collection
- * reads expose point reconstruction and bounded scans; broad collection
- * predicates, endpoint reads, search, and further coordinate changes are absent
- * from the typed surface and refused by the runtime proxies for JS callers.
+ * A read-only `(mode, asOf)` lens over a {@link Store}. Construct one via
+ * {@link Store.asOf} (valid-time) or {@link Store.view} (any public
+ * mode), never directly.
+ *
+ * Carries `identity` — pinned identity reads — only when the graph declared
+ * `identity: { ... }`. That conditional presence is why this is a type alias
+ * over an implementation class plus {@link ViewIdentityAccess} rather than a
+ * class declaration, which would put the member on every graph's view.
+ * `instanceof StoreView` still works.
+ *
+ * @example
+ * ```typescript
+ * const past = store.asOf("2026-01-01T00:00:00.000Z");
+ * const alice = await past.nodes.Person.getById(aliceId);
+ * const jobs = await past.edges.worksAt.findFrom(alice!);
+ * const reach = await past.reachable(alice!, { edges: ["knows"] });
+ * ```
  */
-export class RecordedStoreView<
+export type StoreView<G extends GraphDef> = StoreViewImplementation<G> &
+  ViewIdentityAccess<G>;
+
+export const StoreView = StoreViewImplementation as unknown as new <
+  G extends GraphDef,
+>(
+  store: Store<G>,
+  coordinate: StoreViewCoordinate | ReadCoordinate,
+) => StoreView<G>;
+
+/**
+ * The runtime half of {@link RecordedStoreView}; see that alias for the
+ * contract.
+ */
+class RecordedStoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
   #nodes: RecordedStoreViewNodeCollections<G> | undefined;
@@ -1113,6 +1350,15 @@ export class RecordedStoreView<
         { code: "RECORDED_STORE_VIEW_MISSING_COORDINATE" },
       );
     }
+    // Both `store.asOfRecorded(...)` and `store.asOf(...).asOfRecorded(...)`
+    // construct a RecordedStoreView here, so this is the one place every
+    // asOfRecorded anchor is checked against this store's own recorded-time
+    // ownership before any read compiles.
+    assertRecordedInstantOwnershipMatch(
+      store.recordedTimeOwnership,
+      coordinate.recorded.asOf,
+      "asOfRecorded",
+    );
 
     // `search` is intentionally absent from the typed recorded surface (a TS
     // caller gets a compile error). It is installed here as a runtime-only
@@ -1131,8 +1377,44 @@ export class RecordedStoreView<
     });
   }
 
-  /** The recorded/system-time timestamp this view reconstructs. */
-  get asOfRecorded(): string {
+  /**
+   * Pages incident edge/neighbor pairs, outgoing before incoming and then by
+   * kind/revision/id/history id. The candidateLimit bounds historical candidates examined;
+   * invisible versions can produce an empty page with a continuation.
+   * Self-loops occur once in both-direction mode; parallel edges stay distinct.
+   */
+  async adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(
+    root: GraphNodeReferenceInput<G>,
+    options?: RecordedAdjacencyOptions<K>,
+  ): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>> {
+    const edgeKinds = options?.edgeKinds ?? Object.keys(this.store.graph.edges);
+    if (
+      !Object.hasOwn(this.store.graph.nodes, root.kind) ||
+      edgeKinds.some((kind) => !Object.hasOwn(this.store.graph.edges, kind))
+    ) {
+      throw new ValidationError(
+        "Recorded adjacency requires registered node and edge kinds.",
+        { issues: [{ path: "kind", message: "Unknown graph kind." }] },
+      );
+    }
+    const read = storeRuntime(this.store).recordedAdjacency;
+    if (read === undefined)
+      throw new ConfigurationError(
+        "This store runtime does not support recorded adjacency.",
+        {
+          code: "RECORDED_ADJACENCY_UNSUPPORTED_RUNTIME",
+        },
+      );
+    return (await read(
+      root,
+      this.coordinate,
+      edgeKinds,
+      options,
+    )) as RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>;
+  }
+
+  /** The recorded/system-time anchor this view reconstructs. */
+  get asOfRecorded(): RecordedInstant {
     const recorded = this.coordinate.recorded;
     if (recorded === undefined) {
       throw new ConfigurationError(
@@ -1168,3 +1450,22 @@ export class RecordedStoreView<
     return this.#edges;
   }
 }
+
+/**
+ * A narrow recorded-time read lens. It preserves the valid-time coordinate
+ * carried by the source view and adds a recorded/system-time pin. Collection
+ * reads expose point reconstruction and bounded scans; broad collection
+ * predicates, endpoint reads, search, and further coordinate changes are absent
+ * from the typed surface and refused by the runtime proxies for JS callers.
+ *
+ * Like {@link StoreView}, an alias over an implementation class so `identity`
+ * is present only for identity-enabled graphs.
+ */
+export type RecordedStoreView<G extends GraphDef> =
+  RecordedStoreViewImplementation<G> & ViewIdentityAccess<G>;
+
+export const RecordedStoreView =
+  RecordedStoreViewImplementation as unknown as new <G extends GraphDef>(
+    store: Store<G>,
+    coordinate: ReadCoordinate,
+  ) => RecordedStoreView<G>;

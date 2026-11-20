@@ -7,8 +7,9 @@
  * - Version for forward compatibility
  */
 
-import { ValidationError } from "../errors";
-import { type OrderSpec } from "./ast";
+import { ConfigurationError, ValidationError } from "../errors";
+import { type FieldRef, type OrderSpec } from "./ast";
+import { systemColumnSelectedPath } from "./builder/order-by-field";
 import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -151,7 +152,7 @@ export function decodeCursor(cursor: string): CursorData {
  * In both cases, outputs flattened format "p.name" to match the flattened API.
  */
 export function buildColumnId(spec: OrderSpec): string {
-  const { alias, path, jsonPointer } = spec.field;
+  const { alias, path, jsonPointer } = requireCursorField(spec.field);
 
   // New format: path=["props"] with jsonPointer="/fieldName"
   // jsonPointer is a branded string like "/name" or "/nested/field"
@@ -176,19 +177,23 @@ export function buildColumnId(spec: OrderSpec): string {
  * 1. Raw database row with flat column names
  * 2. Mapped result with alias-keyed nested data
  *
- * For mapped results, we navigate through the path and then jsonPointer.
+ * For mapped results, we navigate through the path and then jsonPointer. An
+ * ordered system column is read where a selectable node or edge holds it
+ * ({@link systemColumnSelectedPath}): `created_at` is `meta.createdAt` there,
+ * not a top-level key.
  */
 export function extractCursorValue(
   row: Record<string, unknown>,
   spec: OrderSpec,
 ): unknown {
-  const { alias, path, jsonPointer } = spec.field;
+  const field = requireCursorField(spec.field);
+  const { alias, path, jsonPointer } = field;
 
   // Try alias-keyed format first (mapped results)
   let current: unknown = row[alias];
   if (current !== undefined) {
     // Follow path first (e.g., ["props"])
-    for (const segment of path) {
+    for (const segment of selectableFieldPath(field)) {
       if (current === null || current === undefined) return undefined;
       if (typeof current !== "object") return undefined;
 
@@ -218,6 +223,19 @@ export function extractCursorValue(
   return current;
 }
 
+/** The path of `field` on a selectable node or edge. */
+function selectableFieldPath(field: FieldRef): readonly string[] {
+  const [column] = field.path;
+  if (
+    field.jsonPointer === undefined &&
+    field.path.length === 1 &&
+    column !== undefined
+  ) {
+    return systemColumnSelectedPath(column) ?? field.path;
+  }
+  return field.path;
+}
+
 /**
  * Builds a cursor from a result row and order specifications.
  *
@@ -239,6 +257,20 @@ export function buildCursorFromRow(
     d: direction,
     vals,
     cols,
+  });
+}
+
+/** Builds a cursor when the ordered values were projected independently. */
+export function buildCursorFromValues(
+  values: readonly unknown[],
+  orderSpecs: readonly OrderSpec[],
+  direction: "f" | "b",
+): string {
+  return encodeCursor({
+    v: CURSOR_VERSION,
+    d: direction,
+    vals: values,
+    cols: orderSpecs.map((spec) => buildColumnId(spec)),
   });
 }
 
@@ -288,4 +320,13 @@ export function validateCursorColumns(
       );
     }
   }
+}
+
+/** Cursor encoding currently requires identifiable fields, not computed values. */
+export function requireCursorField(field: OrderSpec["field"]): FieldRef {
+  if (field.__type !== "field_ref")
+    throw new ConfigurationError(
+      "Cursor pagination does not support database-expression ordering.",
+    );
+  return field;
 }

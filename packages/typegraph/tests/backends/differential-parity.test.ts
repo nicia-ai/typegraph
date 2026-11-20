@@ -28,12 +28,21 @@
  * via PGlite (Postgres-in-WASM) — no Docker.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
+  asNodeId,
   avg,
   count,
   createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
   field,
+  hasPart,
+  partOf,
+  type Store,
+  subClassOf,
   sum,
 } from "../../src";
 import { createSqliteBackend } from "../../src/backend/sqlite";
@@ -118,12 +127,155 @@ async function seedParityCorpus(store: IntegrationStore): Promise<void> {
 }
 
 // ============================================================
+// Ontology graph — subclass, composition, qualified recursion, asOf
+// ============================================================
+
+const OpMedia = defineNode("OpMedia", {
+  schema: z.object({ title: z.string() }),
+});
+const OpPodcast = defineNode("OpPodcast", {
+  schema: z.object({ title: z.string() }),
+});
+const OpVideo = defineNode("OpVideo", {
+  schema: z.object({ title: z.string() }),
+});
+const OpBook = defineNode("OpBook", {
+  schema: z.object({ title: z.string() }),
+});
+const OpChapter = defineNode("OpChapter", {
+  schema: z.object({ title: z.string() }),
+});
+const OpParagraph = defineNode("OpParagraph", {
+  schema: z.object({ title: z.string() }),
+});
+
+const opRelated = defineEdge("opRelated", { schema: z.object({}) });
+const opBookHasChapter = defineEdge("opBookHasChapter", {
+  schema: z.object({}),
+});
+const opParagraphOf = defineEdge("opParagraphOf", { schema: z.object({}) });
+
+const ontologyParityGraph = defineGraph({
+  id: "differential_parity_ontology",
+  nodes: {
+    OpMedia: { type: OpMedia },
+    OpPodcast: { type: OpPodcast },
+    OpVideo: { type: OpVideo },
+    OpBook: { type: OpBook },
+    OpChapter: { type: OpChapter },
+    OpParagraph: { type: OpParagraph },
+  },
+  edges: {
+    opRelated: { type: opRelated, from: [OpMedia], to: [OpMedia] },
+    opBookHasChapter: {
+      type: opBookHasChapter,
+      from: [OpBook],
+      to: [OpChapter],
+      targetCardinality: "one",
+    },
+    opParagraphOf: {
+      type: opParagraphOf,
+      from: [OpParagraph],
+      to: [OpChapter],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    subClassOf(OpPodcast, OpMedia),
+    subClassOf(OpVideo, OpMedia),
+    // Mixed orientation: the book names its chapters (whole -> part), each
+    // paragraph names its chapter (part -> whole).
+    hasPart(OpBook, OpChapter, { via: opBookHasChapter }),
+    partOf(OpParagraph, OpChapter, { via: opParagraphOf }),
+  ],
+});
+
+type OntologyStore = Store<typeof ontologyParityGraph>;
+
+const OP_EDGE_PAST_VALID_FROM = "2019-01-01T00:00:00.000Z";
+const OP_EDGE_PAST_VALID_TO = "2020-01-01T00:00:00.000Z";
+const OP_NODE_VALID_FROM = "2018-01-01T00:00:00.000Z";
+const OP_AS_OF_DURING_PAST = "2019-06-01T00:00:00.000Z";
+const OP_BOOK_ID = "op-book";
+
+// Fixed ids keep qualified recursive paths and subgraph ids comparable across
+// the two independently seeded stores.
+async function seedOntologyCorpus(store: OntologyStore): Promise<void> {
+  const generic = await store.nodes.OpMedia.create(
+    { title: "Generic" },
+    { id: "op-media", validFrom: OP_NODE_VALID_FROM },
+  );
+  const podcast = await store.nodes.OpPodcast.create(
+    { title: "Pod" },
+    { id: "op-podcast", validFrom: OP_NODE_VALID_FROM },
+  );
+  const video = await store.nodes.OpVideo.create(
+    { title: "Vid" },
+    { id: "op-video", validFrom: OP_NODE_VALID_FROM },
+  );
+  const secondPodcast = await store.nodes.OpPodcast.create(
+    { title: "Pod Two" },
+    { id: "op-podcast-2", validFrom: OP_NODE_VALID_FROM },
+  );
+  await store.edges.opRelated.create(generic, podcast, {}, { id: "rel-1" });
+  await store.edges.opRelated.create(podcast, video, {}, { id: "rel-2" });
+  await store.edges.opRelated.create(video, secondPodcast, {}, { id: "rel-3" });
+  await store.edges.opRelated.create(
+    generic,
+    video,
+    {},
+    {
+      id: "rel-past",
+      validFrom: OP_EDGE_PAST_VALID_FROM,
+      validTo: OP_EDGE_PAST_VALID_TO,
+    },
+  );
+
+  await store.edges.opRelated.create(
+    podcast,
+    secondPodcast,
+    {},
+    {
+      id: "rel-past-2",
+      validFrom: OP_EDGE_PAST_VALID_FROM,
+      validTo: OP_EDGE_PAST_VALID_TO,
+    },
+  );
+
+  const book = await store.nodes.OpBook.create(
+    { title: "Book" },
+    { id: OP_BOOK_ID },
+  );
+  const chapterOne = await store.nodes.OpChapter.create(
+    { title: "Ch1" },
+    { id: "op-ch-1" },
+  );
+  const chapterTwo = await store.nodes.OpChapter.create(
+    { title: "Ch2" },
+    { id: "op-ch-2" },
+  );
+  await store.edges.opBookHasChapter.create(book, chapterOne, {});
+  await store.edges.opBookHasChapter.create(book, chapterTwo, {});
+  for (const [index, chapter] of [
+    chapterOne,
+    chapterOne,
+    chapterTwo,
+  ].entries()) {
+    const paragraph = await store.nodes.OpParagraph.create(
+      { title: `Para${index}` },
+      { id: `op-para-${index}` },
+    );
+    await store.edges.opParagraphOf.create(paragraph, chapter, {});
+  }
+}
+
+// ============================================================
 // Corpus — read-only queries over the portable surface
 // ============================================================
 
-type ParityCase = Readonly<{
+type ParityCase<TStore = IntegrationStore> = Readonly<{
   name: string;
-  run: (store: IntegrationStore) => Promise<readonly unknown[]>;
+  run: (store: TStore) => Promise<readonly unknown[]>;
   /** Compare results in order (the query has a total order). Default: multiset. */
   ordered?: boolean;
 }>;
@@ -377,6 +529,106 @@ const CASES: readonly ParityCase[] = [
   },
 ];
 
+const ONTOLOGY_CASES: readonly ParityCase<OntologyStore>[] = [
+  {
+    name: "ontology: polymorphic expansion of a superclass",
+    run: (store) =>
+      store
+        .query()
+        .from("OpMedia", "m")
+        .select((ctx) => ({ kind: ctx.m.kind, title: ctx.m.title }))
+        .execute(),
+  },
+  {
+    name: "ontology: parts() across mixed orientation (hasPart + partOf)",
+    run: (store) =>
+      store
+        .query()
+        .from("OpBook", "b")
+        .whereNode("b", (book) => book.id.eq(OP_BOOK_ID))
+        .parts("x", { depth: "level" })
+        .select((ctx) => ({
+          kind: ctx.x.kind,
+          id: ctx.x.id,
+          level: ctx.level,
+        }))
+        .execute(),
+  },
+  {
+    name: "ontology: wholes() across mixed orientation (partOf + hasPart)",
+    run: (store) =>
+      store
+        .query()
+        .from("OpParagraph", "p")
+        .wholes("w", { depth: "level" })
+        .select((ctx) => ({
+          part: ctx.p.title,
+          whole: ctx.w.id,
+          kind: ctx.w.kind,
+          level: ctx.level,
+        }))
+        .execute(),
+  },
+  {
+    name: "ontology: composition subgraph of a whole",
+    run: async (store) => {
+      const book = await store.nodes.OpBook.getById(
+        asNodeId<typeof OpBook>(OP_BOOK_ID),
+      );
+      if (book === undefined) throw new Error("seed book missing");
+      const result = await store.subgraph(book, {
+        edges: [],
+        composition: true,
+      });
+      return result.nodes.map((node) => ({ kind: node.kind, id: node.id }));
+    },
+  },
+  {
+    name: "recursive: kind-qualified route over subclass nodes",
+    run: (store) =>
+      store
+        .query()
+        .from("OpMedia", "root")
+        .whereNode("root", (media) => media.id.eq("op-media"))
+        .traverse("opRelated", "edge", { expand: "none" })
+        .recursive({
+          maxHops: 3,
+          path: { format: "qualified", alias: "route" },
+          depth: true,
+        })
+        .to("OpMedia", "target")
+        .select((ctx) => ({
+          title: ctx.target.title,
+          depth: ctx.target_depth,
+          route: ctx.route,
+        }))
+        .execute(),
+  },
+  {
+    name: "asOf: a past instant sees only the edges valid then",
+    run: (store) =>
+      store
+        .asOf(OP_AS_OF_DURING_PAST)
+        .query()
+        .from("OpMedia", "m")
+        .traverse("opRelated", "e", { expand: "none" })
+        .to("OpMedia", "t")
+        .select((ctx) => ({ from: ctx.m.title, to: ctx.t.title }))
+        .execute(),
+  },
+  {
+    name: "asOf: a current read excludes the ended edges",
+    run: (store) =>
+      store
+        .query()
+        .from("OpMedia", "m")
+        .traverse("opRelated", "e", { expand: "none" })
+        .to("OpMedia", "t")
+        .select((ctx) => ({ from: ctx.m.title, to: ctx.t.title }))
+        .execute(),
+  },
+];
+
 // ============================================================
 // Comparison
 // ============================================================
@@ -425,28 +677,70 @@ function canonical(rows: readonly unknown[]): string[] {
 // Suite
 // ============================================================
 
+async function expectBackendsAgree<TStore>(
+  parityCase: ParityCase<TStore>,
+  sqliteStore: TStore,
+  pgStore: TStore,
+): Promise<void> {
+  const [sqliteRows, pgRows] = await Promise.all([
+    parityCase.run(sqliteStore),
+    parityCase.run(pgStore),
+  ]);
+
+  // The corpus is intentionally all-non-empty: a result that is empty on
+  // either backend signals a seed/query mistake (and an empty-on-both case
+  // would otherwise pass vacuously). Check both backends, not just one.
+  expect(sqliteRows.length).toBeGreaterThan(0);
+  expect(pgRows.length).toBeGreaterThan(0);
+
+  // Compare in order when the query has a total order; otherwise as a
+  // multiset (unordered queries may return rows in any order).
+  const sqliteCanonical = canonical(sqliteRows);
+  const pgCanonical = canonical(pgRows);
+  const [expected, actual] =
+    parityCase.ordered ?
+      [sqliteCanonical, pgCanonical]
+    : [sqliteCanonical.toSorted(), pgCanonical.toSorted()];
+
+  expect(actual).toEqual(expected);
+}
+
 describe("Differential backend parity (SQLite vs PGlite)", () => {
   let sqliteStore: IntegrationStore;
   let pgStore: IntegrationStore;
+  let sqliteOntologyStore: OntologyStore;
+  let pgOntologyStore: OntologyStore;
   let engine: SharedPgliteEngine;
 
   beforeAll(async () => {
     const { db } = createLocalSqliteBackend();
+    const sqliteBackend = createSqliteBackend(db);
     [sqliteStore] = await createAdapterStoreWithSchema(
       integrationTestGraph,
-      createSqliteBackend(db),
+      sqliteBackend,
+    );
+    [sqliteOntologyStore] = await createAdapterStoreWithSchema(
+      ontologyParityGraph,
+      sqliteBackend,
     );
 
     engine = await setupSharedPgliteEngine();
+    const pgBackend = engine.makeBackend();
     [pgStore] = await createAdapterStoreWithSchema(
       integrationTestGraph,
-      engine.makeBackend(),
+      pgBackend,
+    );
+    [pgOntologyStore] = await createAdapterStoreWithSchema(
+      ontologyParityGraph,
+      pgBackend,
     );
 
     // Independent stores — seed concurrently.
     await Promise.all([
       seedParityCorpus(sqliteStore),
       seedParityCorpus(pgStore),
+      seedOntologyCorpus(sqliteOntologyStore),
+      seedOntologyCorpus(pgOntologyStore),
     ]);
   });
 
@@ -456,27 +750,17 @@ describe("Differential backend parity (SQLite vs PGlite)", () => {
 
   for (const parityCase of CASES) {
     it(`agrees across backends — ${parityCase.name}`, async () => {
-      const [sqliteRows, pgRows] = await Promise.all([
-        parityCase.run(sqliteStore),
-        parityCase.run(pgStore),
-      ]);
+      await expectBackendsAgree(parityCase, sqliteStore, pgStore);
+    });
+  }
 
-      // The corpus is intentionally all-non-empty: a result that is empty on
-      // either backend signals a seed/query mistake (and an empty-on-both case
-      // would otherwise pass vacuously). Check both backends, not just one.
-      expect(sqliteRows.length).toBeGreaterThan(0);
-      expect(pgRows.length).toBeGreaterThan(0);
-
-      // Compare in order when the query has a total order; otherwise as a
-      // multiset (unordered queries may return rows in any order).
-      const sqliteCanonical = canonical(sqliteRows);
-      const pgCanonical = canonical(pgRows);
-      const [expected, actual] =
-        parityCase.ordered ?
-          [sqliteCanonical, pgCanonical]
-        : [sqliteCanonical.toSorted(), pgCanonical.toSorted()];
-
-      expect(actual).toEqual(expected);
+  for (const parityCase of ONTOLOGY_CASES) {
+    it(`agrees across backends — ${parityCase.name}`, async () => {
+      await expectBackendsAgree(
+        parityCase,
+        sqliteOntologyStore,
+        pgOntologyStore,
+      );
     });
   }
 });

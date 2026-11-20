@@ -5,14 +5,17 @@
  * budget); the data deletion happens here, scoped per-deployment via
  * the `typegraph_kind_removals` status table. Splitting the verbs
  * mirrors how `materializeIndexes` complements `evolve`: schema
- * commits are atomic and fast, data work is bounded by row count and
- * deferrable / parallelizable.
+ * commits are atomic and fast, while data work is bounded by row count and
+ * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
   type GraphBackend,
   type KindRemovalRow,
   type RecordKindRemovalParams,
+  type SchemaVersionRow,
+  type SchemaWriteTransactionBackend,
   type TransactionBackend,
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
@@ -22,16 +25,20 @@ import type {
   VectorSlot,
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
-import { sql } from "../query/sql-fragment";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
+import type { SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
+import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
 import {
-  ensureFocusedStatusTable,
-  runMaterialization,
-} from "./materialize-shared";
+  buildHardDeleteEdgeClaimsByEdgeKind,
+  buildHardDeleteEdgeClaimsByNodeKind,
+  buildHardDeleteUniquesByConcreteKind,
+} from "./claims/removal-sql";
+import { ensureFocusedStatusTable } from "./materialize-shared";
 import { closeRecordedHardDeletedKind } from "./recorded-capture";
 
 const ENTITY_KINDS: readonly KindEntity[] = ["node", "edge"];
@@ -63,12 +70,40 @@ export type MaterializeRemovalsOptions = Readonly<{
   stopOnError?: boolean;
 }>;
 
-export type MaterializeRemovalsEntry = Readonly<{
-  kind: string;
-  entity: KindEntity;
-  status: "removed" | "failed";
-  error?: Error;
-}>;
+/**
+ * Outcome of one queued kind removal, discriminated on `status`.
+ *
+ * A union rather than one shape with optional fields, so each outcome carries
+ * exactly its own payload: `"failed"` always has an `error`, `"skipped"`
+ * always has a `reason`, and `"removed"` has neither. The flat form permitted
+ * impossible states — a `"skipped"` with no reason, or a `"removed"` carrying
+ * `reason: "kind-is-live"` — and narrowing on `status` still left both fields
+ * optional at the use site.
+ */
+export type MaterializeRemovalsEntry =
+  | Readonly<{ kind: string; entity: KindEntity; status: "removed" }>
+  | Readonly<{
+      kind: string;
+      entity: KindEntity;
+      status: "failed";
+      error: Error;
+    }>
+  | Readonly<{
+      kind: string;
+      entity: KindEntity;
+      status: "skipped";
+      /**
+       * `"kind-is-live"`: the active schema declares this kind again — it was
+       * dropped, then re-added — so deleting its rows would destroy live
+       * data. The queue row stays pending, so a later removal of the same
+       * kind still reclaims it.
+       *
+       * Reported rather than silent: an empty `results` array would otherwise
+       * be indistinguishable from "nothing was pending", leaving the queue at
+       * a non-zero depth with nothing explaining why.
+       */
+      reason: "kind-is-live";
+    }>;
 
 /**
  * Outcome of reclaiming one per-`(graphId, kind, field)` vector table that
@@ -114,8 +149,11 @@ type MaterializeOneContext = Readonly<{
   graphId: string;
   nodesTable: string;
   edgesTable: string;
-  fulltextTable: string;
+  // Undefined when the backend has no active fulltext strategy — the table
+  // was never created, so the removed-kind cleanup below skips it.
+  fulltextTable: string | undefined;
   uniquesTable: string;
+  edgeClaimsTable: string;
   captureRecordedRemovals: boolean;
   // Resolved once per removal pass (not per kind) and threaded into each
   // recorded-interval close. Undefined when recorded capture is off.
@@ -129,13 +167,12 @@ export async function materializeRemovals(
   const { backend, graphId } = context;
 
   if (
-    backend.executeDdl === undefined ||
     backend.recordKindRemoval === undefined ||
     backend.getPendingKindRemovals === undefined
   ) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend with kind-removal " +
-        "primitives (executeDdl, recordKindRemoval, getPendingKindRemovals). " +
+        "primitives (recordKindRemoval, getPendingKindRemovals). " +
         "The bundled SQLite and Postgres backends provide them.",
       { code: "MATERIALIZE_REMOVALS_BACKEND_UNSUPPORTED" },
     );
@@ -161,23 +198,82 @@ export async function materializeRemovals(
   // The add-only `materializeIndexes` path never reclaims it and the
   // candidate loop below only handles whole kinds, so reclaim here before
   // the no-candidates short-circuit.
-  const reclaimedVectorFields = await reclaimRemovedVectorFieldTables(context);
+  // One read of the active schema, shared by the vector-reclaim candidate scan
+  // and the live-kind candidate scan below. Both are optimizations only: each
+  // destructive path repeats its liveness check under the schema-write lock.
+  const activeRow = await backend.getActiveSchema(graphId);
+  const activeSchema =
+    activeRow === undefined ? undefined : (
+      parseSerializedSchema(activeRow.schema_doc)
+    );
+
+  const reclaimedVectorFields = await reclaimRemovedVectorFieldTables(
+    context,
+    activeRow,
+  );
 
   const pending = await backend.getPendingKindRemovals(graphId);
 
+  // Never delete the rows of a kind the ACTIVE schema still declares.
+  //
+  // A pending removal only records that a kind was absent at some version. It
+  // does not mean the kind is absent *now*: a drop at v3 followed by a re-add
+  // at v4 leaves the v3 removal queued (and `reconcilePendingRemovals` keeps
+  // re-deriving it from history, since that walk compares each consecutive
+  // pair of documents and is blind to what happened later). Cleanup is an
+  // unconditional `DELETE ... WHERE kind = ?`, so acting on that row would
+  // destroy live data belonging to a kind applications are actively writing.
+  //
+  // Skipped rather than completed: the kind genuinely has not been cleaned up,
+  // and leaving the row pending means a later removal of the same kind is
+  // still reclaimed. Self-healing rather than sticky.
+  //
+  // This first read is an optimization only. `materializeOne` repeats the
+  // liveness check while holding the schema-write lock and performs every row,
+  // vector-table, and marker deletion in that same transaction. A re-add must
+  // therefore commit either before the locked check (and be skipped) or after
+  // cleanup commits.
+  //
+  // The decline is REPORTED (`status: "skipped"`), not silent. Queue depth is
+  // the health signal for this subsystem, and a silent skip gives it a
+  // legitimate non-zero steady state that no output explains — an operator
+  // could not tell "nothing pending" from "declined on purpose".
+  //
+  // `reclaimRemovedVectorFieldTables` above independently keys its candidate
+  // scan on the same active schema and repeats the field check under the same
+  // lock before dropping storage — see the note there.
+  const liveKinds = liveKindNamesFrom(activeSchema);
+
   const kindFilter =
     options.kinds === undefined ? undefined : new Set(options.kinds);
-  const candidates = pending.filter((row) =>
-    kindFilter === undefined ? true : kindFilter.has(row.kindName),
+  const selected = pending.filter(
+    (row) => kindFilter === undefined || kindFilter.has(row.kindName),
   );
+  const candidates = selected.filter(
+    (row) => !liveKinds[row.entity].has(row.kindName),
+  );
+  const skipped: readonly MaterializeRemovalsEntry[] = selected
+    .filter((row) => liveKinds[row.entity].has(row.kindName))
+    .map((row) => ({
+      kind: row.kindName,
+      entity: row.entity,
+      status: "skipped" as const,
+      reason: "kind-is-live" as const,
+    }));
 
-  if (candidates.length === 0) return { results: [], reclaimedVectorFields };
+  if (candidates.length === 0) {
+    return { results: skipped, reclaimedVectorFields };
+  }
 
   const tableNames = backend.tableNames;
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
-  const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
+  const fulltextTable =
+    resolveBackendFulltext(backend) === false ? undefined : (
+      (tableNames?.fulltext ?? "typegraph_node_fulltext")
+    );
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
+  const edgeClaimsTable = tableNames?.edgeClaims ?? "typegraph_edge_claims";
 
   const captureRecordedRemovals = context.captureRecordedRemovals === true;
   const ctx = {
@@ -187,6 +283,7 @@ export async function materializeRemovals(
     edgesTable,
     fulltextTable,
     uniquesTable,
+    edgeClaimsTable,
     captureRecordedRemovals,
     recordedSchema:
       captureRecordedRemovals ?
@@ -194,17 +291,17 @@ export async function materializeRemovals(
       : undefined,
   } as const;
 
-  // Each kind targets a disjoint row set (DELETEs filtered by kindName),
-  // so the default best-effort path runs them concurrently — Postgres
-  // parallelizes round-trips across pool connections, SQLite serializes
-  // writes at the engine level either way. `stopOnError` honors strict
-  // sequential semantics; the first failure short-circuits the rest.
-  return {
-    results: await runMaterialization(candidates, options, (removal) =>
-      materializeOne(removal, ctx),
-    ),
-    reclaimedVectorFields,
-  };
+  // Every candidate takes the same per-graph schema-write lock. Running them
+  // concurrently only consumes pool connections while all but one wait, so
+  // process candidates sequentially. Best-effort mode continues after failed
+  // entries; `stopOnError` short-circuits after the first failure.
+  const materialized: MaterializeRemovalsEntry[] = [];
+  for (const candidate of candidates) {
+    const entry = await materializeOne(candidate, ctx);
+    materialized.push(entry);
+    if (options.stopOnError === true && entry.status === "failed") break;
+  }
+  return { results: [...materialized, ...skipped], reclaimedVectorFields };
 }
 
 /**
@@ -299,7 +396,7 @@ async function reconcilePendingRemovals(
       const currentEntries =
         currentSchema[entity === "node" ? "nodes" : "edges"];
       for (const kindName of Object.keys(priorEntries)) {
-        if (kindName in currentEntries) continue;
+        if (hasOwnKey(currentEntries, kindName)) continue;
         if (
           recorded.has(kindRemovalKey(entity, kindName, currentRow.version))
         ) {
@@ -344,6 +441,25 @@ async function reconcilePendingRemovals(
   }
 }
 
+/**
+ * Node and edge kind names the active schema declares, by entity.
+ *
+ * Used to refuse cleanup for a kind that has since been re-added. Returns
+ * empty sets when no schema is committed — nothing is live, so nothing is
+ * protected, and the pending rows proceed as before.
+ */
+function liveKindNamesFrom(
+  schema: SerializedSchema | undefined,
+): Readonly<Record<KindEntity, ReadonlySet<string>>> {
+  if (schema === undefined) {
+    return { node: new Set<string>(), edge: new Set<string>() };
+  }
+  return {
+    node: new Set(Object.keys(schema.nodes)),
+    edge: new Set(Object.keys(schema.edges)),
+  };
+}
+
 function kindRemovalKey(
   entity: KindEntity,
   kindName: string,
@@ -357,9 +473,41 @@ async function materializeOne(
   ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
   const recordKindRemoval = requireDefined(ctx.backend.recordKindRemoval);
+  const schemaWriteTransaction = ctx.backend.schemaWriteTransaction;
+  if (schemaWriteTransaction === undefined) {
+    throw new ConfigurationError(
+      "store.materializeRemovals() requires a backend that can hold the " +
+        "schema-write lock across the live-kind check and cleanup.",
+      { code: "MATERIALIZE_REMOVALS_SCHEMA_FENCE_UNSUPPORTED" },
+    );
+  }
   try {
-    await closeRecordedAndDeleteLiveRows(ctx, row);
-    await Promise.all(buildEmbeddingTableCleanup(ctx, row));
+    const outcome = await schemaWriteTransaction(
+      ctx.graphId,
+      async (target): Promise<"removed" | "skipped"> => {
+        const activeRow = await target.getActiveSchema(ctx.graphId);
+        const activeSchema =
+          activeRow === undefined ? undefined : (
+            parseSerializedSchema(activeRow.schema_doc)
+          );
+        if (liveKindNamesFrom(activeSchema)[row.entity].has(row.kindName)) {
+          return "skipped";
+        }
+
+        await closeRecordedAndDeleteLiveRows(ctx, row, target);
+        await dropEmbeddingTableStorage(ctx, row, target);
+        return "removed";
+      },
+    );
+
+    if (outcome === "skipped") {
+      return {
+        kind: row.kindName,
+        entity: row.entity,
+        status: "skipped",
+        reason: "kind-is-live",
+      };
+    }
 
     const removedAt = nowIso();
     await recordKindRemoval({
@@ -405,80 +553,134 @@ async function materializeOne(
  * Tolerates absent recorded relations exactly as `clear()` and
  * `refreshStatistics()` do: a history-enabled store whose recorded tables
  * predate recorded-time history (bring-your-own-pool, no DDL re-run) skips only
- * the close, then still deletes the live rows. A no-op close when
- * recorded-removal capture is off.
+ * the close, then still deletes the live rows. A transaction-bound catalog
+ * preflight avoids issuing a statement that would abort PostgreSQL and avoids
+ * raw transaction framing, which Durable Object SQLite forbids. A no-op close
+ * when recorded-removal capture is off.
  */
 async function closeRecordedAndDeleteLiveRows(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
+  target: SchemaWriteTransactionBackend,
 ): Promise<void> {
-  const deleteStatements = buildRemovedKindLiveDeleteStatements(ctx, row);
+  // Same tolerance `clearGraph` gives the relation: a database bootstrapped
+  // before edge claims existed has no such table, and reaping a removed kind's
+  // housekeeping rows must not be the operation that fails on it.
+  const reapsEdgeClaims = await target.tableExists(ctx.edgeClaimsTable);
+  const deleteStatements = buildRemovedKindLiveDeleteStatements(
+    ctx,
+    row,
+    reapsEdgeClaims,
+  );
   if (!ctx.captureRecordedRemovals || ctx.recordedSchema === undefined) {
-    await executeDeleteStatements(ctx.backend, deleteStatements);
+    await executeDeleteStatements(target, deleteStatements);
     return;
   }
 
   const recordedSchema = ctx.recordedSchema;
-  try {
-    await ctx.backend.transaction(async (target) => {
-      await closeRecordedHardDeletedKind(
-        target,
-        recordedSchema,
-        ctx.graphId,
-        { entity: row.entity, kind: row.kindName },
-        false,
-      );
-      await executeDeleteStatements(target, deleteStatements);
-    });
-  } catch (error) {
-    if (!isMissingTableError(error)) throw error;
-    await executeDeleteStatements(ctx.backend, deleteStatements);
+  const requiredRecordedTables = [
+    recordedSchema.tables.recordedClock,
+    recordedSchema.tables.recordedEdges,
+    ...(row.entity === "node" ? [recordedSchema.tables.recordedNodes] : []),
+  ];
+  const recordedTablesExist = await Promise.all(
+    requiredRecordedTables.map((tableName) => target.tableExists(tableName)),
+  );
+  if (recordedTablesExist.some((exists) => !exists)) {
+    await executeDeleteStatements(target, deleteStatements);
+    return;
   }
+
+  await closeRecordedHardDeletedKind(
+    target,
+    recordedSchema,
+    ctx.graphId,
+    { entity: row.entity, kind: row.kindName },
+    false,
+  );
+  await executeDeleteStatements(target, deleteStatements);
 }
 
+/**
+ * The live rows a removed kind leaves behind, as statements.
+ *
+ * Neither claim family is spelled here — edge claims come from the two
+ * ownership builders in `operations/edge-claims`, one for edges of a removed
+ * edge kind and one for edges connected to a removed node kind.
+ * The uniqueness claims are NOT spelled here: which claims a kind owns is one
+ * predicate with one owner, `buildHardDeleteUniquesByConcreteKind`, and this is
+ * its second consumer. Filtering on `node_kind` — the claim AXIS — instead would
+ * leak a claim whose axis is a sibling kind, delete a surviving sibling's claim
+ * when the removed kind IS the axis, and never match a claim whose axis is not a
+ * kind at all.
+ */
 function buildRemovedKindLiveDeleteStatements(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
-): readonly string[] {
+  reapsEdgeClaims: boolean,
+): readonly SqlFragment[] {
   const graphLit = literal(ctx.graphId);
   const kindLit = literal(row.kindName);
   if (row.entity === "node") {
     return [
-      `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
-      `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-      `DELETE FROM ${quote(ctx.uniquesTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+      // Must precede the edge delete: ownership is discovered by selecting the
+      // connected edge ids, which no longer exist afterward.
+      ...(reapsEdgeClaims ?
+        [
+          buildHardDeleteEdgeClaimsByNodeKind(
+            ctx.edgeClaimsTable,
+            ctx.edgesTable,
+            { graphId: ctx.graphId, nodeKind: row.kindName },
+          ),
+        ]
+      : []),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.nodesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+      ),
+      sql.raw(
+        `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
+      ),
+      // Omitted when the backend has no active fulltext strategy — the
+      // table was never created, so there is nothing to reap.
+      ...(ctx.fulltextTable === undefined ?
+        []
+      : [
+          sql.raw(
+            `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+          ),
+        ]),
+      buildHardDeleteUniquesByConcreteKind(ctx.uniquesTable, {
+        graphId: ctx.graphId,
+        concreteKind: row.kindName,
+      }),
     ];
   }
   return [
-    `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    sql.raw(
+      `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND kind = ${kindLit}`,
+    ),
+    // Housekeeping, on the same one-owner terms as the uniqueness reap: the
+    // rows this kind's edges held are takeable the moment those edges are gone,
+    // but nothing would ever reap them, so the relation would grow by one row
+    // per removed constrained kind forever.
+    ...(reapsEdgeClaims ?
+      [
+        buildHardDeleteEdgeClaimsByEdgeKind(ctx.edgeClaimsTable, {
+          graphId: ctx.graphId,
+          edgeKind: row.kindName,
+        }),
+      ]
+    : []),
   ];
 }
 
 async function executeDeleteStatements(
-  target: GraphBackend | TransactionBackend,
-  statements: readonly string[],
+  target: SchemaWriteTransactionBackend,
+  statements: readonly SqlFragment[],
 ): Promise<void> {
-  if (target.executeStatement !== undefined) {
-    await Promise.all(
-      statements.map((statement) =>
-        requireDefined(target.executeStatement)(
-          asCompiledStatementSql(sql.raw(statement)),
-        ),
-      ),
-    );
-    return;
+  for (const statement of statements) {
+    await target.executeStatement(asCompiledStatementSql(statement));
   }
-
-  if (target.executeDdl === undefined) {
-    throw new ConfigurationError(
-      "store.materializeRemovals() requires a backend that can execute cleanup statements.",
-      { code: "MATERIALIZE_REMOVALS_BACKEND_UNSUPPORTED" },
-    );
-  }
-  await Promise.all(
-    statements.map((statement) => requireDefined(target.executeDdl)(statement)),
-  );
 }
 
 /**
@@ -495,41 +697,37 @@ async function executeDeleteStatements(
  *
  * Backends without a vector strategy, or schema history that can't be
  * read, yield no cleanup — there is no embedding storage to reclaim.
- * Returned as a single combined promise so the caller can issue it
- * alongside the other disjoint DELETEs.
  */
-function buildEmbeddingTableCleanup(
+async function dropEmbeddingTableStorage(
   ctx: Readonly<{
     backend: GraphBackend;
     graphId: string;
   }>,
   row: KindRemovalRow,
-): readonly Promise<void>[] {
+  target: SchemaWriteTransactionBackend,
+): Promise<void> {
   const vectorStrategy = ctx.backend.vectorStrategy;
-  if (vectorStrategy === undefined) return [];
+  if (vectorStrategy === undefined) return;
 
-  const executeDdl = requireDefined(ctx.backend.executeDdl);
-  const cleanup = (async () => {
-    const slots = await resolveRemovedKindEmbeddingSlots(ctx.backend, row);
-    await Promise.all(
-      slots.map((slot) =>
-        dropVectorSlotStorage(ctx.backend, vectorStrategy, executeDdl, slot),
-      ),
-    );
-  })();
-  return [cleanup];
+  const executeDdl = target.executeSchemaDdl;
+  const deleteContribution = target.deleteSchemaVectorSlotContribution;
+  const slots = await resolveRemovedKindEmbeddingSlots(target, row);
+  for (const slot of slots) {
+    await dropVectorSlotStorage(vectorStrategy, executeDdl, slot);
+    await deleteContribution(slot);
+  }
 }
 
 /**
  * Drops a per-field vector slot's storage via the strategy (table + any ANN
  * index it owns), tolerating an already-absent table — a declared field whose
  * per-field table was never materialized (no write, no index build) has nothing
- * to reclaim. Runs as autocommit statements, so swallowing a missing-table
- * failure can't poison a sibling drop. Shared by removed-kind cleanup and
- * removed-field reclamation so both reclaim storage the same way.
+ * to reclaim. The caller supplies the schema transaction's DDL executor so the
+ * storage drop and marker deletion commit or roll back together. Shared by
+ * removed-kind cleanup and removed-field reclamation so both reclaim storage
+ * the same way.
  */
 async function dropVectorSlotStorage(
-  backend: GraphBackend,
   strategy: VectorStrategy,
   executeDdl: (statement: string) => Promise<void>,
   slot: VectorSlot,
@@ -541,12 +739,6 @@ async function dropVectorSlotStorage(
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
   }
-  // Forget the slot's durable contribution marker(s) in lockstep with the
-  // table drop (#135), so a later re-add of the same `(kind, field)` field
-  // re-creates the table instead of trusting an orphaned "initialized"
-  // marker. Runs even when the table was already absent — the marker can
-  // outlive the table. No-op on backends without the vector marker method.
-  await backend.deleteVectorSlotContribution?.(slot);
 }
 
 /**
@@ -557,7 +749,7 @@ async function dropVectorSlotStorage(
  * kind.
  */
 async function resolveRemovedKindEmbeddingSlots(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   row: KindRemovalRow,
 ): Promise<readonly VectorSlot[]> {
   const priorVersion = row.schemaVersion - 1;
@@ -587,6 +779,16 @@ function vectorFieldKey(kind: string, fieldPath: string): string {
   return `${kind}\u0000${fieldPath}`;
 }
 
+function vectorFieldKeysFrom(schema: SerializedSchema): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const declaration of schema.indexes ?? []) {
+    if (declaration.entity === "vector") {
+      keys.add(vectorFieldKey(declaration.kind, declaration.fieldPath));
+    }
+  }
+  return keys;
+}
+
 /**
  * The historical declaration of a vector field, carrying everything
  * {@link VectorStrategy.buildDropStorage} needs to tear the storage down —
@@ -613,24 +815,24 @@ type HistoricalVectorField = Readonly<{
  * The orphan set is derived from schema history: every vector field ever
  * declared, minus the ones still declared in the *active* schema, restricted
  * to kinds that still exist (removed-kind fields are the kind path's job).
- * Using the active schema as the "still declared" source of truth makes
- * remove-then-re-add safe — a re-added field is current, so it is never
- * dropped. `buildDropStorage` emits `DROP ... IF EXISTS`, so the pass is
- * idempotent and a never-materialized field is a clean no-op; deriving from
- * full history each call also reclaims tables orphaned before this shipped.
+ * The initial active-schema read only finds candidates. Each candidate is
+ * rechecked while holding the schema-write lock, and its DDL plus durable
+ * marker deletion run in that same transaction. A re-add therefore commits
+ * either before the locked check (and is skipped) or after cleanup commits.
+ * `buildDropStorage` emits `DROP ... IF EXISTS`, so the pass is idempotent and
+ * a never-materialized field is a clean no-op; deriving from full history each
+ * call also reclaims tables orphaned before this shipped.
  *
- * Backends without a vector strategy or `executeDdl` have no per-field tables
- * to reclaim and yield an empty result.
+ * Backends without a vector strategy have no per-field tables to reclaim and
+ * yield an empty result.
  */
 async function reclaimRemovedVectorFieldTables(
   context: MaterializeRemovalsContext,
+  activeRow: SchemaVersionRow | undefined,
 ): Promise<readonly ReclaimedVectorFieldEntry[]> {
   const { backend, graphId } = context;
   const vectorStrategy = backend.vectorStrategy;
-  const executeDdl = backend.executeDdl;
-  if (vectorStrategy === undefined || executeDdl === undefined) return [];
-
-  const activeRow = await backend.getActiveSchema(graphId);
+  if (vectorStrategy === undefined) return [];
   if (activeRow === undefined) return [];
 
   // The orphan set is a pure function of (graphId, active version) over
@@ -646,14 +848,7 @@ async function reclaimRemovedVectorFieldTables(
 
   const activeSchema = parseSerializedSchema(activeRow.schema_doc);
 
-  const activeVectorFields = new Set<string>();
-  for (const declaration of activeSchema.indexes ?? []) {
-    if (declaration.entity === "vector") {
-      activeVectorFields.add(
-        vectorFieldKey(declaration.kind, declaration.fieldPath),
-      );
-    }
-  }
+  const activeVectorFields = vectorFieldKeysFrom(activeSchema);
   const survivingKinds = new Set(Object.keys(activeSchema.nodes));
 
   // Walk history backward, keeping the most-recent declaration of each
@@ -683,6 +878,14 @@ async function reclaimRemovedVectorFieldTables(
     }
   }
 
+  // Both clauses key on the ACTIVE schema to keep the candidate set narrow:
+  // `survivingKinds` requires the kind to be live now, so a re-added kind with
+  // its field re-declared is not an orphan, and a still-removed kind is left
+  // to the candidate loop in `materializeRemovals` instead.
+  //
+  // This scan is not the safety boundary: a schema commit can land after it.
+  // The per-field transaction below re-reads the same authority under the
+  // schema-write lock before issuing DDL.
   const orphans = [...historical.values()].filter(
     (field) =>
       !activeVectorFields.has(vectorFieldKey(field.kind, field.fieldPath)) &&
@@ -690,17 +893,48 @@ async function reclaimRemovedVectorFieldTables(
   );
 
   const results: ReclaimedVectorFieldEntry[] = [];
+  let skippedAfterLockedRecheck = false;
+  const schemaWriteTransaction = backend.schemaWriteTransaction;
+  if (orphans.length > 0 && schemaWriteTransaction === undefined) {
+    throw new ConfigurationError(
+      "store.materializeRemovals() requires a backend that can hold the " +
+        "schema-write lock across the vector-field liveness check and cleanup.",
+      { code: "MATERIALIZE_REMOVALS_SCHEMA_FENCE_UNSUPPORTED" },
+    );
+  }
   for (const field of orphans) {
-    // dropVectorSlotStorage swallows the missing-table case (a never-
-    // materialized field has nothing to reclaim), so reaching the catch means
-    // a genuine failure.
     try {
-      await dropVectorSlotStorage(
-        backend,
-        vectorStrategy,
-        executeDdl,
-        field.slot,
+      const reclaimed = await requireDefined(schemaWriteTransaction)(
+        graphId,
+        async (target): Promise<boolean> => {
+          const lockedActiveRow = await target.getActiveSchema(graphId);
+          if (lockedActiveRow === undefined) return false;
+          const lockedActiveSchema = parseSerializedSchema(
+            lockedActiveRow.schema_doc,
+          );
+          const lockedVectorFields = vectorFieldKeysFrom(lockedActiveSchema);
+          if (
+            lockedVectorFields.has(
+              vectorFieldKey(field.kind, field.fieldPath),
+            ) ||
+            !Object.hasOwn(lockedActiveSchema.nodes, field.kind)
+          ) {
+            return false;
+          }
+
+          await dropVectorSlotStorage(
+            vectorStrategy,
+            target.executeSchemaDdl,
+            field.slot,
+          );
+          await target.deleteSchemaVectorSlotContribution(field.slot);
+          return true;
+        },
       );
+      if (!reclaimed) {
+        skippedAfterLockedRecheck = true;
+        continue;
+      }
       results.push({
         kind: field.kind,
         fieldPath: field.fieldPath,
@@ -717,7 +951,10 @@ async function reclaimRemovedVectorFieldTables(
   }
 
   // Cache only a fully-successful pass — a failed drop must be retried.
-  if (results.every((entry) => entry.status === "reclaimed")) {
+  if (
+    !skippedAfterLockedRecheck &&
+    results.every((entry) => entry.status === "reclaimed")
+  ) {
     if (perBackend === undefined) {
       perBackend = new Map();
       reclaimCache.set(backend, perBackend);
@@ -737,9 +974,9 @@ const reclaimCache = new WeakMap<
   Map<string, readonly ReclaimedVectorFieldEntry[]>
 >();
 
-// `executeDdl` accepts a raw SQL string. The DELETE statements built
-// here are dialect-neutral (no SQLite/Postgres-specific syntax) and
-// use single-quote string literals for graph_id / kind names. Both
+// The DELETE statements built here are dialect-neutral and use no
+// SQLite/Postgres-specific syntax. They use single-quote string literals for
+// graph_id / kind names. Both
 // values come from the schema — never untrusted user input — but we
 // still escape single quotes defensively to avoid surprises if a
 // future kind-name validator narrows beyond `[A-Za-z_][A-Za-z0-9_]*`.

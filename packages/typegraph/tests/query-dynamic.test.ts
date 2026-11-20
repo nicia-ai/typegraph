@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  ConfigurationError,
   defineEdge,
   defineGraph,
   defineNode,
@@ -15,7 +16,7 @@ import {
 } from "../src/query/builder/dynamic";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, matchingObject } from "./test-utils";
 
 const Document = defineNode("Document", {
   schema: z.object({
@@ -203,6 +204,99 @@ describe("traverseDynamic + toDynamic", () => {
   });
 });
 
+describe("traverseDynamic + toKindSet", () => {
+  it("finalizes against an explicit, registry-derived kind set", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    const papers = evolved.getNodeCollectionOrThrow("Paper");
+    const authors = evolved.getNodeCollectionOrThrow("Author");
+    const authoredBy = evolved.getEdgeCollectionOrThrow("authoredBy");
+
+    const paper = await papers.create({ title: "P", year: 2021 });
+    const author = await authors.create({ name: "Only Author" });
+    await authoredBy.create(paper, author, { order: 1 });
+
+    const rows = await evolved
+      .query()
+      .fromDynamic("Paper", "p")
+      .traverseDynamic("authoredBy", "a")
+      .toKindSet(["Author"], "u")
+      .select((ctx) => ctx.u)
+      .execute();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.["name"]).toBe("Only Author");
+  });
+
+  it("throws ConfigurationError (EMPTY_KIND_SET) on an empty kind array", async () => {
+    // MUTATION CHECK: dropping this guard lets `compileKindFilter`
+    // turn the empty list into a bare `1 = 0`, so the query would build and
+    // execute successfully, always returning zero rows, instead of refusing
+    // the invalid traversal — verified and reverted.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .traverseDynamic("authoredBy", "a")
+        .toKindSet([], "u"),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .traverseDynamic("authoredBy", "a")
+        .toKindSet([], "u"),
+    ).toThrow(
+      expect.objectContaining({
+        code: "CONFIGURATION_ERROR",
+        details: matchingObject({ code: "EMPTY_KIND_SET" }),
+      }),
+    );
+  });
+
+  it("throws KindNotFoundError on an unregistered kind", async () => {
+    // MUTATION CHECK: `toKindSet`, unlike `toDynamic`, ran no
+    // `registry.hasNodeType` check before this fix — a typo'd kind here
+    // compiled to a kind filter no row matches (a permanent, silent empty
+    // result) instead of throwing — verified and reverted.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .traverseDynamic("authoredBy", "a")
+        .toKindSet(["Athor"], "u"),
+    ).toThrow(KindNotFoundError);
+  });
+
+  it("throws EndpointError when a kind in the set is not a valid endpoint", async () => {
+    // MUTATION CHECK: `toKindSet` ran no `#assertValidEndpoint`
+    // check before this fix — `authoredBy.to = [Author]`, so naming "Paper"
+    // here compiled and executed rather than refusing — verified and
+    // reverted.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .traverseDynamic("authoredBy", "a")
+        .toKindSet(["Paper"], "wrong"),
+    ).toThrow(EndpointError);
+  });
+});
+
 describe("optionalTraverseDynamic", () => {
   it("LEFT JOINs over a runtime edge — papers without authors still surface", async () => {
     const backend = createTestBackend();
@@ -370,6 +464,22 @@ describe(".field() discriminator", () => {
         .fromDynamic("Paper", "p")
         .whereNode("p", (p) => p.field("year").string().eq("2017")),
     ).toThrow(TypeError);
+  });
+
+  it("rejects a dynamic literal whose type disagrees with the registered schema", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(baseGraph, backend);
+    const evolved = await store.evolve(paperExtension);
+
+    // Dynamic access starts as an unknown field surface, so TypeScript cannot
+    // establish this value's type. The accessor has the registered field
+    // metadata at build time and must refuse it before SQL compilation.
+    expect(() =>
+      evolved
+        .query()
+        .fromDynamic("Paper", "p")
+        .whereNode("p", (paper) => paper.field("year").eq("2017")),
+    ).toThrow(/Expected a number literal/);
   });
 
   it("admits BaseFieldAccessor methods without a discriminator", async () => {

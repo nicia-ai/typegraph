@@ -14,6 +14,7 @@ import {
   defineNode,
   ValidationError,
 } from "../src";
+import { decodeCursor } from "../src/query/cursor";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -100,6 +101,55 @@ async function seedTestData(
 // ============================================================
 
 describe("Cursor Pagination", () => {
+  it("pages across equal ids in different kinds with both selective and full projections", async () => {
+    const store = createTestStore();
+    await store.nodes.Person.create(
+      { name: "Shared", age: 30 },
+      { id: "shared" },
+    );
+    await store.nodes.Company.create(
+      { name: "Shared", revenue: 100 },
+      { id: "shared" },
+    );
+
+    const selective = store
+      .query()
+      .from(["Person", "Company"], "item")
+      .orderBy("item", "id")
+      .select((context) => ({ kind: context.item.kind, id: context.item.id }));
+    const selectiveFirst = await selective.paginate({ first: 1 });
+    expect(
+      decodeCursor(requireDefined(selectiveFirst.nextCursor)).cols,
+    ).toEqual(["item.id", "item.kind"]);
+    const selectiveSecond = await selective.paginate({
+      first: 1,
+      after: requireDefined(selectiveFirst.nextCursor),
+    });
+    expect([...selectiveFirst.data, ...selectiveSecond.data]).toEqual([
+      { kind: "Company", id: "shared" },
+      { kind: "Person", id: "shared" },
+    ]);
+    expect(selectiveSecond.hasNextPage).toBe(false);
+
+    const full = store
+      .query()
+      .from(["Person", "Company"], "item")
+      .orderBy("item", "kind")
+      .select((context) => context.item);
+    const fullFirst = await full.paginate({ first: 1 });
+    expect(decodeCursor(requireDefined(fullFirst.nextCursor)).cols).toEqual([
+      "item.kind",
+      "item.id",
+    ]);
+    const fullSecond = await full.paginate({
+      first: 1,
+      after: requireDefined(fullFirst.nextCursor),
+    });
+    expect(
+      [...fullFirst.data, ...fullSecond.data].map((item) => item.kind),
+    ).toEqual(["Company", "Person"]);
+  });
+
   it("returns first page of results", async () => {
     const store = createTestStore();
     await seedTestData(store);
@@ -278,6 +328,45 @@ describe("Cursor Pagination", () => {
         .select((ctx) => ctx.p)
         .paginate({ first: 10, after: "invalid-cursor" }),
     ).rejects.toThrow(ValidationError);
+  });
+
+  it("does not pollute Object.prototype when the query alias is __proto__", async () => {
+    // Aliases are caller data and are validated nowhere. The cursor context
+    // used to be a plain object, so `cursorContext["__proto__"]` returned
+    // Object.prototype (typeof "object"), and the per-alias field writes then
+    // landed ON Object.prototype — global prototype pollution from
+    // `.from(kind, "__proto__")`. Null-prototype bags make the alias an
+    // ordinary own key.
+    const prototypeKeysBefore = Object.getOwnPropertyNames(
+      Object.prototype,
+    ).toSorted();
+    const store = createTestStore();
+    await seedTestData(store);
+
+    const page1 = await store
+      .query()
+      .from("Person", "__proto__")
+      .orderBy("__proto__", "name")
+      .select((ctx) => ctx.__proto__)
+      .paginate({ first: 5 });
+
+    const page2 = await store
+      .query()
+      .from("Person", "__proto__")
+      .orderBy("__proto__", "name")
+      .select((ctx) => ctx.__proto__)
+      .paginate({ first: 5, after: requireDefined(page1.nextCursor) });
+
+    expect(Object.getOwnPropertyNames(Object.prototype).toSorted()).toEqual(
+      prototypeKeysBefore,
+    );
+    expect(({} as Record<string, unknown>)["name"]).toBeUndefined();
+    // The cursor still works as a keyset: page 2 continues after page 1.
+    expect(page1.data).toHaveLength(5);
+    expect(page2.data).toHaveLength(5);
+    expect(requireDefined(page2.data[0]).name).not.toBe(
+      requireDefined(page1.data[0]).name,
+    );
   });
 });
 

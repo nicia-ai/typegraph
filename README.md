@@ -23,6 +23,11 @@ deployment.
 - Keep graph data in your existing SQL database (no separate graph service)
 - Model richer semantics with `subClassOf`, `implies`, `inverseOf`, and `disjointWith`
 - Traverse relationships with compile-time type safety
+- Filter and project with typed database expressions, then compose results with grouping, set operations,
+  preparation, and streaming
+- Chain fixed and recursive traversal stages with qualified paths, per-hop constraints,
+  completed-match filters, and explicit stop rules
+- Assemble independent reads in one statement and bound edge traversals before hydration
 - Run vector and hybrid search across every backend — pgvector, sqlite-vec, and libSQL/Turso native vectors
 - Start with SQLite, move to PostgreSQL without changing your graph definition
 - Evolve the schema at runtime from agent-proposed JSON — no redeploy
@@ -116,7 +121,26 @@ live under the explicit `/adapters/drizzle/...` entrypoints.
 Packages that only define or share graph schemas can import the DSL and its
 schema-derived types from `@nicia-ai/typegraph/core`. Custom backend and search
 strategy authors can use the complete Drizzle-free contract vocabulary from
-`@nicia-ai/typegraph/backend`.
+`@nicia-ai/typegraph/backend`. That authoring surface, and
+`@nicia-ai/typegraph/adapters/drizzle/engine`, is not covered by semver and may
+change in any release; the bundled SQLite and PostgreSQL backends are the
+supported ones. Every other entrypoint is application API and is covered by
+semver: the root and the `/store`, `/query`, `/errors`, `/identity`,
+`/maintenance`, `/core`, `/schema`, `/indexes`, `/graph-extension`,
+`/graph-merge`, `/interchange`, `/profiler`, `/provenance`, `/sqlite/local`,
+`/postgres/pglite` and `/adapters/drizzle/...` subpaths other than
+`/adapters/drizzle/engine`. See
+[Stability](https://typegraph.dev/backend-authoring#stability).
+
+`drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`
+and `@nicia-ai/typegraph/postgres/pglite` load it only when their factory is
+called and refuse with a typed `ConfigurationError`
+(`MISSING_PEER_DEPENDENCY`) naming the package and the install command
+(`npm install drizzle-orm`) when it is absent. The explicit
+`/adapters/drizzle/...` entrypoints expose Drizzle-native backends, connections,
+or schema builders and load `drizzle-orm` when the module is evaluated. Importing
+one without the peer installed therefore surfaces the raw module-resolution
+error, which names the same package.
 
 ## Learn More
 
@@ -124,6 +148,9 @@ strategy authors can use the complete Drizzle-free contract vocabulary from
 - Overview: [What is TypeGraph?](https://typegraph.dev/overview)
 - Setup: [Getting Started](https://typegraph.dev/getting-started)
 - Query builder: [Queries Overview](https://typegraph.dev/queries/overview)
+- Parallel and durable reconciliation: [Graph Merge](https://typegraph.dev/graph-merge)
+- Typed expressions and relational composition: [Expressions](https://typegraph.dev/queries/expressions), [Relations](https://typegraph.dev/queries/relations)
+- Traversal and recursive paths: [Traverse](https://typegraph.dev/queries/traverse), [Recursive queries](https://typegraph.dev/queries/recursive)
 - Temporal and bitemporal history: [Temporal queries](https://typegraph.dev/queries/temporal)
 - Application patterns: [Common Patterns](https://typegraph.dev/recipes)
 - Complete examples: [packages/typegraph/examples](packages/typegraph/examples/)
@@ -131,15 +158,12 @@ strategy authors can use the complete Drizzle-free contract vocabulary from
 
 ## LLM/Coding Agent Support
 
-TypeGraph publishes agent-friendly documentation following the [llms.txt](https://llmstxt.org/) convention:
+TypeGraph publishes one curated [llms.txt](https://typegraph.dev/llms.txt) following the
+[llms.txt](https://llmstxt.org/) convention. It states when to recommend TypeGraph (and when not to), includes a
+working quick start, and links every documentation page as clean markdown (append `.md` to any docs URL, for example
+[overview.md](https://typegraph.dev/overview.md)).
 
-- Landing page: [LLM Support](https://typegraph.dev/llm-support/)
-- Index: [llms.txt](https://typegraph.dev/llms.txt)
-- Core docs: [llms-small.txt](https://typegraph.dev/llms-small.txt)
-- Full docs: [llms-full.txt](https://typegraph.dev/llms-full.txt)
-- Examples: [examples.txt](https://typegraph.dev/_llms-txt/examples.txt)
-
-Recommended retrieval order: `llms-small` → `llms-full` → `examples`.
+See [LLM Support](https://typegraph.dev/llm-support/) for a copy-paste block for `AGENTS.md` / `CLAUDE.md`.
 
 ## License
 

@@ -1,0 +1,316 @@
+---
+title: "TypeGraph vs. Neo4j, LadybugDB and pgGraph: Who Wins What"
+date: 2026-07-23
+excerpt: "I ran 17 LDBC queries against five engines at two scales. TypeGraph on SQLite wins every point read, often by 10–100x, and the engines built around an in-memory graph index win whole-graph algorithms by three to four orders of magnitude."
+tags:
+  - announcements
+cover:
+  alt: "Two abstract query shapes side by side: on the left, concentric rings collapsing on a single blue point (a point read); on the right, a small node cluster with one path lit up in amber across part of it (a graph algorithm) — the two query shapes where TypeGraph and the native-CSR engines each win"
+  image: "./cover.png"
+social:
+  alt: "TypeGraph vs. Neo4j, LadybugDB and pgGraph: Who Wins What"
+  image: "./social.png"
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+My first pass at benchmarking TypeGraph against real graph databases ran the
+seven LDBC "short read" queries (IS1–IS7) against Neo4j and LadybugDB.
+TypeGraph on SQLite won every one of them, which should have made me
+suspicious rather than happy: IS1–IS7 are point lookups and one-hop walks, and
+an in-process engine doing direct index seeks can't lose that race to anything
+that pays a network round trip.
+
+So I rebuilt the harness around the queries a graph database is _supposed_ to
+win (shortest paths, bounded neighborhood walks, complex multi-hop reads, and
+whole-graph algorithms) and ran 17 queries against five engines at two
+scales. The short version:
+
+- **TypeGraph on SQLite still wins every point read, usually by 10–100x.**
+- **The engines that keep an in-memory graph index win whole-graph algorithms
+  by three to four orders of magnitude**, and the gap gets wider as the data
+  grows.
+
+I'm publishing both results rather than only the flattering one.
+
+## The setup
+
+All five engines run through one shared harness
+([`packages/benchmarks/src/real/`](https://github.com/nicia-ai/typegraph/tree/bench/pggraph-comparison-v2/packages/benchmarks/src/real)):
+
+| Engine                         | Version                                                                      |
+| ------------------------------ | ---------------------------------------------------------------------------- |
+| SQLite                         | 3.53.2 (via `better-sqlite3` 12.11.1)                                        |
+| PostgreSQL (TypeGraph backend) | 18.1 (`pgvector/pgvector:pg18` image)                                        |
+| Neo4j                          | `neo4j:2026.05.0` server image, `neo4j-driver` 6.2.0, GDS plugin             |
+| LadybugDB                      | `@ladybugdb/core` 0.18.0                                                     |
+| pgGraph                        | Evokoa pgGraph 0.1.8 (`ghcr.io/evokoa/pggraph:0.1.8`, bundles PostgreSQL 17) |
+
+pgGraph is the new entrant, and I think it's clever. Rather than being a
+separate database, it's a Postgres extension that builds a derived CSR
+(compressed sparse row) index over ordinary normalized tables and exposes
+traversal and pathfinding as SQL functions. Its point reads are tuned
+Postgres, and the CSR index only comes into play once a query traverses.
+
+The 17 queries are the original IS1–IS7; IC13 (shortest path) and IC14
+(weighted shortest path); BFS3, a bounded neighborhood walk; three complex
+reads (IC2, IC8, IC9); and four graph-algorithm queries: GA_DEGREE, GA_WCC
+(weakly connected components), and GA_BFS / GA_SSSP (whole-component
+reachability and shortest-path depth from a seed).
+
+I held the comparison to two rules. Every result is checked with a
+value-level digest, per row, across every engine that runs the query, and
+every run below passed, since a fast wrong answer shouldn't count. And nothing
+is skipped silently: an engine without a comparable primitive for a query
+reports a typed `gap`, so a `gap` cell means the engine can't run that query
+in a comparable form, not that I didn't get around to it.
+
+Scales are **SF1** (9,892 persons, 361K directed `knows` edges) and **SF10**
+(65,645 persons, 3.88M `knows`, 21.9M comments). Each is one run on an EC2
+host with shared vCPUs, so treat sub-millisecond cells and anything flagged
+noisy as order-of-magnitude.
+
+## SF1
+
+p50 latency in milliseconds unless noted. Fastest engine per row in **bold**.
+
+| Query                | typegraph-sqlite | typegraph-postgres |    neo4j | ladybugdb |  pggraph |
+| -------------------- | ---------------: | -----------------: | -------: | --------: | -------: |
+| IS1                  |         **0.03** |               0.76 |     4.84 |      1.11 |     0.93 |
+| IS2                  |         **1.85** |               21.5 |     39.9 |      76.0 |     19.9 |
+| IS3                  |         **0.24** |               1.82 |     4.07 |       4.5 |     1.47 |
+| IS4                  |         **0.02** |               0.98 |     3.01 |      0.39 |     0.91 |
+| IS5                  |         **0.03** |               1.08 |      3.1 |      1.61 |     0.94 |
+| IS6                  |         **0.07** |               1.97 |     3.23 |      3.93 |     1.89 |
+| IS7                  |         **0.07** |               2.15 |     5.74 |      7.83 |     1.76 |
+| IC13 (shortest path) |             3.88 |               22.3 |     3.24 |      9.91 | **2.18** |
+| IC14 (weighted SP)   |             5586 |           **4860** |      gap |       gap |      gap |
+| BFS3                 |          **220** |               1139 |      468 |      1539 |      357 |
+| IC2                  |             51.8 |                523 | **36.2** |      89.1 |      347 |
+| IC8                  |         **3.06** |               17.3 |     3.73 |      24.2 |        8 |
+| IC9                  |             2236 |              15069 |     3388 |   **775** |     3498 |
+| GA_DEGREE            |         **0.03** |               1.09 |     2.97 |       1.8 |     0.72 |
+| GA_WCC               |             7269 |              24237 |     18.7 |       gap | **9.53** |
+| GA_BFS               |              221 |               1828 | **24.5** |       gap |      288 |
+| GA_SSSP              |              220 |               1742 | **23.6** |       gap |      284 |
+
+### Point reads
+
+TypeGraph on SQLite takes every IS row, often by one to two orders of
+magnitude, because it's the only engine here that pays no network round trip
+and no per-call query planning overhead. GA_DEGREE and
+IC8 go the same way, because underneath the "algorithm" and "complex read"
+labels they're point lookups too.
+
+This is the case for an embedded graph. Most of what an application asks its
+graph all day looks like IS1–IS7 (fetch this person, their recent posts,
+who they know), and on IS1 Neo4j takes 4.84ms where SQLite takes 0.03ms.
+
+### Graph algorithms
+
+GA_WCC, GA_BFS, GA_SSSP, and IC13 are what a graph engine's specialized index
+exists for, and here the CSR engines are in a different league:
+
+- **pgGraph wins GA_WCC (9.53ms) and IC13 (2.18ms)**, running union-find and
+  shortest path directly over its CSR index.
+- **Neo4j with the GDS plugin wins GA_BFS (24.5ms) and GA_SSSP (23.6ms).**
+  Without GDS, Neo4j answers these with Cypher path enumeration, which works
+  but is slow. With GDS it projects the graph into memory once and runs the
+  same kind of set-based traversal pgGraph does.
+- **TypeGraph is three to four orders of magnitude slower on GA_WCC** (7,269ms
+  on SQLite, 24,237ms on Postgres, against pgGraph's 9.53ms).
+
+That last gap isn't a bug I can fix. TypeGraph's algorithms run as rounds of
+SQL, one window or aggregate query per round, however well indexed, while
+pgGraph and GDS hold the graph in an in-memory structure built for this access
+pattern, and query tuning won't make SQL iteration behave like a CSR
+traversal.
+
+## SF10
+
+The SF10 run happened **before** I added the GDS plugin to the Neo4j setup, so
+Neo4j's graph-algorithm rows show `gap` here even though Neo4j can run them.
+For Neo4j on those queries, the SF1 table above is the current picture.
+
+`s` = seconds; otherwise milliseconds.
+
+| Query                | typegraph-sqlite | typegraph-postgres |   neo4j | ladybugdb |  pggraph |
+| -------------------- | ---------------: | -----------------: | ------: | --------: | -------: |
+| IS1                  |         **0.03** |               1.06 |    5.22 |      1.12 |     0.93 |
+| IS2                  |         **2.35** |               77.2 |     133 |       104 |     22.6 |
+| IS3                  |         **0.42** |               6.23 |    53.8 |      15.7 |     1.87 |
+| IS4                  |         **0.03** |               0.91 |    3.33 |      0.90 |     0.96 |
+| IS5                  |         **0.04** |               8.67 |    5.52 |      2.68 |     0.96 |
+| IS6                  |         **0.07** |               3.69 |    8.09 |      5.50 |     2.02 |
+| IS7                  |         **0.07** |               7.29 |    8.23 |      8.38 |     1.80 |
+| IC13 (shortest path) |             35.0 |                339 |    82.2 |       161 | **2.25** |
+| IC14 (weighted SP)   |            74.6s |          **57.3s** |     gap |       gap |      gap |
+| BFS3                 |         **1.7s** |               7.2s |    3.9s |      9.3s |     2.2s |
+| IC2                  |              141 |                724 | **138** |       296 |      843 |
+| IC8                  |         **5.24** |                220 |    92.1 |      47.6 |     15.3 |
+| IC9                  |            11.9s |              76.7s |   15.5s |  **3.1s** |    25.4s |
+| GA_DEGREE            |         **0.06** |               1.05 |    3.02 |      2.07 |     0.82 |
+| GA_WCC               |           119.9s |             506.0s |     gap |       gap | **69.0** |
+| GA_BFS               |             2.8s |              22.3s |     gap |       gap | **2.0s** |
+| GA_SSSP              |             2.8s |              22.3s |     gap |       gap | **1.9s** |
+
+Point reads barely move at 10x the data, as you'd expect from an indexed
+seek. The more interesting number is how GA_WCC grows:
+
+| Engine             |     SF1 |   SF10 | Growth |
+| ------------------ | ------: | -----: | -----: |
+| pggraph            |  9.53ms | 69.0ms |    ~7x |
+| typegraph-sqlite   |  7269ms | 119.9s |   ~16x |
+| typegraph-postgres | 24237ms | 506.0s |   ~21x |
+
+pgGraph grows a bit less than linearly with the data, while TypeGraph's
+round-by-round algorithm grows faster than linearly because more edges also
+means more rounds, so the gap gets bigger as the data grows. If you need
+whole-graph analytics over millions of edges on a schedule, use a specialized
+engine for that job.
+
+### SQLite beats Postgres, even inside TypeGraph
+
+Both TypeGraph backends run the same logical algorithms, and SQLite is 4–8x
+faster on the heavy ones at SF10 (GA_WCC 119.9s vs 506.0s, GA_BFS 2.8s vs
+22.3s, IC9 11.9s vs 76.7s). My first guess was network round trips, but that
+doesn't hold up: GA_BFS already issues one `INSERT ... RETURNING` per round,
+Postgres is on loopback, and the ratio stays about 8x at both scales, whereas
+a fixed per-call cost would shrink as a share of a longer run. That points at
+a per-row cost in how Postgres executes these queries, which I haven't tracked
+down yet.
+
+The one exception is IC14, the weighted shortest path, where Postgres wins.
+Its set-based frontier expansion handles a large, unbounded Dijkstra better
+than SQLite's row-at-a-time version.
+
+## IC14: the one only TypeGraph ran
+
+IC14 asks for the lowest-cost path between two people rather than the fewest
+hops. In this lineup, nothing else could run it in a comparable form:
+Neo4j's GDS has no stored `knows` weight to project, pgGraph's shortest path
+counts hops only, and LadybugDB's weighted shortest path isn't wired into the
+harness yet. TypeGraph answers it on both backends with
+`store.algorithms.weightedShortestPath`, at real LDBC scale (5.6s / 4.9s at
+SF1, 75s / 57s at SF10), with byte-identical results across the two.
+
+Those times aren't fast, and the benchmark makes them look worse than real
+use would, because it picks random pairs near the graph's diameter, which is
+the worst case for single-source Dijkstra. Real weighted-path questions tend to be between
+related, nearby entities, where the same algorithm stops early.
+
+## Loading
+
+Loading is where TypeGraph still trails. It improved a lot between my first
+run and this one, because in the meantime 0.37 shipped a trusted initial
+import, and the benchmark loader now uses it.
+
+`importGraph` validates every row it writes: schema shape, edge endpoints,
+cardinality, conflicts. That's the right default, since most imports come
+from somewhere you don't fully trust. But when you're filling a brand-new
+database from an export you produced and already validated, every one of
+those checks is wasted work. `trustedImportGraph` and
+`trustedImportGraphStream` skip them. They bypass the normal write pipeline,
+drop secondary indexes, insert straight into the tables, then rebuild the
+indexes and refresh statistics, all in one transaction.
+
+Loading the same 200,000 nodes and 200,000 edges into a fresh SQLite
+database both ways:
+
+```text
+run 1 — importGraph: 6783ms   trustedImportGraphStream: 2455ms
+run 2 — importGraph: 7253ms   trustedImportGraphStream: 2206ms
+run 3 — importGraph: 5048ms   trustedImportGraphStream: 2116ms
+```
+
+Trusted import was 2.5–3x faster on every run. The streaming form takes a header, then node
+chunks, then edge chunks, so the loader here reads the LDBC CSVs in two
+bounded passes instead of holding a multi-million-row graph in memory.
+
+Skipping validation needs a narrow contract. The node and edge tables must
+be completely empty, and TypeGraph only checks stream order and kind names.
+Property shapes, endpoints, and duplicate-free IDs are on you. Features whose
+extra writes it would otherwise skip (history, uniqueness constraints,
+`searchable()` and `embedding()` fields) are rejected outright. Point it at
+a database with rows in it and it throws before touching anything:
+
+```text
+TrustedImportError: Trusted import requires globally empty TypeGraph node and edge tables.
+  details: { tables: ["typegraph_nodes", "typegraph_edges"], reason: "database_not_empty" }
+```
+
+For anything that isn't a one-time load of a fresh, dedicated database, use
+`importGraph` (untrusted data, conflicts, history, search fields) or
+collection `bulkInsert` (trusted data going into a database that isn't
+empty).
+
+Here's what it did to the benchmark:
+
+| Engine             | SF1 load | Earlier run | SF10 load |
+| ------------------ | -------: | ----------: | --------: |
+| ladybugdb          |      46s |       41.6s |      373s |
+| neo4j              |      66s |       71.4s |      409s |
+| pggraph            |     120s |           — |    1,119s |
+| typegraph-sqlite   |     164s |      587.1s |    2,199s |
+| typegraph-postgres |     344s |      669.3s |    3,278s |
+
+TypeGraph on SQLite went from 587s to 164s (~3.6x) and on Postgres from 669s
+to 344s (~1.9x). SQLite is now within about 1.4x of pgGraph, while
+Postgres is still about 3x slower than pgGraph at both scales, because pgGraph
+loads through batched `INSERT`s tuned for its own schema and TypeGraph's
+Postgres path still uses prepared statements instead of `COPY`. Switching to
+`COPY` is next, and unlike most of what this benchmark turned up, it would
+help every Postgres user.
+
+## pgGraph as an accelerator
+
+pgGraph is the most interesting result here, less for the rows it wins than
+for how it works. It indexes tables that already look a lot like the ones
+TypeGraph's Postgres backend writes (normalized nodes and edges in Postgres,
+queryable over the same connection), which is why its point reads look like
+tuned Postgres while its traversal numbers look like a graph engine's.
+
+**None of this is built yet.** The pgGraph driver in this benchmark loads its own copy
+of the data into its own schema. It doesn't sit on top of a TypeGraph-managed
+database. But the numbers suggest the shape of a pairing: use TypeGraph for
+the point reads and everyday writes it already wins, and when profiling finds
+a real whole-graph workload (components, centrality, unweighted shortest path
+at scale), build a pgGraph index over the same tables and send just that
+query through it. I'm excited about that direction, because it keeps
+everything in one database without giving up anything on the queries
+applications run most.
+
+## What the slow rows actually mean
+
+It's tempting to read every slow cell as a TypeGraph bug. Mostly they aren't:
+
+- **IC9 is a modeling artifact.** LDBC models a message's creator as an edge,
+  so ranking a feed means fetching a sort key for every candidate first: 1.2M
+  of them at SF1 to return the top 20. A real feed would put the owner on the
+  item and index `(owner, created_at)`, which `defineNodeIndex` already
+  supports, so the fix belongs in the schema rather than the engine.
+- **The whole-graph algorithms are architectural.** Tuning has helped (a
+  delta-frontier rewrite of connected components nearly halved the Postgres
+  GA_WCC time during this work), but it won't close a 1,000x gap. Pairing with
+  something like pgGraph for those queries is the realistic answer.
+- **IC14 is benchmark-amplified**, as above.
+
+And the caveats: one run per scale on a shared-vCPU host, so several cells
+are noisy and should be read as order-of-magnitude. What I'm confident in
+regardless: every query passes value-level parity across every engine that
+runs it, and the direction of every finding is far larger than run-to-run
+noise.
+
+## Try it
+
+- [The harness](https://github.com/nicia-ai/typegraph/tree/bench/pggraph-comparison-v2/packages/benchmarks/src/real):
+  all five engine drivers and the EC2 runner
+- Full results and investigation notes:
+  [`sf1-results.md`](https://github.com/nicia-ai/typegraph/blob/bench/pggraph-comparison-v2/packages/benchmarks/reports/sf1-results.md),
+  [`sf10-results.md`](https://github.com/nicia-ai/typegraph/blob/bench/pggraph-comparison-v2/packages/benchmarks/reports/sf10-results.md)
+- [Trusted initial import](/interchange#trusted-initial-import): the full
+  contract
+- [TypeGraph 0.35: Faster Almost Everywhere](/blog/typegraph-0-35-performance):
+  the fixes an earlier run of this benchmark turned up
+
+<NewsletterSignup />

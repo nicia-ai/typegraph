@@ -7,8 +7,8 @@ import {
   defineGraph,
   defineNode,
   type NodeId,
-  type StoreProjection,
 } from "../src";
+import type { StoreProjection } from "../src/store-entry";
 import { createTestBackend } from "./test-utils";
 
 const Document = defineNode("Document", {

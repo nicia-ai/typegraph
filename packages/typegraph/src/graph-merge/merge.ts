@@ -1,4 +1,35 @@
+import { validateEdgeEndpoints } from "../constraints";
+import {
+  assertGraphAllocationOwner,
+  type GraphAllocationOwner,
+  sameGraphAllocationOwner,
+} from "../core/allocation-owner";
+import { recordedInstantOwner } from "../core/temporal";
+import { parseRecordedInstant } from "../core/temporal";
+import { IdentityEndpointValidityError } from "../errors";
+import type { EvolutionPlan } from "../schema/evolution-plan";
+import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
+import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
+import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
+import { resolveEvolvedTransactionStore } from "../store/runtime-port";
+import type { TransactionContext } from "../store/types";
+import { groupBy } from "../utils/array";
+import { nowIso } from "../utils/date";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import {
+  assertMergeTransactionPristine,
+  withAdoptedMergeApplySavepoint,
+} from "./adopted-transaction";
+import {
+  assertMergeCallbackResult,
+  assertOnlyDeclaredApplyOptions,
+  MERGE_PLAN_APPLY_OPTION_KEYS,
+  MERGE_PLAN_DECISION_OPTION_KEYS,
+  type MergePlanApplyOptions,
+  type MergePlanDecisionOptions,
+  mergePlanReadContext,
+} from "./apply-callbacks";
 /**
  * `merge()` orchestrator (design §7.2, T11).
  *
@@ -20,8 +51,8 @@ import { requireDefined } from "../utils/presence";
  *      property union under the stable, non-wall-clock conflict policy.
  *   6. DELETE/MODIFY — `resolveDeleteModify` (T8a): the authoritative final
  *      liveness of every inherited node + the delete/modify conflicts.
- *   7. TYPE-RECONCILE — `reconcileTypes` (T10) over the public-closure glue when
- *      `reconcileTypes: "ontology"`; otherwise a no-op.
+ *   7. TYPE-RECONCILE — `reconcileTypes` (T10) over the store's validated
+ *      `KindRegistry` when `reconcileTypes: "ontology"`; otherwise a no-op.
  *   8. EDGE REPOINT — `repointEdges` (T9): repoint every staged edge onto its
  *      cluster canonical, drop edges to finally-deleted endpoints, dedupe + union
  *      edge props under the same conflict policy.
@@ -41,24 +72,35 @@ import { requireDefined } from "../utils/presence";
  * identical committed graph. T12 proves this with a fast-check shuffle property.
  */
 import {
+  compareBaseVersionAtTarget,
   computeBaseVersion,
-  computeContentComponent,
   computeSchemaComponent,
-  contentComponentOf,
+  engineAnchorOf,
   hasRevisionAnchor,
+  isLegacyBaseVersion,
+  LEGACY_BASE_VERSION_REFUSAL,
+  optionalActiveSchemaHash,
+  readActiveSchemaVersion,
   revisionAnchorOf,
   revisionOriginOf,
+  schemaActiveVersionOf,
+  schemaComponentOf,
 } from "./base-version";
 import { blockNodes } from "./blocking";
+import type { CandidateIdentityScope } from "./candidate-identity-closure";
 import { canonicalizeProps, edgeStateSignature } from "./canonical-props";
 import type { CanonicalEntity, ClusterMember } from "./canonicalize";
-import { BASE_PROVENANCE_BRANCH, canonicalizeCluster } from "./canonicalize";
-import { buildSubClassClosure } from "./closures";
+import {
+  BASE_PROVENANCE_BRANCH,
+  canonicalizeCluster,
+  COMMITTED_TARGET_BRANCH,
+} from "./canonicalize";
 import type { ClusterResult } from "./clustering";
 import {
   connectedComponents,
+  decisiveEdgesForCluster,
   enforceBaseGuard,
-  enforceDiameter,
+  enforceDiameterWithEdges,
 } from "./clustering";
 import type { ProvenanceWeights } from "./conflict-policy";
 import { buildBranchRank } from "./conflict-policy";
@@ -68,9 +110,78 @@ import {
   resolveDeleteModify,
   resolveEdgeDeleteModify,
 } from "./delete-modify";
-import type { MergedEdge, StagedEdge } from "./edge-repoint";
-import { buildCanonicalMap, repointEdges } from "./edge-repoint";
-import { BaseVersionMismatchError, MergeError } from "./errors";
+import type {
+  EndpointDeletedEdge,
+  MergedEdge,
+  StagedEdge,
+} from "./edge-repoint";
+import {
+  BRANCH_CREATED_EDGE_ORIGIN,
+  buildCanonicalMap,
+  INHERITED_EDGE_ORIGIN,
+  repointEdges,
+  withRepointedEndpoints,
+} from "./edge-repoint";
+import {
+  BaseVersionMismatchError,
+  describeCause,
+  IdentityMergeConflictError,
+  InvalidMergeOptionsError,
+  InvalidMergePlanError,
+  MERGE_ERROR_CODES,
+  mergeCallbackIsolationError,
+  MergeCompositionOrphanError,
+  MergeError,
+  MergePlanCapabilityError,
+  MergePlanDigestMismatchError,
+  MergePlanningStaleError,
+  MergePlanOwnerMismatchError,
+  MergePlanSchemaMismatchError,
+  MergePlanTargetMismatchError,
+  StaleMergePlanError,
+  translateMergeCommitError,
+  UnsupportedMergePlanVersionError,
+} from "./errors";
+import type {
+  CandidateDiagnostic,
+  CandidateDiagnostics,
+  ClusterExclusionReason,
+} from "./evidence";
+import { compareMatchEvidence, entityRef } from "./evidence";
+import { evolutionPlanningTarget } from "./evolution-target";
+import { createRecordedBaseReader } from "./historical-base";
+import {
+  branchAncestryOf,
+  mergeIdentityDecision,
+  mergeIdentityDecisionFromArtifact,
+} from "./identity-decision";
+import type { IdentitySeparationFacts } from "./identity-separation";
+import {
+  captureIdentitySeparationFacts,
+  isSeparatedPair,
+  NO_IDENTITY_SEPARATION_FACTS,
+  separatingAssertionIds,
+} from "./identity-separation";
+import { reduceIdentityRetraction } from "./identity-three-way";
+import { unwrapMergeBranches } from "./ingestion-branch";
+import {
+  assertIdentityEndpointsNotDeleted,
+  assertIdentityPeersStable,
+  assertMergedIdentityClassesConsistent,
+  assertNoContradictoryIdentityClosure,
+  assertOneIdOneTruth,
+  assertPlannedIdentityIdsFresh,
+  buildIdentityPeerProbe,
+  type IdentityPeerProbe,
+  type LedgerAssertion,
+  NO_STORED_ASSERTIONS,
+  planIdentityChanges,
+  type PlanIdentityContext,
+  remapIdentityAssertionEndpoints,
+  RETRACTION_DELETION_OVERRULED_DROP_REASON,
+  translateIdentityCommitError,
+  translateIdentityPlanError,
+} from "./merge-identity";
 import {
   compareMergeKeys,
   compareStrings,
@@ -81,8 +192,42 @@ import {
   mergeKeyOf,
 } from "./node-key";
 import type { NormalizedMergeOptions } from "./options";
-import { normalizeMergeOptions } from "./options";
+import { normalizeMergeOptions, undeclaredResolveKindRefusal } from "./options";
+import type {
+  MergePlanAnchors,
+  MergePlanArtifact,
+  MergePlanArtifactV3,
+  MergePlanArtifactV3Input,
+  MergePlanCompositionOrphan,
+  MergePlanEdgeUpsert,
+  MergePlanEntityRef,
+  MergePlanNodeUpsert,
+  MergePlanTargetFence,
+  MergePlanWrites,
+} from "./plan-schema";
+import { MERGE_PLAN_FORMAT_VERSION } from "./plan-schema";
 import {
+  acyclicityConflict,
+  assertPlanStructurallySound,
+  compositionWindowConflict,
+  compositionWindowWriteSet,
+  edgeClaimConflict,
+  MERGE_NODE_DELETE_POLICY,
+  mergeNodeDeleteSequence,
+  plannedEdgeWriteOnlyReleases,
+  type PlanStructuralCheck,
+  type PlanStructure,
+  readPlannedEdgeRows,
+  restrictedDeleteConflict,
+  statesValidityEnd,
+} from "./plan-structure";
+import {
+  constructMergePlanArtifact,
+  validateMergePlanArtifact,
+} from "./plan-wire";
+import type { ProvenanceGraph } from "./provenance-store";
+import {
+  contributionKey,
   openProvenanceStore,
   persistProvenanceRecords,
   provenanceGraphId,
@@ -106,33 +251,77 @@ import type {
   StagedModifiedNode,
   StagedNewEdge,
   StagedNewNode,
+  StagedRetraction,
+  StagedWindowedEdge,
   StagingSet,
 } from "./staging";
 import { stageBranches } from "./staging";
-import { withTxConflictRetry } from "./tx-retry";
+import type {
+  ModifiedNode,
+  StateDiffBaseReader,
+  ValidWindow,
+} from "./state-diff";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
+  CompositionWindowVerdict,
   Edge,
   EdgeId,
+  GraphBackend,
   GraphDef,
+  GraphReadBackend,
+  IdentityTransferAssertion,
   JsonValue,
+  KindRegistry,
+  LineageDelta,
   Node,
+  NodeDeletePolicy,
   NodeId,
+  NodeRow,
   NodeType,
   Store,
   TransactionBackend,
+  TransactionDeleteNodeWithPolicy,
   TransactionOptions,
   UniqueIntrospection,
+  ValidityEndMutation,
 } from "./typegraph-internal";
+import type { IdentityDecisionProvenance } from "./typegraph-internal";
 import {
+  activeSchemaHash,
+  advanceRevisionClock,
+  assertCompositionWindowsDisjoint,
+  BATCH_POINT_READ,
+  batchPointReadVerdict,
+  bindExtraIfReachable,
+  compositionEdgeAttachesPart,
+  findLiveCompositionAttachment,
+  findLiveCompositionWhole,
+  forceRecordedGraphRevision,
+  forceWriteTransactionRevision,
+  type GraphWriteLock,
+  isLiveNodeRow,
+  loadIdentityWindowHistory,
   lockRecordedGraphWrite,
+  orientCompositionEndpoints,
+  planCompositionCascade,
   readRecordedClock,
   readRevisionOrigin,
+  runRetriedUnit,
   storeBackend,
+  storeCaptureEnabled,
+  storeRuntime,
+  transactionAssertWritable,
   transactionBackend,
+  transactionDeleteNodeWithPolicy,
+  TypeGraphError,
+  uncapturedGraphWriteLock,
+  withDecidedCompositionWindows,
+  withDeferredCompositionExistence,
+  withRecordedIdentityDecision,
 } from "./typegraph-internal";
 import type {
+  AppliedMergeReport,
   BaseAmbiguity,
   BaseVersion,
   BranchId,
@@ -142,6 +331,9 @@ import type {
   Embedder,
   EntityResolution,
   GraphBranch,
+  IdentityUnresolvedConflict,
+  MergeBranch,
+  MergedCounts,
   MergeIncrementalArgs as MergeIncrementalArguments,
   MergeOptions,
   MergeReport,
@@ -149,16 +341,18 @@ import type {
   PropertyConflictPolicy,
   ProvenanceIndex,
   ProvenanceRecord,
+  RecordedForkPoint,
   SimilarityStrategy,
   TypeReconciliation,
+  ValidityEndResolution,
 } from "./types";
-import { asBranchId } from "./types";
+import type { ValidToChange } from "./valid-window";
+import { resolveValidWindows } from "./valid-window";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
 
 /** Reserved synthetic branch id for the live target in `mergeIncremental()`. */
-const COMMITTED_TARGET_BRANCH: BranchId = asBranchId("__committed_target__");
 
 /**
  * Materializes a {@link Node}-shaped object from a staged new node's parsed
@@ -253,10 +447,23 @@ async function precomputeEmbeddings<G extends GraphDef>(
     }
   }
 
-  const lookup = new Map<string, Float32Array>();
   if (texts.size === 0) {
-    return lookup;
+    return new Map<string, Float32Array>();
   }
+  return embedSortedTexts(texts, embedder);
+}
+
+/**
+ * Runs the injected {@link Embedder} over `texts` in sorted order and returns the
+ * text→vector lookup. Sorting here is what makes every embedding call a pure
+ * function of the text SET rather than of arrival order (the determinism
+ * contract), and the one-vector-per-text contract is enforced loudly — a short
+ * or long batch would otherwise silently mis-key the lookup.
+ */
+async function embedSortedTexts(
+  texts: ReadonlySet<string>,
+  embedder: Embedder,
+): Promise<ReadonlyMap<string, Float32Array>> {
   const orderedTexts = [...texts].sort((left, right) =>
     compareStrings(left, right),
   );
@@ -271,6 +478,7 @@ async function precomputeEmbeddings<G extends GraphDef>(
       },
     );
   }
+  const lookup = new Map<string, Float32Array>();
   for (const [index, text] of orderedTexts.entries()) {
     lookup.set(text, requireDefined(vectors[index]));
   }
@@ -312,31 +520,192 @@ async function embedMissingPairTexts(
   if (missing.size === 0) {
     return existing;
   }
-  const orderedTexts = [...missing].sort((left, right) =>
-    compareStrings(left, right),
+  return new Map([...existing, ...(await embedSortedTexts(missing, embedder))]);
+}
+
+/**
+ * The participant sets a fusion could occur WITHIN, so the separation probe
+ * costs one pair per pair the plan can actually merge rather than one per pair
+ * of participants.
+ *
+ * A cluster is always a subset of a connected component of the candidate-edge
+ * graph — the base and diameter guards only SPLIT components — so the
+ * components bound the transitive check exactly. Under
+ * `reconcileTypes: "ontology"` two staged nodes sharing a bare id can also fuse
+ * through a retype edge, so every bare id's members form one more group: a
+ * deliberately COARSER bound than `ontologyRetypeEdges` computes, chosen over
+ * a second call to it so the retype compatibility decision keeps one owner.
+ */
+function identityFusionGroups(
+  candidateEdges: readonly CandidateEdge[],
+  participants: readonly MergeKey[],
+  ontologyRetype: boolean,
+): readonly (readonly MergeKey[])[] {
+  const groups = connectedComponents(candidateEdges, participants).map(
+    (component) => component.members,
   );
-  const vectors = await embedder(orderedTexts);
-  if (vectors.length !== orderedTexts.length) {
-    throw new MergeError(
-      `Embedder returned ${vectors.length} vectors for ${orderedTexts.length} texts; expected exactly one per text.`,
-      {
-        details: { texts: orderedTexts.length, vectors: vectors.length },
-        suggestion:
-          "Ensure MergeOptions.embedder returns one vector per input text, in order.",
+  if (!ontologyRetype) return groups;
+  const byBareId = groupBy(participants, (key) => idOf(key));
+  return [
+    ...groups,
+    ...[...byBareId.values()].filter((members) => members.length > 1),
+  ];
+}
+
+/**
+ * The always-on separation VETO at the candidate-edge application point: a
+ * SCORED match between two entities the ledger holds apart is recall the
+ * ledger forbids, so the proposal is dropped, the merge continues, and the
+ * drop is reported as a typed `separation` conflict.
+ *
+ * A FORCED edge is left alone here on purpose. It is a DEFINITION — a shared
+ * unique value or a rediscovered base row — and refusing it at this point
+ * would fail merges the plan never had a problem with: the component base
+ * guard routinely severs a forced base match, so the two separated entities
+ * never land in one cluster and nothing is ever fused. The definitional
+ * refusal therefore runs on the edges that SURVIVE the base and diameter guards
+ * ({@link assertSurvivingEdgesNotSeparated}), where a contradiction is real.
+ */
+function applyIdentitySeparationVeto(
+  candidateEdges: readonly CandidateEdge[],
+  facts: IdentitySeparationFacts,
+): Readonly<{
+  edges: readonly CandidateEdge[];
+  conflicts: readonly IdentityUnresolvedConflict[];
+  // The edges the veto itself dropped — reported to `candidateDiagnostics`
+  // with `clusterDisposition: { kind: "excluded", reason: "separation" }` the
+  // same way the base and diameter guards report theirs, so the diagnostic
+  // surface never says "retained" about a pair the merge actually refused.
+  vetoedEdges: readonly CandidateEdge[];
+}> {
+  const edges: CandidateEdge[] = [];
+  const conflicts: IdentityUnresolvedConflict[] = [];
+  const vetoedEdges: CandidateEdge[] = [];
+  for (const edge of candidateEdges) {
+    if (
+      edge.evidence.decision === "definitional" ||
+      !isSeparatedPair(facts, edge.a, edge.b)
+    ) {
+      edges.push(edge);
+      continue;
+    }
+    vetoedEdges.push(edge);
+    const [source] = edge.evidence.sources;
+    conflicts.push({
+      kind: "separation",
+      a: entityRef(edge.a),
+      b: entityRef(edge.b),
+      assertionIds: separatingAssertionIds(facts, edge.a, edge.b),
+      ...(source === undefined ? {} : { source }),
+    });
+  }
+  return { edges, conflicts, vetoedEdges };
+}
+
+/**
+ * The separation veto's refusal of a DEFINITIONAL claim, applied to the edges
+ * that survived the base and diameter guards — the only edges that can still
+ * fuse anything. A definitional edge spanning two classes the ledger holds
+ * apart is a direct contradiction between two definitional claims, so the plan
+ * fails here rather than in the commit on the separation relation's
+ * ordered-pair CHECK, naming both entities, the assertion that separated them
+ * and the sources that proposed the match.
+ */
+function assertSurvivingEdgesNotSeparated(
+  survivingEdges: readonly CandidateEdge[],
+  facts: IdentitySeparationFacts,
+): void {
+  if (facts.separatedClassPairs.size === 0) return;
+  for (const edge of survivingEdges) {
+    if (edge.evidence.decision !== "definitional") continue;
+    if (!isSeparatedPair(facts, edge.a, edge.b)) continue;
+    throw separationRefusal(edge.a, edge.b, facts, {
+      subject: "a definitional match between",
+      details: { sources: edge.evidence.sources },
+      suggestion:
+        "Retract the `different` assertion separating these entities, or stop proposing them as one match, then re-plan the merge.",
+    });
+  }
+}
+
+/**
+ * The separation veto's refusal, for both application points that can still
+ * fail a plan: one message shape, one error code, and one `details` contract
+ * naming the two entities and the `different` assertion that separated them.
+ */
+function separationRefusal(
+  left: MergeKey,
+  right: MergeKey,
+  facts: IdentitySeparationFacts,
+  refusal: Readonly<{
+    subject: string;
+    details: Readonly<Record<string, unknown>>;
+    suggestion: string;
+  }>,
+): IdentityMergeConflictError {
+  return new IdentityMergeConflictError(
+    `Identity separation refuses ${refusal.subject} ${kindOf(left)}:${idOf(left)} and ${kindOf(right)}:${idOf(right)}: the identity ledger holds their classes apart.`,
+    {
+      code: MERGE_ERROR_CODES.identitySeparationConflict,
+      details: {
+        a: entityRef(left),
+        b: entityRef(right),
+        assertionIds: separatingAssertionIds(facts, left, right),
+        ...refusal.details,
       },
-    );
+      suggestion: refusal.suggestion,
+    },
+  );
+}
+
+/**
+ * The always-on separation veto at the POST-CLUSTER application point: a
+ * TRANSITIVE fusion. `a`–`b` and `b`–`c` can each clear the threshold with no
+ * separated candidate edge among them, and the cluster still fuses `a` with
+ * `c`. A pure lookup into facts captured before planning, so plan construction
+ * stays synchronous.
+ */
+function assertClusterNotSeparated(
+  members: readonly MergeKey[],
+  facts: IdentitySeparationFacts,
+): void {
+  if (facts.separatedClassPairs.size === 0) return;
+  for (const [index, left] of members.entries()) {
+    for (const right of members.slice(index + 1)) {
+      if (!isSeparatedPair(facts, left, right)) continue;
+      throw separationRefusal(left, right, facts, {
+        subject: "a merge cluster containing both",
+        details: { cluster: members.map((member) => entityRef(member)) },
+        suggestion:
+          "Retract the `different` assertion separating these entities, or raise the match threshold so the cluster no longer spans them, then re-plan the merge.",
+      });
+    }
   }
-  const augmented = new Map(existing);
-  for (const [index, text] of orderedTexts.entries()) {
-    augmented.set(text, requireDefined(vectors[index]));
-  }
-  return augmented;
+}
+
+/**
+ * The ONE list merged branches are recorded as: the caller's branches,
+ * code-point by branch id. A plan artifact's `MergePlanAnchors.branches` and
+ * the identity decision's `branchAncestry` both read it here, so the same
+ * logical merge run directly and through a plan + `applyMergePlan` records the
+ * same replay provenance instead of two lists that only happen to agree.
+ *
+ * The reserved stand-in an incremental merge stages its committed target
+ * under is not a merged branch and is never recorded, whichever list the
+ * caller holds.
+ */
+function branchesInAnchorOrder<G extends GraphDef>(
+  branches: readonly GraphBranch<G>[],
+): readonly GraphBranch<G>[] {
+  return branches
+    .filter((branch) => branch.id !== COMMITTED_TARGET_BRANCH)
+    .toSorted((left, right) => compareStrings(left.id, right.id));
 }
 
 /**
  * Runs candidate generation for every kind that has a {@link ResolveConfig} by
  * driving the candidate SOURCES (`sources.ts`) over the shared SCORING stage
- * (`scoring.ts`, §4): per kind, each source proposes pairs + forced edges off the
+ * (`scoring.ts`): per kind, each source proposes pairs + forced edges off the
  * scope, and the scoring stage turns them into the kind's candidate edges.
  * Accumulates edges + any base members across kinds and records comparison-ceiling
  * warnings. Kinds NOT in `resolve` (or with no staged new nodes) contribute no
@@ -366,6 +735,8 @@ async function generateAllCandidates<G extends GraphDef>(
       edges: readonly CandidateEdge[];
       warnings: readonly string[];
       baseMembers: readonly BaseMember[];
+      diagnostics: readonly CandidateDiagnostic[];
+      diagnosticsTotal: number;
     }>,
     MergeError
   >
@@ -373,6 +744,8 @@ async function generateAllCandidates<G extends GraphDef>(
   const allEdges: CandidateEdge[] = [];
   const warnings: string[] = [];
   const baseMembers: BaseMember[] = [];
+  const diagnostics: CandidateDiagnostic[] = [];
+  let diagnosticsTotal = 0;
   const byKind = newNodesByKind(staging);
   const sources =
     useBaseSources ?
@@ -395,6 +768,8 @@ async function generateAllCandidates<G extends GraphDef>(
             edges: readonly CandidateEdge[];
             warnings: readonly string[];
             baseMembers: readonly BaseMember[];
+            diagnostics: readonly CandidateDiagnostic[];
+            diagnosticsTotal: number;
           }>,
           MergeError
         >
@@ -403,7 +778,13 @@ async function generateAllCandidates<G extends GraphDef>(
         if (resolveConfig === undefined) {
           // No resolution config for this kind: merge by id only (no candidate
           // edges, so every new node stays a singleton cluster).
-          return ok({ edges: [], warnings: [], baseMembers: [] });
+          return ok({
+            edges: [],
+            warnings: [],
+            baseMembers: [],
+            diagnostics: [],
+            diagnosticsTotal: 0,
+          });
         }
 
         const nodes = items.map((staged) => asNode(staged));
@@ -458,6 +839,7 @@ async function generateAllCandidates<G extends GraphDef>(
           kindCtx,
           options.onComparisonCeiling,
           options.maxComparisonsPerKind,
+          options.candidateDiagnostics?.limit ?? 0,
         );
         if (isErr(scored)) {
           return err(scored.error);
@@ -468,6 +850,8 @@ async function generateAllCandidates<G extends GraphDef>(
             (warning) => `[${kind}] ${warning.message}`,
           ),
           baseMembers: kindBaseMembers,
+          diagnostics: scored.data.diagnostics,
+          diagnosticsTotal: scored.data.diagnosticsTotal,
         });
       },
     ),
@@ -480,6 +864,14 @@ async function generateAllCandidates<G extends GraphDef>(
     allEdges.push(...result.data.edges);
     warnings.push(...result.data.warnings);
     baseMembers.push(...result.data.baseMembers);
+    if (options.candidateDiagnostics !== undefined) {
+      diagnostics.push(...result.data.diagnostics);
+      diagnostics.sort((left, right) =>
+        compareMatchEvidence(left.evidence, right.evidence),
+      );
+      diagnostics.splice(options.candidateDiagnostics.limit);
+    }
+    diagnosticsTotal += result.data.diagnosticsTotal;
   }
 
   return ok({
@@ -492,6 +884,8 @@ async function generateAllCandidates<G extends GraphDef>(
     baseMembers: baseMembers.sort((left, right) =>
       compareMergeKeys(mergeKeyOf(left), mergeKeyOf(right)),
     ),
+    diagnostics,
+    diagnosticsTotal,
   });
 }
 
@@ -517,6 +911,10 @@ function clusterMembersFor(
         kind: staged.node.kind,
         branchId: staged.branchId,
         props: staged.node.props as Readonly<Record<string, JsonValue>>,
+        validFrom: staged.node.row.valid_from ?? null,
+        ...(staged.node.row.valid_to === undefined ?
+          {}
+        : { validTo: staged.node.row.valid_to }),
       });
     }
     const base = baseMembersById.get(key);
@@ -527,6 +925,8 @@ function clusterMembersFor(
         kind: base.kind,
         branchId: BASE_PROVENANCE_BRANCH,
         props: base.props,
+        ...(base.validFrom === undefined ? {} : { validFrom: base.validFrom }),
+        ...(base.validTo === undefined ? {} : { validTo: base.validTo }),
       });
     }
   }
@@ -564,46 +964,174 @@ function indexNewNodesById(
  *
  * The modified inherited edges are the RECONCILED ones (one per id, 3-way merged
  * against base by {@link reconcileEdgeModifications}) — NOT the raw per-branch
- * `staging.modifiedEdges`. Staging each branch's full fork props separately would
- * make the repoint union treat unchanged-from-base fields as conflicts, dropping a
- * disjoint edit by another branch.
+ * `staging.modifiedEdges`. That reconciler is the authority on a row several
+ * branches modified: it survived delete/modify resolution, merged the props, and
+ * already recorded any {@link PropertyConflict} the disagreement raised. Staging
+ * each branch's copy separately would put the same row through a second
+ * arbitration in the repoint fold and report the same conflict twice.
+ *
+ * Every inherited edge is staged WITH the base props it was diffed against, which is
+ * what lets the fold's property union tell an authored value from an untouched one
+ * (issue #408). A branch-created edge carries none — nothing preceded it.
+ *
+ * Each edge's diff bucket is carried through as its staged ORIGIN
+ * ({@link INHERITED_EDGE_ORIGIN} / {@link BRANCH_CREATED_EDGE_ORIGIN}): the modified
+ * and re-windowed buckets hold rows the base already has, the new bucket holds rows a
+ * branch created. This is the ONLY place that distinction is known — the repoint phase
+ * needs it to fold onto a row the target holds, and an edge id says nothing about
+ * where the row came from.
+ *
+ * `windowOnlyCarried` names the identities staged ONLY to carry an ending. Their
+ * `branchId` is a write vehicle rather than a contribution (see the loop below),
+ * which the provenance fold must know so it does not credit it.
+ *
+ * `authoredWindows` holds EVERY branch's re-windowed copy, each carrying the
+ * window its branch wrote, for the cross-branch composition check
+ * ({@link lostBranchAttachment}). The staged rows cannot stand in for them: an
+ * identity is staged at most once, with the RESOLVED window, so a branch's
+ * re-attachment (a reopen) is invisible there whenever the merge does not
+ * write it — the edge's own deletion absorbs it, the incremental target's end
+ * takes precedence over it, or a sibling branch's end beats it. In each case
+ * the deletion of one endpoint still discards that attachment, and the check
+ * must see it.
  */
 function buildStagedEdges(
   staging: StagingSet,
   modifiedEdges: readonly StagedModifiedEdge[],
-): readonly StagedEdge[] {
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>,
+  edgeDeletions: ReadonlyMap<MergeKey, string>,
+): Readonly<{
+  edges: readonly StagedEdge[];
+  windowOnlyCarried: ReadonlySet<MergeKey>;
+  authoredWindows: readonly StagedEdge[];
+}> {
   const staged: StagedEdge[] = [];
+  const stagedIdentities = new Set<MergeKey>();
+  const windowOnlyCarried = new Set<MergeKey>();
+  const authoredWindows: StagedEdge[] = [];
+  // Every branch diffs against the same merge base, so any re-windowed copy of
+  // an identity states that base's window.
+  const baseWindowByEdge = new Map<MergeKey, ValidWindow>();
+  for (const item of staging.windowedEdges) {
+    baseWindowByEdge.set(mergeKeyOf(item.edge), item.edge.base);
+  }
   for (const items of staging.newEdgesByKind.values()) {
     for (const item of items) {
       staged.push(toStagedEdge(item.branchId, item));
     }
   }
   for (const item of modifiedEdges) {
+    const identity = mergeKeyOf(item.edge);
+    stagedIdentities.add(identity);
+    const validToChange = edgeValidityEnds.get(identity);
+    // A modified row whose window no branch moved holds the base's window.
+    const baseValidTo =
+      baseWindowByEdge.has(identity) ?
+        baseWindowByEdge.get(identity)?.validTo
+      : item.edge.row.valid_to;
     staged.push({
       id: item.edge.id,
       kind: item.edge.kind,
+      origin: INHERITED_EDGE_ORIGIN,
       fromId: item.edge.fromId,
       toId: item.edge.toId,
       fromKind: item.edge.fromKind,
       toKind: item.edge.toKind,
       props: item.edge.forkProps as Readonly<Record<string, JsonValue>>,
+      baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
+      ...(baseValidTo === undefined ? {} : { baseValidTo }),
       branchId: item.branchId,
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
     });
   }
-  return staged;
+  // An inherited edge whose ONLY change is its end-of-validity is in neither the
+  // new nor the modified bucket, so it must be staged here or the ending would
+  // have nothing to ride on. Its props are the fork's, which equal the base's by
+  // construction — the write carries the window and leaves the row's content
+  // alone. Finally-deleted edges are excluded: deletion absorbs the ending.
+  //
+  // WHICH branch's copy carries it is arbitrary — the first in the staging order,
+  // `(kind, id, branch)` — and stays that way. The copy is staged WITH the base it
+  // was diffed against, so the repoint fold's property union sees that it authored
+  // nothing and it contributes no claim under any label (issue #408); the carrier's
+  // `branchId` is then a write vehicle only. It is still recorded as window-only
+  // carried, because provenance reads the staged copies too and the ending's author
+  // is credited from the resolution rather than from whoever carried the row.
+  for (const item of staging.windowedEdges) {
+    const identity = mergeKeyOf(item.edge);
+    authoredWindows.push(
+      windowedStagedEdge(
+        item,
+        item.edge.fork.validTo === undefined ?
+          { clearValidTo: true }
+        : { validTo: item.edge.fork.validTo },
+      ),
+    );
+    if (stagedIdentities.has(identity)) continue;
+    if (edgeDeletions.has(identity)) continue;
+    const validToChange = edgeValidityEnds.get(identity);
+    if (validToChange === undefined) continue;
+    stagedIdentities.add(identity);
+    windowOnlyCarried.add(identity);
+    staged.push(
+      windowedStagedEdge(
+        item,
+        validToChange.kind === "set" ?
+          { validTo: validToChange.validTo }
+        : { clearValidTo: true },
+      ),
+    );
+  }
+  return { edges: staged, windowOnlyCarried, authoredWindows };
 }
 
-/** Projects a {@link StagedNewEdge} onto the repoint-phase {@link StagedEdge}. */
+/** The inherited {@link StagedEdge} for a re-windowed row, carrying `window`. */
+function windowedStagedEdge(
+  item: StagedWindowedEdge,
+  window: Readonly<{ validTo: string }> | Readonly<{ clearValidTo: true }>,
+): StagedEdge {
+  const baseValidTo = item.edge.base.validTo;
+  return {
+    id: item.edge.id,
+    kind: item.edge.kind,
+    origin: INHERITED_EDGE_ORIGIN,
+    fromId: item.edge.fromId,
+    toId: item.edge.toId,
+    fromKind: item.edge.fromKind,
+    toKind: item.edge.toKind,
+    props: item.edge.props as Readonly<Record<string, JsonValue>>,
+    baseProps: item.edge.baseProps as Readonly<Record<string, JsonValue>>,
+    ...(baseValidTo === undefined ? {} : { baseValidTo }),
+    branchId: item.branchId,
+    ...window,
+  };
+}
+
+/**
+ * Projects a {@link StagedNewEdge} onto the repoint-phase {@link StagedEdge}.
+ *
+ * A new edge's valid-time window travels with it, exactly as a staged new
+ * node's does: without it a branch edge authored over an ENDED window would
+ * commit as CURRENT at merge time, leaving a live edge between endpoints that
+ * are themselves no longer valid.
+ */
 function toStagedEdge(branchId: BranchId, item: StagedNewEdge): StagedEdge {
   return {
     id: item.edge.id,
     kind: item.edge.kind,
+    origin: BRANCH_CREATED_EDGE_ORIGIN,
     fromId: item.edge.fromId,
     toId: item.edge.toId,
     fromKind: item.edge.fromKind,
     toKind: item.edge.toKind,
     props: item.edge.props as Readonly<Record<string, JsonValue>>,
     branchId,
+    validFrom: item.edge.row.valid_from ?? null,
+    ...(item.edge.row.valid_to === undefined ?
+      {}
+    : { validTo: item.edge.row.valid_to }),
   };
 }
 
@@ -654,25 +1182,9 @@ function buildProvenanceIndex(
 }
 
 /**
- * Appends a branch's contribution of a CANONICAL node id (`role: "node"`) or a
- * SURVIVING edge id (`role: "edge"`), keeping its source.
- */
-function pushProvenance(
-  records: ProvenanceRecord[],
-  role: ProvenanceRecord["role"],
-  branchId: BranchId,
-  canonicalId: string,
-  canonicalKind: string,
-  sourceId: string,
-): void {
-  records.push({ role, canonicalId, canonicalKind, branchId, sourceId });
-}
-
-/**
- * Empty per-branch trust weights — the fallback when the caller supplies no
- * {@link MergeOptions.provenanceWeights}. With empty weights the
- * `"provenanceWeighted"` policy degrades to the stable branch order (its
- * documented tie-break), i.e. `"lastWriteWins"` semantics.
+ * Empty per-branch trust weights used by policies that do not consult weights.
+ * Option validation requires a non-empty map whenever `"provenanceWeighted"`
+ * is selected, so this value is never a silent fallback for that policy.
  */
 const EMPTY_WEIGHTS: ProvenanceWeights = new Map<BranchId, number>();
 
@@ -701,6 +1213,26 @@ export type MergePlan<G extends GraphDef> = Readonly<{
     Readonly<Record<string, unknown>>
   >;
   retypeMap: ReadonlyMap<MergeKey, string>;
+  // The REAL member->survivor canonical map the commit repoints edges and
+  // assertion endpoints with, carried on the plan so every closure re-run
+  // judges endpoints at their post-merge identity. Never reconstruct this
+  // from `resolutions` — those record only multi-bare-id clusters, keyed by
+  // the survivor's kind, so a reconstruction drops pure ontology-retype
+  // clusters and mis-keys mixed-kind members.
+  canonicalOf: ReadonlyMap<MergeKey, MergeKey>;
+  /**
+   * `(kind, id) -> validTo` for every inherited NODE whose end-of-validity the
+   * merge itself decided — a branch's ending that differs from the base's, on a
+   * row the committed target did not already re-window. Keyed on the PRE-retype
+   * identity, exactly as the modification fold is. An identity absent here has
+   * no reconciled ending, and the commit passes no window for it at all — never
+   * the base value re-asserted, and never the target's own value written back at
+   * itself, which is what lets an unchanged window coalesce.
+   */
+  nodeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
+  /** The edge half of {@link nodeValidityEnds}, consumed by the repoint phase. */
+  edgeValidityEnds: ReadonlyMap<MergeKey, ValidToChange>;
+  validityEnds: readonly ValidityEndResolution[];
   resolutions: readonly EntityResolution[];
   propertyConflicts: readonly PropertyConflict<G>[];
   deleteModifyConflicts: readonly DeleteModifyConflict[];
@@ -709,6 +1241,16 @@ export type MergePlan<G extends GraphDef> = Readonly<{
   baseAmbiguities: readonly BaseAmbiguity[];
   provenanceRecords: readonly ProvenanceRecord[];
   warnings: readonly string[];
+  candidateDiagnostics?: CandidateDiagnostics;
+  identityAssertions: readonly IdentityTransferAssertion[];
+  // Complete expected rows, never bare ids: a retraction ends whatever CURRENT
+  // row carries its id, so it is only legal against the exact truth the branch
+  // retracted. The plan therefore carries the full staged assertion, and both
+  // validation layers (the plan-time filter and the in-transaction freshness
+  // guard) compare it to the target's row before the id is ended.
+  identityRetractions: readonly IdentityTransferAssertion[];
+  /** Scored matches the identity separation veto dropped. */
+  identityConflicts: readonly IdentityUnresolvedConflict[];
 }>;
 
 /**
@@ -716,20 +1258,59 @@ export type MergePlan<G extends GraphDef> = Readonly<{
  * Pure composition of the T3–T10 phases over the staged union; every step is
  * order-independent given the captured `branchRank`.
  */
-function planMerge<G extends GraphDef>(
-  staging: StagingSet,
-  candidateEdges: readonly CandidateEdge[],
-  candidateWarnings: readonly string[],
-  baseMembers: readonly BaseMember[],
-  options: NormalizedMergeOptions<G>,
-  branchRank: ReadonlyMap<BranchId, number>,
-  subClassClosure: ReturnType<typeof buildSubClassClosure>,
-  preferredBranchId?: BranchId,
+function buildInternalMergePlan<G extends GraphDef>(
+  input: Readonly<{
+    staging: StagingSet;
+    candidateEdges: readonly CandidateEdge[];
+    candidateWarnings: readonly string[];
+    candidateDiagnostics: readonly CandidateDiagnostic[];
+    candidateDiagnosticsTotal: number;
+    baseMembers: readonly BaseMember[];
+    options: NormalizedMergeOptions<G>;
+    branchRank: ReadonlyMap<BranchId, number>;
+    registry: KindRegistry;
+    storedIdentityRowsById: ReadonlyMap<string, LedgerAssertion>;
+    separationFacts: IdentitySeparationFacts;
+    separationConflicts: readonly IdentityUnresolvedConflict[];
+    vetoedEdges: readonly CandidateEdge[];
+    preferredBranchId?: BranchId | undefined;
+  }>,
 ): MergePlan<G> {
+  const {
+    staging,
+    candidateEdges,
+    candidateWarnings,
+    candidateDiagnostics,
+    candidateDiagnosticsTotal,
+    baseMembers,
+    options,
+    branchRank,
+    registry,
+    storedIdentityRowsById,
+    separationFacts,
+    separationConflicts,
+    vetoedEdges,
+    preferredBranchId,
+  } = input;
+  const identity = planIdentityChanges(staging, storedIdentityRowsById);
   const provenanceRecords: ProvenanceRecord[] = [];
+  // The contributions already recorded, keyed by `contributionKey` — the sidecar
+  // row's own identity, so a repeat is the same row written twice and never new
+  // information. Several phases legitimately observe the SAME contribution: an
+  // inherited edge is credited once when its modification survives delete/modify
+  // and again when the repoint folds it, and a fold set's `mergedIds` lists one
+  // entry per staged COPY, so a row staged by several branches re-offers each of
+  // its branches once per copy. Repeats inflate `provenancePersisted.count` and,
+  // because `bulkUpsertById` cannot create the same id twice in one batch, fail the
+  // whole best-effort persist. Collapsing at this single funnel keeps the record
+  // list, the in-memory index and the reported count all speaking about DISTINCT
+  // contributions.
+  const recordedContributions = new Set<string>();
   // Per-branch trust weights for the `"provenanceWeighted"` policy, or empty when
   // the caller supplied none (then the policy falls back to the stable branch order).
   const weights = options.provenanceWeights ?? EMPTY_WEIGHTS;
+  // Records a branch's contribution of a CANONICAL node id (`role: "node"`) or a
+  // SURVIVING edge id (`role: "edge"`), keeping its source.
   const recordProvenance = (
     role: ProvenanceRecord["role"],
     branchId: BranchId,
@@ -740,14 +1321,19 @@ function planMerge<G extends GraphDef>(
     if (branchId === preferredBranchId) {
       return;
     }
-    pushProvenance(
-      provenanceRecords,
+    const record: ProvenanceRecord = {
       role,
-      branchId,
       canonicalId,
       canonicalKind,
+      branchId,
       sourceId,
-    );
+    };
+    const key = contributionKey(record);
+    if (recordedContributions.has(key)) {
+      return;
+    }
+    recordedContributions.add(key);
+    provenanceRecords.push(record);
   };
 
   // (4) cluster over every staged new-node id + every base member id (so a forced
@@ -788,7 +1374,7 @@ function planMerge<G extends GraphDef>(
   const preferKind =
     isOntology ?
       (kinds: readonly string[]): string | undefined =>
-        mostSpecificCommonKind(subClassClosure, kinds)
+        mostSpecificCommonKind(registry, kinds)
     : undefined;
   const clusterEdges =
     isOntology ?
@@ -796,8 +1382,7 @@ function planMerge<G extends GraphDef>(
         ...candidateEdges,
         ...ontologyRetypeEdges(
           newNodesById.keys(),
-          (kinds) =>
-            mostSpecificCommonKind(subClassClosure, kinds) !== undefined,
+          (kinds) => mostSpecificCommonKind(registry, kinds) !== undefined,
         ),
       ]
     : candidateEdges;
@@ -813,24 +1398,101 @@ function planMerge<G extends GraphDef>(
     clusterEdges,
     baseIds,
   );
-  const clusters =
+  const diameterGuard =
     options.clusterMaxDiameter === undefined ?
-      guard.clusters
-    : enforceDiameter(guard.clusters, clusterEdges, options.clusterMaxDiameter);
+      {
+        clusters: guard.clusters,
+        survivingEdges: guard.survivingEdges,
+        excludedEdges: [],
+      }
+    : enforceDiameterWithEdges(
+        guard.clusters,
+        clusterEdges,
+        options.clusterMaxDiameter,
+      );
+  const clusters = diameterGuard.clusters;
+  const baseSurvivingEdges = new Set(guard.survivingEdges);
+  const survivingEdges = diameterGuard.survivingEdges.filter((edge) =>
+    baseSurvivingEdges.has(edge),
+  );
+  // (4c) the second application point of the always-on separation veto, on the
+  // FINAL clusters and the edges that reached them — after the base and
+  // diameter guards have split what they split, so a match the guards
+  // already severed is never refused for a fusion it can no longer cause. The
+  // edge-level refusal runs first because it is the more specific diagnosis:
+  // a surviving DEFINITIONAL claim contradicting the ledger, named with the
+  // sources that proposed it, rather than the cluster it happens to sit in.
+  assertSurvivingEdgesNotSeparated(survivingEdges, separationFacts);
+  for (const cluster of clusters) {
+    assertClusterNotSeparated(cluster.members, separationFacts);
+  }
+  const excludedByEndpoints = new Map<string, ClusterExclusionReason>();
+  for (const excluded of [
+    ...guard.excludedEdges,
+    ...diameterGuard.excludedEdges,
+  ]) {
+    excludedByEndpoints.set(
+      JSON.stringify([excluded.edge.a, excluded.edge.b]),
+      excluded.reason,
+    );
+  }
+  // The separation veto drops a candidate edge before it ever reaches the base
+  // or diameter guards, so it needs its own exclusion reason fed into the same
+  // map — otherwise the diagnostic surface says "retained" about a pair the
+  // merge actually refused for contradicting the identity ledger.
+  for (const edge of vetoedEdges) {
+    excludedByEndpoints.set(
+      JSON.stringify([edge.a, edge.b]),
+      "separation" as const,
+    );
+  }
+  const diagnosticsWithDisposition: CandidateDiagnostic[] =
+    candidateDiagnostics.map((diagnostic): CandidateDiagnostic => {
+      if (diagnostic.evidence.decision === "definitional") return diagnostic;
+      if (diagnostic.scoreDecision === "rejected") return diagnostic;
+      const a = mergeKey(diagnostic.evidence.a.kind, diagnostic.evidence.a.id);
+      const b = mergeKey(diagnostic.evidence.b.kind, diagnostic.evidence.b.id);
+      const reason = excludedByEndpoints.get(JSON.stringify([a, b]));
+      return {
+        ...diagnostic,
+        clusterDisposition:
+          reason === undefined ?
+            ("retained" as const)
+          : ({ kind: "excluded" as const, reason } as const),
+      } as CandidateDiagnostic;
+    });
+  const definitionalExclusions: CandidateDiagnostic[] = [
+    ...guard.excludedEdges,
+    ...diameterGuard.excludedEdges,
+  ]
+    .filter((excluded) => excluded.edge.evidence.decision === "definitional")
+    .map((excluded) => ({
+      evidence: excluded.edge.evidence as Extract<
+        CandidateEdge["evidence"],
+        Readonly<{ decision: "definitional" }>
+      >,
+      scoreDecision: "accepted" as const,
+      clusterDisposition: {
+        kind: "excluded" as const,
+        reason: excluded.reason,
+      },
+    }));
+  const retainedDiagnostics = [
+    ...diagnosticsWithDisposition,
+    ...definitionalExclusions,
+  ].sort((left, right) => compareMatchEvidence(left.evidence, right.evidence));
   // The guard keys on composite `(kind, id)` identities; the public BaseAmbiguity
   // carries them in full, so a component spanning two same-id/different-kind committed
   // entities stays distinguishable in the report.
   const baseAmbiguities: BaseAmbiguity[] = guard.events.map((event) => ({
-    baseIds: event.baseIds.map((key) => ({ kind: kindOf(key), id: idOf(key) })),
-    memberIds: event.memberIds.map((key) => ({
-      kind: kindOf(key),
-      id: idOf(key),
-    })),
+    baseIds: event.baseIds.map((key) => entityRef(key)),
+    memberIds: event.memberIds.map((key) => entityRef(key)),
   }));
 
   // (5) canonicalize each cluster: min-id survivor + commutative prop union.
   const canonicalEntities: CanonicalEntity[] = [];
   const resolutions: EntityResolution[] = [];
+  const clusterByCanonicalIdentity = new Map<MergeKey, ClusterResult>();
   const propertyConflicts: PropertyConflict<G>[] = [];
   // (7-input) the distinct member kinds per cluster, collected here so a committed
   // BASE member's kind is part of type reconciliation — a base↔staged kind divergence
@@ -854,6 +1516,10 @@ function planMerge<G extends GraphDef>(
       preferredBranchId,
     );
     canonicalEntities.push(entity);
+    clusterByCanonicalIdentity.set(
+      mergeKey(entity.kind, entity.canonicalId),
+      cluster,
+    );
     reconcileInputs.push({
       canonicalId: mergeKey(entity.kind, entity.canonicalId),
       memberKinds: members.map((member) => member.kind),
@@ -867,7 +1533,10 @@ function planMerge<G extends GraphDef>(
       cluster.members.map((member) => idOf(member)),
     );
     if (distinctMergedIds.size > 1) {
-      resolutions.push(entity.resolution);
+      resolutions.push({
+        ...entity.resolution,
+        decisiveEdges: decisiveEdgesForCluster(cluster, survivingEdges),
+      });
     }
     // Conflicts are recorded REGARDLESS of distinct-id count: two branches can
     // stage a new node under the SAME id with differing props, producing a genuine
@@ -900,6 +1569,58 @@ function planMerge<G extends GraphDef>(
   for (const deletion of deleteModify.nodeDeletions) {
     nodeDeletions.set(mergeKey(deletion.kind, deletion.id), deletion.kind);
   }
+  // A node soft-delete CASCADES: it ends every open assertion touching the
+  // node, at the node's own deletion instant. The diff derives that cause and
+  // stages the ending as a `cascade` retraction naming the deleted node
+  // (StagedRetraction.cause); every other ending is the branch's own act and is
+  // staged `explicit`.
+  //
+  // A cascade's fate therefore belongs to the deletion that caused it. When the
+  // delete/modify resolution OVERRULES that deletion ("flag"/"modifyWins" keep
+  // the modification), applying the ending anyway would let the losing
+  // deletion's side effect outlive the decision and strip the resurrected
+  // node's identity truth — so the ending is dropped with its cause, visibly.
+  // A retraction survives as soon as ONE branch staged it explicitly, or one
+  // cause deletion survived: those are intents the deletion decision does not
+  // speak to.
+  const anyDeletionOverruled = staging.deletedNodes.some(
+    (deletion) =>
+      !nodeDeletions.has(mergeKey(deletion.node.kind, deletion.node.id)),
+  );
+  const stagedRetractionsById = new Map<string, StagedRetraction[]>();
+  for (const staged of staging.retractedIdentityAssertions) {
+    const contributions = stagedRetractionsById.get(staged.assertion.id) ?? [];
+    contributions.push(staged);
+    stagedRetractionsById.set(staged.assertion.id, contributions);
+  }
+  const overruledRetractionDrops: DroppedItem[] = [];
+  const contributionOverruled = (staged: StagedRetraction): boolean =>
+    staged.cause.kind === "cascade" &&
+    !nodeDeletions.has(
+      mergeKey(staged.cause.deletedNode.kind, staged.cause.deletedNode.id),
+    );
+  const survivingRetractions =
+    anyDeletionOverruled ?
+      identity.retractions.flatMap((retraction) => {
+        const contributions = stagedRetractionsById.get(retraction.id) ?? [];
+        const standing = contributions.filter(
+          (staged) => !contributionOverruled(staged),
+        );
+        if (standing.length === contributions.length) return [retraction];
+        if (standing.length === 0) {
+          overruledRetractionDrops.push({
+            kind: "identity",
+            id: retraction.id,
+            reason: RETRACTION_DELETION_OVERRULED_DROP_REASON,
+          });
+          return [];
+        }
+        // The ending survives on the contributions that still stand, so its
+        // instant and cause are theirs: an overruled deletion's cascade may
+        // not decide when the pair stopped being asserted.
+        return [reduceIdentityRetraction(standing).assertion];
+      })
+    : identity.retractions;
   for (const modification of deleteModify.survivingModifications) {
     recordProvenance(
       "node",
@@ -962,13 +1683,83 @@ function planMerge<G extends GraphDef>(
     propertyConflicts.push(conflict as PropertyConflict<G>);
   }
 
-  // (7) opt-in ontology type reconciliation over the public-closure glue. Inputs
-  // (incl. base member kinds) were collected per cluster in the canonicalize loop.
+  // (6-window) reconcile the inherited valid-time windows the branches moved.
+  // Runs AFTER both delete/modify resolutions because a finally-deleted row
+  // absorbs its own ending: deleting and ending are both "no longer true", and
+  // the stronger statement wins without recording a conflict. A reopen was
+  // already weighed against any deletion there, as a DeleteModifyConflict.
+  const validWindows = resolveValidWindows(
+    staging,
+    new Set(nodeDeletions.keys()),
+    new Set(edgeDeletions.keys()),
+    preferredBranchId,
+  );
+
+  // (6-window provenance) credit the branches that AUTHORED a committed node
+  // ending. Ending a row is authored state, but a branch whose only change to a
+  // node is its window is neither a cluster member nor a surviving modification,
+  // and the write that carries the ending names no branch — so without this the
+  // branch whose claim the commit applied is absent from the provenance sidecar
+  // entirely (issue #402). The credit comes from the resolution because only the
+  // resolution knows whose claim won; a claim that LOST the least-claim rule is
+  // not in `nodeCredits` and is not credited, since provenance records
+  // contribution to COMMITTED state.
+  //
+  // Edges take the same credit through `stagedEdgeBranches` below, where the
+  // repoint's surviving edge id is known.
+  //
+  // A branch that edited the node's props AND moved its window is already
+  // credited with this exact record by the modification loop above; re-recording
+  // it would count one sidecar row twice. A record whose `sourceId` differs from
+  // its canonical is a DIFFERENT contribution (a fork id folded into a survivor)
+  // and never stands in for the in-place one.
+  const creditedNodeIdentities = new Map<MergeKey, Set<BranchId>>();
+  for (const record of provenanceRecords) {
+    if (record.role !== "node" || record.sourceId !== record.canonicalId) {
+      continue;
+    }
+    const identity = mergeKey(record.canonicalKind, record.canonicalId);
+    const credited =
+      creditedNodeIdentities.get(identity) ?? new Set<BranchId>();
+    credited.add(record.branchId);
+    creditedNodeIdentities.set(identity, credited);
+  }
+  for (const [identity, branchIds] of validWindows.nodeCredits) {
+    for (const branchId of branchIds) {
+      if (creditedNodeIdentities.get(identity)?.has(branchId) === true) {
+        continue;
+      }
+      const id = idOf(identity);
+      recordProvenance("node", branchId, id, kindOf(identity), id);
+    }
+  }
+
+  // (7) opt-in ontology type reconciliation over the store's validated
+  // KindRegistry. Inputs (incl. base member kinds) were collected per cluster
+  // in the canonicalize loop.
   const reconciliation = reconcileTypes(
     reconcileInputs,
-    subClassClosure,
+    registry,
     options.reconcileTypes,
   );
+  const reconciledClusterByEntityId = new Map<string, ClusterResult>();
+  for (const identity of reconciliation.retypeMap.keys()) {
+    const entityId = idOf(identity);
+    const cluster = clusterByCanonicalIdentity.get(identity);
+    if (cluster !== undefined && !reconciledClusterByEntityId.has(entityId)) {
+      reconciledClusterByEntityId.set(entityId, cluster);
+    }
+  }
+  const typeReconciliations: readonly TypeReconciliation[] =
+    reconciliation.reconciliations.map((item) => {
+      const cluster = reconciledClusterByEntityId.get(item.entityId);
+      return cluster === undefined ? item : (
+          {
+            ...item,
+            decisiveEdges: decisiveEdgesForCluster(cluster, survivingEdges),
+          }
+        );
+    });
 
   // (8) repoint every staged edge onto its cluster canonical + dedupe. Index the
   // canonical entities by their `(kind, id)` ONCE so the per-cluster survivor
@@ -981,21 +1772,86 @@ function planMerge<G extends GraphDef>(
   const canonicalOf = buildCanonicalMap(clusters, (cluster) =>
     pickClusterCanonical(cluster, entityByIdentity),
   );
-  const stagedEdges = buildStagedEdges(
+  const canonicalEndpointWindows = new Map<
+    MergeKey,
+    Readonly<{ validFrom?: string; validTo?: string }>
+  >();
+  for (const entity of canonicalEntities) {
+    if (
+      entity.endpointValidFrom === undefined &&
+      entity.endpointValidTo === undefined
+    ) {
+      continue;
+    }
+    const sourceKey = mergeKey(entity.kind, entity.canonicalId);
+    const finalKind = reconciliation.retypeMap.get(sourceKey) ?? entity.kind;
+    canonicalEndpointWindows.set(mergeKey(finalKind, entity.canonicalId), {
+      ...(entity.endpointValidFrom === undefined ?
+        {}
+      : { validFrom: entity.endpointValidFrom }),
+      ...(entity.endpointValidTo === undefined ?
+        {}
+      : { validTo: entity.endpointValidTo }),
+    });
+  }
+  // Repoint identity-assertion endpoints through the same canonical + retype maps
+  // the edges use, so an assertion naming a folded or retyped branch node
+  // references its survivor instead of a dangling `(kind, id)` the commit-time
+  // endpoint guard would reject. The two guards that follow turn the remaining
+  // commit-time identity failures into deterministic plan-time conflicts.
+  const identityRemap = remapIdentityAssertionEndpoints(
+    identity.assertions,
+    canonicalOf,
+    reconciliation.retypeMap,
+    storedIdentityRowsById,
+    canonicalEndpointWindows,
+  );
+  assertIdentityEndpointsNotDeleted(
+    identityRemap.assertions,
+    nodeDeletions,
+    staging.deletedNodes,
+    reconciliation.retypeMap,
+    storedIdentityRowsById,
+  );
+  const {
+    edges: stagedEdges,
+    windowOnlyCarried,
+    authoredWindows,
+  } = buildStagedEdges(
     staging,
     reconciledEdgeModifications.survivingModifications,
+    validWindows.edgeEnds,
+    edgeDeletions,
   );
   // An edge id can be staged by MORE THAN ONE branch (e.g. an inherited edge
   // modified by two branches), so map each id to the SET of contributing branches.
   // A plain last-write Map would credit only one branch's provenance.
+  //
+  // A branch that authored the row's committed END is a contributor too, and the
+  // staged copy cannot name it: an identity is staged ONCE, so a branch whose only
+  // change is the window has no copy of its own whenever another branch's props
+  // edit already staged the row (issue #402). Folding the window authors in here —
+  // from the resolution that chose the end — credits them against the SURVIVING
+  // edge the repoint decides, exactly as a modifying branch is credited, and a
+  // `Set` keeps a branch that both edited props and moved the window one
+  // contributor.
+  //
+  // A WINDOW-ONLY CARRIER is the exception: that copy exists only to give the
+  // ending a row to ride on, its props are the base's, and the branch holding it
+  // is whichever sorted first — possibly one whose later claim the merge
+  // discarded. Crediting it would name a branch that put nothing in the committed
+  // row, so the row's credit comes from the resolution alone.
   const stagedEdgeBranches = new Map<string, Set<BranchId>>();
   for (const staged of stagedEdges) {
-    const branches = stagedEdgeBranches.get(staged.id);
-    if (branches === undefined) {
-      stagedEdgeBranches.set(staged.id, new Set([staged.branchId]));
-    } else {
+    const identity = mergeKeyOf(staged);
+    const branches = stagedEdgeBranches.get(staged.id) ?? new Set<BranchId>();
+    if (!windowOnlyCarried.has(identity)) {
       branches.add(staged.branchId);
     }
+    for (const branchId of validWindows.edgeCredits.get(identity) ?? []) {
+      branches.add(branchId);
+    }
+    stagedEdgeBranches.set(staged.id, branches);
   }
   const deletedNodeIdSet = new Set<MergeKey>(nodeDeletions.keys());
   const repoint = repointEdges<G>(
@@ -1006,6 +1862,16 @@ function planMerge<G extends GraphDef>(
     branchRank,
     weights,
     preferredBranchId,
+  );
+  assertNoLostBranchAttachments(
+    registry,
+    [
+      ...repoint.endpointDeletedEdges,
+      ...authoredWindows.map((staged) =>
+        withRepointedEndpoints(staged, canonicalOf),
+      ),
+    ],
+    deletedNodeIdSet,
   );
   for (const merged of repoint.edges) {
     for (const sourceId of merged.mergedIds) {
@@ -1020,6 +1886,10 @@ function planMerge<G extends GraphDef>(
     ...edgeDeleteModify.dropped,
     ...repoint.dropped,
     ...reconciliation.dropped,
+    ...identity.dropped,
+    ...overruledRetractionDrops,
+    ...identityRemap.dropped,
+    ...validWindows.dropped,
   ].sort((left, right) =>
     compareStrings(`${left.kind}|${left.id}`, `${right.kind}|${right.id}`),
   );
@@ -1037,18 +1907,35 @@ function planMerge<G extends GraphDef>(
       ]),
     ),
     retypeMap: reconciliation.retypeMap,
+    canonicalOf,
+    nodeValidityEnds: validWindows.nodeEnds,
+    edgeValidityEnds: validWindows.edgeEnds,
+    validityEnds: validWindows.resolutions,
     // Order report arrays by the composite (kind, id) identity — never a bare id
     // or a `|`-joined string. A bare id ties two different-kind entities that
     // share an id, and a `|` separator collides on caller-supplied ids/property
     // names that contain `|`; either makes the comparator non-total, so the
     // returned order would depend on stable-sort + insertion order and break the
     // order-independence the whole subsystem guarantees.
-    resolutions: resolutions.sort((left, right) =>
-      compareMergeKeys(
-        mergeKey(left.kind, left.canonicalId),
-        mergeKey(right.kind, right.canonicalId),
+    // A resolution names the kind its survivor is WRITTEN under — the
+    // reconciled kind when the ontology cascade retypes the cluster — the same
+    // value the commit's node write, the artifact's `guards.retypes` and its
+    // resolution evidence check all read, so one owner decides it. The staged
+    // (pre-retype) survivor kind is the retype map's key.
+    resolutions: resolutions
+      .map((resolution) => ({
+        ...resolution,
+        kind:
+          reconciliation.retypeMap.get(
+            mergeKey(resolution.kind, resolution.canonicalId),
+          ) ?? resolution.kind,
+      }))
+      .sort((left, right) =>
+        compareMergeKeys(
+          mergeKey(left.kind, left.canonicalId),
+          mergeKey(right.kind, right.canonicalId),
+        ),
       ),
-    ),
     propertyConflicts: [...propertyConflicts, ...repoint.conflicts].sort(
       (left, right) => {
         const byEntity = compareMergeKeys(
@@ -1069,7 +1956,7 @@ function planMerge<G extends GraphDef>(
         mergeKey(right.kind, right.entityId),
       ),
     ),
-    typeReconciliations: reconciliation.reconciliations,
+    typeReconciliations,
     dropped,
     baseAmbiguities: baseAmbiguities.sort((left, right) =>
       compareMergeKeys(
@@ -1084,8 +1971,49 @@ function planMerge<G extends GraphDef>(
       ),
     ),
     provenanceRecords,
-    warnings: candidateWarnings,
+    warnings: [...candidateWarnings, ...identityRemap.warnings],
+    ...(options.candidateDiagnostics === undefined ?
+      {}
+    : {
+        candidateDiagnostics: {
+          entries: retainedDiagnostics.slice(
+            0,
+            options.candidateDiagnostics.limit,
+          ),
+          total: candidateDiagnosticsTotal + definitionalExclusions.length,
+          limit: options.candidateDiagnostics.limit,
+          truncated:
+            candidateDiagnosticsTotal + definitionalExclusions.length >
+            options.candidateDiagnostics.limit,
+        },
+      }),
+    identityAssertions: identityRemap.assertions,
+    identityRetractions: survivingRetractions,
+    identityConflicts: separationConflicts.toSorted((left, right) =>
+      compareSeparationConflicts(left, right),
+    ),
   };
+}
+
+/**
+ * Order-independent report order for separation conflicts: by the endpoint
+ * pair, never insertion order, which would depend on which branch's diff
+ * happened to stage an entity first.
+ */
+function compareSeparationConflicts(
+  left: IdentityUnresolvedConflict,
+  right: IdentityUnresolvedConflict,
+): number {
+  const byA = compareMergeKeys(
+    mergeKey(left.a.kind, left.a.id),
+    mergeKey(right.a.kind, right.a.id),
+  );
+  return byA === 0 ?
+      compareMergeKeys(
+        mergeKey(left.b.kind, left.b.id),
+        mergeKey(right.b.kind, right.b.id),
+      )
+    : byA;
 }
 
 /**
@@ -1127,14 +2055,37 @@ function pickClusterCanonical(
  * survive; writing it as `undefined` makes the row write drop it (the props column
  * is JSON-serialized, which omits `undefined`), so the fork's deletion is applied
  * instead of being silently reverted to the base value.
+ *
+ * The bag is null-prototype ({@link createDataKeyedBag}) because its keys are
+ * DATA — property names read off committed rows, and `trustedImportGraph`
+ * writes a caller's bag verbatim, so a stored bag CAN carry an own `__proto__`
+ * (`JSON.parse` mints it as ordinary own data). Writing the deletion marker for
+ * that key into a `{}` literal does not create an entry: it invokes
+ * `Object.prototype`'s `__proto__` setter, which with `undefined` as the value
+ * is a silent no-op. The tombstone this function exists to write would simply
+ * not be written.
+ *
+ * SCOPE OF THE CLAIM, measured rather than assumed: no reachable write carries
+ * an own `__proto__` back into a committed row anyway — Zod drops the key in
+ * strip AND loose mode, so the base value does not survive a merge commit with
+ * or without the tombstone, and `branch()`'s validating clone refuses such a
+ * base outright. So this is the function honoring its own contract
+ * independently of what a distant layer happens to strip, NOT a user-visible
+ * defect being fixed: the end state is currently identical either way, which is
+ * why no end-to-end test guards it (one would pass under the mutation). The
+ * live-ammunition key for the deletion contract is a DECLARED prototype-named
+ * field such as `toString`, which this file's tests cover.
  */
 function commitModificationProps(
   baseProps: Readonly<Record<string, unknown>>,
   forkProps: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const props: Record<string, unknown> = { ...forkProps };
+  const props = createDataKeyedBag<unknown>();
+  for (const key of Object.keys(forkProps)) {
+    props[key] = forkProps[key];
+  }
   for (const key of Object.keys(baseProps)) {
-    if (!(key in forkProps)) {
+    if (!hasOwnKey(forkProps, key)) {
       props[key] = undefined;
     }
   }
@@ -1142,112 +2093,744 @@ function commitModificationProps(
 }
 
 /**
- * Applies a resolved {@link MergePlan} through a transaction's collection API.
- * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
- * both modes execute the same resolved semantics.
+ * The `(kind, id)` an edge endpoint finally carries in the committed target: its
+ * own kind unless the ontology retype cascade reconciled that identity to a more
+ * specific one. Every consumer — the commit's edge upserts, the write signature,
+ * and the incremental endpoint guard — resolves endpoints through here, so a
+ * guard can never compare a pre-retype endpoint against a post-retype row.
  */
-async function applyMergePlan<G extends GraphDef>(
+function finalEdgeEndpoint<G extends GraphDef>(
   plan: MergePlan<G>,
-  nodesApi: TxNodes,
-  edgesApi: TxEdges,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
-  // Counted by composite `(kind, id)` identity, so two different-kind nodes that
-  // share an id string each count once (and never collide in the dedupe set).
-  const committedNodeIds = new Set<MergeKey>();
+  kind: string,
+  id: AnyNodeId,
+): Readonly<{ kind: string; id: AnyNodeId }> {
+  return { kind: plan.retypeMap.get(mergeKey(kind, id)) ?? kind, id };
+}
 
-  // Identities written as canonical cluster entities, and the fork props of every
-  // surviving inherited modification keyed by identity. On the new-vs-base path a
-  // committed node can be BOTH a base-member cluster survivor AND an inherited
-  // modification; without coordinating the two writes the canonical upsert (built
-  // from the cluster union, which carries the OLDER base props) would clobber the
-  // modification's fork edit. We therefore fold the fork props into the canonical
-  // write and skip the standalone modification write for that identity.
+/**
+ * One node row a plan writes: the identity it lands on, the canonical cluster
+ * entity it came from (absent for a modification-only write), and the surviving
+ * inherited modification folded into it (absent when nothing modified the row).
+ *
+ * A write with NEITHER is a window-only write: an inherited row whose sole
+ * change is its reconciled end-of-validity. It carries no props, and the upsert
+ * patch-merges, so it moves the row's window and nothing else.
+ */
+type PlannedNodeWrite = Readonly<{
+  identity: MergeKey;
+  kind: string;
+  id: AnyNodeId;
+  entity?: CanonicalEntity;
+  modification?: ModifiedNode;
+  /**
+   * The valid-time window the write carries. `validFrom` comes only from a
+   * staged canonical survivor (the commit cannot move a live row's lower bound
+   * — see `valid-window.ts`); `validTo` is the survivor's authored end, or, for
+   * an inherited row, the reconciled end-of-validity. Absent means "do not touch
+   * the committed window", which is what lets an otherwise-unchanged write
+   * coalesce.
+   */
+  validFrom?: string | null;
+}> &
+  ValidityEndMutation;
+
+/**
+ * THE node-write enumeration: every node row a resolved plan writes, in commit
+ * order — surviving inherited modifications first, then canonical cluster
+ * survivors. Both the commit ({@link applyMergePlan}) and the incremental write
+ * guards consume this one function, so which rows a plan touches, which are
+ * skipped (finally deleted, or folded into a canonical write), and which kind
+ * the retype cascade lands them on are decided in exactly one place. The
+ * consumers differ only in how they derive the final props from each write; see
+ * {@link nodeWriteProps}.
+ *
+ * A canonical survivor can ALSO be an inherited modification. Its two writes are
+ * folded into one — the standalone modification write is skipped and the entity
+ * carries the modification — because the canonical upsert is built from the
+ * cluster union, which holds the OLDER base props and would otherwise clobber
+ * the fork's edit.
+ */
+function plannedNodeWrites<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly PlannedNodeWrite[] {
   const canonicalIdentities = new Set<MergeKey>();
   for (const entity of plan.canonicalEntities) {
     canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
   }
-  const survivingModProps = new Map<
-    MergeKey,
-    Readonly<{
-      baseProps: Readonly<Record<string, unknown>>;
-      forkProps: Readonly<Record<string, unknown>>;
-    }>
-  >();
+  const modificationsByIdentity = new Map<MergeKey, ModifiedNode>();
   for (const modification of plan.survivingModifications) {
-    survivingModProps.set(mergeKeyOf(modification.node), {
-      baseProps: modification.node.baseProps,
-      forkProps: modification.node.forkProps,
-    });
+    modificationsByIdentity.set(
+      mergeKeyOf(modification.node),
+      modification.node,
+    );
   }
 
-  // Surviving inherited modifications, skipping any node finally deleted OR folded
-  // into a canonical cluster write below. Property deletions the fork made are
-  // honored via {@link commitModificationProps}.
+  const writes: PlannedNodeWrite[] = [];
+  const written = new Set<MergeKey>();
   for (const modification of plan.survivingModifications) {
     const identity = mergeKeyOf(modification.node);
     if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
       continue;
     }
-    const collection = nodeCollection(nodesApi, modification.node.kind);
-    await collection.upsertByIdFromRecord(
-      modification.node.id,
-      commitModificationProps(
-        modification.node.baseProps,
-        modification.node.forkProps,
-      ),
-    );
-    committedNodeIds.add(identity);
+    written.add(identity);
+    const validToChange = plan.nodeValidityEnds.get(identity);
+    writes.push({
+      identity,
+      kind: modification.node.kind,
+      id: modification.node.id,
+      modification: modification.node,
+      ...(validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
+    });
   }
-
-  // New canonical cluster nodes (survivors), with retype cascade. When the survivor
-  // is also an inherited modification, merge the fork edit's props ON TOP of the
-  // cluster union so the explicit fork edit is not lost to the (older) base props
-  // the union carried.
   for (const entity of plan.canonicalEntities) {
-    const identity = mergeKey(entity.kind, entity.canonicalId);
-    if (plan.nodeDeletions.has(identity)) {
+    // The retype cascade is keyed on the PRE-retype identity, as is the
+    // modification fold: both index the entity as the plan staged it.
+    const sourceIdentity = mergeKey(entity.kind, entity.canonicalId);
+    if (plan.nodeDeletions.has(sourceIdentity)) {
       continue;
     }
-    const kind = plan.retypeMap.get(identity) ?? entity.kind;
-    const modification = survivingModProps.get(identity);
-    // Fold the fork edit ON TOP of the cluster union, honoring the fork's property
-    // deletions (which surface as `undefined` and so override the union's value).
-    const props =
-      modification === undefined ?
-        entity.props
-      : {
-          ...entity.props,
-          ...commitModificationProps(
-            modification.baseProps,
-            modification.forkProps,
+    const kind = plan.retypeMap.get(sourceIdentity) ?? entity.kind;
+    const modification = modificationsByIdentity.get(sourceIdentity);
+    written.add(sourceIdentity);
+    // A staged survivor's own authored window is the canonicalize decision —
+    // including the committed-target precedence that module applies — so it
+    // takes priority. The reconciled inherited end fills in only where the
+    // survivor claims no end of its own.
+    const validToChange = plan.nodeValidityEnds.get(sourceIdentity);
+    writes.push({
+      identity: mergeKey(kind, entity.canonicalId),
+      kind,
+      id: entity.canonicalId,
+      entity,
+      ...(modification === undefined ? {} : { modification }),
+      ...(entity.validFrom === undefined ?
+        {}
+      : { validFrom: entity.validFrom }),
+      ...(typeof entity.validTo === "string" ? { validTo: entity.validTo }
+      : validToChange?.kind === "set" ? { validTo: validToChange.validTo }
+      : validToChange?.kind === "clear" ? { clearValidTo: true as const }
+      : {}),
+    });
+  }
+  // An inherited row whose ONLY change is its end-of-validity has neither a
+  // surviving modification nor a canonical entity, so it has no write yet. It
+  // gets one carrying the ending and NO props: the upsert patch-merges, so an
+  // empty bag leaves the row's content exactly as committed. Sorted by identity
+  // so the enumeration stays a pure function of the plan.
+  for (const identity of [...plan.nodeValidityEnds.keys()].sort((left, right) =>
+    compareMergeKeys(left, right),
+  )) {
+    if (written.has(identity) || plan.nodeDeletions.has(identity)) {
+      continue;
+    }
+    const kind = plan.retypeMap.get(identity) ?? kindOf(identity);
+    const validToChange = requireDefined(plan.nodeValidityEnds.get(identity));
+    writes.push({
+      identity: mergeKey(kind, idOf(identity)),
+      kind,
+      id: idOf(identity),
+      ...(validToChange.kind === "set" ?
+        { validTo: validToChange.validTo }
+      : { clearValidTo: true as const }),
+    });
+  }
+  return writes;
+}
+
+/**
+ * Folds a planned write's sources into the prop bag to write, with the caller
+ * supplying the only piece that differs between them: how a folded modification
+ * contributes. The commit honors the fork's property DELETIONS (see
+ * {@link commitModificationProps}); the incremental guard compares against the
+ * fork's raw intended state. Modification props land ON TOP of the cluster
+ * union so an explicit fork edit is never lost to the (older) base props the
+ * union carried.
+ */
+function nodeWriteProps(
+  write: PlannedNodeWrite,
+  modificationProps: (
+    modification: ModifiedNode,
+  ) => Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    ...write.entity?.props,
+    ...(write.modification === undefined ?
+      undefined
+    : modificationProps(write.modification)),
+  };
+}
+
+type NodeWriteWindowOptions = Readonly<{ validFrom?: string | null }> &
+  ValidityEndMutation;
+
+/** Converts the plan's explicit set/clear state into the collection option union. */
+function nodeWriteWindowOptions(
+  write: NodeWriteWindowOptions,
+): NodeWriteWindowOptions {
+  const validFrom =
+    write.validFrom === undefined ? {} : { validFrom: write.validFrom };
+  return { ...validFrom, ...validityEndMutationOf(write) };
+}
+
+/**
+ * THE projection of a write's end-of-validity state — a stated instant, or an
+ * explicit reopening — onto the mutation the collections accept. The live plan,
+ * its wire artifact, and the replayed artifact all read it, so a reopening can
+ * never be dropped by one of them.
+ */
+function validityEndMutationOf(
+  write: Readonly<{
+    validTo?: string | undefined;
+    clearValidTo?: boolean | undefined;
+  }>,
+): ValidityEndMutation {
+  if (write.clearValidTo === true) return { clearValidTo: true };
+  return write.validTo === undefined ? {} : { validTo: write.validTo };
+}
+
+/** Whether a live edge of `edgeKind` ending at `validTo` still attaches its `partKind` part. */
+function liveCompositionEdgeAttaches(
+  registry: KindRegistry,
+  partKind: string,
+  edgeKind: string,
+  validTo: string | undefined,
+): boolean {
+  return compositionEdgeAttachesPart(registry, partKind, {
+    kind: edgeKind,
+    deleted_at: undefined,
+    valid_to: validTo,
+  });
+}
+
+type MechanicalNodeWrite = Readonly<{
+  recreate?: true;
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  validFrom?: string | null;
+}> &
+  ValidityEndMutation;
+
+type MechanicalEdgeWrite = Readonly<{
+  kind: string;
+  item: EdgeUpsert;
+}>;
+
+/** The node rows a plan deletes — the claims it releases — as `applyNodeRows` receives them. */
+function plannedNodeReleases<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanEntityRef[] {
+  return [...plan.nodeDeletions].map(([identity, kind]) => ({
+    kind,
+    id: idOf(identity),
+  }));
+}
+
+/**
+ * The node rows a plan writes, as `applyNodeRows` receives them: every planned
+ * write with its resolved after-image props (a modification's base keys the
+ * fork removed set to `undefined`, so the patch-merging upsert drops them) and
+ * its window mutation.
+ */
+function plannedNodeUpserts<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MechanicalNodeWrite[] {
+  return plannedNodeWrites(plan).map((write) => ({
+    kind: write.kind,
+    id: write.id,
+    props: nodeWriteProps(write, (modification) =>
+      commitModificationProps(modification.baseProps, modification.forkProps),
+    ),
+    ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
+    ...validityEndMutationOf(write),
+  }));
+}
+
+/**
+ * Applies the plan's node deletions and upserts inside the apply transaction.
+ *
+ * `deleteNodeWithPolicy` is threaded down from the caller's own
+ * `target.transaction(tx => ...)` callback — the only scope holding `tx`
+ * itself — rather than re-derived from `target`: the outer Store's hook runner
+ * reports a delete's `onOperationEnd` the instant it runs, so a context built
+ * from `target` here would report success for a delete inside a merge that
+ * later rolls back. See {@link transactionDeleteNodeWithPolicy}.
+ */
+/**
+ * For each node the plan deletes, the instant each of its assertions the plan
+ * retracts ends at.
+ */
+function plannedAssertionEndsByNode(
+  deletions: readonly MergePlanEntityRef[],
+  identityRetractions: readonly IdentityTransferAssertion[],
+): ReadonlyMap<MergeKey, ReadonlyMap<string, string>> {
+  const deleted = new Set(
+    deletions.map((deletion) => mergeKey(deletion.kind, deletion.id)),
+  );
+  const endsByNode = new Map<MergeKey, Map<string, string>>();
+  for (const retraction of identityRetractions) {
+    if (retraction.validTo === undefined) continue;
+    for (const endpoint of [retraction.a, retraction.b]) {
+      const key = mergeKeyOf(endpoint);
+      if (!deleted.has(key)) continue;
+      const ends = endsByNode.get(key) ?? new Map<string, string>();
+      ends.set(retraction.id, retraction.validTo);
+      endsByNode.set(key, ends);
+    }
+  }
+  return endsByNode;
+}
+
+async function applyNodeRows<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  nodesApi: TxNodes,
+  deletions: readonly MergePlanEntityRef[],
+  upserts: readonly MechanicalNodeWrite[],
+  identityRetractions: readonly IdentityTransferAssertion[],
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+): Promise<number> {
+  const afterImages = new Map<MergeKey, Readonly<Record<string, unknown>>>();
+  const upsertsByKind = new Map<string, MechanicalNodeWrite[]>();
+  for (const upsert of upserts) {
+    const items = upsertsByKind.get(upsert.kind);
+    if (items === undefined) upsertsByKind.set(upsert.kind, [upsert]);
+    else items.push(upsert);
+  }
+  for (const [kind, items] of upsertsByKind) {
+    const currentRows = await nodeCollection(nodesApi, kind).getByIds(
+      items.map((item) => item.id),
+      INCLUDE_TOMBSTONES,
+    );
+    const currentById = new Map<string, Readonly<Record<string, unknown>>>();
+    for (const node of currentRows) {
+      if (node !== undefined) currentById.set(node.id, nodeProps(node));
+    }
+    for (const item of items) {
+      const props = createDataKeyedBag<unknown>();
+      const unset = new Set(
+        Object.entries(item.props)
+          .filter(([, value]) => value === undefined)
+          .map(([key]) => key),
+      );
+      for (const [key, value] of Object.entries(
+        currentById.get(item.id) ?? {},
+      )) {
+        if (!unset.has(key)) props[key] = value;
+      }
+      for (const [key, value] of Object.entries(item.props)) {
+        if (value !== undefined) props[key] = value;
+      }
+      afterImages.set(mergeKey(kind, item.id), props);
+    }
+  }
+  return storeRuntime(target).applyResolvedNodeUniqueness(
+    txBackend,
+    {
+      upserts: upserts.map((upsert) => ({
+        kind: upsert.kind,
+        id: upsert.id,
+        props: requireDefined(
+          afterImages.get(mergeKey(upsert.kind, upsert.id)),
+        ),
+      })),
+      releases: deletions,
+    },
+    async () => {
+      // Routed through the internal runtime port rather than the collection
+      // facade, whose `delete(id)` takes no policy by design: enforcement
+      // stays on, so a part's own `restrict` edge still aborts the merge, while
+      // `cascadeComposition: false` leaves the parts to the plan, which already
+      // enumerates every one a composition delete would cascade to
+      // (`assertNoCompositionOrphans`, in `applyGraphRows`, verifies that
+      // enumeration is COMPLETE before this loop runs at all). The plan's
+      // own edge deletions have already landed ({@link applyMergeRowWrites}).
+      //
+      // A deleted node's assertions the plan retracts end when the branch
+      // ended them, not at this delete: the delete's own identity cascade
+      // ends them at the retraction's instant and still stamps the node as
+      // their cause, so the target's history and transition log read as the
+      // branch's did.
+      // A recreation deletes the live node before writing it again, resetting
+      // its validity window. It takes the plan deletions' policy, so its own
+      // `restrict` edges still refuse and its parts are not cascaded away;
+      // only a plan deletion carries the assertion ends the plan retracts.
+      const deletePolicy: NodeDeletePolicy = MERGE_NODE_DELETE_POLICY;
+      const assertionEndsByNode = plannedAssertionEndsByNode(
+        deletions,
+        identityRetractions,
+      );
+      for (const deletion of mergeNodeDeleteSequence(deletions, upserts)) {
+        const assertionEnds = assertionEndsByNode.get(
+          mergeKey(deletion.kind, deletion.id),
+        );
+        await deleteNodeWithPolicy(
+          { kind: deletion.kind, id: deletion.id },
+          assertionEnds === undefined ? deletePolicy : (
+            { ...deletePolicy, identityAssertionEnds: assertionEnds }
           ),
-        };
-    const collection = nodeCollection(nodesApi, kind);
-    await collection.upsertByIdFromRecord(entity.canonicalId, props);
-    committedNodeIds.add(mergeKey(kind, entity.canonicalId));
-  }
+        );
+      }
+      const committed = new Set<MergeKey>();
+      for (const upsert of upserts) {
+        await nodeCollection(nodesApi, upsert.kind).upsertByIdFromRecord(
+          upsert.id,
+          upsert.props,
+          nodeWriteWindowOptions(upsert),
+        );
+        committed.add(mergeKey(upsert.kind, upsert.id));
+      }
+      return committed.size;
+    },
+  );
+}
 
-  // Soft-delete every finally-deleted node (key encodes the kind; the value repeats
-  // it for the collection lookup).
-  for (const [identity, kind] of plan.nodeDeletions) {
-    const collection = nodeCollection(nodesApi, kind);
-    await collection.delete(idOf(identity));
-  }
+/**
+ * Owns the row dependency order shared by both merge executors: edge
+ * deletions, then node writes, then edge upserts. A branch that deleted a
+ * connecting edge and then its endpoint had to take that order, so a
+ * `restrict` endpoint whose only blocking edge the plan also deletes is not
+ * refused, and no `cascade` / `disconnect` removes an edge the plan owns. New
+ * endpoints still exist before their edges are written.
+ */
+async function applyMergeRowWrites<T>(
+  edgesApi: TxEdges,
+  edgeDeletions: readonly MergePlanEntityRef[],
+  writeNodes: () => Promise<T>,
+  edgeUpserts: readonly MechanicalEdgeWrite[],
+  releasingEdgeIds: ReadonlySet<string>,
+): Promise<Readonly<{ nodes: T; edges: number }>> {
+  await applyEdgeDeletes(edgesApi, edgeDeletions);
+  const nodes = await writeNodes();
+  const edges = await applyEdgeUpserts(edgesApi, edgeUpserts, releasingEdgeIds);
+  return { nodes, edges };
+}
 
-  // Soft-delete every finally-deleted inherited edge. These ids are disjoint from
-  // the merged-edge upserts below (deleted edges are not staged), so order is
-  // immaterial. Without this an inherited edge deleted in a branch stayed live.
-  for (const [identity, kind] of plan.edgeDeletions) {
-    await edgeCollection(edgesApi, kind).delete(idOf(identity));
+async function applyEdgeDeletes(
+  edgesApi: TxEdges,
+  deletions: readonly MergePlanEntityRef[],
+): Promise<void> {
+  for (const deletion of deletions) {
+    await edgeCollection(edgesApi, deletion.kind).delete(deletion.id);
   }
+}
 
-  // Repointed + deduped edges, grouped by kind so each kind is one batched
-  // round-trip (upsert-by-id is order-independent). The retype cascade keys on
-  // each endpoint's full `(kind, id)` identity.
-  const edgesByKind = new Map<string, EdgeUpsert[]>();
+/**
+ * RELEASES BEFORE CLAIMS: every upsert that only releases what its stored row
+ * held (`releasingEdgeIds`, {@link plannedEdgeWriteOnlyReleases}) lands before
+ * the rest. A move is planned as "retire the old edge, write the new one", and
+ * a claim the retired edge still holds (a part's one whole, a `oneActive`
+ * slot) refuses the new edge if it is written first — which a single
+ * `bulkUpsertById` would do, since it runs its creates ahead of its updates.
+ * A write stating an end is not therefore a release: an edge inserted already
+ * ended claims its window, so it lands with the claims.
+ */
+async function applyEdgeUpserts(
+  edgesApi: TxEdges,
+  upserts: readonly MechanicalEdgeWrite[],
+  releasingEdgeIds: ReadonlySet<string>,
+): Promise<number> {
+  const onlyReleases = (upsert: MechanicalEdgeWrite): boolean =>
+    releasingEdgeIds.has(upsert.item.id);
+  return (
+    (await upsertEdgeRows(
+      edgesApi,
+      upserts.filter((upsert) => onlyReleases(upsert)),
+    )) +
+    (await upsertEdgeRows(
+      edgesApi,
+      upserts.filter((upsert) => !onlyReleases(upsert)),
+    ))
+  );
+}
+
+async function upsertEdgeRows(
+  edgesApi: TxEdges,
+  upserts: readonly MechanicalEdgeWrite[],
+): Promise<number> {
+  const byKind = new Map<string, EdgeUpsert[]>();
+  for (const upsert of upserts) {
+    const items = byKind.get(upsert.kind);
+    if (items === undefined) byKind.set(upsert.kind, [upsert.item]);
+    else items.push(upsert.item);
+  }
+  for (const [kind, items] of byKind) {
+    await edgeCollection(edgesApi, kind).bulkUpsertById(items);
+  }
+  return upserts.length;
+}
+
+/** What the apply decided about the plan's edge upserts before writing any row. */
+type EdgeUpsertDecision = Readonly<{
+  /** The upserts that only release what their stored row held; they land first. */
+  releasingEdgeIds: ReadonlySet<string>;
+  /** The composition window verdict over the plan's whole composition write set. */
+  compositionWindows: CompositionWindowVerdict | undefined;
+}>;
+
+/**
+ * Decides the plan's edge upserts once, inside the apply transaction and
+ * before any row is written, from the plan's constrained writes beside the
+ * rows the target holds for them now ({@link readPlannedEdgeRows} — the
+ * planner's own reader):
+ *
+ * - which upserts only release ({@link plannedEdgeWriteOnlyReleases}), so
+ *   {@link applyEdgeUpserts} lands them before the rest;
+ * - the composition window verdict over the plan's whole composition write
+ *   set ({@link compositionWindowWriteSet} — the set the planner judged),
+ *   fenced. The apply then writes one edge kind per `bulkUpsertById`, each
+ *   its own frame; judged alone, a frame would read rows a later kind's frame
+ *   has not changed yet. Every frame consumes this verdict instead
+ *   ({@link withEdgeUpsertDecision}), so the plan and the apply reach one
+ *   decision over one write set.
+ *
+ * @throws CompositionError (`COMPOSITION_WINDOW_OVERLAP`) when the write set
+ *   would leave one part with two composition windows sharing an instant.
+ */
+async function decideEdgeUpserts<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  writes: MergePlanWrites,
+): Promise<EdgeUpsertDecision> {
+  const planned = await readPlannedEdgeRows(target, txBackend, writes);
+  const releasingEdgeIds = new Set(
+    planned.edgeRows
+      .filter((row) => plannedEdgeWriteOnlyReleases(row))
+      .map((row) => row.edgeId),
+  );
+  const compositionWrites = compositionWindowWriteSet(
+    target,
+    planned,
+    nowIso(),
+  );
+  if (
+    compositionWrites.inserts.length === 0 &&
+    compositionWrites.revisions.length === 0
+  ) {
+    return { releasingEdgeIds, compositionWindows: undefined };
+  }
+  const compositionWindows = await assertCompositionWindowsDisjoint(
+    {
+      graphId: target.graphId,
+      registry: target.registry,
+      lock: await lockRecordedGraphWrite(txBackend, target.graphId),
+    },
+    txBackend,
+    compositionWrites,
+  );
+  return { releasingEdgeIds, compositionWindows };
+}
+
+/** Runs `write` with the decision's composition window verdict open, if it reached one. */
+function withEdgeUpsertDecision<Output>(
+  txBackend: TransactionBackend,
+  decision: EdgeUpsertDecision,
+  write: () => Promise<Output>,
+): Promise<Output> {
+  return decision.compositionWindows === undefined ?
+      write()
+    : withDecidedCompositionWindows(
+        txBackend,
+        decision.compositionWindows,
+        write,
+      );
+}
+
+type MergeGraphRows = Readonly<{
+  /** The normalized write view the composition decisions read. */
+  writes: MergePlanWrites;
+  nodePhase: MergeNodeWritePhase;
+  edgeUpserts: readonly MechanicalEdgeWrite[];
+}>;
+
+/**
+ * The node and edge rows of every merge apply — the live plan and the replayed
+ * artifact both land them through here, so they order the same writes and
+ * guard composition the same way.
+ *
+ * A plan's composition rows are valid together and not one at a time: a
+ * required part is written before its edge, a moved part loses its old edge
+ * before the new one lands. So the per-write existence rule is deferred for
+ * exactly the parts the plan could leave unattached
+ * ({@link requiredExistenceOrphanCandidates}), and re-asserted for those same
+ * parts against the final state, in this transaction, once the last edge is
+ * in ({@link assertNoUnattachedRequiredParts}).
+ */
+async function applyGraphRows<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  rows: MergeGraphRows,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<Readonly<{ nodes: number; retracted: number; edges: number }>> {
+  // Authoritative re-verification, before any row work below: a part
+  // attached to a deleted whole after the branch point (and neither deleted
+  // nor moved away by this plan) must abort the WHOLE apply.
+  await assertNoCompositionOrphans(target, txBackend, rows.writes);
+
+  // Resolved before any row is written: a deleted composition edge's
+  // endpoints are read while it is still live in `txBackend`.
+  const unattachedCandidates = await requiredExistenceOrphanCandidates(
+    { graphId: target.graphId, registry: target.registry },
+    txBackend,
+    rows.writes,
+  );
+
+  const edgeUpsertDecision = await decideEdgeUpserts(
+    target,
+    txBackend,
+    rows.writes,
+  );
+
+  const applied = await withDeferredCompositionExistence(
+    txBackend,
+    unattachedCandidates,
+    () =>
+      withEdgeUpsertDecision(txBackend, edgeUpsertDecision, async () => {
+        const applied = await applyMergeRowWrites(
+          edgesApi,
+          rows.writes.edgeDeletes,
+          () =>
+            applyNodeWritePhase(
+              target,
+              txBackend,
+              nodesApi,
+              rows.nodePhase,
+              deleteNodeWithPolicy,
+              decision,
+            ),
+          rows.edgeUpserts,
+          edgeUpsertDecision.releasingEdgeIds,
+        );
+        return { ...applied.nodes, edges: applied.edges };
+      }),
+  );
+
+  await assertNoUnattachedRequiredParts(
+    target,
+    txBackend,
+    unattachedCandidates,
+  );
+  return applied;
+}
+
+async function applyIdentityRows<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  assertions: readonly IdentityTransferAssertion[],
+  retractions: readonly IdentityTransferAssertion[],
+  // The governing merge decision every transition this apply causes carries.
+  // Threaded to the ONE owner of "which decision is in force" — the capture
+  // session `applyIdentityChangesForContext` opens — never re-derived here.
+  decision: IdentityDecisionProvenance | undefined,
+  assertConsistent?: () => Promise<void>,
+): Promise<Readonly<{ asserted: number; retracted: number }>> {
+  try {
+    const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
+      txBackend,
+      retractions,
+      assertions,
+      decision,
+    );
+    if (assertConsistent !== undefined) await assertConsistent();
+    return { asserted: applied.created, retracted: applied.retracted };
+  } catch (error) {
+    throw translateIdentityCommitError(error);
+  }
+}
+
+type MergeNodeWritePhase = Readonly<{
+  deletions: readonly MergePlanEntityRef[];
+  upserts: readonly MechanicalNodeWrite[];
+  identityRetractions: readonly IdentityTransferAssertion[];
+}>;
+
+/**
+ * The node write phase of every merge apply — the live plan and the replayed
+ * artifact both land their node rows through here, so they order the same
+ * writes the same way.
+ *
+ * A retraction naming a node whose validity window this merge ends is applied
+ * BEFORE the node rows: the store refuses to end the window of an endpoint a
+ * current assertion still names, so the only order a branch could have staged
+ * the pair in is the only order the apply can land it in. Every other
+ * retraction waits for the identity phase, which is handed the complete list
+ * again and skips the ones already ended here. A window end the plan did not
+ * pair with a retraction is still refused, as the typed identity conflict.
+ *
+ * The rows are written under the merge's governing decision, so a membership
+ * transition a node write causes as a side effect — a deleted node's same-ID
+ * fold detaching, an upserted node folding into a class — names the merge
+ * that caused it, as the identity rows' own transitions do. Edge writes cause
+ * no membership transition and so carry none.
+ */
+async function applyNodeWritePhase<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  nodesApi: TxNodes,
+  phase: MergeNodeWritePhase,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<Readonly<{ nodes: number; retracted: number }>> {
+  const validityEndedNodes = new Set(
+    phase.upserts
+      .filter((write) => "validTo" in write)
+      .map((write) => mergeKey(write.kind, write.id)),
+  );
+  const earlyIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    [],
+    phase.identityRetractions.filter(
+      (retraction) =>
+        validityEndedNodes.has(mergeKeyOf(retraction.a)) ||
+        validityEndedNodes.has(mergeKeyOf(retraction.b)),
+    ),
+    decision,
+  );
+  const applyRows = (): Promise<number> =>
+    applyNodeRows(
+      target,
+      txBackend,
+      nodesApi,
+      phase.deletions,
+      phase.upserts,
+      phase.identityRetractions,
+      deleteNodeWithPolicy,
+    );
+  try {
+    const nodes =
+      decision === undefined ?
+        await applyRows()
+      : await withRecordedIdentityDecision(txBackend, decision, applyRows);
+    return { nodes, retracted: earlyIdentity.retracted };
+  } catch (error) {
+    throw error instanceof IdentityEndpointValidityError ?
+        translateIdentityCommitError(error)
+      : error;
+  }
+}
+
+/**
+ * Applies a resolved {@link MergePlan} through a transaction's collection API.
+ * Shared by `commitPlan()` and the guarded `mergeIncremental()` commit path so
+ * both modes execute the same resolved semantics.
+ */
+async function applyInternalMergePlan<G extends GraphDef>(
+  plan: MergePlan<G>,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<MergedCounts> {
+  const edgeUpserts: MechanicalEdgeWrite[] = [];
   for (const edge of plan.mergedEdges) {
-    const fromKind = plan.retypeMap.get(mergeKey(edge.fromKind, edge.fromId));
-    const toKind = plan.retypeMap.get(mergeKey(edge.toKind, edge.toId));
     // Honor a fork's property deletion on an inherited edge: drop base keys absent
     // from the merged props (the edge upsert PATCH-merges, so a removed key would
     // otherwise survive). New edges have no base entry, so their props pass through.
@@ -1256,27 +2839,86 @@ async function applyMergePlan<G extends GraphDef>(
       edgeBaseProps === undefined ?
         edge.props
       : commitModificationProps(edgeBaseProps, edge.props);
-    const item: EdgeUpsert = {
-      id: edge.id,
-      from: { kind: fromKind ?? edge.fromKind, id: edge.fromId },
-      to: { kind: toKind ?? edge.toKind, id: edge.toId },
-      props,
-    };
-    const existing = edgesByKind.get(edge.kind);
-    if (existing === undefined) {
-      edgesByKind.set(edge.kind, [item]);
-    } else {
-      existing.push(item);
-    }
+    // A staged edge's valid-time window travels with the write, mirroring the
+    // canonical-entity upsert above: on a fresh insert it IS the branch's
+    // window, on a resurrection it stops the upsert from resetting a
+    // branch-authored (possibly already ENDED) window to merge time, and on an
+    // inherited edge it is the reconciled end-of-validity. An edge with no
+    // window leaves its committed one untouched.
+    edgeUpserts.push({
+      kind: edge.kind,
+      item: {
+        id: edge.id,
+        from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+        to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
+        props,
+        ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+        ...validityEndMutationOf(edge),
+      },
+    });
   }
-  let committedEdges = 0;
-  for (const [kind, items] of edgesByKind) {
-    await edgeCollection(edgesApi, kind).bulkUpsertById(items);
-    committedEdges += items.length;
-  }
+  const rows = await applyGraphRows(
+    target,
+    txBackend,
+    nodesApi,
+    edgesApi,
+    {
+      writes: resolvedMergeWrites(plan),
+      nodePhase: {
+        deletions: plannedNodeReleases(plan),
+        upserts: plannedNodeUpserts(plan),
+        identityRetractions: plan.identityRetractions,
+      },
+      edgeUpserts,
+    },
+    deleteNodeWithPolicy,
+    decision,
+  );
 
-  return { nodes: committedNodeIds.size, edges: committedEdges };
+  // The IDENTITY-APPLIER boundary: any refusal from the apply below is an
+  // identity statement by construction, so it is translated into the typed
+  // conflict error here — the completeness backstop for applier invariants
+  // the plan-time simulation does not (yet) mirror.
+  //
+  // The post-write assertion shares the boundary because it is the same kind
+  // of statement, made one step later: with every node, edge and identity
+  // write of this merge in place, the affected identity classes must carry no
+  // contradiction. It is what makes the committed ledger correct independently
+  // of the plan-time simulation, and it runs for BOTH commit modes because
+  // both commit through here.
+  const appliedIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    plan.identityAssertions,
+    plan.identityRetractions,
+    decision,
+    () => assertMergedIdentityClassesConsistent(target, txBackend, plan),
+  );
+
+  return {
+    nodes: rows.nodes,
+    edges: rows.edges,
+    // ACTUAL ledger effects from the applier: rows created (idempotent
+    // exact/pair matches the target already held are excluded — the normal
+    // incremental case, where the target's own additions are staged back at
+    // it) and rows ended (already-ended or unknown ids excluded). Any apply
+    // failure aborts the whole merge, so the counts never describe a
+    // partial commit.
+    identity: {
+      asserted: appliedIdentity.asserted,
+      retracted: rows.retracted + appliedIdentity.retracted,
+    },
+  };
 }
+
+/**
+ * Attempt budget for every merge commit transaction. A serialization failure
+ * or deadlock aborts the whole transaction with nothing committed, so
+ * re-running it from the top (the documented PostgreSQL protocol for both) is
+ * safe; three attempts absorbs the occasional lost race without masking a
+ * genuinely contended target.
+ */
+const MERGE_COMMIT_ATTEMPTS = 3;
 
 /**
  * Applies a resolved {@link MergePlan} to the target via the typed transaction
@@ -1306,43 +2948,97 @@ export async function commitPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   expectedBaseVersion?: BaseVersion,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
-  if (!storeBackend(target).capabilities.transactions) {
-    throw new MergeError(
-      "merge() requires a transaction-capable target backend. The merged plan (canonical upserts, soft-deletes, edge upserts) must commit atomically; a non-transactional fallback would leave a partially-merged graph on a mid-commit failure. (mergeIncremental() enforces the same requirement.)",
-      { details: { capability: "transactions" } },
+  decision?: IdentityDecisionProvenance,
+): Promise<MergedCounts> {
+  if (
+    expectedBaseVersion !== undefined &&
+    engineAnchorOf(expectedBaseVersion) !== undefined
+  ) {
+    throw new BaseVersionMismatchError(
+      "Engine-anchored base versions are retired because their lineage delta cannot fence identity-only writes or commit-time graph reads. Re-branch and re-plan using a current base version.",
+      { details: { expectedBaseVersion } },
     );
   }
-  return withTxConflictRetry(() =>
-    target.transaction(async (tx) => {
-      // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
-      // transaction, so the target may have been written between the base@V
-      // precondition and this commit. Revision-anchored stores check their
-      // durable clock under the graph write lock; legacy stores re-derive the
-      // content fingerprint through this transaction's snapshot. Either proof
-      // ensures the plan still describes the live target before committing.
-      if (expectedBaseVersion !== undefined) {
-        await assertTargetUnchanged(
-          transactionBackend(tx),
-          target,
-          expectedBaseVersion,
-        );
-      }
-      return applyMergePlan(
-        plan,
-        tx.nodes as unknown as TxNodes,
-        tx.edges as unknown as TxEdges,
-      );
-    }, mergeCommitTransactionOptions(target)),
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
+    throw new MergeError(
+      "merge() requires a transaction-capable target backend. The merged plan (canonical upserts, soft-deletes, edge upserts) must commit atomically; a non-transactional fallback would leave a partially-merged graph on a mid-commit failure. (mergeIncremental() enforces the same requirement.)",
+      { details: { capability: "execution.interactiveTransactions" } },
+    );
+  }
+  return runMergeCommit(() =>
+    runRetriedUnit(
+      {
+        operation: "commitPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
+      () =>
+        target.transaction(async (tx) => {
+          await lockMergeCommitFence(
+            transactionBackend(tx),
+            target,
+            expectedBaseVersion,
+          );
+          // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
+          // transaction, so the target may have been written between the base@V
+          // precondition and this commit. Revision-anchored stores check their
+          // durable clock under the graph write lock; legacy stores re-derive the
+          // content fingerprint through this transaction's snapshot. Either proof
+          // ensures the plan still describes the live target before committing.
+          if (expectedBaseVersion !== undefined) {
+            await assertTargetUnchanged(
+              transactionBackend(tx),
+              target,
+              expectedBaseVersion,
+            );
+          }
+          // Identity ids are re-validated EXPLICITLY even under a base@V match:
+          // the legacy fingerprint ranges over CURRENT assertions only, so a row
+          // that claimed a planned id in the window and was then ended would pass
+          // the token check and fail generically inside the applier.
+          await assertPlannedIdentityIdsFresh(
+            target,
+            transactionBackend(tx),
+            plan,
+          );
+          return applyInternalMergePlan(
+            plan,
+            tx.nodes as unknown as TxNodes,
+            tx.edges as unknown as TxEdges,
+            target,
+            transactionBackend(tx),
+            (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+            decision,
+          );
+        }, mergeCommitTransactionOptions(target)),
+    ),
   );
+}
+
+/** Runs one atomic commit while preserving the merge boundary's error taxonomy. */
+async function runMergeCommit<Output>(
+  commit: () => Promise<Output>,
+): Promise<Output> {
+  try {
+    return await commit();
+  } catch (error) {
+    throw translateMergeCommitError(error);
+  }
 }
 
 /**
  * Isolation for the merge commit transaction. SERIALIZABLE closes the window
- * between the in-transaction re-validation reads and COMMIT on multi-writer
- * Postgres (SSI aborts a racing writer with SQLSTATE 40001, which
- * {@link withTxConflictRetry} retries); SQLite and PGlite serialize writers by
- * construction, and the SQLite backend ignores the option.
+ * between the in-transaction re-validation reads and COMMIT against other
+ * SERIALIZABLE writers on multi-writer Postgres (SSI aborts one of them with
+ * SQLSTATE 40001, which
+ * {@link file://../backend/capabilities/retried-unit.ts runRetriedUnit} retries). SSI does
+ * not arbitrate against a writer at a weaker isolation, so the decisions only
+ * the per-graph write fence protects — edge acyclicity, a composition whole's
+ * parts closure — do not rest on it: making one advances the graph's fence
+ * row, which fails this transaction with the same SQLSTATE when ANY writer
+ * that made such a decision committed after its snapshot, and the retry
+ * re-runs the commit against the graph that writer left. SQLite and PGlite serialize
+ * writers by construction, and the SQLite backend ignores the option.
  */
 const MERGE_COMMIT_TX_OPTIONS = {
   isolationLevel: "serializable",
@@ -1355,79 +3051,146 @@ function mergeCommitTransactionOptions<G extends GraphDef>(
   // allocates its durable clock inside the write transaction. Revision-anchored
   // merges hold that same per-graph lock before checking the anchor, which
   // closes the TOCTOU gap without asking a history store for SERIALIZABLE.
-  return target.historyEnabled ? undefined : MERGE_COMMIT_TX_OPTIONS;
+  //
+  // `storeCaptureEnabled`, not the public `historyEnabled` getter: the
+  // "durable clock allocated inside this transaction" rationale is specific
+  // to TypeGraph's own capture. An engine-native `history: true` store never
+  // allocates anything here — `revisionNow` just reads the committing
+  // session — so it takes the SAME SERIALIZABLE path a non-capturing store
+  // does, unchanged from before this store had a public `historyEnabled`
+  // that could answer `true` for it.
+  return storeCaptureEnabled(target) ? undefined : MERGE_COMMIT_TX_OPTIONS;
+}
+
+/**
+ * The fences a live merge commit takes as the FIRST statements of its
+ * transaction, through the store's one prelude ({@link lockStoreWriteFence}):
+ * the schema-version fence, then the per-graph write lock wherever this commit
+ * needs it up front.
+ *
+ * Every later graph-lock acquisition in the apply (the composition orphan
+ * re-verification, the composition window decision, a write frame) then
+ * re-enters a lock taken behind the schema fence, so no read or decision of
+ * the commit can take the graph lock first. Taking it first is the inverted
+ * order: a concurrent schema commit holds the schema row `FOR UPDATE` and then
+ * waits for the graph lock, and PostgreSQL aborts one side as a deadlock.
+ *
+ * The graph lock is taken here when the store's writers all take it, or when
+ * the base version is revision-anchored: tracked writers advance that clock
+ * under this lock, so holding it around the read→apply sequence makes the
+ * O(1) anchor check a TOCTOU guard without relying on the transaction's
+ * snapshot being the latest committed state. Otherwise only the apply sites
+ * that need it take it, and a backend without a keyed fence can still commit
+ * a merge that needs none.
+ *
+ * A target handle whose schema another handle has advanced is refused here,
+ * as `BaseVersionMismatchError` with the `StaleVersionError` as its cause,
+ * before any read of the commit.
+ */
+async function lockMergeCommitFence<G extends GraphDef>(
+  txBackend: TransactionBackend,
+  target: Store<G>,
+  expectedBaseVersion: BaseVersion | undefined,
+): Promise<void> {
+  const graphLockRequired =
+    (expectedBaseVersion !== undefined &&
+      hasRevisionAnchor(expectedBaseVersion)) ||
+    storeWritersTakeGraphWriteFence({
+      historyEnabled: storeCaptureEnabled(target),
+      revisionTrackingEnabled: target.revisionTrackingEnabled,
+    });
+  await lockStoreWriteFence(txBackend, {
+    graphId: target.graphId,
+    schemaVersion: target.introspect().schemaVersion,
+    graphLock: graphLockRequired ? "required" : "not-required",
+    staleSchemaError: (cause) =>
+      new BaseVersionMismatchError(
+        "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
+        { cause },
+      ),
+  });
 }
 
 /**
  * The in-transaction half of the base@V guard: revision-anchored targets read
- * their durable clock under the graph lock; legacy targets recompute their
- * content fingerprint through the transaction-scoped backend. The schema
- * component cannot drift because it is a pure function of the in-memory graph
- * definition.
+ * their durable clock under the graph lock {@link lockMergeCommitFence} took.
+ * Untracked targets recompute the complete content fingerprint through the
+ * transaction-scoped backend, which includes current identity assertions and
+ * establishes read dependencies on the graph state used by the plan.
  */
 async function assertTargetUnchanged<G extends GraphDef>(
   txBackend: TransactionBackend,
   target: Store<G>,
   expectedBaseVersion: BaseVersion,
 ): Promise<void> {
-  if (hasRevisionAnchor(expectedBaseVersion)) {
-    // All tracked writers acquire this lock before touching graph rows and
-    // advance the same clock before committing. Holding it around the
-    // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
-    // relying on the transaction's snapshot being the latest committed state.
-    await lockRecordedGraphWrite(txBackend, target.graphId);
-    const expectedOrigin = revisionOriginOf(expectedBaseVersion);
-    const liveOrigin = await readRevisionOrigin(
-      txBackend,
-      target.revisionSchema,
-      target.graphId,
-    );
-    if (liveOrigin !== expectedOrigin) {
+  const comparison = await compareBaseVersionAtTarget(
+    target,
+    txBackend,
+    expectedBaseVersion,
+  );
+  if (comparison.matches) return;
+  switch (comparison.kind) {
+    case "schema": {
+      throw new BaseVersionMismatchError(
+        "The merge target schema version changed before the commit transaction; the resolved plan was not applied.",
+        {
+          details: {
+            expectedActiveVersion: comparison.expectedActiveVersion,
+            liveActiveVersion: comparison.liveActiveVersion,
+          },
+        },
+      );
+    }
+    case "revision-origin": {
       throw new BaseVersionMismatchError(
         "The merge branch was forked from a different revision-tracked store; the resolved plan was not applied.",
         {
-          details: { expectedOrigin, liveOrigin },
+          details: {
+            expectedOrigin: comparison.expected,
+            liveOrigin: comparison.live,
+          },
           suggestion:
             "Merge the branch back into its original base store, or fork a new branch from this target.",
         },
       );
     }
-    const liveRevision = await readRecordedClock(
-      txBackend,
-      target.revisionSchema,
-      target.graphId,
-    );
-    const expectedRevision = revisionAnchorOf(expectedBaseVersion);
-    if (liveRevision !== expectedRevision) {
+    case "revision": {
       throw new BaseVersionMismatchError(
         "The merge target was modified between the revision-anchor check and the commit transaction; the resolved plan was not applied.",
         {
-          details: { expectedRevision, liveRevision },
+          details: {
+            expectedRevision: comparison.expected,
+            liveRevision: comparison.live,
+          },
           suggestion:
             "Re-run the merge (and re-branch if the divergence is real), or route all graph writes through the revision-tracked Store.",
         },
       );
     }
-    return;
-  }
-  const liveContent = await computeContentComponent(
-    txBackend,
-    target.graphId,
-    target.graph,
-  );
-  const expectedContent = contentComponentOf(expectedBaseVersion);
-  if (liveContent !== expectedContent) {
-    throw new BaseVersionMismatchError(
-      "The merge target was modified between the base@V check and the commit transaction; the resolved plan no longer describes the live target and was not applied.",
-      {
-        details: {
-          expectedContentFingerprint: expectedContent,
-          liveContentFingerprint: liveContent,
+    case "content-origin": {
+      throw new BaseVersionMismatchError(
+        "The merge target's durable origin changed before the commit transaction; the resolved plan was not applied.",
+        {
+          details: {
+            expectedOrigin: comparison.expected,
+            liveOrigin: comparison.live,
+          },
         },
-        suggestion:
-          "Re-run the merge (and re-branch if the divergence is real), or serialize writers against merges on this target.",
-      },
-    );
+      );
+    }
+    case "content": {
+      throw new BaseVersionMismatchError(
+        "The merge target was modified between the base@V check and the commit transaction; the resolved plan no longer describes the live target and was not applied.",
+        {
+          details: {
+            expectedContentFingerprint: comparison.expected,
+            liveContentFingerprint: comparison.live,
+          },
+          suggestion:
+            "Re-run the merge (and re-branch if the divergence is real), or serialize writers against merges on this target.",
+        },
+      );
+    }
   }
 }
 
@@ -1444,53 +3207,32 @@ type TxEdges = Record<string, EdgeCollectionLike>;
 
 /** The node-collection surface the commit uses (runtime, kind-string keyed). */
 type NodeCollectionLike = Readonly<{
-  getById: (
-    id: string,
-    options?: Readonly<{ temporalMode?: "includeTombstones" }>,
-  ) => Promise<Node | undefined>;
   getByIds: (
     ids: readonly string[],
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Node | undefined)[]>;
-  bulkCreate: (
-    items: readonly Readonly<{
-      id?: string;
-      props: Record<string, unknown>;
-    }>[],
-  ) => Promise<unknown>;
-  update: (id: string, props: Record<string, unknown>) => Promise<unknown>;
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
+    options?: Readonly<{ validFrom?: string | null }> & ValidityEndMutation,
   ) => Promise<unknown>;
-  delete: (id: string) => Promise<void>;
 }>;
 
 /** The edge-collection surface the commit uses (runtime, kind-string keyed). */
 type EdgeCollectionLike = Readonly<{
-  getById: (
-    id: string,
-    options?: Readonly<{ temporalMode?: "includeTombstones" }>,
-  ) => Promise<Edge | undefined>;
   getByIds: (
     ids: readonly string[],
     options?: Readonly<{ temporalMode?: "includeTombstones" }>,
   ) => Promise<readonly (Edge | undefined)[]>;
-  bulkCreate: (
-    items: readonly Readonly<{
-      id?: string;
-      from: Readonly<{ kind: string; id: string }>;
-      to: Readonly<{ kind: string; id: string }>;
-      props?: Record<string, unknown>;
-    }>[],
-  ) => Promise<unknown>;
   bulkUpsertById: (
-    items: readonly Readonly<{
+    items: readonly (Readonly<{
       id: string;
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
-    }>[],
+      validFrom?: string | null;
+    }> &
+      ValidityEndMutation)[],
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -1523,7 +3265,7 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
 /**
  * Validates the `base@V` precondition: every branch's `base` token MUST equal the
  * target's current base version. A mismatch means the branch forked from a
- * divergent schema or base revision, which cannot be merged safely.
+ * divergent schema or graph state and cannot be merged safely.
  */
 async function validateBaseVersions<G extends GraphDef>(
   target: Store<G>,
@@ -1531,32 +3273,117 @@ async function validateBaseVersions<G extends GraphDef>(
 ): Promise<Result<BaseVersion, BaseVersionMismatchError>> {
   const targetVersion = await computeBaseVersion(target);
   for (const branch of branches) {
-    if (branch.base !== targetVersion) {
-      return err(
-        new BaseVersionMismatchError(
-          `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the merge target's current base@V "${targetVersion}".`,
-          {
-            details: {
-              branchId: branch.id,
-              branchBase: branch.base,
-              targetBase: targetVersion,
-            },
-          },
-        ),
-      );
-    }
+    if (branch.base === targetVersion) continue;
+    return err(
+      branchBaseMismatchError(
+        branch,
+        `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the merge target's current base@V "${targetVersion}".`,
+        { targetBase: targetVersion },
+      ),
+    );
   }
   return ok(targetVersion);
+}
+
+/**
+ * The refusal for a branch whose `base@V` no longer matches, shared by the
+ * snapshot and fork-point preconditions. A token in the retired format is
+ * named as such, with a re-branch suggestion instead of the generic one.
+ */
+function branchBaseMismatchError<G extends GraphDef>(
+  branch: GraphBranch<G>,
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): BaseVersionMismatchError {
+  const legacy = isLegacyBaseVersion(branch.base);
+  return new BaseVersionMismatchError(message, {
+    details: {
+      branchId: branch.id,
+      branchBase: branch.base,
+      ...details,
+      ...(legacy ? { reason: LEGACY_BASE_VERSION_REFUSAL.reason } : {}),
+    },
+    ...(legacy ? { suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion } : {}),
+  });
 }
 
 /** Normalizes options, converting an invalid-option throw into a typed result. */
 function tryNormalize<G extends GraphDef>(
   optionsInput: MergeOptions<G>,
+  refusedOptions: readonly (keyof MergeOptions<G>)[] = [],
 ): Result<NormalizedMergeOptions<G>, MergeError> {
+  const refusedOption = refusedOptions.find((option) =>
+    hasOwnKey(optionsInput, option),
+  );
+  if (refusedOption !== undefined) {
+    return err(
+      new InvalidMergeOptionsError(
+        `This merge operation does not accept options.${refusedOption}.`,
+        { details: { option: refusedOption } },
+      ),
+    );
+  }
+
   try {
     return ok(normalizeMergeOptions(optionsInput));
   } catch (error) {
-    return err(new MergeError("Invalid merge options.", { cause: error }));
+    // A refusal the normalizer already spelled as a typed invalid-option error
+    // travels unchanged: re-wrapping it would bury the `details.option` the
+    // caller needs to know WHICH option was refused. Anything else —
+    // a zod parse failure, a bare validation throw — becomes the generic
+    // invalid-options refusal with the original attached as its cause.
+    return err(
+      error instanceof InvalidMergeOptionsError ? error : (
+        new InvalidMergeOptionsError("Invalid merge options.", { cause: error })
+      ),
+    );
+  }
+}
+
+/**
+ * Opens (creating if needed) the target's provenance sidecar BEFORE the merge
+ * mutates anything, converting a refusal into a typed merge result.
+ *
+ * `openProvenanceStore` refuses two classes of state — an occupied sidecar graph
+ * id (`GRAPH_MERGE_PROVENANCE_ID_COLLISION`) and a backend that cannot fence the
+ * ownership claim (`GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED`) — and both are pure
+ * configuration verdicts: they are as true before the merge as after it, and
+ * nothing the merge does changes them. Reporting them post-commit as a warning
+ * would leave the caller with a committed graph and an option it stated,
+ * TypeGraph accepted, and then silently dropped. They are therefore refusals of
+ * `options.persistProvenance` itself, carried as `InvalidMergeOptionsError`
+ * (`category: "user"`, catchable exactly like every other refused merge option)
+ * with the originating `ConfigurationError` as its cause.
+ *
+ * Any OTHER failure is a backend failure, not a verdict about the option, and is
+ * wrapped as a plain `MergeError` — still pre-commit, because a merge whose
+ * provenance sidecar cannot be reached should not commit half a contract either.
+ */
+async function tryOpenProvenanceStore<G extends GraphDef>(
+  target: Store<G>,
+): Promise<Result<Store<ProvenanceGraph>, MergeError>> {
+  try {
+    return ok(await openProvenanceStore(target));
+  } catch (error) {
+    const code =
+      error instanceof TypeGraphError ?
+        (error.details as Readonly<{ code?: unknown }> | undefined)?.code
+      : undefined;
+    const details = {
+      option: "persistProvenance",
+      graphId: provenanceGraphId(target.graphId),
+      targetGraphId: target.graphId,
+      ...(typeof code === "string" ? { provenanceErrorCode: code } : {}),
+    };
+    const message = `options.persistProvenance was requested but the merge-provenance sidecar cannot be opened: ${describeCause(error)}`;
+    return err(
+      (
+        code === "GRAPH_MERGE_PROVENANCE_ID_COLLISION" ||
+          code === "GRAPH_MERGE_PROVENANCE_CLAIM_UNFENCED"
+      ) ?
+        new InvalidMergeOptionsError(message, { details, cause: error })
+      : new MergeError(message, { details, cause: error }),
+    );
   }
 }
 
@@ -1568,15 +3395,1046 @@ function tryNormalize<G extends GraphDef>(
  * `base@V` precondition is the CALLER's responsibility — `merge()` enforces it,
  * the synthetic scope deliberately bypasses it (§6.4-B).
  */
-async function resolveMerge<G extends GraphDef>(
+type ResolvedMerge<G extends GraphDef> = Readonly<{
+  target: Store<G>;
+  plan: MergePlan<G>;
+  options: NormalizedMergeOptions<G>;
+  /**
+   * Root-first: the base (or fork-point) graph, then every branch merged. The
+   * ancestry the identity decision records for a `merge()` that never produced
+   * a durable plan artifact to read anchors from.
+   */
+  branchAncestry: readonly string[];
+  expectedBaseVersion?: BaseVersion;
+  incrementalGuard?: IncrementalCommitGuard<G>;
+}>;
+
+/** Why `target` cannot carry a public merge plan, or `undefined` when it can. */
+export function publicPlanCapabilityRefusal<G extends GraphDef>(
+  target: Store<G>,
+): MergePlanCapabilityError | undefined {
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
+    return new MergePlanCapabilityError(
+      "Public merge plans require a transaction-capable target backend.",
+      { details: { capability: "execution.interactiveTransactions" } },
+    );
+  }
+  if (!target.revisionTrackingEnabled) {
+    return new MergePlanCapabilityError(
+      "Public merge plans require durable target revision tracking.",
+      {
+        details: { capability: "revisionTracking" },
+        suggestion:
+          "Create the target Store with { revisionTracking: true } (or history enabled), then create a new plan.",
+      },
+    );
+  }
+  return undefined;
+}
+
+function assertPublicPlanCapability<G extends GraphDef>(
+  target: Store<G>,
+): void {
+  const refusal = publicPlanCapabilityRefusal(target);
+  if (refusal !== undefined) throw refusal;
+}
+
+export async function captureMergePlanTargetFence<G extends GraphDef>(
+  target: Store<G>,
+): Promise<MergePlanTargetFence> {
+  assertPublicPlanCapability(target);
+  const [activeSchema, schemaHash, owner, revision] = await Promise.all([
+    storeBackend(target).getActiveSchema(target.graphId),
+    computeSchemaComponent(target),
+    target.allocationOwner(),
+    target.revisionNow(),
+  ]);
+  return {
+    graphId: target.graphId,
+    schema: {
+      managed: activeSchema !== undefined,
+      version: activeSchema?.version ?? 1,
+      hash:
+        activeSchema === undefined ? schemaHash : (
+          await activeSchemaHash(activeSchema)
+        ),
+    },
+    revision: { origin: owner.origin, owner, revision: revision ?? null },
+  };
+}
+
+export function sameMergePlanTargetFence(
+  left: MergePlanArtifact["target"],
+  right: MergePlanArtifact["target"],
+): boolean {
+  return (
+    left.graphId === right.graphId &&
+    left.schema.managed === right.schema.managed &&
+    left.schema.version === right.schema.version &&
+    left.schema.hash === right.schema.hash &&
+    left.revision.owner !== undefined &&
+    sameGraphAllocationOwner(left.revision.owner, right.revision.owner) &&
+    left.revision.origin === right.revision.origin &&
+    left.revision.revision === right.revision.revision
+  );
+}
+
+function evolutionPlanMatchesPlanningFence(
+  evolutionPlan: EvolutionPlan,
+  fence: MergePlanTargetFence,
+): boolean {
+  return (
+    fence.graphId === evolutionPlan.graphId &&
+    fence.schema.version === evolutionPlan.baseline.version &&
+    fence.schema.hash === evolutionPlan.baseline.hash
+  );
+}
+
+function evolutionResultingFence(
+  evolutionPlan: EvolutionPlan,
+  baselineFence: MergePlanTargetFence,
+): MergePlanTargetFence {
+  return {
+    ...baselineFence,
+    schema: {
+      managed: true,
+      version:
+        evolutionPlan.status === "change" ?
+          evolutionPlan.result.version
+        : evolutionPlan.baseline.version,
+      hash: evolutionPlan.result.hash,
+    },
+  };
+}
+
+export async function assertPlanningFenceUnchanged<G extends GraphDef>(
+  target: Store<G>,
+  startingFence: MergePlanTargetFence,
+): Promise<void> {
+  const endingFence = await captureMergePlanTargetFence(target);
+  if (sameMergePlanTargetFence(startingFence, endingFence)) return;
+  throw new MergePlanningStaleError(
+    "The merge target changed while the plan was being computed; no reviewable plan was produced.",
+    { details: { startingFence, endingFence } },
+  );
+}
+
+function splitWireProps(props: Readonly<Record<string, unknown>>): Readonly<{
+  setProps: Readonly<Record<string, JsonValue>>;
+  unsetProps: readonly string[];
+}> {
+  const setProps = createDataKeyedBag<JsonValue>();
+  const unsetProps: string[] = [];
+  for (const key of Object.keys(props).sort(compareStrings)) {
+    const value = props[key];
+    if (value === undefined) {
+      unsetProps.push(key);
+    } else {
+      setProps[key] = value as JsonValue;
+    }
+  }
+  return { setProps, unsetProps };
+}
+
+function wireEntityRef(kind: string, id: string): MergePlanEntityRef {
+  return { kind, id };
+}
+
+function resolvedNodeUpserts<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanNodeUpsert[] {
+  return plannedNodeWrites(plan).map((write) => ({
+    kind: write.kind,
+    id: write.id,
+    ...splitWireProps(
+      nodeWriteProps(write, (modification) =>
+        commitModificationProps(modification.baseProps, modification.forkProps),
+      ),
+    ),
+    ...(write.validFrom === undefined ? {} : { validFrom: write.validFrom }),
+    ...validityEndMutationOf(write),
+  }));
+}
+
+function resolvedEdgeUpserts<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly MergePlanEdgeUpsert[] {
+  return plan.mergedEdges.map((edge) => {
+    const baseProps = plan.inheritedEdgeBaseProps.get(edge.id);
+    const props =
+      baseProps === undefined ?
+        edge.props
+      : commitModificationProps(baseProps, edge.props);
+    return {
+      kind: edge.kind,
+      id: edge.id,
+      from: finalEdgeEndpoint(plan, edge.fromKind, edge.fromId),
+      to: finalEdgeEndpoint(plan, edge.toKind, edge.toId),
+      ...splitWireProps(props),
+      ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
+      ...validityEndMutationOf(edge),
+    };
+  });
+}
+
+/**
+ * THE normalized write view of a resolved plan — every row it deletes, upserts,
+ * asserts, or retracts, in the wire artifact's own shape. The artifact
+ * serializes exactly this, and every walk that asks "what does this merge
+ * write" (the required-existence orphan candidates, for one) reads it, so the
+ * live-plan apply path and the replayed-artifact apply path see one view of
+ * the same plan rather than two hand-maintained projections of it.
+ */
+export function resolvedMergeWrites<G extends GraphDef>(
+  plan: MergePlan<G>,
+): MergePlanWrites {
+  return {
+    nodeDeletes: plannedNodeReleases(plan),
+    nodeUpserts: resolvedNodeUpserts(plan),
+    edgeDeletes: [...plan.edgeDeletions].map(([identity, kind]) =>
+      wireEntityRef(kind, idOf(identity)),
+    ),
+    edgeUpserts: resolvedEdgeUpserts(plan),
+    identityAssertions: plan.identityAssertions,
+    identityRetractions: plan.identityRetractions,
+  };
+}
+
+/**
+ * A resolved write set as the composition-orphan decisions read it: what the
+ * target's composition state becomes once the writes land, stated as an
+ * overlay on a backend that has not been written yet.
+ *
+ * Both orphan arms judge the POST-plan state. Read against the pre-apply
+ * target alone, a deleted whole still shows the part the same plan moves
+ * away, and a deleted part still shows up as a live row with no edge.
+ */
+type PlannedCompositionState = Readonly<{
+  deletedNodes: ReadonlySet<MergeKey>;
+  upsertedNodes: ReadonlySet<MergeKey>;
+  /**
+   * Composition edges that no longer attach their part: deleted outright, or
+   * ended under a pair that counts only an open window as a membership.
+   */
+  detachedEdgeIds: ReadonlySet<string>;
+  /** The composition edge upserts, by the part each one names. */
+  edgeUpsertsByPart: ReadonlyMap<MergeKey, readonly MergePlanEdgeUpsert[]>;
+}>;
+
+function plannedCompositionState(
+  registry: KindRegistry,
+  writes: MergePlanWrites,
+): PlannedCompositionState {
+  const detachedEdgeIds = new Set(writes.edgeDeletes.map((edge) => edge.id));
+  const edgeUpsertsByPart = new Map<MergeKey, MergePlanEdgeUpsert[]>();
+  for (const upsert of writes.edgeUpserts) {
+    const partSide = registry.compositionPartSide(upsert.kind);
+    if (partSide === undefined) continue;
+    const part = partSide === "from" ? upsert.from : upsert.to;
+    if (
+      upsert.validTo !== undefined &&
+      !liveCompositionEdgeAttaches(
+        registry,
+        part.kind,
+        upsert.kind,
+        upsert.validTo,
+      )
+    ) {
+      detachedEdgeIds.add(upsert.id);
+      continue;
+    }
+    const partKey = mergeKey(part.kind, part.id);
+    const upserts = edgeUpsertsByPart.get(partKey);
+    if (upserts === undefined) edgeUpsertsByPart.set(partKey, [upsert]);
+    else upserts.push(upsert);
+  }
+  return {
+    deletedNodes: new Set(
+      writes.nodeDeletes.map((node) => mergeKey(node.kind, node.id)),
+    ),
+    upsertedNodes: new Set(
+      writes.nodeUpserts.map((node) => mergeKey(node.kind, node.id)),
+    ),
+    detachedEdgeIds,
+    edgeUpsertsByPart,
+  };
+}
+
+/**
+ * Whether one of the plan's own edge upserts leaves `part` attached. An
+ * upsert that states no window keeps the stored row's, so that row is read;
+ * an upsert of a row the target does not hold yet is born open.
+ */
+async function plannedEdgeUpsertAttachesPart(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  backend: GraphReadBackend,
+  part: MergePlanEntityRef,
+  planned: PlannedCompositionState,
+): Promise<boolean> {
+  const upserts =
+    planned.edgeUpsertsByPart.get(mergeKey(part.kind, part.id)) ?? [];
+  for (const upsert of upserts) {
+    const validTo =
+      statesValidityEnd(upsert) ?
+        upsert.validTo
+      : (await backend.getEdge(ctx.graphId, upsert.id))?.valid_to;
+    if (
+      liveCompositionEdgeAttaches(ctx.registry, part.kind, upsert.kind, validTo)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * THE "deleted" composition-orphan finding, shared by the plan-time refusal
+ * and apply's authoritative re-verification: for every whole the write set
+ * deletes, re-read its LIVE parts closure (`planCompositionCascade`) and
+ * report every member the write set neither deletes nor carries away.
+ *
+ * A member is CARRIED AWAY when the write set detaches the edge that binds it
+ * into the closure — the first half of a move — and so is everything hanging
+ * from it: those parts leave with their own whole, which survives. Whether a
+ * carried-away part ends up attached anywhere is the "unattached" arm's
+ * question ({@link unattachedRequiredPartOrphansAmong}), not this one's.
+ *
+ * Every deleted whole gets its own walk, not only the deletion's "root"
+ * wholes: a plan can delete two unrelated wholes whose closures do not reach
+ * each other. The same live orphan can therefore be found twice at depth >= 2,
+ * once through the outer whole's closure and once through an inner, also
+ * deleted whole's own walk. A part has exactly one immediate whole at read
+ * time, so the two walks agree, and deduping by part keeps the first report.
+ */
+async function compositionOrphansAmong(
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    lock: GraphWriteLock;
+  }>,
+  backend: GraphBackend | TransactionBackend,
+  wholes: readonly MergePlanEntityRef[],
+  planned: PlannedCompositionState,
+): Promise<readonly MergePlanCompositionOrphan[]> {
+  const orphansByPart = new Map<MergeKey, MergePlanCompositionOrphan>();
+  for (const whole of wholes) {
+    if (!ctx.registry.isCompositionWhole(whole.kind)) {
+      continue;
+    }
+    const cascadePlan = await planCompositionCascade(
+      ctx,
+      whole.kind,
+      whole.id,
+      backend,
+    );
+    // `members` is leaf-first, so walking it backwards meets every member
+    // after the whole it hangs from.
+    const carriedAway = new Set<MergeKey>();
+    for (const member of cascadePlan.members.toReversed()) {
+      const partKey = mergeKey(member.kind, member.id);
+      if (
+        planned.detachedEdgeIds.has(member.viaEdgeId) ||
+        carriedAway.has(mergeKey(member.whole.kind, member.whole.id))
+      ) {
+        carriedAway.add(partKey);
+        continue;
+      }
+      if (planned.deletedNodes.has(partKey)) continue;
+      if (orphansByPart.has(partKey)) continue;
+      // `member.whole`/`member.viaEdgeKind` are the pair `planCompositionCascade`
+      // already resolved to admit this member in the first place — the
+      // member's OWN immediate whole, not necessarily the cascade root
+      // (`whole`, above) once the closure is more than one level deep.
+      orphansByPart.set(partKey, {
+        part: { kind: member.kind, id: member.id },
+        whole: member.whole,
+        viaEdgeKind: member.viaEdgeKind,
+        cause: "deleted",
+      });
+    }
+  }
+  return [...orphansByPart.values()];
+}
+
+/**
+ * THE "moved" composition finding, shared by the plan-time refusal and apply's
+ * authoritative re-verification: every part the write set deletes that the
+ * target still holds under a live whole the write set neither deletes nor
+ * detaches the part from.
+ *
+ * A branch deletes a part by deleting it or by deleting its whole (the
+ * cascade), and in both cases its own diff carries the composition edge it
+ * removed. A part the target has since moved under another whole — or
+ * attached to one — hangs from an edge the branch never saw, so the plan
+ * neither deletes nor detaches it. Applying the plan would take a part away
+ * from a whole that survives, a whole the branch never touched: the mirror of
+ * the "deleted" arm ({@link compositionOrphansAmong}), where a surviving part
+ * loses the whole the plan deletes.
+ */
+async function compositionMovedPartsAmong(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  backend: GraphReadBackend,
+  parts: readonly MergePlanEntityRef[],
+  planned: PlannedCompositionState,
+): Promise<readonly MergePlanCompositionOrphan[]> {
+  const moved: MergePlanCompositionOrphan[] = [];
+  for (const part of parts) {
+    const attachment = await findLiveCompositionAttachment(
+      ctx.registry,
+      backend,
+      ctx.graphId,
+      part.kind,
+      part.id,
+      planned.detachedEdgeIds,
+    );
+    if (attachment === undefined) continue;
+    const { whole } = attachment;
+    if (planned.deletedNodes.has(mergeKey(whole.kind, whole.id))) continue;
+    const wholeRow = await backend.getNode(ctx.graphId, whole.kind, whole.id);
+    if (wholeRow === undefined || !isLiveNodeRow(wholeRow)) continue;
+    moved.push({
+      part,
+      whole: { kind: whole.kind, id: whole.id },
+      viaEdgeKind: attachment.edge.kind,
+      cause: "moved",
+    });
+  }
+  return moved;
+}
+
+/**
+ * THE cross-branch composition finding: whether a branch's staged edge that the
+ * plan does not write because an endpoint is finally deleted — dropped by the
+ * repoint, or a branch's re-windowed copy carrying the window that branch wrote,
+ * which the plan may not write at all — is a composition attachment the plan
+ * would silently lose, and if so which `cause` it is.
+ *
+ * One branch attached the part — moved it, created it under a whole, or
+ * re-attached it through a row ended at the merge base — while another
+ * branch's deletion took away one end of that attachment:
+ *
+ * - the part is deleted (directly, or by its old whole's cascade) and the
+ *   whole the branch attached it to survives: `"moved"`, the multi-branch
+ *   mirror of {@link compositionMovedPartsAmong}; `whole` is that survivor.
+ * - the whole is deleted and the part survives: `"deleted"`, the mirror of
+ *   {@link compositionOrphansAmong}; `whole` is the deleted whole.
+ *
+ * Anything else is ordinary: an edge that does not realize a composition pair,
+ * a staged row that does not attach its part (the predicate every composition
+ * reader shares, {@link stagedRowAttachesForBranch}), a plan that deletes BOTH
+ * ends, and an INHERITED row that already attached at the merge base, whose
+ * loss is the ordinary cascade or an edge delete/modify case. The incremental
+ * target's own attachments are
+ * excluded too: {@link compositionOrphansAmong} and
+ * {@link compositionMovedPartsAmong} already judge those against the target's
+ * live rows, so one situation never gets two verdicts.
+ *
+ * `fromKey`/`toKey` are the post-repoint identities the drop was decided on,
+ * so the finding names the canonical nodes the plan actually deletes or keeps.
+ */
+function lostBranchAttachment(
+  registry: KindRegistry,
+  dropped: EndpointDeletedEdge,
+  deletedNodes: ReadonlySet<MergeKey>,
+): MergePlanCompositionOrphan | undefined {
+  const { staged } = dropped;
+  if (staged.branchId === COMMITTED_TARGET_BRANCH) return undefined;
+  const partSide = registry.compositionPartSide(staged.kind);
+  if (partSide === undefined) return undefined;
+  const sourcePartKind = partSide === "from" ? staged.fromKind : staged.toKind;
+  if (!stagedRowAttachesForBranch(registry, sourcePartKind, staged)) {
+    return undefined;
+  }
+  const [partKey, wholeKey] =
+    partSide === "from" ?
+      [dropped.fromKey, dropped.toKey]
+    : [dropped.toKey, dropped.fromKey];
+  const partDeleted = deletedNodes.has(partKey);
+  if (partDeleted === deletedNodes.has(wholeKey)) return undefined;
+  return {
+    part: entityRef(partKey),
+    whole: entityRef(wholeKey),
+    viaEdgeKind: staged.kind,
+    cause: partDeleted ? "moved" : "deleted",
+    branchId: staged.branchId,
+  };
+}
+
+/**
+ * Whether the BRANCH is what makes this staged composition row attach its
+ * part: a row the branch created that attaches, or an inherited row that
+ * attaches in the staged copy but not at the merge base — a re-attachment
+ * through a row the base had already ended. An inherited row that attached
+ * at the base was not attached by the branch, whatever else it changed.
+ */
+function stagedRowAttachesForBranch(
+  registry: KindRegistry,
+  partKind: string,
+  staged: StagedEdge,
+): boolean {
+  const attaches = (validTo: string | undefined): boolean =>
+    liveCompositionEdgeAttaches(registry, partKind, staged.kind, validTo);
+  if (staged.origin === BRANCH_CREATED_EDGE_ORIGIN) {
+    return attaches(staged.validTo);
+  }
+  const stagedValidTo =
+    staged.clearValidTo === true ?
+      undefined
+    : (staged.validTo ?? staged.baseValidTo);
+  return attaches(stagedValidTo) && !attaches(staged.baseValidTo);
+}
+
+/**
+ * Plan-time refusal of every {@link lostBranchAttachment}: throws
+ * `MergeCompositionOrphanError` for the first one — the repoint's drops in
+ * their (edge id, branch id) order, then every branch's re-windowed copy in
+ * staging order — so the refusal does not depend on the order the branches
+ * were passed in.
+ *
+ * Plan time, not apply time, because the conflict lives entirely in the
+ * branch diffs the plan froze: no target write can resolve it, so a later
+ * re-verification would only repeat this verdict. Every planning entry point
+ * builds its plan through `buildInternalMergePlan`, so all of them refuse
+ * here, ahead of the plan-time orphan refusal — which is also why a required-existence
+ * part caught here is never additionally reported as `"unattached"`.
+ */
+function assertNoLostBranchAttachments(
+  registry: KindRegistry,
+  endpointDeletedEdges: readonly EndpointDeletedEdge[],
+  deletedNodes: ReadonlySet<MergeKey>,
+): void {
+  for (const dropped of endpointDeletedEdges) {
+    const finding = lostBranchAttachment(registry, dropped, deletedNodes);
+    if (finding !== undefined) {
+      throw new MergeCompositionOrphanError(finding);
+    }
+  }
+}
+
+/**
+ * The plan-time composition-orphan REFUSAL: the first finding of all three
+ * arms — {@link compositionOrphansAmong} (`cause: "deleted"`),
+ * {@link compositionMovedPartsAmong} (`cause: "moved"`) and
+ * {@link unattachedRequiredPartOrphansAmong} (`cause: "unattached"`). Every
+ * arm reads the target's current state through the plan's own
+ * {@link PlannedCompositionState}, so it judges the graph the apply would
+ * leave, by the same functions the apply refuses with.
+ *
+ * A plan-time finding is a certain apply refusal, not a report to act on: the
+ * plan is fenced by the target's revision, so the unchanged target refuses it
+ * at apply and any target write that would resolve it makes the plan stale.
+ * It is therefore refused here, like every other structural conflict.
+ *
+ * Unlocked (`uncapturedGraphWriteLock`): planning does no write and holds no
+ * write transaction to lock inside. `applyGraphRows` re-runs these SAME
+ * checks, under a REAL lock, inside the apply transaction.
+ */
+async function compositionOrphanConflict<G extends GraphDef>(
+  structure: PlanStructure<G>,
+): Promise<MergeError | undefined> {
+  const { target, writes } = structure;
+  const ctx = {
+    graphId: target.graphId,
+    registry: target.registry,
+    lock: uncapturedGraphWriteLock(),
+  };
+  const backend = storeBackend(target);
+  const planned = plannedCompositionState(target.registry, writes);
+  const [orphan] = [
+    ...(await compositionOrphansAmong(
+      ctx,
+      backend,
+      writes.nodeDeletes,
+      planned,
+    )),
+    ...(await compositionMovedPartsAmong(
+      ctx,
+      backend,
+      writes.nodeDeletes,
+      planned,
+    )),
+    ...(await unattachedRequiredPartOrphansAmong(
+      ctx,
+      backend,
+      await requiredExistenceOrphanCandidates(ctx, backend, writes),
+      batchedNodeReader(target, backend),
+      planned,
+    )),
+  ];
+  return orphan === undefined ? undefined : (
+      new MergeCompositionOrphanError(orphan)
+    );
+}
+
+/**
+ * The structural conflicts every planning entry point refuses, in the order
+ * a plan meeting several is refused by: one more conflict kind is one more
+ * entry here.
+ */
+const PLAN_STRUCTURAL_CHECKS: readonly PlanStructuralCheck[] = [
+  acyclicityConflict,
+  compositionOrphanConflict,
+  restrictedDeleteConflict,
+  edgeClaimConflict,
+  compositionWindowConflict,
+];
+
+/**
+ * THE plan-time structural gate: throws the first conflict
+ * {@link PLAN_STRUCTURAL_CHECKS} finds in `writes`. Every producer of a plan
+ * artifact runs it over the artifact's FINAL write set — `resolveMerge` for
+ * the merge planners, and a planner that rewrites the resolved writes
+ * afterwards (mutation planning's recreations) again over what it emits.
+ */
+export async function assertMergeWritesStructurallySound<G extends GraphDef>(
+  target: Store<G>,
+  writes: MergePlanWrites,
+): Promise<void> {
+  await assertPlanStructurallySound(target, writes, PLAN_STRUCTURAL_CHECKS);
+}
+
+/**
+ * Apply's AUTHORITATIVE re-verification of the "deleted" and "moved" findings
+ * {@link compositionOrphanConflict} refuses at plan time: run inside the
+ * apply transaction, under the per-graph write lock `lockRecordedGraphWrite`
+ * reentrantly confirms (or newly takes, on a target that had not yet needed
+ * it this transaction), so a concurrent attach cannot be missed. Throws
+ * `MergeCompositionOrphanError` on the first orphan found — before any row of
+ * the plan has been written, which is why it reads the write set as an
+ * overlay exactly as the plan-time refusal does.
+ */
+async function assertNoCompositionOrphans<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  writes: MergePlanWrites,
+): Promise<void> {
+  const registry = target.registry;
+  if (
+    !writes.nodeDeletes.some(
+      (deletion) =>
+        registry.isCompositionWhole(deletion.kind) ||
+        registry.isCompositionPart(deletion.kind),
+    )
+  ) {
+    return;
+  }
+  const planned = plannedCompositionState(registry, writes);
+  await refuseFirstOrphan(target, txBackend, async (ctx) => [
+    ...(await compositionOrphansAmong(
+      ctx,
+      txBackend,
+      writes.nodeDeletes,
+      planned,
+    )),
+    ...(await compositionMovedPartsAmong(
+      ctx,
+      txBackend,
+      writes.nodeDeletes,
+      planned,
+    )),
+  ]);
+}
+
+/**
+ * The apply-time composition refusal both guards reduce to: take (or
+ * reentrantly confirm) the per-graph write lock, run `find` under it, and
+ * throw `MergeCompositionOrphanError` for the FIRST orphan it reports — one
+ * owner of which orphan a refusal names.
+ */
+async function refuseFirstOrphan<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  find: (
+    ctx: Readonly<{
+      graphId: string;
+      registry: KindRegistry;
+      lock: GraphWriteLock;
+    }>,
+  ) => Promise<readonly MergePlanCompositionOrphan[]>,
+): Promise<void> {
+  const lock = await lockRecordedGraphWrite(txBackend, target.graphId);
+  const [firstOrphan] = await find({
+    graphId: target.graphId,
+    registry: target.registry,
+    lock,
+  });
+  if (firstOrphan !== undefined) {
+    throw new MergeCompositionOrphanError(firstOrphan);
+  }
+}
+
+/**
+ * Every required-existence part this merge could newly orphan — the exact,
+ * bounded candidate set {@link unattachedRequiredPartOrphansAmong} scans,
+ * rather than a graph-wide `findNodesByKind` scan (the way
+ * `readCompositionUnattachedParts` audits a schema tightening).
+ *
+ * ONE walk over ONE view: `writes` is the plan's normalized write view
+ * ({@link resolvedMergeWrites}), the same shape the wire artifact carries, so
+ * the live-plan apply, the replayed-artifact apply (both through
+ * `applyGraphRows`) and the plan-time refusal all derive their candidates
+ * here. A new source is added to this function and nowhere else.
+ *
+ * THREE sources, unioned (a part can be newly orphaned without its OWN row
+ * ever being rewritten — an edge-only change is enough):
+ *
+ * 1. Every node row this merge writes (`writes.nodeUpserts`) — a brand-new
+ *    or re-canonicalized required-existence part.
+ * 2. Every required-existence endpoint of a composition edge THIS MERGE
+ *    DELETES (`writes.edgeDeletes`) — an edge-level delete/modify conflict,
+ *    or a repointed edge dropped for a finally-deleted endpoint, can sever
+ *    a part's only attachment while the part's own row is never touched.
+ *    Read from `backend` while the edge is STILL LIVE there — the apply
+ *    resolves this list before it writes any row, then runs
+ *    {@link unattachedRequiredPartOrphansAmong}'s actual CHECK only after the
+ *    last one has landed (`applyGraphRows`).
+ * 3. Every required-existence endpoint of a composition edge in
+ *    `writes.edgeUpserts` whose validity window THIS MERGE explicitly closes
+ *    (`validTo` stated — reopening can only ATTACH, never orphan, so it needs
+ *    no candidate) — a `population: "oneActive"` pair ended by this merge's
+ *    own canonicalization, mirroring the write-path's own
+ *    `assertCompositionExistencePreserved`. An edge whose window this merge
+ *    does not mention at all is not what could newly close it, so it
+ *    contributes no candidate.
+ *
+ * Only `registry.compositionExistence(kind) === "required"` kinds are worth
+ * tracking; candidates are deduped by identity.
+ */
+export async function requiredExistenceOrphanCandidates(
+  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  backend: GraphReadBackend,
+  writes: MergePlanWrites,
+): Promise<readonly MergePlanEntityRef[]> {
+  const candidates = new Map<MergeKey, MergePlanEntityRef>();
+  const add = (kind: string, id: string): void => {
+    if (ctx.registry.compositionExistence(kind) !== "required") return;
+    candidates.set(mergeKey(kind, id), { kind, id });
+  };
+  const addPartSide = (
+    edgeKind: string,
+    from: MergePlanEntityRef,
+    to: MergePlanEntityRef,
+  ): void => {
+    const partSide = ctx.registry.compositionPartSide(edgeKind);
+    if (partSide === undefined) return;
+    const { part } = orientCompositionEndpoints(partSide, from, to);
+    add(part.kind, part.id);
+  };
+
+  for (const upsert of writes.nodeUpserts) {
+    add(upsert.kind, upsert.id);
+  }
+
+  for (const deletion of writes.edgeDeletes) {
+    if (!ctx.registry.isCompositionEdge(deletion.kind)) continue;
+    const edgeRow = await backend.getEdge(ctx.graphId, deletion.id);
+    if (edgeRow === undefined) continue;
+    addPartSide(
+      edgeRow.kind,
+      { kind: edgeRow.from_kind, id: edgeRow.from_id },
+      { kind: edgeRow.to_kind, id: edgeRow.to_id },
+    );
+  }
+
+  for (const upsert of writes.edgeUpserts) {
+    if (upsert.validTo === undefined) continue;
+    addPartSide(upsert.kind, upsert.from, upsert.to);
+  }
+
+  return [...candidates.values()];
+}
+
+/**
+ * The declared composition pair a diagnostic names for a required-existence
+ * part with NO live whole at all — there is no attaching edge to resolve one
+ * from, so this picks the FIRST declared pair for the concrete kind
+ * (`CompositionRelation.pairs`' own code-point order).
+ * Presentational only: `ONTOLOGY_COMPOSITION_EXISTENCE_MIXED` already
+ * guarantees every pair a concrete part kind can match shares the same
+ * `existence`, so which ONE is named here never changes whether this is
+ * refused, only which `viaEdgeKind` the message credits.
+ */
+function firstCompositionPairFor(
+  registry: KindRegistry,
+  concretePartKind: string,
+): Readonly<{ viaEdgeKind: string }> | undefined {
+  return registry
+    .compositionRelation()
+    .pairs.find((pair) =>
+      registry.isAssignableTo(concretePartKind, pair.partKind),
+    );
+}
+
+/**
+ * THE "unattached" composition-orphan arm, `compositionOrphansAmong`'s
+ * sibling: reports every `candidate` that is live and resolves to no whole at
+ * all. A different question from `compositionOrphansAmong`'s ("would a planned
+ * DELETION orphan a part the plan neither deletes nor moves"), so it is its
+ * own function; both feed the identical `MergePlanCompositionOrphan` shape
+ * (distinguished only by `cause`) into the SAME
+ * `MergePlanReview.compositionOrphans` / `MergeCompositionOrphanError`.
+ *
+ * Reuses `findLiveCompositionWhole` — the SAME predicate the write-path
+ * detach refusal and `store.verifyConstraintFences()`'s `compositionExistence`
+ * family read — rather than a second, drift-prone spelling of "does this
+ * part have a live whole".
+ *
+ * `planned` is what separates the two callers, and the only thing that does.
+ * At APPLY time (`assertNoUnattachedRequiredParts`) every row of the write set
+ * has already landed in `backend`, so it is omitted and `backend` is the final
+ * state. At PLAN time nothing has been written, so the plan's own
+ * {@link PlannedCompositionState} stands in for those writes: a part the plan
+ * deletes is not a candidate, a part it creates is, an edge it detaches does
+ * not count, and an edge it writes does.
+ */
+async function unattachedRequiredPartOrphansAmong(
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    lock: GraphWriteLock;
+  }>,
+  backend: GraphReadBackend,
+  candidates: readonly MergePlanEntityRef[],
+  getNodes: BatchedNodeReader | undefined,
+  planned?: PlannedCompositionState,
+): Promise<readonly MergePlanCompositionOrphan[]> {
+  const orphans: MergePlanCompositionOrphan[] = [];
+  for (const candidate of await liveOrphanCandidates(
+    ctx,
+    backend,
+    candidates,
+    getNodes,
+    planned,
+  )) {
+    const whole = await findLiveCompositionWhole(
+      ctx.registry,
+      backend,
+      ctx.graphId,
+      candidate.kind,
+      candidate.id,
+      planned?.detachedEdgeIds,
+    );
+    if (whole !== undefined) continue;
+    if (
+      planned !== undefined &&
+      (await plannedEdgeUpsertAttachesPart(ctx, backend, candidate, planned))
+    ) {
+      continue;
+    }
+    const pair = firstCompositionPairFor(ctx.registry, candidate.kind);
+    if (pair === undefined) continue;
+    orphans.push({
+      part: candidate,
+      viaEdgeKind: pair.viaEdgeKind,
+      cause: "unattached",
+    });
+  }
+  return orphans;
+}
+
+/** The batched point read of node rows by kind, when a backend reaches one. */
+type BatchedNodeReader = (
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+) => Promise<readonly NodeRow[]>;
+
+/**
+ * The backend's batched point read, bound the way the interchange paths bind
+ * theirs: the verdict comes from the Store's own backend, while the binding is
+ * taken against the port the read will actually run on (a transaction target at
+ * apply time). `undefined` when the backend does not reach `getNodes`, which is
+ * the capability's declared `per-id getNode` fallback.
+ */
+function batchedNodeReader<G extends GraphDef>(
+  target: Store<G>,
+  port: Readonly<Partial<Pick<GraphBackend, "getNodes">>>,
+): BatchedNodeReader | undefined {
+  const bound = bindExtraIfReachable(
+    port,
+    batchPointReadVerdict(storeBackend(target)).extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  return bound?.getNodes;
+}
+
+/**
+ * Narrows orphan candidates to the ones that are LIVE once the write set has
+ * landed: a live row on `backend`, or — under a not-yet-applied `planned`
+ * overlay — a row the plan upserts, and never one it deletes. A candidate
+ * that is not live is not an orphan: a retired part owes no whole.
+ *
+ * ONE batched read per kind when `getNodes` is reachable, the per-candidate
+ * point read otherwise. Candidates are every planned write of a
+ * required-existence kind, so the unbatched shape pays a round trip per part
+ * on the merge write path.
+ */
+async function liveOrphanCandidates(
+  ctx: Readonly<{ graphId: string }>,
+  backend: GraphReadBackend,
+  candidates: readonly MergePlanEntityRef[],
+  getNodes: BatchedNodeReader | undefined,
+  planned: PlannedCompositionState | undefined,
+): Promise<readonly MergePlanEntityRef[]> {
+  const liveKeys = new Set<MergeKey>(planned?.upsertedNodes);
+  const unresolved = candidates.filter(
+    (candidate) => !liveKeys.has(mergeKey(candidate.kind, candidate.id)),
+  );
+  if (getNodes === undefined) {
+    for (const candidate of unresolved) {
+      const row = await backend.getNode(
+        ctx.graphId,
+        candidate.kind,
+        candidate.id,
+      );
+      if (row === undefined || row.deleted_at !== undefined) continue;
+      liveKeys.add(mergeKey(candidate.kind, candidate.id));
+    }
+  } else {
+    for (const [kind, kindCandidates] of groupBy(
+      unresolved,
+      (candidate) => candidate.kind,
+    )) {
+      const ids = kindCandidates.map((candidate) => candidate.id);
+      for (const row of await getNodes(ctx.graphId, kind, ids)) {
+        if (row.deleted_at === undefined) liveKeys.add(mergeKey(kind, row.id));
+      }
+    }
+  }
+  return candidates.filter((candidate) => {
+    const key = mergeKey(candidate.kind, candidate.id);
+    return liveKeys.has(key) && planned?.deletedNodes.has(key) !== true;
+  });
+}
+
+/**
+ * Apply's AUTHORITATIVE re-verification of
+ * {@link unattachedRequiredPartOrphansAmong}'s finding: run inside the apply
+ * transaction, under the per-graph write lock, AFTER the plan's last node and
+ * edge row has landed, so a required part's composition edge this merge just
+ * wrote (or just dropped or collapsed) is visible to the check. It is also
+ * the check the apply's deferred per-write existence rule falls due at
+ * (`applyGraphRows`). Throws `MergeCompositionOrphanError` on the first
+ * orphan found.
+ */
+async function assertNoUnattachedRequiredParts<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  candidates: readonly MergePlanEntityRef[],
+): Promise<void> {
+  if (candidates.length === 0) return;
+  await refuseFirstOrphan(target, txBackend, (ctx) =>
+    unattachedRequiredPartOrphansAmong(
+      ctx,
+      txBackend,
+      candidates,
+      batchedNodeReader(target, txBackend),
+    ),
+  );
+}
+
+async function resolvedMergeArtifact<G extends GraphDef>(
+  target: Store<G>,
+  resolved: ResolvedMerge<G>,
+  mode: "snapshot" | "incremental",
+  targetFence: MergePlanTargetFence,
+  anchors: MergePlanAnchors,
+): Promise<MergePlanArtifactV3> {
+  const { plan, options } = resolved;
+  const writes = resolvedMergeWrites(plan);
+  const input: MergePlanArtifactV3Input = {
+    formatVersion: MERGE_PLAN_FORMAT_VERSION,
+    mode,
+    target: {
+      ...targetFence,
+      revision: {
+        ...targetFence.revision,
+        owner: requireDefined(targetFence.revision.owner),
+      },
+    },
+    anchors,
+    proposed: {
+      nodes: {
+        upserts: writes.nodeUpserts.length,
+        deletions: writes.nodeDeletes.length,
+      },
+      edges: {
+        upserts: writes.edgeUpserts.length,
+        deletions: writes.edgeDeletes.length,
+      },
+      identity: {
+        assertions: writes.identityAssertions.length,
+        retractions: writes.identityRetractions.length,
+      },
+    },
+    writes,
+    guards: {
+      canonicalMappings: [...plan.canonicalOf]
+        .sort(([left], [right]) => compareMergeKeys(left, right))
+        .map(([member, canonical]) => ({
+          member: entityRef(member),
+          canonical: entityRef(canonical),
+        })),
+      retypes: [...plan.retypeMap]
+        .sort(([left], [right]) => compareMergeKeys(left, right))
+        .map(([entity, toKind]) => ({
+          entity: entityRef(entity),
+          toKind,
+        })),
+      deletedNodes: plannedNodeReleases(plan),
+      ...(resolved.incrementalGuard === undefined ?
+        {}
+      : {
+          incremental: {
+            tombstoneResurrection: "refuse" as const,
+            lossyUpdates: "refuse" as const,
+            edgeIdentity: "preserve" as const,
+          },
+        }),
+    },
+    review: {
+      resolutions: plan.resolutions,
+      conflicts: plan.propertyConflicts as unknown as readonly JsonValue[],
+      deleteModifyConflicts: plan.deleteModifyConflicts,
+      typeReconciliations: plan.typeReconciliations,
+      dropped: plan.dropped,
+      validityEnds: plan.validityEnds,
+      baseAmbiguities: plan.baseAmbiguities,
+      provenanceRecords: plan.provenanceRecords,
+      warnings: plan.warnings,
+      ...(plan.candidateDiagnostics === undefined ?
+        {}
+      : { diagnostics: plan.candidateDiagnostics }),
+      // Optional and omitted when empty, so a merge the separation veto never
+      // touched produces the same review object it always has.
+      ...(plan.identityConflicts.length === 0 ?
+        {}
+      : {
+          identityConflicts:
+            plan.identityConflicts as unknown as readonly JsonValue[],
+        }),
+    },
+    provenance: {
+      includeInReport: options.provenance,
+      persist: options.persistProvenance,
+    },
+  };
+  return constructMergePlanArtifact(input);
+}
+
+async function resolveMerge<G extends GraphDef, Output>(
   store: Store<G>,
   target: Store<G>,
   branches: readonly GraphBranch<G>[],
   options: NormalizedMergeOptions<G>,
   useBaseSources: boolean,
-  incremental?: IncrementalConfig,
-  expectedBaseVersion?: BaseVersion,
-): Promise<Result<MergeReport<G>, MergeError>> {
+  incremental: IncrementalConfig<G> | undefined,
+  expectedBaseVersion: BaseVersion | undefined,
+  complete: (resolved: ResolvedMerge<G>) => Promise<Output>,
+  baseReader?: StateDiffBaseReader,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
+): Promise<Result<Output, MergeError>> {
   // Reserved BranchIds are used for non-user contributions. Reject real branches
   // that try to mint them rather than silently corrupting conflict/provenance state.
   let targetBranchSeen = false;
@@ -1605,13 +4463,78 @@ async function resolveMerge<G extends GraphDef>(
     }
   }
 
+  const resolveKindRefusal = undeclaredResolveKindRefusal(
+    target.graph,
+    options.resolve,
+  );
+  if (resolveKindRefusal !== undefined) return err(resolveKindRefusal);
+
+  // A branch must be a DATA fork. A schema operation on the branch's store
+  // after forking (evolve, migrateSchema, removeKinds) mutates rows through
+  // its own preflights, and the state diff would project those side effects
+  // into the merge as ordinary data changes detached from the schema change
+  // that caused them — e.g. a kind removal's cascaded assertion cleanup
+  // arriving as bare identity retractions against a target that still has the
+  // kind. The check compares the branch's CURRENT committed schema row to the
+  // (version, hash) anchor `branch()` captured at fork — version included, so
+  // a ROUND-TRIP migration that restores the original document hash while
+  // its preflights mutated rows is still refused. Hand-built branch objects
+  // without an anchor fall back to hash equality against the fork source
+  // (which also keeps unmanaged, row-less sources mergeable).
+  for (const branch of branches) {
+    const branchSchemaRow = await storeBackend(branch.store).getActiveSchema(
+      branch.store.graphId,
+    );
+    let drifted: boolean;
+    if ("schemaAnchor" in branch) {
+      const anchor = branch.schemaAnchor;
+      drifted =
+        anchor === undefined ?
+          branchSchemaRow !== undefined
+        : branchSchemaRow?.version !== anchor.version ||
+          (await activeSchemaHash(branchSchemaRow)) !== anchor.hash;
+    } else {
+      const sourceSchemaRow = await storeBackend(store).getActiveSchema(
+        store.graphId,
+      );
+      drifted =
+        (await optionalActiveSchemaHash(branchSchemaRow)) !==
+        (await optionalActiveSchemaHash(sourceSchemaRow));
+    }
+    if (drifted) {
+      return err(
+        new BaseVersionMismatchError(
+          `Branch "${branch.id}"'s store has a committed schema different from its at-fork state — a schema operation ran on the branch after forking. Merge carries data changes only; apply the schema change to the target first (or re-fork), then merge.`,
+          {
+            details: {
+              branchId: branch.id,
+              branchSchemaVersion: branchSchemaRow?.version,
+              branchSchemaHash: await optionalActiveSchemaHash(branchSchemaRow),
+              anchor: "schemaAnchor" in branch ? branch.schemaAnchor : "absent",
+            },
+          },
+        ),
+      );
+    }
+  }
+
   try {
     // (2) stage the provenance-tagged union of every branch's diff. For the
     // incremental path, capture the committed target branch's node versions from
     // its diff enumeration — the plan-time baseline for the commit-time
     // lost-update guard (assertInheritedTargetUnchanged).
     const preferredBranchId = incremental?.targetBranchId;
-    const staging = await stageBranches(store, branches, preferredBranchId);
+    const staging = await stageBranches(
+      store,
+      branches,
+      preferredBranchId,
+      baseReader,
+      explicitPruneTo,
+      scopedIdentity,
+    );
+    // Pure over the (now fixed) staging set, so the deterministic per-kind order
+    // is computed once and shared by every consumer below.
+    const stagedNewByKind = newNodesByKind(staging);
 
     // Capture the stable branch order ONCE (never wall-clock).
     const branchIds = branches.map((branch) => branch.id);
@@ -1635,7 +4558,15 @@ async function resolveMerge<G extends GraphDef>(
     for (const kind of introspection.kinds) {
       introspectionKinds.set(kind.name, kind.unique);
     }
-    const subClassClosure = buildSubClassClosure(introspection.ontology);
+    // The registry is built from the same `graph.ontology` `introspect()`
+    // projects onto `{ metaEdge, from, to }` pairs (store/introspect.ts), and
+    // unlike that raw projection it has already passed
+    // `validateOntologyRelations` — including the equivalence-class refusal.
+    // `store`, not `target`: on the incremental path `store` is the fork
+    // point, which is the ontology source type reconciliation has always
+    // used, and the schema-drift guard above already refuses a branch whose
+    // schema differs.
+    const registry = store.registry;
 
     // (3) candidate generation across every resolved kind. When an embedder is
     // configured, precompute the STAGED texts' vectors ONCE (a batched step) so
@@ -1648,7 +4579,7 @@ async function resolveMerge<G extends GraphDef>(
       options.embedder === undefined ?
         undefined
       : await precomputeEmbeddings(
-          newNodesByKind(staging),
+          stagedNewByKind,
           options.resolve,
           options.embedder,
         );
@@ -1668,84 +4599,242 @@ async function resolveMerge<G extends GraphDef>(
     if (isErr(candidates)) {
       return err(candidates.error);
     }
+    const baseMembers = candidates.data.baseMembers;
+
+    // The separation veto is ON for every identity-enabled merge: a
+    // `different` assertion is an integrity fact, not a recall heuristic —
+    // whether the target already holds it or a merged branch carries it. The
+    // facts are captured ONCE here, before planning, so the candidate-edge
+    // veto below and the post-cluster transitive assertion inside
+    // `buildInternalMergePlan` read one fact set and cannot disagree — and so
+    // plan construction stays synchronous.
+    const separationFacts =
+      target.graph.identity === undefined ?
+        NO_IDENTITY_SEPARATION_FACTS
+      : await captureIdentitySeparationFacts(
+          target,
+          identityFusionGroups(
+            candidates.data.edges,
+            [
+              ...new Set([
+                ...[...stagedNewByKind].flatMap(([kind, entries]) =>
+                  entries.map((entry) => mergeKey(kind, entry.node.id)),
+                ),
+                ...baseMembers.map((member) => mergeKeyOf(member)),
+              ]),
+            ],
+            options.reconcileTypes === "ontology",
+          ),
+          staging.newIdentityAssertions.map((staged) => staged.assertion),
+        );
+
+    // Same-id folding joins nodes no assertion names, so the plan-time
+    // contradiction simulation needs the LIVE target peers sharing any staged
+    // or base id. One kind-free indexed probe.
+    // The identity guard protects EVERY identity-enabled incremental merge —
+    // explicit same/different assertions exist under both profiles. Only the
+    // same-id peer expansion (and the direct-peer window check) is
+    // fold-specific.
+    const identityProbeIds =
+      target.graph.identity === undefined ?
+        undefined
+      : [
+          ...new Set([
+            ...[...stagedNewByKind.values()].flatMap((entries) =>
+              entries.map((entry) => entry.node.id),
+            ),
+            ...staging.modifiedNodes.map((entry) => entry.node.id),
+            ...baseMembers.map((member) => member.id),
+            ...staging.newIdentityAssertions.flatMap((staged) => [
+              staged.assertion.a.id,
+              staged.assertion.b.id,
+            ]),
+          ]),
+        ];
+    const targetPeers =
+      identityProbeIds === undefined ?
+        []
+      : await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
+
+    // Every staged assertion and retraction id's target row, fetched BEFORE
+    // planning. Retractions are validated against the complete truth their id
+    // identifies on the target (a current row with DIFFERENT truth — the
+    // target reused the id independently — must not be ended by a branch that
+    // never saw it), and the survivor dedupe must know which staged ids are
+    // ALREADY COMMITTED on the target: the applier is idempotent per semantic
+    // pair, so a committed row can never lose the survivor pick to a branch's
+    // freshly minted id.
+    const stagedIdentityIds = [
+      ...new Set([
+        ...staging.newIdentityAssertions.map((staged) => staged.assertion.id),
+        ...staging.retractedIdentityAssertions.map(
+          (staged) => staged.assertion.id,
+        ),
+      ]),
+    ];
+    const storedIdentityRowsById =
+      stagedIdentityIds.length === 0 || target.graph.identity === undefined ?
+        NO_STORED_ASSERTIONS
+      : await storeRuntime(target).identityAssertionRowsByIds(
+          stagedIdentityIds,
+        );
+
+    // The target's identity semantics, shared by the plan-time simulation and
+    // the post-plan recheck so both judge legality under one context.
+    const identityContext: PlanIdentityContext = {
+      sameIdAcrossKinds: target.graph.identity?.sameIdAcrossKinds,
+      areDisjoint: (left, right) => target.registry.areDisjoint(left, right),
+    };
 
     // (4–8) resolve the whole merge into a commit-ready plan.
-    const plan = planMerge(
-      staging,
+    const veto = applyIdentitySeparationVeto(
       candidates.data.edges,
-      candidates.data.warnings,
-      candidates.data.baseMembers,
+      separationFacts,
+    );
+    const plan = buildInternalMergePlan({
+      staging,
+      candidateEdges: veto.edges,
+      candidateWarnings: candidates.data.warnings,
+      candidateDiagnostics: candidates.data.diagnostics,
+      candidateDiagnosticsTotal: candidates.data.diagnosticsTotal,
+      baseMembers,
       options,
       branchRank,
-      subClassClosure,
+      registry,
+      storedIdentityRowsById,
+      separationFacts,
+      separationConflicts: veto.conflicts,
+      vetoedEdges: veto.vetoedEdges,
       preferredBranchId,
+    });
+    await assertPlannedIdentityClosureConsistent(
+      target,
+      staging,
+      plan,
+      identityContext,
+      targetPeers,
     );
 
-    // (9) commit to the target. Incremental mode commits through the guarded path
-    // (the existing-target-id write guard, §6.6); snapshot mode commits directly,
-    // re-validating the captured base@V inside the transaction (TOCTOU guard).
-    const merged =
-      incremental === undefined ?
-        await commitPlan(target, plan, expectedBaseVersion)
-      : await commitIncrementalPlan(target, plan, {
-          stagedNewByKind: newNodesByKind(staging),
-          options,
-          introspectionKinds,
-          // The committed (kind, id) keys the base sources matched at PLAN time;
-          // anything NEW the in-tx re-probe surfaces is a window write.
-          plannedBaseMatchKeys: new Set(
-            candidates.data.baseMembers.map((member) => mergeKeyOf(member)),
-          ),
-          targetNodeVersions: staging.targetNodeVersions,
-          targetEdgeSignatures: staging.targetEdgeSignatures,
-        });
-
-    // (10) assemble the report. The full provenance records are always built in the
-    // plan; the in-memory index is gated by `provenance`, and on-graph persistence
-    // by `persistProvenance`.
-    const provenance: ProvenanceIndex =
-      options.provenance ?
-        buildProvenanceIndex(plan.provenanceRecords)
-      : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) };
-
-    const warnings = [...plan.warnings];
-    let provenancePersisted: MergeReport<G>["provenancePersisted"];
-    if (options.persistProvenance) {
-      // POST-COMMIT, best-effort: the graph is already committed, so a provenance
-      // write failure must NOT fail the merge — it surfaces as a warning. The
-      // sidecar node ids are deterministic, so this UPSERTS (idempotent re-runs).
-      try {
-        const provenanceStore = await openProvenanceStore(target);
-        const count = await persistProvenanceRecords(
-          provenanceStore,
-          target.graphId,
-          plan.provenanceRecords,
-        );
-        provenancePersisted = {
-          graphId: provenanceGraphId(target.graphId),
-          count,
-        };
-      } catch (error) {
-        warnings.push(
-          "provenance persistence failed (graph committed; provenance not persisted): " +
-            (error instanceof Error ? error.message : String(error)),
-        );
-      }
+    // The commit guard's baseline must be a VALIDATED state: re-probe the
+    // live peers and snapshot the final seeds' classes AFTER planning, then
+    // re-run the identity simulation against that exact snapshot — its
+    // members join the universe UNLINKED, with connectivity rebuilt from the
+    // deletion-filtered fresh ledger and the checker's fold unions. A class
+    // change in the plan→snapshot window therefore either fails this recheck
+    // as a typed plan-time conflict, or matches the plan; either way the
+    // transaction guard never baselines drift the plan did not validate.
+    // The probe ranges only over ids the final plan folds on — a window row
+    // at an id canonicalization dropped is an unrelated target advance.
+    // One-id-one-truth, for BOTH commit modes: two branches staging one id
+    // for different truths, or a staged id already identifying different
+    // truth in the target (ended rows included), used to surface only inside
+    // the commit as a generic wrap of IDENTITY_IMPORT_ID_CONFLICT.
+    if (plan.identityAssertions.length > 0) {
+      assertOneIdOneTruth(
+        plan.identityAssertions,
+        await storeRuntime(target).identityAssertionRowsByIds(
+          plan.identityAssertions.map((assertion) => assertion.id),
+        ),
+      );
     }
 
-    const report: MergeReport<G> = {
-      merged,
-      resolutions: plan.resolutions,
-      conflicts: plan.propertyConflicts,
-      deleteModifyConflicts: plan.deleteModifyConflicts,
-      typeReconciliations: plan.typeReconciliations,
-      dropped: plan.dropped,
-      baseAmbiguities: plan.baseAmbiguities,
-      provenance,
-      warnings,
-      ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
-    };
-    return ok(report);
+    // Plan time: every structural refusal the apply is certain to meet —
+    // a cycle, a composition orphan, a restricted delete, two holders of one
+    // claim — judged over the resolved writes after canonicalization and
+    // repointing. Runs for BOTH commit modes, exactly like the
+    // one-id-one-truth check above: a typed conflict here, before either
+    // callback runs, is what keeps `planMerge()` from returning a plan that
+    // can never be applied.
+    await assertMergeWritesStructurallySound(target, resolvedMergeWrites(plan));
+
+    let identityGuard: IdentityPeerProbe | undefined;
+    if (identityProbeIds !== undefined && incremental !== undefined) {
+      const freshPeers =
+        await storeRuntime(target).liveNodesSharingIds(identityProbeIds);
+      const built = await buildIdentityPeerProbe(
+        target,
+        identityProbeIds,
+        freshPeers,
+        plan,
+        target.graph.identity?.sameIdAcrossKinds ?? "ignore",
+      );
+      // Base assertion endpoints must be judged at their post-merge
+      // identity, exactly as the in-plan check judged them — through the
+      // REAL canonical map the plan carries.
+      const canonicalIdentityOf = plan.canonicalOf;
+      assertNoContradictoryIdentityClosure(
+        plan.identityAssertions,
+        plan.identityRetractions,
+        // The FRESH target ledger, not the pre-planning staging capture —
+        // a `different` committed in the window must invalidate the plan
+        // here, as a typed conflict, before it can become the baseline.
+        // Connectivity is REBUILT from this deletion-filtered ledger (plus
+        // the fold unions inside the checker) rather than from the old
+        // closure's member lists: filtering a deleted member out of a class
+        // does not model the post-deletion state — deleting a bridge ends
+        // its assertions and SPLITS the class, so pre-linking the filtered
+        // remainder would falsely reject a plan that deletes the bridge and
+        // asserts the ends different.
+        [
+          ...built.ledger,
+          ...(
+            await loadPlannedIdentityHistory(target, plan.identityAssertions)
+          ).filter(
+            (assertion) =>
+              !built.ledger.some((current) => current.id === assertion.id),
+          ),
+        ],
+        new Set(plan.nodeDeletions.keys()),
+        canonicalIdentityOf,
+        plan.retypeMap,
+        identityContext,
+        // The snapshot's (deletion-filtered) class MEMBERS join the universe
+        // as unlinked refs: their same-id fold links at ids outside the probe
+        // range are re-derived by the checker's fold union, and their
+        // assertion links come from the fresh ledger — never from the old
+        // class shape itself.
+        [...built.probe.seeds, ...built.snapshot.groups.flat()],
+      );
+      identityGuard = built.probe;
+    }
+
+    const inheritedBaselines =
+      baseReader === undefined && explicitPruneTo === undefined ?
+        undefined
+      : await capturePlannedTargetBaselines(target, plan, staging);
+    const incrementalGuard =
+      incremental === undefined ? undefined : (
+        ({
+          stagedNewByKind,
+          options,
+          introspectionKinds,
+          forkPoint: incremental.forkPoint,
+          ...(identityGuard === undefined ?
+            {}
+          : { identityPeerProbe: identityGuard }),
+          plannedBaseMatchKeys: new Set(
+            baseMembers.map((member) => mergeKeyOf(member)),
+          ),
+          targetNodeVersions:
+            inheritedBaselines?.nodes ?? staging.targetNodeVersions,
+          targetEdgeSignatures:
+            inheritedBaselines?.edges ?? staging.targetEdgeSignatures,
+        } satisfies IncrementalCommitGuard<G>)
+      );
+
+    return ok(
+      await complete({
+        target,
+        plan,
+        options,
+        branchAncestry: branchAncestryOf(
+          store.graphId,
+          branchesInAnchorOrder(branches).map((branch) => branch.id as string),
+        ),
+        ...(expectedBaseVersion === undefined ? {} : { expectedBaseVersion }),
+        ...(incrementalGuard === undefined ? {} : { incrementalGuard }),
+      }),
+    );
   } catch (error) {
     // A typed MergeError thrown deeper (e.g. the incremental guard's stale-overwrite
     // refusal) carries its own precise message — surface it directly rather than
@@ -1760,6 +4849,1500 @@ async function resolveMerge<G extends GraphDef>(
         { cause: error },
       ),
     );
+  }
+}
+
+/** Commits one already-resolved merge and constructs its compatibility report. */
+async function commitResolvedMerge<G extends GraphDef>(
+  resolved: ResolvedMerge<G>,
+): Promise<MergeReport<G>> {
+  const { target, plan, options } = resolved;
+  const provenanceStore =
+    options.persistProvenance ?
+      await tryOpenProvenanceStore(target)
+    : undefined;
+  if (provenanceStore !== undefined && isErr(provenanceStore)) {
+    throw provenanceStore.error;
+  }
+  // An unreviewed `merge()` has no plan artifact and therefore no digest, but
+  // it still explains itself: the branch ancestry it combined.
+  const decision = mergeIdentityDecision({
+    branchAncestry: resolved.branchAncestry,
+  });
+  const merged =
+    resolved.incrementalGuard === undefined ?
+      await commitPlan(target, plan, resolved.expectedBaseVersion, decision)
+    : await commitIncrementalPlan(
+        target,
+        plan,
+        resolved.incrementalGuard,
+        decision,
+      );
+
+  const provenance: ProvenanceIndex =
+    options.provenance ?
+      buildProvenanceIndex(plan.provenanceRecords)
+    : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) };
+  const warnings = [...plan.warnings];
+  let provenancePersisted: MergeReport<G>["provenancePersisted"];
+  if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+    try {
+      const count = await persistProvenanceRecords(
+        provenanceStore.data,
+        target.graphId,
+        plan.provenanceRecords,
+      );
+      provenancePersisted = {
+        graphId: provenanceGraphId(target.graphId),
+        count,
+      };
+    } catch (error) {
+      warnings.push(
+        "provenance persistence failed (graph committed; provenance not persisted): " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+
+  return {
+    merged,
+    resolutions: plan.resolutions,
+    conflicts: plan.propertyConflicts,
+    deleteModifyConflicts: plan.deleteModifyConflicts,
+    typeReconciliations: plan.typeReconciliations,
+    dropped: plan.dropped,
+    validityEnds: plan.validityEnds,
+    baseAmbiguities: plan.baseAmbiguities,
+    provenance,
+    warnings,
+    ...(plan.candidateDiagnostics === undefined ?
+      {}
+    : { candidateDiagnostics: plan.candidateDiagnostics }),
+    ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+    identityConflicts: plan.identityConflicts,
+  };
+}
+
+function incrementalBaseConflictPolicyError<G extends GraphDef>(
+  options: NormalizedMergeOptions<G>,
+): InvalidMergeOptionsError {
+  return new InvalidMergeOptionsError(
+    'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
+    {
+      details: {
+        option: "onBasePropertyConflict",
+        accepted: "flag",
+        received: options.onBasePropertyConflict,
+      },
+    },
+  );
+}
+
+function incrementalSchemaError(): MergeError {
+  return new MergeError(
+    "mergeIncremental() requires target and forkPoint to share a schema; schema drift is not supported (the target content may differ — only the schema must match).",
+    { details: {} },
+  );
+}
+
+/**
+ * The plan-time contradiction verdict over the ledger the merge would leave
+ * behind: the base's current rows plus the target's own history — the window
+ * ledger the commit's identity importer validates against, read through the
+ * one shared loader with the importer's own requests — so a claim that
+ * contradicts target history is refused here, typed and before any write,
+ * instead of by the importer inside the commit.
+ */
+async function assertPlannedIdentityClosureConsistent<G extends GraphDef>(
+  target: Store<G>,
+  staging: StagingSet,
+  plan: MergePlan<G>,
+  identityContext: PlanIdentityContext,
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+): Promise<void> {
+  const history = await loadPlannedIdentityHistory(
+    target,
+    plan.identityAssertions,
+  );
+  const baseIds = new Set(
+    staging.baseIdentityAssertions.map((assertion) => assertion.id),
+  );
+  assertNoContradictoryIdentityClosure(
+    plan.identityAssertions,
+    plan.identityRetractions,
+    [
+      ...staging.baseIdentityAssertions,
+      ...history.filter((assertion) => !baseIds.has(assertion.id)),
+    ],
+    new Set(plan.nodeDeletions.keys()),
+    plan.canonicalOf,
+    plan.retypeMap,
+    identityContext,
+    identityNodeUniverse(plan, targetPeers),
+  );
+}
+
+/**
+ * Every node the committed target holds, which the identity simulation treats
+ * as present at every coordinate. Each canonical entity enters under the kind
+ * the commit will actually WRITE — the retyped one when the ontology cascade
+ * retypes it — while its deletion check runs against the source identity,
+ * which is how `nodeDeletions` is keyed.
+ */
+function identityNodeUniverse<G extends GraphDef>(
+  plan: MergePlan<G>,
+  targetPeers: readonly Readonly<{ kind: string; id: string }>[],
+): readonly Readonly<{ kind: string; id: string }>[] {
+  return [
+    ...plan.canonicalEntities
+      .filter(
+        (entity) =>
+          !plan.nodeDeletions.has(mergeKey(entity.kind, entity.canonicalId)),
+      )
+      .map((entity) => ({
+        kind:
+          plan.retypeMap.get(mergeKey(entity.kind, entity.canonicalId)) ??
+          entity.kind,
+        id: entity.canonicalId,
+      })),
+    ...targetPeers.filter(
+      (node) => !plan.nodeDeletions.has(mergeKey(node.kind, node.id)),
+    ),
+  ];
+}
+
+async function loadPlannedIdentityHistory<G extends GraphDef>(
+  target: Store<G>,
+  assertions: readonly IdentityTransferAssertion[],
+): Promise<readonly IdentityTransferAssertion[]> {
+  if (target.graph.identity === undefined || assertions.length === 0) return [];
+  const ctx = storeRuntime(target).identityContext();
+  try {
+    return await loadIdentityWindowHistory(
+      ctx,
+      ctx.backend,
+      assertions,
+      nowIso(),
+    );
+  } catch (error) {
+    throw translateIdentityPlanError(error);
+  }
+}
+
+/** Builds a durable, reviewable snapshot merge plan without mutating the target. */
+export async function planMerge<G extends GraphDef>(
+  store: Store<G>,
+  branchInputs: readonly MergeBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
+  const normalized = tryNormalize(optionsInput);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  const target = options.target ?? store;
+  let targetFence: MergePlanTargetFence;
+  try {
+    targetFence = await captureMergePlanTargetFence(target);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to capture the target's durable plan fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const precondition = await validateBaseVersions(store, branches);
+  if (isErr(precondition)) return err(precondition.error);
+  // Each branch's own base token is recorded for review after the exact
+  // precondition above has accepted it.
+  const anchors: MergePlanAnchors = {
+    kind: "snapshot",
+    base: { graphId: store.graphId, baseVersion: precondition.data },
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: branch.base,
+    })),
+  };
+  return resolveMerge(
+    store,
+    target,
+    branches,
+    options,
+    false,
+    undefined,
+    precondition.data,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(target, targetFence);
+      return resolvedMergeArtifact(
+        target,
+        resolved,
+        "snapshot",
+        targetFence,
+        anchors,
+      );
+    },
+  );
+}
+
+/**
+ * Plans a merge against the graph produced by a reviewed evolution plan.
+ * Durable data and revision evidence is still captured from the original
+ * target; the schema fence names the version the caller will apply first.
+ */
+export async function planMergeForEvolution<G extends GraphDef>(
+  store: Store<G>,
+  evolutionPlan: EvolutionPlan,
+  branchInputs: readonly MergeBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
+  const normalized = tryNormalize(optionsInput);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.target !== undefined && options.target !== store) {
+    return err(
+      new MergePlanCapabilityError(
+        "Evolution merge planning must use the Store that owns the evolution plan.",
+        { details: { capability: "evolutionPlanTarget" } },
+      ),
+    );
+  }
+  let target: Store<G>;
+  let baselineFence: MergePlanTargetFence;
+  try {
+    target = evolutionPlanningTarget(store, evolutionPlan);
+    baselineFence = await captureMergePlanTargetFence(store);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to prepare an evolution merge target: ${describeCause(error)}`,
+          { cause: error, details: { capability: "evolutionPlanningTarget" } },
+        )
+      ),
+    );
+  }
+  if (!evolutionPlanMatchesPlanningFence(evolutionPlan, baselineFence)) {
+    return err(
+      new MergePlanningStaleError(
+        "The evolution plan baseline no longer matches the active merge target schema.",
+        { details: { startingFence: baselineFence } },
+      ),
+    );
+  }
+  const resultingFence = evolutionResultingFence(evolutionPlan, baselineFence);
+  const baselinePrecondition = await validateBaseVersions(store, branches);
+  const precondition =
+    isErr(baselinePrecondition) ?
+      await validateBaseVersions(target, branches)
+    : baselinePrecondition;
+  if (isErr(precondition)) return err(precondition.error);
+  const anchors: MergePlanAnchors = {
+    kind: "snapshot",
+    base: { graphId: store.graphId, baseVersion: precondition.data },
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: branch.base,
+    })),
+  };
+  return resolveMerge(
+    target,
+    target,
+    branches,
+    { ...options, target },
+    false,
+    undefined,
+    precondition.data,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+      // The evolved candidate, not the baseline: composition orphans are
+      // judged under the registry the evolution commits, as apply will.
+      return resolvedMergeArtifact(
+        target,
+        resolved,
+        "snapshot",
+        resultingFence,
+        anchors,
+      );
+    },
+  );
+}
+
+/**
+ * Candidate-specific evolution planning: retains incremental committed-target
+ * matching while binding the returned artifact to the schema the evolution will
+ * commit. General evolution merges remain snapshot merges by design.
+ */
+export async function planMergeIncrementalForEvolution<G extends GraphDef>(
+  store: Store<G>,
+  evolutionPlan: EvolutionPlan,
+  branchInputs: readonly MergeBranch<G>[],
+  optionsInput: MergeOptions<G> = {},
+  startingFence?: MergePlanTargetFence,
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
+  const normalized = tryNormalize(optionsInput, ["target"]);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.onBasePropertyConflict !== "flag") {
+    return err(incrementalBaseConflictPolicyError(options));
+  }
+  let target: Store<G>;
+  let baselineFence: MergePlanTargetFence;
+  try {
+    target = evolutionPlanningTarget(store, evolutionPlan);
+    baselineFence = startingFence ?? (await captureMergePlanTargetFence(store));
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to prepare an evolution merge target: ${describeCause(error)}`,
+          { cause: error, details: { capability: "evolutionPlanningTarget" } },
+        )
+      ),
+    );
+  }
+  if (!evolutionPlanMatchesPlanningFence(evolutionPlan, baselineFence)) {
+    return err(
+      new MergePlanningStaleError(
+        "The evolution plan baseline no longer matches the active merge target schema.",
+        { details: { startingFence: baselineFence } },
+      ),
+    );
+  }
+  try {
+    await assertPlanningFenceUnchanged(store, baselineFence);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergeError(
+          `Unable to verify the evolution merge planning fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const forkPrecondition = await validateForkPointVersions(target, branches);
+  if (isErr(forkPrecondition)) {
+    try {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+    } catch (error) {
+      return err(
+        error instanceof MergeError ? error : (
+          new MergeError(
+            `Unable to verify the evolution merge planning fence: ${describeCause(error)}`,
+            { cause: error },
+          )
+        ),
+      );
+    }
+    return err(forkPrecondition.error);
+  }
+  const forkVersion = forkPrecondition.data;
+  const forkSchema = await computeSchemaComponent(target);
+  if (forkSchema !== evolutionPlan.result.hash) {
+    return err(incrementalSchemaError());
+  }
+  const targetBranch: GraphBranch<G> = {
+    id: COMMITTED_TARGET_BRANCH,
+    base: forkVersion,
+    store: target,
+    close: (): Promise<void> => Promise.resolve(),
+  };
+  const resultingFence = evolutionResultingFence(evolutionPlan, baselineFence);
+  const anchors: MergePlanAnchors = {
+    kind: "incremental",
+    forkPoint: {
+      graphId: target.graphId,
+      baseVersion: forkVersion,
+      schema: resultingFence.schema,
+    },
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: forkVersion,
+    })),
+  };
+  return resolveMerge(
+    target,
+    target,
+    [targetBranch, ...branches],
+    options,
+    true,
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      forkPoint: { store: target, version: forkVersion },
+    },
+    undefined,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(store, baselineFence);
+      // The evolved candidate, not the baseline: composition orphans are
+      // judged under the registry the evolution commits, as apply will.
+      return resolvedMergeArtifact(
+        target,
+        resolved,
+        "incremental",
+        resultingFence,
+        anchors,
+      );
+    },
+  );
+}
+
+/** Builds a durable, reviewable incremental merge plan without mutating the target. */
+export async function planMergeIncremental<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  return planMergeIncrementalWithPruning(args);
+}
+
+/** Candidate-only bounded diff; the candidate keys are complete by construction. */
+export async function planMergeIncrementalWithCandidateKeys<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+  candidateKeys: LineageDelta,
+  scopedIdentity?: CandidateIdentityScope,
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  if (candidateKeys.kind !== "keys" || args.forkPoint !== args.target) {
+    return err(
+      new MergePlanCapabilityError(
+        "Bounded candidate planning requires the live target as its fork point and exact candidate keys.",
+      ),
+    );
+  }
+  const branch = args.branches[0];
+  if (branch === undefined || args.branches.length !== 1) {
+    return err(
+      new MergePlanCapabilityError(
+        "Bounded candidate planning requires exactly one candidate source.",
+      ),
+    );
+  }
+  return planMergeIncrementalWithPruning(
+    args,
+    new Map([
+      [COMMITTED_TARGET_BRANCH, { kind: "keys", nodes: [], edges: [] }],
+      [branch.id, candidateKeys],
+    ]),
+    scopedIdentity,
+  );
+}
+
+async function planMergeIncrementalWithPruning<G extends GraphDef>(
+  args: MergeIncrementalArguments<G>,
+  explicitPruneTo?: ReadonlyMap<BranchId, LineageDelta>,
+  scopedIdentity?: CandidateIdentityScope,
+): Promise<Result<MergePlanArtifactV3, MergeError>> {
+  const { forkPoint, target } = args;
+  const branches = unwrapMergeBranches(args.branches);
+  const normalized = tryNormalize(args.options ?? {}, ["target"]);
+  if (isErr(normalized)) return err(normalized.error);
+  const options = normalized.data;
+  if (options.onBasePropertyConflict !== "flag") {
+    return err(incrementalBaseConflictPolicyError(options));
+  }
+  let targetFence: MergePlanTargetFence;
+  try {
+    targetFence = await captureMergePlanTargetFence(target);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to capture the target's durable plan fence: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  const prepared = await prepareIncrementalForkPoint(
+    forkPoint,
+    target,
+    branches,
+  );
+  if (isErr(prepared)) return err(prepared.error);
+  const { store: forkStore, version: forkVersion } = prepared.data;
+  const [forkSchema, targetSchema] = await Promise.all([
+    computeSchemaComponent(forkStore),
+    computeSchemaComponent(target),
+  ]);
+  if (forkSchema !== targetSchema) return err(incrementalSchemaError());
+  const forkActiveSchema = await storeBackend(forkStore).getActiveSchema(
+    forkStore.graphId,
+  );
+  const targetBranch: GraphBranch<G> = {
+    id: COMMITTED_TARGET_BRANCH,
+    base: forkVersion,
+    store: target,
+    // `target` is the caller's own live store, not a working copy this
+    // function created — modeling it as a GraphBranch is an internal device
+    // for reusing the branch-shaped merge machinery, so closing it here
+    // would close a backend the caller still owns.
+    close: (): Promise<void> => Promise.resolve(),
+  };
+  const anchors: MergePlanAnchors = {
+    kind: "incremental",
+    forkPoint: {
+      graphId: forkStore.graphId,
+      baseVersion: forkVersion,
+      schema: {
+        managed: forkActiveSchema !== undefined,
+        version: forkActiveSchema?.version ?? 1,
+        hash:
+          forkActiveSchema === undefined ? forkSchema : (
+            await activeSchemaHash(forkActiveSchema)
+          ),
+      },
+    },
+    // `validateForkPointVersions` established exact equality for every
+    // branch; the common fork version is the review anchor. Order is anchor
+    // order so identity ancestry follows the plan's branches.
+    branches: branchesInAnchorOrder(branches).map((branch) => ({
+      branchId: branch.id,
+      baseVersion: forkVersion,
+    })),
+  };
+  return resolveMerge(
+    forkStore,
+    target,
+    [targetBranch, ...branches],
+    options,
+    true,
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      forkPoint: prepared.data.precondition,
+    },
+    undefined,
+    async (resolved) => {
+      await assertPlanningFenceUnchanged(target, targetFence);
+      await assertForkPointUnchanged(prepared.data.precondition);
+      return resolvedMergeArtifact(
+        target,
+        resolved,
+        "incremental",
+        targetFence,
+        anchors,
+      );
+    },
+    prepared.data.baseReader,
+    explicitPruneTo,
+    scopedIdentity,
+  );
+}
+
+function mergePlanValidationError(
+  failure: Exclude<
+    Awaited<ReturnType<typeof validateMergePlanArtifact>>,
+    Readonly<{ success: true }>
+  >["error"],
+): MergeError {
+  switch (failure.kind) {
+    case "unsupported-version": {
+      return new UnsupportedMergePlanVersionError(
+        `Unsupported merge plan format version ${String(failure.received)}.`,
+        { details: { received: failure.received } },
+      );
+    }
+    case "digest-mismatch": {
+      return new MergePlanDigestMismatchError(
+        "The merge plan digest does not match its canonical content.",
+        { details: { expected: failure.expected, received: failure.received } },
+      );
+    }
+    case "malformed": {
+      return new InvalidMergePlanError("The merge plan is malformed.", {
+        details: { issues: failure.issues },
+      });
+    }
+    default: {
+      const exhaustive: never = failure;
+      return exhaustive;
+    }
+  }
+}
+
+function wireWriteProps(
+  setProps: Readonly<Record<string, JsonValue>>,
+  unsetProps: readonly string[],
+): Record<string, unknown> {
+  const props = createDataKeyedBag<unknown>();
+  for (const [key, value] of Object.entries(setProps)) props[key] = value;
+  for (const key of unsetProps) props[key] = undefined;
+  return props;
+}
+
+function resolvedWireProps(
+  current: Readonly<Record<string, unknown>>,
+  setProps: Readonly<Record<string, JsonValue>>,
+  unsetProps: readonly string[],
+): Record<string, unknown> {
+  const props = createDataKeyedBag<unknown>();
+  const unset = new Set(unsetProps);
+  for (const [key, value] of Object.entries(current)) {
+    if (!unset.has(key)) props[key] = value;
+  }
+  for (const [key, value] of Object.entries(setProps)) props[key] = value;
+  return props;
+}
+
+function invalidPlanForTarget(
+  message: string,
+  details: Readonly<Record<string, unknown>>,
+): InvalidMergePlanError {
+  return new InvalidMergePlanError(message, { details });
+}
+
+function permitsExplicitNodeResurrection(
+  artifact: MergePlanArtifact,
+  reference: MergePlanEntityRef,
+): boolean {
+  return (
+    artifact.guards.nodeResurrections?.some(
+      (entry) =>
+        mergeKey(entry.kind, entry.id) ===
+        mergeKey(reference.kind, reference.id),
+    ) === true
+  );
+}
+
+function assertMergeAllocationOwner(
+  expected: GraphAllocationOwner | undefined,
+  actual: GraphAllocationOwner | undefined,
+  graphId: string,
+): void {
+  if (expected === undefined)
+    throw new MergePlanCapabilityError(
+      "The checkpoint or fence has no bound allocation owner; regenerate it before applying.",
+      {
+        details: {
+          capability: "graphAllocationOwner",
+          code: "RECORDED_ANCHOR_UNBOUND",
+          graphId,
+        },
+      },
+    );
+  try {
+    assertGraphAllocationOwner(expected, actual, { graphId });
+  } catch (error) {
+    throw new MergePlanOwnerMismatchError(
+      "The merge checkpoint belongs to a different or retired allocation.",
+      {
+        cause: error,
+        details: { code: "GRAPH_ALLOCATION_OWNER_MISMATCH", graphId },
+      },
+    );
+  }
+}
+
+async function preflightWireMergeWrites<G extends GraphDef>(
+  target: Store<G>,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  artifact: MergePlanArtifactV3,
+): Promise<void> {
+  const graphNodes = target.graph.nodes as Record<string, unknown>;
+  const graphEdges = target.graph.edges as Record<
+    string,
+    (typeof target.graph.edges)[keyof typeof target.graph.edges] | undefined
+  >;
+  const assertNodeKind = (kind: string): void => {
+    if (!hasOwnKey(graphNodes, kind)) {
+      throw invalidPlanForTarget(
+        `The merge plan references unknown node kind "${kind}".`,
+        { kind, role: "node" },
+      );
+    }
+  };
+  const assertEdgeKind = (kind: string): void => {
+    if (!hasOwnKey(graphEdges, kind) || graphEdges[kind] === undefined) {
+      throw invalidPlanForTarget(
+        `The merge plan references unknown edge kind "${kind}".`,
+        { kind, role: "edge" },
+      );
+    }
+  };
+
+  for (const item of [
+    ...artifact.writes.nodeDeletes,
+    ...artifact.writes.nodeUpserts,
+    ...artifact.guards.deletedNodes,
+    ...artifact.guards.canonicalMappings.flatMap((mapping) => [
+      mapping.member,
+      mapping.canonical,
+    ]),
+    ...artifact.guards.retypes.map((retype) => retype.entity),
+    ...artifact.writes.identityAssertions.flatMap((assertion) => [
+      assertion.a,
+      assertion.b,
+    ]),
+    ...artifact.writes.identityRetractions.flatMap((assertion) => [
+      assertion.a,
+      assertion.b,
+    ]),
+  ]) {
+    assertNodeKind(item.kind);
+  }
+  for (const retype of artifact.guards.retypes) assertNodeKind(retype.toKind);
+  for (const item of [
+    ...artifact.writes.edgeDeletes,
+    ...artifact.writes.edgeUpserts,
+  ]) {
+    assertEdgeKind(item.kind);
+  }
+
+  const plannedNodes = new Set(
+    artifact.writes.nodeUpserts.map((upsert) =>
+      mergeKey(upsert.kind, upsert.id),
+    ),
+  );
+  const deletedNodes = new Set(
+    artifact.writes.nodeDeletes.map((deletion) =>
+      mergeKey(deletion.kind, deletion.id),
+    ),
+  );
+  const endpointRows = new Map<MergeKey, Node | undefined>();
+  const readEndpoint = async (
+    endpoint: MergePlanEntityRef,
+  ): Promise<Node | undefined> => {
+    const key = mergeKey(endpoint.kind, endpoint.id);
+    if (endpointRows.has(key)) return endpointRows.get(key);
+    const row = (
+      await nodeCollection(nodesApi, endpoint.kind).getByIds(
+        [endpoint.id],
+        INCLUDE_TOMBSTONES,
+      )
+    )[0];
+    endpointRows.set(key, row);
+    return row;
+  };
+  const nodeUpsertsByKind = new Map<string, MergePlanNodeUpsert[]>();
+  for (const upsert of artifact.writes.nodeUpserts) {
+    const upserts = nodeUpsertsByKind.get(upsert.kind) ?? [];
+    upserts.push(upsert);
+    nodeUpsertsByKind.set(upsert.kind, upserts);
+  }
+  const currentNodesByIdentity = new Map<MergeKey, Node | undefined>();
+  for (const [kind, upserts] of nodeUpsertsByKind) {
+    const rows = await nodeCollection(nodesApi, kind).getByIds(
+      upserts.map((upsert) => upsert.id),
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, upsert] of upserts.entries()) {
+      const row = rows[index];
+      const identity = mergeKey(kind, upsert.id);
+      currentNodesByIdentity.set(identity, row);
+      endpointRows.set(identity, row);
+    }
+  }
+  for (const upsert of artifact.writes.nodeUpserts) {
+    const current = currentNodesByIdentity.get(
+      mergeKey(upsert.kind, upsert.id),
+    );
+    if (
+      upsert.recreate === true &&
+      (current === undefined || current.meta.deletedAt !== undefined)
+    )
+      throw invalidPlanForTarget(
+        "Recreation requires a live node at the reviewed target fence.",
+        { kind: upsert.kind, id: upsert.id },
+      );
+    if (
+      artifact.guards.incremental !== undefined &&
+      current?.meta.deletedAt !== undefined &&
+      !permitsExplicitNodeResurrection(artifact, upsert)
+    ) {
+      throw invalidPlanForTarget(
+        `The incremental merge plan would resurrect soft-deleted committed node "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+    }
+    const props = resolvedWireProps(
+      current === undefined ? {} : nodeProps(current),
+      upsert.setProps,
+      upsert.unsetProps,
+    );
+    const schema = nodeSchemaFor(target, upsert.kind);
+    if (schema !== undefined && !schema.safeParse(props).success) {
+      throw invalidPlanForTarget(
+        `The merge plan's node write for "${upsert.id}" does not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+    }
+    if (artifact.guards.incremental !== undefined && current !== undefined) {
+      const analysis = analyzeRevalidatingWrite(
+        schema,
+        nodeProps(current),
+        wireWriteProps(upsert.setProps, upsert.unsetProps),
+      );
+      assertValidRevalidatingWrite(
+        analysis,
+        `The incremental merge plan found committed node "${upsert.id}" with props that do not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "node" },
+      );
+      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
+        throw invalidPlanForTarget(
+          `The incremental merge plan would strip existing props while updating committed node "${upsert.id}".`,
+          { kind: upsert.kind, id: upsert.id, role: "node" },
+        );
+      }
+    }
+  }
+
+  const currentEdgeIds = new Set<string>();
+  const edgeUpsertsByKind = new Map<string, MergePlanEdgeUpsert[]>();
+  for (const upsert of artifact.writes.edgeUpserts) {
+    const upserts = edgeUpsertsByKind.get(upsert.kind) ?? [];
+    upserts.push(upsert);
+    edgeUpsertsByKind.set(upsert.kind, upserts);
+  }
+  const currentEdgesByIdentity = new Map<MergeKey, Edge | undefined>();
+  for (const [kind, upserts] of edgeUpsertsByKind) {
+    const rows = await edgeCollection(edgesApi, kind).getByIds(
+      upserts.map((upsert) => upsert.id),
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, upsert] of upserts.entries()) {
+      const row = rows[index];
+      currentEdgesByIdentity.set(mergeKey(kind, upsert.id), row);
+      if (row !== undefined) currentEdgeIds.add(upsert.id);
+    }
+  }
+  for (const upsert of artifact.writes.edgeUpserts) {
+    const registration = requireDefined(graphEdges[upsert.kind]);
+    const endpointError = validateEdgeEndpoints(
+      upsert.kind,
+      upsert.from.kind,
+      upsert.to.kind,
+      registration,
+      target.registry,
+    );
+    if (endpointError !== undefined) {
+      throw invalidPlanForTarget(endpointError.message, {
+        kind: upsert.kind,
+        id: upsert.id,
+        role: "edge",
+      });
+    }
+    for (const endpoint of [upsert.from, upsert.to]) {
+      assertNodeKind(endpoint.kind);
+      const key = mergeKey(endpoint.kind, endpoint.id);
+      if (deletedNodes.has(key)) {
+        throw invalidPlanForTarget(
+          `The merge plan deletes an endpoint required by edge "${upsert.id}".`,
+          { edgeKind: upsert.kind, edgeId: upsert.id, endpoint },
+        );
+      }
+      if (plannedNodes.has(key)) continue;
+      const row = await readEndpoint(endpoint);
+      if (row === undefined || row.meta.deletedAt !== undefined) {
+        throw invalidPlanForTarget(
+          `The merge plan references a missing edge endpoint "${endpoint.id}".`,
+          { edgeKind: upsert.kind, edgeId: upsert.id, endpoint },
+        );
+      }
+    }
+    const current = currentEdgesByIdentity.get(
+      mergeKey(upsert.kind, upsert.id),
+    );
+    if (
+      artifact.guards.incremental !== undefined &&
+      current?.meta.deletedAt !== undefined
+    ) {
+      throw invalidPlanForTarget(
+        `The incremental merge plan would resurrect soft-deleted committed edge "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+    const props = resolvedWireProps(
+      current === undefined ? {} : edgeProps(current),
+      upsert.setProps,
+      upsert.unsetProps,
+    );
+    const schema = edgeSchemaFor(target, upsert.kind);
+    if (schema !== undefined && !schema.safeParse(props).success) {
+      throw invalidPlanForTarget(
+        `The merge plan's edge write for "${upsert.id}" does not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+    if (artifact.guards.incremental !== undefined && current !== undefined) {
+      const analysis = analyzeRevalidatingWrite(
+        schema,
+        edgeProps(current),
+        wireWriteProps(upsert.setProps, upsert.unsetProps),
+      );
+      assertValidRevalidatingWrite(
+        analysis,
+        `The incremental merge plan found committed edge "${upsert.id}" with props that do not validate against the active schema.`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
+        throw invalidPlanForTarget(
+          `The incremental merge plan would strip existing props while updating committed edge "${upsert.id}".`,
+          { kind: upsert.kind, id: upsert.id, role: "edge" },
+        );
+      }
+    }
+    if (
+      current !== undefined &&
+      (current.fromKind !== upsert.from.kind ||
+        current.fromId !== upsert.from.id ||
+        current.toKind !== upsert.to.kind ||
+        current.toId !== upsert.to.id)
+    ) {
+      throw invalidPlanForTarget(
+        `The merge plan would change the immutable endpoints of edge "${upsert.id}".`,
+        { kind: upsert.kind, id: upsert.id, role: "edge" },
+      );
+    }
+  }
+
+  const missingEdgeIds = artifact.writes.edgeUpserts
+    .map((upsert) => upsert.id)
+    .filter((id) => !currentEdgeIds.has(id));
+  if (missingEdgeIds.length > 0) {
+    const plannedEdgeById = new Map(
+      artifact.writes.edgeUpserts.map((upsert) => [upsert.id, upsert]),
+    );
+    for (const kind of Object.keys(target.graph.edges)) {
+      const rows = await edgeCollection(edgesApi, kind).getByIds(
+        missingEdgeIds,
+        INCLUDE_TOMBSTONES,
+      );
+      for (const [index, row] of rows.entries()) {
+        if (row === undefined) continue;
+        const id = requireDefined(missingEdgeIds[index]);
+        const planned = plannedEdgeById.get(id);
+        if (planned !== undefined && planned.kind !== row.kind) {
+          throw invalidPlanForTarget(
+            `The merge plan reuses edge id "${id}" across kinds.`,
+            { id, committedKind: row.kind, plannedKind: planned.kind },
+          );
+        }
+      }
+    }
+  }
+}
+
+async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
+  target: Store<G>,
+  txBackend: TransactionBackend,
+  artifact: MergePlanArtifactV3,
+  requireFreshSnapshot: boolean,
+): Promise<void> {
+  await lockStoreWriteFence(txBackend, {
+    graphId: target.graphId,
+    schemaVersion:
+      artifact.target.schema.managed ?
+        artifact.target.schema.version
+      : undefined,
+    graphLock: "required",
+    ...(requireFreshSnapshot ?
+      {
+        requireFreshSnapshot: true,
+        freshSnapshotError: mergeCallbackIsolationError,
+      }
+    : {}),
+    staleSchemaError: (cause) =>
+      new MergePlanSchemaMismatchError(
+        "The target's active schema no longer matches the merge plan.",
+        { cause, details: { expected: artifact.target.schema } },
+      ),
+  });
+  const activeSchema = await txBackend.getActiveSchema(target.graphId);
+  const liveSchema = {
+    managed: activeSchema !== undefined,
+    version: activeSchema?.version ?? 1,
+    hash:
+      activeSchema === undefined ?
+        await computeSchemaComponent(target)
+      : await activeSchemaHash(activeSchema),
+  };
+  if (
+    liveSchema.managed !== artifact.target.schema.managed ||
+    liveSchema.version !== artifact.target.schema.version ||
+    liveSchema.hash !== artifact.target.schema.hash
+  ) {
+    throw new MergePlanSchemaMismatchError(
+      "The target's active schema no longer matches the merge plan.",
+      { details: { expected: artifact.target.schema, live: liveSchema } },
+    );
+  }
+  const liveOrigin = await readRevisionOrigin(
+    txBackend,
+    target.revisionSchema,
+    target.graphId,
+  );
+  assertMergeAllocationOwner(
+    artifact.target.revision.owner,
+    liveOrigin === undefined ? undefined : (
+      await recordedAnchorOwner(target.revisionSchema, liveOrigin)
+    ),
+    target.graphId,
+  );
+  if (liveOrigin !== artifact.target.revision.origin) {
+    throw new MergePlanOwnerMismatchError(
+      "The merge plan belongs to a different target revision origin.",
+      {
+        details: {
+          expectedOrigin: artifact.target.revision.origin,
+          liveOrigin,
+        },
+      },
+    );
+  }
+  const liveRevision =
+    (await readRecordedClock(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+    )) ?? null;
+  if (liveRevision !== artifact.target.revision.revision) {
+    throw new StaleMergePlanError(
+      "The target revision changed after this merge plan was created; the plan was not applied.",
+      {
+        details: {
+          expectedRevision: artifact.target.revision.revision,
+          liveRevision,
+        },
+      },
+    );
+  }
+}
+
+function identityConsistencySeeds(
+  artifact: MergePlanArtifactV3,
+  profile: "fold" | "ignore" | undefined,
+): readonly MergePlanEntityRef[] {
+  const deleted = new Set(
+    artifact.writes.nodeDeletes.map((entity) =>
+      mergeKey(entity.kind, entity.id),
+    ),
+  );
+  const byIdentity = new Map<MergeKey, MergePlanEntityRef>();
+  const add = (entity: MergePlanEntityRef): void => {
+    const identity = mergeKey(entity.kind, entity.id);
+    if (!deleted.has(identity)) byIdentity.set(identity, entity);
+  };
+  for (const assertion of [
+    ...artifact.writes.identityAssertions,
+    ...artifact.writes.identityRetractions,
+  ]) {
+    add(assertion.a);
+    add(assertion.b);
+  }
+  if (profile === "fold") {
+    for (const upsert of artifact.writes.nodeUpserts) add(upsert);
+  }
+  return [...byIdentity]
+    .sort(([left], [right]) => compareMergeKeys(left, right))
+    .map(([, entity]) => entity);
+}
+
+async function applyWireMergeWrites<G extends GraphDef>(
+  target: Store<G>,
+  nodesApi: TxNodes,
+  edgesApi: TxEdges,
+  txBackend: TransactionBackend,
+  artifact: MergePlanArtifactV3,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<MergedCounts> {
+  const identityAssertions = artifact.writes
+    .identityAssertions as readonly IdentityTransferAssertion[];
+  const identityRetractions = artifact.writes
+    .identityRetractions as readonly IdentityTransferAssertion[];
+  const rows = await applyGraphRows(
+    target,
+    txBackend,
+    nodesApi,
+    edgesApi,
+    {
+      writes: artifact.writes,
+      nodePhase: {
+        deletions: artifact.writes.nodeDeletes,
+        upserts: artifact.writes.nodeUpserts.map((upsert) => ({
+          kind: upsert.kind,
+          id: upsert.id,
+          props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+          ...(upsert.recreate === true ? { recreate: true as const } : {}),
+          ...(upsert.validFrom === undefined ?
+            {}
+          : { validFrom: upsert.validFrom }),
+          ...validityEndMutationOf(upsert),
+        })),
+        identityRetractions,
+      },
+      edgeUpserts: artifact.writes.edgeUpserts.map((upsert) => ({
+        kind: upsert.kind,
+        item: {
+          id: upsert.id,
+          from: upsert.from,
+          to: upsert.to,
+          props: wireWriteProps(upsert.setProps, upsert.unsetProps),
+          ...(upsert.validFrom === undefined ?
+            {}
+          : { validFrom: upsert.validFrom }),
+          ...validityEndMutationOf(upsert),
+        },
+      })),
+    },
+    deleteNodeWithPolicy,
+    decision,
+  );
+
+  const appliedIdentity = await applyIdentityRows(
+    target,
+    txBackend,
+    identityAssertions,
+    identityRetractions,
+    decision,
+    () =>
+      storeRuntime(target).assertIdentityClassesConsistentAtTarget(
+        txBackend,
+        identityConsistencySeeds(
+          artifact,
+          target.graph.identity?.sameIdAcrossKinds,
+        ),
+      ),
+  );
+  if (
+    !forceRecordedGraphRevision(txBackend, target.graphId) &&
+    !forceWriteTransactionRevision(txBackend)
+  ) {
+    await advanceRevisionClock(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+      true,
+    );
+  }
+  return {
+    nodes: rows.nodes,
+    edges: rows.edges,
+    identity: {
+      asserted: appliedIdentity.asserted,
+      retracted: rows.retracted + appliedIdentity.retracted,
+    },
+  };
+}
+
+function reportFromArtifact<G extends GraphDef>(
+  artifact: MergePlanArtifactV3,
+  merged: MergedCounts,
+  warnings: readonly string[],
+  provenancePersisted?: MergeReport<G>["provenancePersisted"],
+): MergeReport<G> {
+  const provenanceRecords = artifact.review
+    .provenanceRecords as unknown as readonly ProvenanceRecord[];
+  return {
+    merged,
+    resolutions: artifact.review
+      .resolutions as unknown as readonly EntityResolution[],
+    conflicts: artifact.review
+      .conflicts as unknown as readonly PropertyConflict<G>[],
+    deleteModifyConflicts: artifact.review
+      .deleteModifyConflicts as unknown as readonly DeleteModifyConflict[],
+    typeReconciliations: artifact.review
+      .typeReconciliations as unknown as readonly TypeReconciliation[],
+    dropped: artifact.review.dropped as unknown as readonly DroppedItem[],
+    validityEnds: artifact.review
+      .validityEnds as unknown as readonly ValidityEndResolution[],
+    baseAmbiguities: artifact.review
+      .baseAmbiguities as unknown as readonly BaseAmbiguity[],
+    provenance:
+      artifact.provenance.includeInReport ?
+        buildProvenanceIndex(provenanceRecords)
+      : { byBranch: () => ({ nodeIds: [], edgeIds: [] }) },
+    warnings,
+    ...(artifact.review.diagnostics === undefined ?
+      {}
+    : {
+        candidateDiagnostics: artifact.review
+          .diagnostics as unknown as CandidateDiagnostics,
+      }),
+    ...(provenancePersisted === undefined ? {} : { provenancePersisted }),
+    identityConflicts: (artifact.review.identityConflicts ??
+      []) as unknown as readonly IdentityUnresolvedConflict[],
+  };
+}
+
+/** Validates a serialized merge plan and binds it to its target graph. */
+export async function validateMergePlanForTarget<G extends GraphDef>(
+  target: Store<G>,
+  input: MergePlanArtifact,
+): Promise<MergePlanArtifactV3> {
+  let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
+  try {
+    validation = await validateMergePlanArtifact(input);
+  } catch (error) {
+    throw new InvalidMergePlanError(
+      `Merge plan validation failed: ${describeCause(error)}`,
+      { cause: error },
+    );
+  }
+  if (!validation.success) throw mergePlanValidationError(validation.error);
+  const artifact = validation.artifact;
+  // A legacy format parses for inspection only: it predates review fields
+  // the current applier relies on, so it is planned again rather than applied.
+  if (artifact.formatVersion !== MERGE_PLAN_FORMAT_VERSION) {
+    throw new UnsupportedMergePlanVersionError(
+      `Merge plan format ${artifact.formatVersion} can be inspected but not applied; plan the merge again.`,
+      {
+        details: {
+          received: artifact.formatVersion,
+          supported: MERGE_PLAN_FORMAT_VERSION,
+        },
+      },
+    );
+  }
+  if (artifact.target.graphId !== target.graphId) {
+    throw new MergePlanTargetMismatchError(
+      "The merge plan names a different target graph.",
+      {
+        details: {
+          expectedGraphId: artifact.target.graphId,
+          receivedGraphId: target.graphId,
+        },
+      },
+    );
+  }
+  return artifact;
+}
+
+async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
+  target: Store<G>,
+  tx: TransactionContext<G>,
+  artifact: MergePlanArtifactV3,
+  options: MergePlanApplyOptions<G>,
+  requireFreshSnapshot: boolean,
+  decision: IdentityDecisionProvenance | undefined,
+): Promise<MergedCounts> {
+  const { beforeApply, afterApply } = options;
+  const txBackend = transactionBackend(tx);
+  await assertMergePlanFenceInsideTransaction(
+    target,
+    txBackend,
+    artifact,
+    requireFreshSnapshot,
+  );
+  if (beforeApply !== undefined) {
+    assertMergeCallbackResult(
+      await beforeApply(mergePlanReadContext(tx, target.graph)),
+      "beforeApply",
+    );
+  }
+  await preflightWireMergeWrites(
+    target,
+    tx.nodes as unknown as TxNodes,
+    tx.edges as unknown as TxEdges,
+    artifact,
+  );
+  await assertPlannedIdentityIdsFresh(target, txBackend, {
+    identityAssertions: artifact.writes.identityAssertions,
+    identityRetractions: artifact.writes.identityRetractions,
+  });
+  const applied = await applyWireMergeWrites(
+    target,
+    tx.nodes as unknown as TxNodes,
+    tx.edges as unknown as TxEdges,
+    txBackend,
+    artifact,
+    (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+    decision,
+  );
+  if (afterApply !== undefined) {
+    assertMergeCallbackResult(
+      await afterApply(tx, { merged: structuredClone(applied) }),
+      "afterApply",
+    );
+  }
+  return applied;
+}
+
+/** Validates and atomically applies an approved serialized merge plan. */
+export async function applyMergePlan<G extends GraphDef>(
+  target: Store<G>,
+  input: MergePlanArtifact,
+  options: MergePlanApplyOptions<NoInfer<G>> = {},
+): Promise<Result<AppliedMergeReport<G>, MergeError>> {
+  let artifact: MergePlanArtifactV3;
+  let decision: IdentityDecisionProvenance;
+  try {
+    assertOnlyDeclaredApplyOptions(options, MERGE_PLAN_APPLY_OPTION_KEYS);
+    artifact = await validateMergePlanForTarget(target, input);
+    // Built from evidence already in hand — the artifact's own digest, the
+    // anchors it names, and the review revalidation that names this plan.
+    // Nothing here is read back or recomputed, and a field the apply cannot
+    // evidence stays absent.
+    decision = mergeIdentityDecisionFromArtifact(artifact, options);
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new InvalidMergePlanError(
+          `Merge plan validation failed: ${describeCause(error)}`,
+          { cause: error },
+        )
+      ),
+    );
+  }
+  try {
+    const { beforeApply, afterApply } = options;
+    const composed = beforeApply !== undefined || afterApply !== undefined;
+    const transactionOptions =
+      composed ?
+        ({ isolationLevel: "read_committed" } as const)
+      : mergeCommitTransactionOptions(target);
+    assertPublicPlanCapability(target);
+    const provenanceStore =
+      artifact.provenance.persist ?
+        await tryOpenProvenanceStore(target)
+      : undefined;
+    if (provenanceStore !== undefined && isErr(provenanceStore)) {
+      return err(provenanceStore.error);
+    }
+    const outcome = await runRetriedUnit(
+      {
+        operation: "applyMergePlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
+      () =>
+        target.transactionWithReceipt(
+          (tx) =>
+            applyValidatedMergePlanInTransaction(
+              target,
+              tx,
+              artifact,
+              options,
+              composed,
+              decision,
+            ),
+          transactionOptions,
+        ),
+    );
+    const warnings = [...artifact.review.warnings];
+    let provenancePersisted: MergeReport<G>["provenancePersisted"];
+    if (provenanceStore !== undefined && !isErr(provenanceStore)) {
+      try {
+        const records = artifact.review
+          .provenanceRecords as unknown as readonly ProvenanceRecord[];
+        const count = await persistProvenanceRecords(
+          provenanceStore.data,
+          target.graphId,
+          records,
+        );
+        provenancePersisted = {
+          graphId: provenanceGraphId(target.graphId),
+          count,
+        };
+      } catch (error) {
+        warnings.push(
+          "provenance persistence failed (graph committed; provenance not persisted): " +
+            describeCause(error),
+        );
+      }
+    }
+    return ok({
+      ...reportFromArtifact<G>(
+        artifact,
+        outcome.result,
+        warnings,
+        provenancePersisted,
+      ),
+      receipt: outcome.receipt,
+    });
+  } catch (error) {
+    const translated = translateMergeCommitError(error);
+    return err(
+      translated instanceof MergeError ? translated : (
+        new MergeError(
+          `Merge plan apply failed: ${describeCause(translated)}`,
+          {
+            cause: translated,
+          },
+        )
+      ),
+    );
+  }
+}
+
+/**
+ * Applies an approved serialized merge plan through a caller-owned transaction.
+ * `tx` must belong to a currently active callback of `target`; retained contexts
+ * and contexts created by another Store are refused. Apply the plan before any
+ * graph writes in that transaction, because pending writes are not represented by
+ * the plan's durable revision fence.
+ *
+ * The caller owns commit, rollback, and whole-transaction retry. This function
+ * opens no transaction and throws on every failure so the surrounding callback
+ * rejects. The apply runs behind a savepoint ({@link withAdoptedMergeApplySavepoint}),
+ * so a failure raised after some rows were written still leaves none of them:
+ * a caller that catches and commits keeps no half-applied merge. Plans requesting
+ * persisted provenance are refused because the sidecar cannot yet be enlisted in
+ * this caller-owned transaction.
+ *
+ * `options` carries the same decision provenance `applyMergePlan` records — the
+ * compatible review revalidation that names this plan, and the ingestion
+ * source — so a plan applied here records the same identity decision.
+ */
+export async function applyMergePlanInTransaction<G extends GraphDef>(
+  target: Store<G>,
+  tx: TransactionContext<NoInfer<G>>,
+  input: MergePlanArtifact,
+  options: MergePlanDecisionOptions = {},
+): Promise<MergeReport<G>> {
+  try {
+    assertOnlyDeclaredApplyOptions(options, MERGE_PLAN_DECISION_OPTION_KEYS);
+    let effectiveTarget: Store<G>;
+    try {
+      effectiveTarget = resolveEvolvedTransactionStore(tx, target);
+    } catch (error) {
+      throw new MergePlanCapabilityError(
+        "The merge transaction must belong to an active callback of the target Store.",
+        { cause: error, details: { capability: "mergeTransactionStore" } },
+      );
+    }
+    // The apply writes through the transaction's backend, not its
+    // collections, so it passes their write gate itself, before any read:
+    // a read-only transaction is refused rather than written to.
+    transactionAssertWritable(tx, "applyMergePlanInTransaction()");
+    const artifact = await validateMergePlanForTarget(effectiveTarget, input);
+    assertPublicPlanCapability(effectiveTarget);
+    if (artifact.provenance.persist) {
+      throw new MergePlanCapabilityError(
+        "A caller-owned merge transaction cannot persist merge provenance atomically.",
+        {
+          details: { capability: "adoptedMergeProvenance" },
+          suggestion:
+            "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
+        },
+      );
+    }
+    const txBackend = transactionBackend(tx);
+    await assertMergeTransactionPristine(effectiveTarget, txBackend);
+    const decision = mergeIdentityDecisionFromArtifact(artifact, options);
+    const merged = await withAdoptedMergeApplySavepoint(
+      effectiveTarget,
+      tx,
+      () =>
+        applyValidatedMergePlanInTransaction(
+          effectiveTarget,
+          tx,
+          artifact,
+          {},
+          true,
+          decision,
+        ),
+    );
+    return reportFromArtifact(artifact, merged, artifact.review.warnings);
+  } catch (error) {
+    const translated = translateMergeCommitError(error);
+    throw translated instanceof MergeError ? translated : (
+        new MergeError(
+          `Merge plan apply failed: ${describeCause(translated)}`,
+          { cause: translated },
+        )
+      );
   }
 }
 
@@ -1789,9 +6372,10 @@ async function resolveMerge<G extends GraphDef>(
  */
 export async function merge<G extends GraphDef>(
   store: Store<G>,
-  branches: readonly GraphBranch<G>[],
+  branchInputs: readonly MergeBranch<G>[],
   optionsInput: MergeOptions<G> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
   const normalized = tryNormalize(optionsInput);
   if (isErr(normalized)) {
     return err(normalized.error);
@@ -1816,6 +6400,7 @@ export async function merge<G extends GraphDef>(
     false,
     undefined,
     precondition.data,
+    commitResolvedMerge,
   );
 }
 
@@ -1835,9 +6420,10 @@ export async function merge<G extends GraphDef>(
  */
 export async function mergeAgainstBase<G extends GraphDef>(
   store: Store<G>,
-  branches: readonly GraphBranch<G>[],
+  branchInputs: readonly MergeBranch<G>[],
   optionsInput: MergeOptions<G> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
+  const branches = unwrapMergeBranches(branchInputs);
   const normalized = tryNormalize(optionsInput);
   if (isErr(normalized)) {
     return err(normalized.error);
@@ -1858,14 +6444,32 @@ export async function mergeAgainstBase<G extends GraphDef>(
     true,
     undefined,
     expectedBaseVersion,
+    commitResolvedMerge,
   );
 }
 
 // --- mergeIncremental: full fork-point-vs-live-target entry point (§6.6) -------
 
+/**
+ * The fork-point premise {@link mergeIncremental} established BEFORE planning:
+ * this store, at this `base@V`, is the immutable ancestor every branch diff was
+ * computed against. Carried into the commit so it can be re-established at the
+ * point of no return (see {@link assertForkPointUnchanged}).
+ */
+type ForkPointPrecondition<G extends GraphDef> =
+  | Readonly<{
+      store: Store<G>;
+      version: BaseVersion;
+    }>
+  | Readonly<{
+      target: Store<G>;
+      point: RecordedForkPoint;
+    }>;
+
 /** Internal config carried into {@link resolveMerge} for incremental mode. */
-type IncrementalConfig = Readonly<{
+type IncrementalConfig<G extends GraphDef> = Readonly<{
   targetBranchId: BranchId;
+  forkPoint: ForkPointPrecondition<G>;
 }>;
 
 /**
@@ -1879,22 +6483,143 @@ async function validateForkPointVersions<G extends GraphDef>(
 ): Promise<Result<BaseVersion, BaseVersionMismatchError>> {
   const forkVersion = await computeBaseVersion(forkPoint);
   for (const branch of branches) {
-    if (branch.base !== forkVersion) {
+    if (branch.base === forkVersion) continue;
+    return err(
+      branchBaseMismatchError(
+        branch,
+        `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the fork-point's base@V "${forkVersion}". mergeIncremental() requires every branch to have forked from the supplied forkPoint.`,
+        { forkPointBase: forkVersion },
+      ),
+    );
+  }
+  return ok(forkVersion);
+}
+
+function isRecordedForkPoint<G extends GraphDef>(
+  forkPoint: Store<G> | RecordedForkPoint,
+): forkPoint is RecordedForkPoint {
+  return "recorded" in forkPoint;
+}
+
+/** Checks the durable cut against the source graph that retains its history. */
+async function assertRecordedForkPointAvailable<G extends GraphDef>(
+  target: Store<G>,
+  point: RecordedForkPoint,
+): Promise<void> {
+  if (
+    !target.historyEnabled ||
+    target.recordedTimeOwnership !== "typegraph-relations"
+  ) {
+    throw new MergePlanCapabilityError(
+      "A recorded fork point requires TypeGraph-owned history on the merge target.",
+      { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  if (isLegacyBaseVersion(point.base)) {
+    throw new BaseVersionMismatchError(
+      "The recorded fork point's base@V token was minted in a retired format.",
+      {
+        details: {
+          forkPointBase: point.base,
+          reason: LEGACY_BASE_VERSION_REFUSAL.reason,
+        },
+        suggestion: LEGACY_BASE_VERSION_REFUSAL.suggestion,
+      },
+    );
+  }
+  const parts = parseRecordedInstant(point.recorded, "forkPoint.recorded");
+  if (parts.kind !== "typegraph" || !hasRevisionAnchor(point.base)) {
+    throw new MergePlanCapabilityError(
+      "A recorded fork point requires a TypeGraph-owned revision anchor.",
+      { details: { capability: "recordedForkPoint" } },
+    );
+  }
+  const [currentBase, origin, currentRecorded] = await Promise.all([
+    computeBaseVersion(target),
+    target.allocationOwner().then((owner) => owner.origin),
+    target.recordedNow(),
+  ]);
+  const currentParts =
+    currentRecorded === undefined ? undefined : (
+      parseRecordedInstant(currentRecorded)
+    );
+  assertMergeAllocationOwner(
+    recordedInstantOwner(point.recorded),
+    currentRecorded === undefined ? undefined : (
+      recordedInstantOwner(currentRecorded)
+    ),
+    target.graphId,
+  );
+  if (
+    revisionAnchorOf(point.base) !== point.recorded ||
+    revisionOriginOf(point.base) !== origin ||
+    schemaComponentOf(point.base) !== schemaComponentOf(currentBase) ||
+    currentParts?.kind !== "typegraph" ||
+    currentParts.revision < parts.revision
+  ) {
+    throw new BaseVersionMismatchError(
+      "The recorded fork point no longer identifies a retained revision of this graph under its current origin and schema.",
+      {
+        details: { forkPointBase: point.base, targetBase: currentBase },
+      },
+    );
+  }
+}
+
+type PreparedIncrementalForkPoint<G extends GraphDef> = Readonly<{
+  store: Store<G>;
+  version: BaseVersion;
+  precondition: ForkPointPrecondition<G>;
+  baseReader?: StateDiffBaseReader;
+}>;
+
+async function prepareIncrementalForkPoint<G extends GraphDef>(
+  forkPoint: Store<G> | RecordedForkPoint,
+  target: Store<G>,
+  branches: readonly GraphBranch<G>[],
+): Promise<Result<PreparedIncrementalForkPoint<G>, MergeError>> {
+  if (!isRecordedForkPoint(forkPoint)) {
+    const validated = await validateForkPointVersions(forkPoint, branches);
+    if (isErr(validated)) return err(validated.error);
+    return ok({
+      store: forkPoint,
+      version: validated.data,
+      precondition: { store: forkPoint, version: validated.data },
+    });
+  }
+  try {
+    await assertRecordedForkPointAvailable(target, forkPoint);
+    for (const branch of branches) {
+      if (branch.base === forkPoint.base) continue;
       return err(
         new BaseVersionMismatchError(
-          `Branch "${branch.id}" forked from base@V "${branch.base}", which does not match the fork-point's base@V "${forkVersion}". mergeIncremental() requires every branch to have forked from the supplied forkPoint.`,
+          `Branch "${branch.id}" did not fork from the supplied recorded fork point.`,
           {
             details: {
               branchId: branch.id,
               branchBase: branch.base,
-              forkPointBase: forkVersion,
+              forkPointBase: forkPoint.base,
             },
           },
         ),
       );
     }
+    return ok({
+      store: target,
+      version: forkPoint.base,
+      precondition: { target, point: forkPoint },
+      baseReader: createRecordedBaseReader(target, forkPoint.recorded),
+    });
+  } catch (error) {
+    return err(
+      error instanceof MergeError ? error : (
+        new MergePlanCapabilityError(
+          `Unable to read the recorded fork point: ${describeCause(error)}`,
+          { cause: error, details: { capability: "recordedForkPoint" } },
+        )
+      ),
+    );
   }
-  return ok(forkVersion);
 }
 
 /**
@@ -1945,10 +6670,11 @@ function edgeSchemaFor<G extends GraphDef>(
 }
 
 /**
- * Models TypeGraph's re-validating update semantics for one row:
- * `schema.safeParse({...current, ...planned})`, then storing the parsed result. This
- * is NOT used as a pre-transaction write guard anymore; `mergeIncremental()` calls it
- * inside the target transaction to decide between create/update/skip/error.
+ * Models TypeGraph's re-validating update semantics for one row —
+ * `schema.safeParse({...current, ...planned})`, then storing the parsed result —
+ * so `mergeIncremental()` can route each planned write to create / update / skip /
+ * error from INSIDE the target transaction, where `current` is the row the commit
+ * will actually overwrite.
  */
 function analyzeRevalidatingWrite(
   schema: PropsSchema | undefined,
@@ -1986,6 +6712,20 @@ function analyzeRevalidatingWrite(
   };
 }
 
+/** Mutation postimages must survive the existing executor's revalidation unchanged. */
+export function assertStableMergePostimage(
+  schema: PropsSchema | undefined,
+  props: Readonly<Record<string, unknown>>,
+): void {
+  const analysis = analyzeRevalidatingWrite(schema, props, {});
+  if (analysis.status !== "valid" || analysis.storageWouldChange) {
+    throw new MergePlanCapabilityError(
+      "The validated mutation postimage cannot be reapplied unchanged through the native merge wire codec. Use a JSON-round-trip-stable schema.",
+      { details: { capability: "stableMergePostimage" } },
+    );
+  }
+}
+
 export function writeWouldChangeRow(
   schema: PropsSchema | undefined,
   committed: Readonly<Record<string, unknown>>,
@@ -2000,7 +6740,8 @@ export function writeWouldChangeRow(
  * write comparisons operate on the persisted props bag only.
  */
 function nodeProps(node: Node): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public node.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(node)) {
     if (key === "id" || key === "kind" || key === "meta") continue;
     props[key] = value;
@@ -2013,7 +6754,8 @@ function nodeProps(node: Node): Record<string, unknown> {
  * write comparisons operate on the persisted props bag only.
  */
 function edgeProps(edge: Edge): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // Data-keyed: schema property names spread onto the public edge.
+  const props = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(edge)) {
     if (
       key === "id" ||
@@ -2033,24 +6775,6 @@ function edgeProps(edge: Edge): Record<string, unknown> {
 
 const INCLUDE_TOMBSTONES = { temporalMode: "includeTombstones" as const };
 
-function finalEdgeFrom<G extends GraphDef>(
-  edge: MergedEdge,
-  plan: MergePlan<G>,
-) {
-  return {
-    kind:
-      plan.retypeMap.get(mergeKey(edge.fromKind, edge.fromId)) ?? edge.fromKind,
-    id: edge.fromId,
-  };
-}
-
-function finalEdgeTo<G extends GraphDef>(edge: MergedEdge, plan: MergePlan<G>) {
-  return {
-    kind: plan.retypeMap.get(mergeKey(edge.toKind, edge.toId)) ?? edge.toKind,
-    id: edge.toId,
-  };
-}
-
 function assertValidRevalidatingWrite(
   analysis: RevalidatingWriteAnalysis,
   message: string,
@@ -2061,74 +6785,12 @@ function assertValidRevalidatingWrite(
   }
 }
 
-function describeCause(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
-type PlannedNodeWrite = Readonly<{
-  identity: MergeKey;
-  kind: string;
-  id: AnyNodeId;
-  props: Readonly<Record<string, unknown>>;
-}>;
-
-function plannedNodeWrites<G extends GraphDef>(
-  plan: MergePlan<G>,
-): readonly PlannedNodeWrite[] {
-  const canonicalIdentities = new Set<MergeKey>();
-  for (const entity of plan.canonicalEntities) {
-    canonicalIdentities.add(mergeKey(entity.kind, entity.canonicalId));
-  }
-  const survivingModProps = new Map<
-    MergeKey,
-    Readonly<Record<string, unknown>>
-  >();
-  for (const modification of plan.survivingModifications) {
-    survivingModProps.set(
-      mergeKeyOf(modification.node),
-      modification.node.forkProps,
-    );
-  }
-
-  const writes: PlannedNodeWrite[] = [];
-  for (const modification of plan.survivingModifications) {
-    const identity = mergeKeyOf(modification.node);
-    if (plan.nodeDeletions.has(identity) || canonicalIdentities.has(identity)) {
-      continue;
-    }
-    writes.push({
-      identity,
-      kind: modification.node.kind,
-      id: modification.node.id,
-      props: modification.node.forkProps,
-    });
-  }
-  for (const entity of plan.canonicalEntities) {
-    const sourceIdentity = mergeKey(entity.kind, entity.canonicalId);
-    if (plan.nodeDeletions.has(sourceIdentity)) {
-      continue;
-    }
-    const kind = plan.retypeMap.get(sourceIdentity) ?? entity.kind;
-    const forkProps = survivingModProps.get(sourceIdentity);
-    writes.push({
-      identity: mergeKey(kind, entity.canonicalId),
-      kind,
-      id: entity.canonicalId,
-      props:
-        forkProps === undefined ?
-          entity.props
-        : { ...entity.props, ...forkProps },
-    });
-  }
-  return writes;
-}
-
 function edgeWriteSignature<G extends GraphDef>(
   edge: MergedEdge,
   plan: MergePlan<G>,
 ): string {
-  const from = finalEdgeFrom(edge, plan);
-  const to = finalEdgeTo(edge, plan);
+  const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
+  const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
   return JSON.stringify([
     edge.kind,
     from.kind,
@@ -2177,7 +6839,7 @@ async function validateIncrementalNodeWrites<G extends GraphDef>(
     const analysis = analyzeRevalidatingWrite(
       nodeSchemaFor(target, write.kind),
       nodeProps(current),
-      write.props,
+      nodeWriteProps(write, (modification) => modification.forkProps),
     );
     assertValidRevalidatingWrite(
       analysis,
@@ -2304,8 +6966,8 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
       );
     }
 
-    const from = finalEdgeFrom(edge, plan);
-    const to = finalEdgeTo(edge, plan);
+    const from = finalEdgeEndpoint(plan, edge.fromKind, edge.fromId);
+    const to = finalEdgeEndpoint(plan, edge.toKind, edge.toId);
     if (
       current.fromId !== from.id ||
       current.fromKind !== from.kind ||
@@ -2350,6 +7012,12 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
   introspectionKinds: ReadonlyMap<string, readonly UniqueIntrospection[]>;
   plannedBaseMatchKeys: ReadonlySet<MergeKey>;
   /**
+   * The fork point and the `base@V` every branch declared against it, checked
+   * before planning and re-checked at the commit (see
+   * {@link assertForkPointUnchanged}).
+   */
+  forkPoint: ForkPointPrecondition<G>;
+  /**
    * `(kind, id) -> version` for every committed target node observed while
    * planning (the target-branch diff enumeration). The commit-time guard
    * re-reads the rows the plan writes OR deletes and refuses if any inherited
@@ -2365,6 +7033,16 @@ type IncrementalCommitGuard<G extends GraphDef> = Readonly<{
    * edge the plan upserts OR deletes drifted in the plan→commit window.
    */
   targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
+  /**
+   * The plan-time identity probe: the bare ids probed, the live peer keys
+   * observed, per-seed class fingerprints, and the negative-ledger
+   * fingerprint. Present for EVERY identity-enabled incremental merge (both
+   * profiles — explicit assertions change legality under `"ignore"` too; only
+   * the direct-peer window check is fold-specific). The commit-time guard
+   * revalidates all of it through the transaction backend and refuses
+   * plan→commit drift as a typed replan error.
+   */
+  identityPeerProbe?: IdentityPeerProbe;
 }>;
 
 /**
@@ -2473,6 +7151,108 @@ async function assertBaseResolutionStable<G extends GraphDef>(
 /** A `(kind, id)` the plan will mutate whose identity was an observed target row. */
 type InheritedTargetRef = Readonly<{ kind: string; id: string }>;
 
+function plannedNodeRefs<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly InheritedTargetRef[] {
+  return [
+    ...plannedNodeWrites(plan).map((write) => ({
+      kind: write.kind,
+      id: write.id,
+    })),
+    ...[...plan.nodeDeletions].map(([identity, kind]) => ({
+      kind,
+      id: idOf(identity),
+    })),
+  ];
+}
+
+function plannedEdgeRefs<G extends GraphDef>(
+  plan: MergePlan<G>,
+): readonly InheritedTargetRef[] {
+  return [
+    ...plan.mergedEdges.map((edge) => ({ kind: edge.kind, id: edge.id })),
+    ...[...plan.edgeDeletions].map(([identity, kind]) => ({
+      kind,
+      id: idOf(identity),
+    })),
+  ];
+}
+
+/** Historical pruning enumerates changed rows only; fetch any other plan writes by id. */
+async function capturePlannedTargetBaselines<G extends GraphDef>(
+  target: Store<G>,
+  plan: MergePlan<G>,
+  staged: Readonly<{
+    targetNodeVersions: ReadonlyMap<MergeKey, number>;
+    targetEdgeSignatures: ReadonlyMap<MergeKey, string>;
+  }>,
+): Promise<
+  Readonly<{
+    nodes: ReadonlyMap<MergeKey, number>;
+    edges: ReadonlyMap<MergeKey, string>;
+  }>
+> {
+  const nodes = new Map(staged.targetNodeVersions);
+  const edges = new Map(staged.targetEdgeSignatures);
+  const nodeCollections = target.nodes as unknown as TxNodes;
+  const edgeCollections = target.edges as unknown as TxEdges;
+  for (const [kind, ids] of bucketMissingRefsByKind(
+    plannedNodeRefs(plan),
+    nodes,
+  )) {
+    const rows = await nodeCollection(nodeCollections, kind).getByIds(
+      ids,
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, id] of ids.entries()) {
+      const version = rows[index]?.meta.version;
+      if (version !== undefined) nodes.set(mergeKey(kind, id), version);
+    }
+  }
+  for (const [kind, ids] of bucketMissingRefsByKind(
+    plannedEdgeRefs(plan),
+    edges,
+  )) {
+    const rows = await edgeCollection(edgeCollections, kind).getByIds(
+      ids,
+      INCLUDE_TOMBSTONES,
+    );
+    for (const [index, id] of ids.entries()) {
+      const row = rows[index];
+      if (row === undefined) continue;
+      edges.set(
+        mergeKey(kind, id),
+        edgeStateSignature({
+          fromKind: row.fromKind,
+          fromId: row.fromId,
+          toKind: row.toKind,
+          toId: row.toId,
+          live: row.meta.deletedAt === undefined,
+          props: edgeProps(row),
+        }),
+      );
+    }
+  }
+  return { nodes, edges };
+}
+
+function bucketMissingRefsByKind(
+  refs: Iterable<InheritedTargetRef>,
+  present: MergeKeyMembership,
+): ReadonlyMap<string, readonly string[]> {
+  const missing = new Map<string, string[]>();
+  const seen = new Set<MergeKey>();
+  for (const ref of refs) {
+    const key = mergeKey(ref.kind, ref.id);
+    if (present.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    const ids = missing.get(ref.kind) ?? [];
+    ids.push(ref.id);
+    missing.set(ref.kind, ids);
+  }
+  return missing;
+}
+
 /** Anything keyed by {@link MergeKey} that can answer a membership check. */
 type MergeKeyMembership = Readonly<{ has(key: MergeKey): boolean }>;
 
@@ -2579,14 +7359,8 @@ async function assertInheritedNodesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const nodeRefs: InheritedTargetRef[] = plannedNodeWrites(plan).map(
-    (write) => ({ kind: write.kind, id: write.id }),
-  );
-  for (const [identity, kind] of plan.nodeDeletions) {
-    nodeRefs.push({ kind, id: idOf(identity) });
-  }
   await assertInheritedUnchanged<Node, number>({
-    refs: nodeRefs,
+    refs: plannedNodeRefs(plan),
     expected: guard.targetNodeVersions,
     fetchRows: (kind, ids) =>
       nodeCollection(nodesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
@@ -2620,15 +7394,8 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
   guard: IncrementalCommitGuard<G>,
   plan: MergePlan<G>,
 ): Promise<void> {
-  const edgeRefs: InheritedTargetRef[] = plan.mergedEdges.map((edge) => ({
-    kind: edge.kind,
-    id: edge.id,
-  }));
-  for (const [identity, kind] of plan.edgeDeletions) {
-    edgeRefs.push({ kind, id: idOf(identity) });
-  }
   await assertInheritedUnchanged<Edge, string>({
-    refs: edgeRefs,
+    refs: plannedEdgeRefs(plan),
     expected: guard.targetEdgeSignatures,
     fetchRows: (kind, ids) =>
       edgeCollection(edgesApi, kind).getByIds(ids, INCLUDE_TOMBSTONES),
@@ -2656,6 +7423,88 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
 }
 
 /**
+ * Re-establishes `mergeIncremental()`'s fork-point premise at the point of no
+ * return — the incremental analogue of the snapshot path's
+ * {@link assertTargetUnchanged}.
+ *
+ * `mergeIncremental()` reads the fork point's `base@V` BEFORE planning, refuses
+ * any branch that declares a different one, and then derives the whole plan
+ * from fork-point→branch diffs. A write landing on the fork point in that
+ * window makes every one of those diffs describe an ancestor that no longer
+ * exists — and nothing downstream notices, because the incremental commit
+ * deliberately does NOT re-check the TARGET's `base@V` (an advancing target is
+ * the feature). Re-reading the fork point here turns that into a typed refusal
+ * instead of a committed plan derived from state that is gone.
+ *
+ * The token is recomputed by {@link computeBaseVersion} — the same and only
+ * definition of a store's `base@V` that produced the value being compared, so
+ * there is no second spelling of the comparison to drift. A whole-token match
+ * includes the schema version, durable origin where present, and graph state.
+ *
+ * The re-read goes through the fork point's OWN backend rather than this
+ * transaction: the fork point is a different store, and what must hold is its
+ * COMMITTED state. Deliberately no advisory lock either — the fork point is
+ * immutable by contract, so this detects a violated contract rather than
+ * excluding a legal writer, and taking the graph write lock on a second
+ * connection would deadlock against this very transaction whenever the fork
+ * point and the target share one database.
+ */
+async function assertForkPointUnchanged<G extends GraphDef>(
+  precondition: ForkPointPrecondition<G>,
+  session?: TransactionBackend,
+): Promise<void> {
+  if ("point" in precondition) {
+    if (session === undefined) {
+      await assertRecordedForkPointAvailable(
+        precondition.target,
+        precondition.point,
+      );
+    } else {
+      const { target, point } = precondition;
+      const [origin, recorded, version] = await Promise.all([
+        readRevisionOrigin(session, target.revisionSchema, target.graphId),
+        readRecordedClock(session, target.revisionSchema, target.graphId),
+        readActiveSchemaVersion(session, target.graphId),
+      ]);
+      const pointParts = parseRecordedInstant(point.recorded);
+      const recordedParts =
+        recorded === undefined ? undefined : parseRecordedInstant(recorded);
+      assertMergeAllocationOwner(
+        recordedInstantOwner(point.recorded),
+        recorded === undefined ? undefined : recordedInstantOwner(recorded),
+        target.graphId,
+      );
+      if (
+        pointParts.kind !== "typegraph" ||
+        recordedParts?.kind !== "typegraph" ||
+        recordedParts.revision < pointParts.revision ||
+        origin !== revisionOriginOf(point.base) ||
+        version !== schemaActiveVersionOf(point.base)
+      ) {
+        throw new BaseVersionMismatchError(
+          "The recorded fork point is unavailable on the merge transaction's graph session.",
+          { details: { forkPointBase: point.base } },
+        );
+      }
+    }
+    return;
+  }
+  const liveVersion = await computeBaseVersion(precondition.store);
+  if (liveVersion === precondition.version) return;
+  throw new BaseVersionMismatchError(
+    "The mergeIncremental() fork point was modified between the fork-point precondition and the commit transaction; every branch diff was computed against the previous fork-point state, so the resolved plan was not applied.",
+    {
+      details: {
+        expectedForkPointBase: precondition.version,
+        liveForkPointBase: liveVersion,
+      },
+      suggestion:
+        "Keep the fork-point store immutable for the duration of the merge (it is the diff reference, not a merge target), then re-run mergeIncremental().",
+    },
+  );
+}
+
+/**
  * The full incremental commit path (§6.6). The planner has already folded the live
  * target in as a preferred synthetic branch, so this path preflights destructive
  * row hazards inside the target transaction and then applies the normal merge plan.
@@ -2664,11 +7513,12 @@ async function commitIncrementalPlan<G extends GraphDef>(
   target: Store<G>,
   plan: MergePlan<G>,
   guard: IncrementalCommitGuard<G>,
-): Promise<Readonly<{ nodes: number; edges: number }>> {
-  if (!storeBackend(target).capabilities.transactions) {
+  decision?: IdentityDecisionProvenance,
+): Promise<MergedCounts> {
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergeError(
       "mergeIncremental() requires a transaction-capable target backend. Incremental writes must preflight existing rows and commit atomically; non-transactional fallback would allow partial graph writes.",
-      { details: { capability: "transactions" } },
+      { details: { capability: "execution.interactiveTransactions" } },
     );
   }
 
@@ -2680,25 +7530,69 @@ async function commitIncrementalPlan<G extends GraphDef>(
   // PostgreSQL read committed each subsequent statement sees committed work that
   // landed before the lock was acquired, while the lock excludes later tracked
   // writes until this plan commits.
-  return withTxConflictRetry(() =>
-    target.transaction(async (tx) => {
-      if (target.revisionTrackingEnabled) {
-        await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
-      }
-      const nodesApi = tx.nodes as unknown as TxNodes;
-      const edgesApi = tx.edges as unknown as TxEdges;
-      // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
-      // this transaction, so re-derive them here (tx snapshot) and refuse the
-      // plan if a matching committed row appeared in the window. `tx` exposes
-      // the same `.nodes` collection record a `BaseLookupStore` needs.
-      await assertBaseResolutionStable(tx as unknown as BaseLookupStore, guard);
-      // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
-      // writes or deletes changed since it was observed at plan time (lost update).
-      await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
-      await validateIncrementalNodeWrites(target, nodesApi, plan);
-      await validateIncrementalEdgeWrites(target, edgesApi, plan);
-      return applyMergePlan(plan, nodesApi, edgesApi);
-    }, mergeCommitTransactionOptions(target)),
+  return runMergeCommit(() =>
+    runRetriedUnit(
+      {
+        operation: "commitIncrementalPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
+      () =>
+        target.transaction(async (tx) => {
+          // The fork point carries no target base version to anchor on.
+          await lockMergeCommitFence(transactionBackend(tx), target, undefined);
+          // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
+          // against is re-read here, so a write to it in the plan→commit window
+          // refuses the merge instead of committing diffs against a fork point
+          // that has moved. Runs first: it is the premise every later guard's
+          // baseline was derived under, and on a revision-anchored fork point it
+          // is an O(1) read.
+          await assertForkPointUnchanged(
+            guard.forkPoint,
+            transactionBackend(tx),
+          );
+          const nodesApi = tx.nodes as unknown as TxNodes;
+          const edgesApi = tx.edges as unknown as TxEdges;
+          // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
+          // this transaction, so re-derive them here (tx snapshot) and refuse the
+          // plan if a matching committed row appeared in the window. `tx` exposes
+          // the same `.nodes` collection record a `BaseLookupStore` needs.
+          await assertBaseResolutionStable(
+            tx as unknown as BaseLookupStore,
+            guard,
+          );
+          // Identity window guards: the by-id freshness check runs DIRECTLY (not
+          // via the probe guard, whose early return must never be able to skip
+          // it), then the probe-based layers revalidate peers, classes, the
+          // negative ledger, and finally re-run the full identity simulation on
+          // the tx snapshot.
+          await assertPlannedIdentityIdsFresh(
+            target,
+            transactionBackend(tx),
+            plan,
+          );
+          await assertIdentityPeersStable(
+            target,
+            transactionBackend(tx),
+            guard.identityPeerProbe,
+            plan,
+          );
+          // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
+          // writes or deletes changed since it was observed at plan time (lost update).
+          await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
+          await validateIncrementalNodeWrites(target, nodesApi, plan);
+          await validateIncrementalEdgeWrites(target, edgesApi, plan);
+          return applyInternalMergePlan(
+            plan,
+            nodesApi,
+            edgesApi,
+            target,
+            transactionBackend(tx),
+            (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+            decision,
+          );
+        }, mergeCommitTransactionOptions(target)),
+    ),
   );
 }
 
@@ -2710,19 +7604,29 @@ async function commitIncrementalPlan<G extends GraphDef>(
  * through the same three-way merge planner.
  *
  * Object-form args so the two same-typed stores (`forkPoint`, `target`) cannot be
- * swapped. `options.target` is ignored — `target` is the explicit arg.
+ * swapped. The named `target` is authoritative; an untyped caller that also
+ * supplies `options.target` is refused rather than silently ignored.
  *
  * Preconditions (typed errors): every branch forked from `forkPoint`
  * (`branch.base === computeBaseVersion(forkPoint)`); `forkPoint` and `target` share a
  * schema hash (schema drift is fatal; target CONTENT may have advanced); and
  * `onBasePropertyConflict` is `"flag"` (keep-base for committed-row conflicts).
+ *
+ * The fork-point precondition is not merely an entry check: it is re-verified
+ * inside the commit transaction, so `forkPoint` must stay immutable for the
+ * duration of the call. A write to it while the merge is in flight makes every
+ * branch diff describe an ancestor that no longer exists, and is refused with
+ * `BaseVersionMismatchError` rather than committed (see
+ * {@link assertForkPointUnchanged}). The TARGET, by contrast, may advance
+ * throughout — that is what "incremental" means.
  */
 export async function mergeIncremental<G extends GraphDef>(
   args: MergeIncrementalArguments<G>,
 ): Promise<Result<MergeReport<G>, MergeError>> {
-  const { forkPoint, target, branches } = args;
+  const { forkPoint, target } = args;
+  const branches = unwrapMergeBranches(args.branches);
 
-  const normalized = tryNormalize(args.options ?? {});
+  const normalized = tryNormalize(args.options ?? {}, ["target"]);
   if (isErr(normalized)) {
     return err(normalized.error);
   }
@@ -2732,46 +7636,77 @@ export async function mergeIncremental<G extends GraphDef>(
   // conflicts. A non-keep-base policy would let a stale branch value overwrite a
   // newer committed value.
   if (options.onBasePropertyConflict !== "flag") {
-    return err(
-      new MergeError(
-        'mergeIncremental() requires onBasePropertyConflict: "flag" (keep-base); a non-keep-base policy could overwrite a newer committed base value with a stale branch value.',
-        { details: {} },
-      ),
-    );
+    return err(incrementalBaseConflictPolicyError(options));
+  }
+
+  // The recorded path resolves a sparse target diff. Pin the target's durable
+  // revision while planning so the bounded baseline reads and that diff refer
+  // to the same committed state.
+  let targetFence: MergePlanTargetFence | undefined;
+  if ("recorded" in forkPoint) {
+    try {
+      targetFence = await captureMergePlanTargetFence(target);
+    } catch (error) {
+      return err(
+        error instanceof MergeError ? error : (
+          new MergePlanCapabilityError(
+            `Unable to capture the target's durable planning fence: ${describeCause(error)}`,
+            { cause: error },
+          )
+        ),
+      );
+    }
   }
 
   // Every branch must have forked from THIS fork-point (honest diff).
-  const forkPrecondition = await validateForkPointVersions(forkPoint, branches);
-  if (isErr(forkPrecondition)) {
-    return err(forkPrecondition.error);
+  const prepared = await prepareIncrementalForkPoint(
+    forkPoint,
+    target,
+    branches,
+  );
+  if (isErr(prepared)) {
+    return err(prepared.error);
   }
-  const forkVersion = forkPrecondition.data;
+  const { store: forkStore, version: forkVersion } = prepared.data;
 
   // Schema half of base@V stays a hard precondition; target CONTENT may advance.
   const [forkSchema, targetSchema] = await Promise.all([
-    computeSchemaComponent(forkPoint),
+    computeSchemaComponent(forkStore),
     computeSchemaComponent(target),
   ]);
   if (forkSchema !== targetSchema) {
-    return err(
-      new MergeError(
-        "mergeIncremental() requires target and forkPoint to share a schema; schema drift is not supported (the target content may differ — only the schema must match).",
-        { details: {} },
-      ),
-    );
+    return err(incrementalSchemaError());
   }
 
   const targetBranch: GraphBranch<G> = {
     id: COMMITTED_TARGET_BRANCH,
     base: forkVersion,
     store: target,
+    // See the sibling targetBranch above (planMerge's incremental arm): a
+    // stand-in for the caller's own live target, never a working copy this
+    // function owns, so its close is a no-op.
+    close: (): Promise<void> => Promise.resolve(),
   };
   return resolveMerge(
-    forkPoint,
+    forkStore,
     target,
     [targetBranch, ...branches],
     options,
     true,
-    { targetBranchId: COMMITTED_TARGET_BRANCH },
+    {
+      targetBranchId: COMMITTED_TARGET_BRANCH,
+      // The fork-point precondition just validated, carried to the commit so
+      // it is re-established there rather than assumed to have held for the
+      // whole of planning (see `assertForkPointUnchanged`).
+      forkPoint: prepared.data.precondition,
+    },
+    undefined,
+    async (resolved) => {
+      if (targetFence !== undefined) {
+        await assertPlanningFenceUnchanged(target, targetFence);
+      }
+      return commitResolvedMerge(resolved);
+    },
+    prepared.data.baseReader,
   );
 }

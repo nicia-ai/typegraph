@@ -144,6 +144,32 @@ function placeholderNode(value: Placeholder): SqlPlaceholderChunk {
   return Object.freeze({ kind: "placeholder", value });
 }
 
+/**
+ * Appends a fragment's chunks one at a time. Never `push(...chunks)`: a
+ * fragment holding a large `VALUES` list has more chunks than an engine
+ * accepts as call arguments, and the spread overflows the stack.
+ */
+function appendChunks(chunks: SqlChunk[], fragment: SqlFragment): void {
+  for (const chunk of getChunks(fragment)) chunks.push(chunk);
+}
+
+/**
+ * The most terms one compound SELECT (`UNION ALL` chain) may join on every
+ * engine: SQLite's default `SQLITE_LIMIT_COMPOUND_SELECT`. A statement built
+ * from caller-sized input splits its terms at this cap as well as at the
+ * bound-parameter budget.
+ */
+export const PORTABLE_COMPOUND_SELECT_TERMS_LIMIT = 500;
+
+/** How many bound parameters a fragment renders, placeholders included. */
+export function countSqlParameters(fragment: SqlFragment): number {
+  let count = 0;
+  for (const chunk of getChunks(fragment)) {
+    if (chunk.kind === "parameter" || chunk.kind === "placeholder") count += 1;
+  }
+  return count;
+}
+
 function templateSql(
   strings: TemplateStringsArray,
   ...values: readonly unknown[]
@@ -157,7 +183,7 @@ function templateSql(
     if (index >= values.length) continue;
     const value = values[index];
     if (isSqlFragment(value)) {
-      chunks.push(...getChunks(value));
+      appendChunks(chunks, value);
       intentSources.push(value);
     } else if (isSqlPlaceholder(value)) {
       chunks.push(placeholderNode(value));
@@ -185,8 +211,8 @@ function joinSql(
   const intentSources: SqlFragment[] = [separator];
 
   for (const [index, fragment] of fragments.entries()) {
-    if (index > 0) chunks.push(...getChunks(separator));
-    chunks.push(...getChunks(fragment));
+    if (index > 0) appendChunks(chunks, separator);
+    appendChunks(chunks, fragment);
     intentSources.push(fragment);
   }
 

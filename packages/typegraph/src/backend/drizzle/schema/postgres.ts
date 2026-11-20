@@ -26,7 +26,9 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -39,12 +41,22 @@ import {
 
 import {
   buildPostgresEdgeIndexBuilders,
+  buildPostgresGraphIdOrderIndex,
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
-import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
-import { type IndexDeclaration } from "../../../indexes/types";
+import {
+  assertNoSystemIndexNameCollision,
+  systemIndexName,
+} from "../../../indexes/system";
+import {
+  type IndexDeclaration,
+  type RelationalIndexDeclaration,
+} from "../../../indexes/types";
+import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../recorded-storage";
 import { regconfig, tsvector } from "../columns/fulltext";
+import { carryAllocationSchemaToTables } from "../postgres-allocation-schema";
+import { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Table name configuration.
@@ -55,14 +67,27 @@ export type PostgresTableNames = Readonly<{
   recordedNodes: string;
   recordedEdges: string;
   recordedClock: string;
+  recordedAnchors: string;
+  storeOperations: string;
   revisionOrigins: string;
+  revisionChanges: string;
+  identityAssertions: string;
+  recordedIdentityAssertions: string;
+  identityClosure: string;
+  identitySeparation: string;
+  identityTransitions: string;
+  identityTransitionRetention: string;
   uniques: string;
+  edgeClaims: string;
+  baseSchemaVersions: string;
   schemaVersions: string;
+  graphTemplates: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
+  fences: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -73,23 +98,15 @@ export type CreatePostgresTablesOptions = Readonly<{
    * pick them up automatically.
    */
   indexes?: readonly IndexDeclaration[] | undefined;
+  /** Resolve graph index identifiers for an isolated physical namespace. */
+  physicalIndexName?:
+    ((index: RelationalIndexDeclaration) => string) | undefined;
 }>;
 
-const DEFAULT_TABLE_NAMES: PostgresTableNames = {
-  nodes: "typegraph_nodes",
-  edges: "typegraph_edges",
-  recordedNodes: "typegraph_recorded_nodes",
-  recordedEdges: "typegraph_recorded_edges",
-  recordedClock: "typegraph_recorded_clock",
-  revisionOrigins: "typegraph_revision_origins",
-  uniques: "typegraph_node_uniques",
-  schemaVersions: "typegraph_schema_versions",
-  fulltext: "typegraph_node_fulltext",
-  indexMaterializations: "typegraph_index_materializations",
-  contributionMaterializations: "typegraph_contribution_materializations",
-  kindRemovals: "typegraph_kind_removals",
-  reconciliationMarkers: "typegraph_reconciliation_markers",
-};
+const DEFAULT_TABLE_NAMES: PostgresTableNames = defaultPostgresTableNames;
+
+/** The bundled physical names, shared with working-copy allocation. */
+export { defaultPostgresTableNames } from "./postgres-table-names";
 
 /**
  * Creates PostgreSQL table definitions with customizable table names.
@@ -101,7 +118,24 @@ export function createPostgresTables(
 ) {
   const n: PostgresTableNames = { ...DEFAULT_TABLE_NAMES, ...names };
   const indexes = options.indexes ?? [];
-  assertNoSystemIndexNameCollision(indexes, n);
+  const physicalNames = new Set<string>();
+  const resolvedIndexes = indexes.map((index) => {
+    if (index.entity === "vector" || options.physicalIndexName === undefined)
+      return index;
+    const physicalName = options.physicalIndexName(index);
+    if (
+      physicalName.length === 0 ||
+      new TextEncoder().encode(physicalName).length > 63 ||
+      physicalNames.has(physicalName)
+    ) {
+      throw new Error(
+        `Invalid or duplicate physical PostgreSQL index name "${physicalName}".`,
+      );
+    }
+    physicalNames.add(physicalName);
+    return { ...index, name: physicalName };
+  });
+  assertNoSystemIndexNameCollision(resolvedIndexes, n);
 
   const nodes = pgTable(
     n.nodes,
@@ -122,7 +156,8 @@ export function createPostgresTables(
       // System indexes come from SYSTEM_INDEX_DECLARATIONS (single source
       // for both dialects + the runtime materializer).
       ...buildPostgresSystemIndexBuilders("nodes", n.nodes, t),
-      ...buildPostgresNodeIndexBuilders(t, indexes),
+      buildPostgresGraphIdOrderIndex(n.nodes, t.graphId),
+      ...buildPostgresNodeIndexBuilders(t, resolvedIndexes),
     ],
   );
 
@@ -137,6 +172,8 @@ export function createPostgresTables(
       toKind: text("to_kind").notNull(),
       toId: text("to_id").notNull(),
       props: jsonb("props").notNull(),
+      matchIdentityName: text("match_identity_name"),
+      matchIdentityKey: text("match_identity_key"),
       validFrom: timestamp("valid_from", { withTimezone: true }),
       validTo: timestamp("valid_to", { withTimezone: true }),
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -145,8 +182,19 @@ export function createPostgresTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
+      uniqueIndex(systemIndexName(n.edges, "match_identity_uq")).on(
+        t.graphId,
+        t.kind,
+        t.matchIdentityName,
+        t.matchIdentityKey,
+      ),
+      check(
+        systemIndexName(n.edges, "match_identity_pair_check"),
+        sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
+      ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
-      ...buildPostgresEdgeIndexBuilders(t, indexes),
+      buildPostgresGraphIdOrderIndex(n.edges, t.graphId),
+      ...buildPostgresEdgeIndexBuilders(t, resolvedIndexes),
     ],
   );
 
@@ -164,10 +212,8 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", {
-        withTimezone: true,
-      }).notNull(),
-      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      recordedFrom: bigint("recorded_from", { mode: "number" }).notNull(),
+      recordedTo: bigint("recorded_to", { mode: "number" }).notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -196,10 +242,8 @@ export function createPostgresTables(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
       deletedAt: timestamp("deleted_at", { withTimezone: true }),
-      recordedFrom: timestamp("recorded_from", {
-        withTimezone: true,
-      }).notNull(),
-      recordedTo: timestamp("recorded_to", { withTimezone: true }).notNull(),
+      recordedFrom: bigint("recorded_from", { mode: "number" }).notNull(),
+      recordedTo: bigint("recorded_to", { mode: "number" }).notNull(),
       op: text("op").notNull(),
       schemaVersion: integer("schema_version"),
       txId: text("tx_id"),
@@ -215,9 +259,45 @@ export function createPostgresTables(
     n.recordedClock,
     {
       graphId: text("graph_id").notNull(),
+      revision: bigint("revision", { mode: "number" }).notNull(),
       recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      anchorRetention: text(RECORDED_ANCHOR_RETENTION_COLUMN),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const recordedAnchors = pgTable(
+    n.recordedAnchors,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      revision: bigint("revision", { mode: "number" }).notNull(),
+      recordedAt: text("recorded_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.revision] }),
+      index(systemIndexName(n.recordedAnchors, "time_idx")).on(
+        t.graphId,
+        t.origin,
+        t.recordedAt,
+        t.revision,
+      ),
+    ],
+  );
+
+  const storeOperations = pgTable(
+    n.storeOperations,
+    {
+      graphId: text("graph_id").notNull(),
+      origin: text("origin").notNull(),
+      scope: text("scope").notNull(),
+      idempotencyKey: text("idempotency_key").notNull(),
+      operationDigest: text("operation_digest").notNull(),
+      evidence: text("evidence").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.origin, t.scope, t.idempotencyKey] }),
+    ],
   );
 
   const revisionOrigins = pgTable(
@@ -225,6 +305,257 @@ export function createPostgresTables(
     {
       graphId: text("graph_id").notNull(),
       origin: text("origin").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.graphId] })],
+  );
+
+  const revisionChanges = pgTable(
+    n.revisionChanges,
+    {
+      entryId: text("entry_id").primaryKey(),
+      graphId: text("graph_id").notNull(),
+      revision: bigint("revision", { mode: "number" }).notNull(),
+      complete: boolean("complete").notNull(),
+      entity: text("entity").notNull(),
+      kind: text("kind").notNull(),
+      id: text("id").notNull(),
+    },
+    (t) => [
+      index(`${n.revisionChanges}_graph_revision_idx`).on(
+        t.graphId,
+        t.revision,
+      ),
+    ],
+  );
+
+  // The identity assertion ledger. `ended_by_kind` / `ended_by_id` record WHY
+  // an assertion stopped being current: NULL for an explicit retraction,
+  // populated with the deleted endpoint's `(kind, id)` when a node soft-delete
+  // cascaded onto it. The CHECK holds the two invariants the writers rely on —
+  // the pair is set or unset together, and a cause only ever names an ENDED
+  // row's own endpoint.
+  const identityAssertions = pgTable(
+    n.identityAssertions,
+    {
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.id] }),
+      index(`${n.identityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.validTo,
+      ),
+      index(`${n.identityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.validTo,
+      ),
+      uniqueIndex(`${n.identityAssertions}_current_pair_idx`)
+        .on(t.graphId, t.relation, t.aKind, t.aId, t.bKind, t.bId)
+        .where(sql`${t.validTo} IS NULL`),
+      check(
+        `${n.identityAssertions}_ended_by_check`,
+        sql`(ended_by_kind IS NULL) = (ended_by_id IS NULL) AND (ended_by_kind IS NULL OR (valid_to IS NOT NULL AND ((ended_by_kind = a_kind AND ended_by_id = a_id) OR (ended_by_kind = b_kind AND ended_by_id = b_id))))`,
+      ),
+    ],
+  );
+
+  const recordedIdentityAssertions = pgTable(
+    n.recordedIdentityAssertions,
+    {
+      historyId: text("history_id").notNull(),
+      graphId: text("graph_id").notNull(),
+      id: text("id").notNull(),
+      relation: text("rel").notNull(),
+      aKind: text("a_kind").notNull(),
+      aId: text("a_id").notNull(),
+      bKind: text("b_kind").notNull(),
+      bId: text("b_id").notNull(),
+      validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+      validTo: timestamp("valid_to", { withTimezone: true }),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+      deletedAt: timestamp("deleted_at", { withTimezone: true }),
+      endedByKind: text("ended_by_kind"),
+      endedById: text("ended_by_id"),
+      recordedFrom: bigint("recorded_from", { mode: "number" }).notNull(),
+      recordedTo: bigint("recorded_to", { mode: "number" }).notNull(),
+      op: text("op").notNull(),
+      schemaVersion: integer("schema_version"),
+      txId: text("tx_id"),
+      meta: jsonb("meta"),
+    },
+    (t) => [
+      primaryKey({ columns: [t.historyId] }),
+      index(`${n.recordedIdentityAssertions}_entity_idx`).on(
+        t.graphId,
+        t.id,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_a_idx`).on(
+        t.graphId,
+        t.aKind,
+        t.aId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      index(`${n.recordedIdentityAssertions}_b_idx`).on(
+        t.graphId,
+        t.bKind,
+        t.bId,
+        t.recordedFrom,
+        t.recordedTo,
+      ),
+      // `recorded_from`-led lookup, same rationale as the two recorded
+      // relations' `since_idx` (`../../../indexes/system.ts`): `entity_idx`/
+      // `a_idx`/`b_idx` all lead with an endpoint, not `recorded_from`
+      // alone, so none can serve `changesSince`'s per-revision completeness
+      // scan (`store/recorded-capture/lineage.ts`) without a full table scan.
+      index(systemIndexName(n.recordedIdentityAssertions, "since_idx")).on(
+        t.graphId,
+        t.recordedFrom,
+      ),
+    ],
+  );
+
+  const identityClosure = pgTable(
+    n.identityClosure,
+    {
+      graphId: text("graph_id").notNull(),
+      memberKind: text("member_kind").notNull(),
+      memberId: text("member_id").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.memberKind, t.memberId] }),
+      index(`${n.identityClosure}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+      ),
+    ],
+  );
+
+  // The identity separation relation: the `different` ledger lifted to whole
+  // identity classes, one row per separated class pair. `class_key_low` /
+  // `class_key_high` hold the persisted class-key encoding (see
+  // `identity/separation.ts`), ordered by code point. The CHECK pins `COLLATE
+  // "C"` because a database whose default collation is linguistic orders text
+  // differently from the writer, which would reject legitimate pairs; under
+  // `C` the comparison is byte order, which is exactly code-point order.
+  // Fusing two separated classes relabels both sides of their shared row to
+  // one key, so the contradiction cannot commit.
+  const identitySeparation = pgTable(
+    n.identitySeparation,
+    {
+      graphId: text("graph_id").notNull(),
+      classKeyLow: text("class_key_low").notNull(),
+      classKeyHigh: text("class_key_high").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.classKeyLow, t.classKeyHigh] }),
+      index(`${n.identitySeparation}_high_idx`).on(t.graphId, t.classKeyHigh),
+      check(
+        `${n.identitySeparation}_ordered_pair_check`,
+        sql`class_key_low COLLATE "C" < class_key_high COLLATE "C"`,
+      ),
+    ],
+  );
+
+  // The identity transition log: an append-only annotation on the recorded
+  // axis. Carries no membership — `class_kind`/`class_id` name the class
+  // canonical AFTER the transition, `prior_class_kind`/`prior_class_id` the
+  // canonical BEFORE (NULL when that class did not exist as a real row).
+  // Every membership answer still comes from `historicalIdentityReconstructionCtes`.
+  const identityTransitions = pgTable(
+    n.identityTransitions,
+    {
+      graphId: text("graph_id").notNull(),
+      transitionId: text("transition_id").notNull(),
+      recordedRevision: bigint("recorded_revision", {
+        mode: "number",
+      }).notNull(),
+      recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+      validAt: timestamp("valid_at", { withTimezone: true }).notNull(),
+      cause: text("cause").notNull(),
+      classKind: text("class_kind").notNull(),
+      classId: text("class_id").notNull(),
+      priorClassKind: text("prior_class_kind"),
+      priorClassId: text("prior_class_id"),
+      assertionIds: jsonb("assertion_ids").notNull(),
+      decision: jsonb("decision"),
+      txId: text("tx_id"),
+      // NULL for a row this graph recorded itself through the live capture
+      // flush; set to the restore's own wall time for a row an archival
+      // restore inserted verbatim. `identityReplay` uses ONLY this marker —
+      // never a revision comparison — to decide whether a row may be paired
+      // with a reconstructed before/after snapshot, because a restored row's
+      // `recorded_revision` is the SOURCE graph's own number and interleaves
+      // arbitrarily with this graph's (see `isRestoredTransitionRow`).
+      restoredAt: timestamp("restored_at", { withTimezone: true }),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.transitionId] }),
+      index(`${n.identityTransitions}_class_idx`).on(
+        t.graphId,
+        t.classKind,
+        t.classId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_revision_idx`).on(
+        t.graphId,
+        t.recordedRevision,
+      ),
+      index(`${n.identityTransitions}_prior_class_idx`).on(
+        t.graphId,
+        t.priorClassKind,
+        t.priorClassId,
+        t.recordedRevision,
+      ),
+    ],
+  );
+
+  // One row per graph, holding two retention cuts on two axes: the
+  // watermark `pruneIdentityTransitions` advances on this graph's own
+  // recorded axis (`0` means nothing has been pruned), and the highest cut an
+  // archival restore carried in on the raw revisions restored rows keep
+  // (`NULL` means none). Each cut keeps the recorded time of the instant it
+  // was made at. An absent row means neither.
+  const identityTransitionRetention = pgTable(
+    n.identityTransitionRetention,
+    {
+      graphId: text("graph_id").notNull(),
+      prunedBeforeRevision: bigint("pruned_before_revision", {
+        mode: "number",
+      }).notNull(),
+      prunedBeforeRecordedAt: timestamp("pruned_before_recorded_at", {
+        withTimezone: true,
+      }),
+      restoredPrunedBeforeRevision: bigint("restored_pruned_before_revision", {
+        mode: "number",
+      }),
+      restoredPrunedBeforeRecordedAt: timestamp(
+        "restored_pruned_before_recorded_at",
+        { withTimezone: true },
+      ),
     },
     (t) => [primaryKey({ columns: [t.graphId] })],
   );
@@ -248,6 +579,62 @@ export function createPostgresTables(
     ],
   );
 
+  // The edge cardinality claim relation: one row per claim AXIS
+  // (`<cardinality>:<edgeKind>`) and endpoint KEY, naming the edge that holds
+  // it. Declared edge cardinality is a predicate over `(kind, from)` or
+  // `(kind, from, to)`, which the edges primary key `(graph_id, id)` cannot
+  // fence, so this relation's own primary key is what refuses a second
+  // concurrent claimant. A claim whose holder is no longer live (or, for
+  // `oneActive`, no longer active) is taken over in place, which is why the
+  // relation needs no release path — see `store/claims/edge-claims.ts`.
+  const edgeClaims = pgTable(
+    n.edgeClaims,
+    {
+      graphId: text("graph_id").notNull(),
+      axis: text("axis").notNull(),
+      key: text("key").notNull(),
+      edgeId: text("edge_id").notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.graphId, t.axis, t.key] }),
+      index(`${n.edgeClaims}_edge_idx`).on(t.graphId, t.edgeId),
+    ],
+  );
+
+  // The write-fence rows relation: one row per keyed exclusion a `row`
+  // mechanism has ever acquired, keyed on `<namespace>:<key>` (the existing
+  // advisory namespaces, verbatim). Never dropped, never row-deleted, never
+  // touched by `clear()` — the same never-dropped posture as
+  // `schema_versions`, `recorded_clock`. `generation` is the acquire
+  // statement's own monotonically increasing counter (see
+  // `resolveFenceStatements`'s `row` derivation); it is not consumed here,
+  // only stored.
+  const fences = pgTable(
+    n.fences,
+    {
+      key: text("key").notNull(),
+      generation: bigint("generation", { mode: "number" }).notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.key] })],
+  );
+
+  const baseSchemaVersions = pgTable(
+    n.baseSchemaVersions,
+    {
+      installation: integer("installation").notNull(),
+      version: integer("version").notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.installation] }),
+      check(
+        systemIndexName(n.baseSchemaVersions, "singleton_check"),
+        sql`${t.installation} = 1`,
+      ),
+    ],
+  );
+
   const schemaVersions = pgTable(
     n.schemaVersions,
     {
@@ -261,6 +648,7 @@ export function createPostgresTables(
     (t) => [
       primaryKey({ columns: [t.graphId, t.version] }),
       index(`${n.schemaVersions}_active_idx`).on(t.graphId, t.isActive),
+      buildPostgresGraphIdOrderIndex(n.schemaVersions, t.graphId),
       // Partial unique index enforcing the "at most one active version
       // per graph" invariant at the storage layer. Defense in depth
       // against buggy backend implementations or out-of-band writes.
@@ -270,6 +658,17 @@ export function createPostgresTables(
         .on(t.graphId)
         .where(sql`${t.isActive} = TRUE`),
     ],
+  );
+
+  const graphTemplates = pgTable(
+    n.graphTemplates,
+    {
+      templateId: text("template_id").notNull(),
+      schemaHash: text("schema_hash").notNull(),
+      schemaDoc: jsonb("schema_doc").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.templateId] })],
   );
 
   /**
@@ -354,23 +753,12 @@ export function createPostgresTables(
   );
 
   /**
-   * Per-deployment durable marker that a strategy-owned table
-   * contribution (#129 — fulltext today) has been materialized against
-   * this database (#135). The single source of truth replacing the old
-   * in-memory per-backend `fulltextEnsured` latch: "is fulltext storage
-   * materialized?" is now a queryable database fact, written only by
-   * the async boot path and read (cached) by the fulltext hot-path
-   * gate.
-   *
-   * Keyed on `(graph_id, logical_name, owner, table_name)` — unlike
-   * `indexMaterializations` (physical index name is database-global),
-   * a contribution's identity is graph-scoped: two graphs can each own
-   * a logically-identical fulltext table. `signature` is deliberately
-   * NOT in the key: a same-identity row with a different signature is
-   * detectable drift, surfaced as a loud error rather than a silent
-   * re-materialize. `materialized_at` is null until the first success;
-   * the COALESCE-on-failure rule preserves it across failed retries,
-   * mirroring `indexMaterializations`.
+   * Durable markers for strategy-owned table contributions (#129). A
+   * deployment-scoped physical contribution uses the reserved deployment
+   * graph id, while a graph row records logical activation. Keyed on
+   * `(graph_id, logical_name, owner, table_name)`; `signature` is
+   * deliberately NOT in the key so same-identity drift is detectable
+   * rather than silently re-materialized.
    */
   const contributionMaterializations = pgTable(
     n.contributionMaterializations,
@@ -431,15 +819,28 @@ export function createPostgresTables(
     ],
   );
 
-  return {
+  const created = {
     nodes,
     edges,
     recordedNodes,
     recordedEdges,
     recordedClock,
+    recordedAnchors,
+    storeOperations,
     revisionOrigins,
+    revisionChanges,
+    identityAssertions,
+    recordedIdentityAssertions,
+    identityClosure,
+    identitySeparation,
+    identityTransitions,
+    identityTransitionRetention,
     uniques,
+    edgeClaims,
+    fences,
+    baseSchemaVersions,
     schemaVersions,
+    graphTemplates,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,
@@ -447,6 +848,8 @@ export function createPostgresTables(
     fulltext,
     fulltextTableName: n.fulltext,
   } as const;
+  carryAllocationSchemaToTables(names, created);
+  return created;
 }
 
 /**
@@ -464,6 +867,7 @@ export const {
   recordedEdges,
   recordedClock,
   uniques,
+  edgeClaims,
   schemaVersions,
   fulltext,
 } = tables;

@@ -35,6 +35,11 @@ const PUBLIC_SUBPATHS = [
   { subpath: "/graph-extension", expectedExport: "defineGraphExtension" },
   { subpath: "/graph-merge", expectedExport: "branch" },
   { subpath: "/provenance", expectedExport: "createRetractionCapability" },
+  { subpath: "/store", expectedExport: "StoreView" },
+  { subpath: "/query", expectedExport: "QueryBuilder" },
+  { subpath: "/errors", expectedExport: "DatabaseOperationError" },
+  { subpath: "/identity", expectedExport: "pruneIdentityTransitions" },
+  { subpath: "/maintenance", expectedExport: "listGraphIds" },
   { subpath: "/sqlite/local", expectedExport: "createLocalSqliteStore" },
   { subpath: "/postgres/pglite", expectedExport: "createLocalPgliteStore" },
   {
@@ -54,12 +59,20 @@ const PUBLIC_SUBPATHS = [
     expectedExport: "createPostgresBackend",
   },
   {
+    subpath: "/adapters/drizzle/postgres/working-copy",
+    expectedExport: "createPostgresWorkingCopyManager",
+  },
+  {
     subpath: "/adapters/drizzle/postgres/pglite",
     expectedExport: "createLocalPgliteBackend",
   },
   {
     subpath: "/adapters/drizzle/indexes",
     expectedExport: "buildSqliteNodeIndexBuilders",
+  },
+  {
+    subpath: "/adapters/drizzle/engine",
+    expectedExport: "createSqlBackend",
   },
 ];
 
@@ -85,8 +98,10 @@ function toSubpath(exportsKey) {
 }
 
 const failures = [];
-let esmRoot;
-let cjsRoot;
+// Modules loaded per condition, keyed by subpath, for the cross-module checks
+// after the per-subpath loop.
+const esmModules = new Map();
+const cjsModules = new Map();
 
 // Guard against the export surface growing past this test: every subpath the
 // installed package declares must be covered by PUBLIC_SUBPATHS.
@@ -112,7 +127,7 @@ for (const { subpath, expectedExport } of PUBLIC_SUBPATHS) {
 
   try {
     const esmModule = await import(specifier);
-    if (subpath === "") esmRoot = esmModule;
+    esmModules.set(subpath, esmModule);
     if (typeof esmModule[expectedExport] === "undefined")
       failures.push(`ESM ${specifier}: missing export "${expectedExport}"`);
   } catch (error) {
@@ -121,7 +136,7 @@ for (const { subpath, expectedExport } of PUBLIC_SUBPATHS) {
 
   try {
     const cjsModule = require(specifier);
-    if (subpath === "") cjsRoot = cjsModule;
+    cjsModules.set(subpath, cjsModule);
     if (typeof cjsModule[expectedExport] === "undefined")
       failures.push(`CJS ${specifier}: missing export "${expectedExport}"`);
   } catch (error) {
@@ -129,12 +144,15 @@ for (const { subpath, expectedExport } of PUBLIC_SUBPATHS) {
   }
 }
 
-if (esmRoot !== undefined && cjsRoot !== undefined) {
+// The SQL-fragment vocabulary lives in ./backend.
+const esmBackend = esmModules.get("/backend");
+const cjsBackend = cjsModules.get("/backend");
+if (esmBackend !== undefined && cjsBackend !== undefined) {
   try {
-    const cjsFragment = cjsRoot.sql`SELECT ${1}`;
-    const cjsPlaceholder = new cjsRoot.Placeholder("value");
-    const renderedByEsm = esmRoot.renderPostgres(
-      esmRoot.sql`${cjsFragment}, ${cjsPlaceholder}`,
+    const cjsFragment = cjsBackend.sql`SELECT ${1}`;
+    const cjsPlaceholder = new cjsBackend.Placeholder("value");
+    const renderedByEsm = esmBackend.renderPostgres(
+      esmBackend.sql`${cjsFragment}, ${cjsPlaceholder}`,
     );
     if (
       renderedByEsm.sql !== "SELECT $1, $2" ||
@@ -146,10 +164,10 @@ if (esmRoot !== undefined && cjsRoot !== undefined) {
       );
     }
 
-    const esmFragment = esmRoot.sql`SELECT ${2}`;
-    const esmPlaceholder = new esmRoot.Placeholder("value");
-    const renderedByCjs = cjsRoot.renderPostgres(
-      cjsRoot.sql`${esmFragment}, ${esmPlaceholder}`,
+    const esmFragment = esmBackend.sql`SELECT ${2}`;
+    const esmPlaceholder = new esmBackend.Placeholder("value");
+    const renderedByCjs = cjsBackend.renderPostgres(
+      cjsBackend.sql`${esmFragment}, ${esmPlaceholder}`,
     );
     if (
       renderedByCjs.sql !== "SELECT $1, $2" ||
@@ -164,6 +182,73 @@ if (esmRoot !== undefined && cjsRoot !== undefined) {
     failures.push(`ESM/CJS SQL fragment interoperability: ${error.message}`);
   }
 }
+
+// One class, one object: a name exported from both the root and a subpath
+// must be the same object within a module system, or `instanceof` against the
+// subpath's class silently fails for values the root produced. Checked within
+// ESM and within CJS separately (the two systems legitimately load separate
+// copies of the package).
+const SHARED_EXPORTS = [
+  { name: "TypeGraphError", subpath: "/errors" },
+  { name: "ValidationError", subpath: "/errors" },
+  { name: "ConfigurationError", subpath: "/errors" },
+  { name: "defineGraph", subpath: "/core" },
+];
+
+async function assertErrorIdentity(system, modules, loadZod) {
+  const root = modules.get("");
+  const errors = modules.get("/errors");
+  for (const { name, subpath } of SHARED_EXPORTS) {
+    const fromSubpath = modules.get(subpath)?.[name];
+    if (root?.[name] === undefined || fromSubpath === undefined) {
+      failures.push(`${system} ${name}: missing from the root or ${subpath}`);
+    } else if (root[name] !== fromSubpath) {
+      failures.push(
+        `${system} ${name}: the root and ${subpath} export different objects`,
+      );
+    }
+  }
+  if (root === undefined || errors === undefined) return;
+
+  // An error thrown by a store opened from the root is an instance of the
+  // ./errors classes.
+  try {
+    const { z } = await loadZod();
+    const { createLocalSqliteBackend } = modules.get(
+      "/adapters/drizzle/sqlite/local",
+    );
+    const Item = root.defineNode("SmokeItem", {
+      schema: z.object({ name: z.string() }),
+    });
+    const graph = root.defineGraph({
+      id: "smoke_identity",
+      nodes: { SmokeItem: { type: Item } },
+      edges: {},
+    });
+    const { backend } = createLocalSqliteBackend();
+    const [store] = await root.createStoreWithSchema(graph, backend);
+    let thrown;
+    try {
+      await store.nodes.SmokeItem.create({ name: 42 });
+    } catch (error) {
+      thrown = error;
+    }
+    await backend.close();
+    if (
+      !(thrown instanceof errors.ValidationError) ||
+      !(thrown instanceof errors.TypeGraphError)
+    ) {
+      failures.push(
+        `${system} a ValidationError thrown by a store opened from the root is not an instance of the ./errors classes (${String(thrown)})`,
+      );
+    }
+  } catch (error) {
+    failures.push(`${system} store error identity: ${error.message}`);
+  }
+}
+
+await assertErrorIdentity("ESM", esmModules, () => import("zod"));
+await assertErrorIdentity("CJS", cjsModules, () => require("zod"));
 
 if (failures.length > 0) {
   console.error(

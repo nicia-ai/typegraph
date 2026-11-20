@@ -1,10 +1,21 @@
+import { type BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type HardDeleteNodeParams,
   type NodeRow,
   type TransactionBackend,
 } from "../../backend/types";
-import { RECORDED_MAX } from "../../core/temporal";
+import { RECORDED_MAX_REVISION } from "../../core/temporal";
+import { IDENTITY_ASSERTION_COLUMNS } from "../../identity/historical-sql";
+import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
+import {
+  encodeIdentityTransitionRow,
+  IDENTITY_TRANSITION_COLUMNS,
+  identityTransitionIdSequence,
+  type IdentityTransitionNote,
+  withIdentityTransitionLogRelations,
+} from "../../identity/transition-log";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
@@ -17,8 +28,11 @@ import { allocateRecordedCommit } from "./clock";
 import { executeStatement } from "./guards";
 import {
   insertRecordedEdgeRows,
+  insertRecordedIdentityAssertionRows,
   insertRecordedNodeRows,
   recordedEdgeChunkSize,
+  recordedIdentityAssertionChunkSize,
+  recordedIdentityTransitionChunkSize,
   type RecordedInsert,
   recordedNodeChunkSize,
   type RecordedOperation,
@@ -42,7 +56,15 @@ export type TouchedEdge = Readonly<{
   afterImage?: EdgeRow | undefined;
 }>;
 
-export type TouchedEntity = TouchedNode | TouchedEdge;
+export type TouchedIdentityAssertion = Readonly<{
+  entity: "identity";
+  graphId: string;
+  id: string;
+  afterImage?: IdentityAssertionStorageRow | undefined;
+}>;
+
+export type TouchedEntity =
+  TouchedNode | TouchedEdge | TouchedIdentityAssertion;
 
 type IdRow = Readonly<{ id: string }>;
 type ClosedRow = Readonly<{ id: string; deleted_at: unknown }>;
@@ -54,6 +76,9 @@ export function entityKey(entity: TouchedEntity): string {
     }
     case "edge": {
       return `edge\u0000${entity.graphId}\u0000${entity.id}`;
+    }
+    case "identity": {
+      return `identity\u0000${entity.graphId}\u0000${entity.id}`;
     }
   }
 }
@@ -67,17 +92,17 @@ async function closeOpenReturning(
   table: SqlFragment,
   graphId: string,
   ids: readonly string[],
-  recordedCommit: string,
+  recordedRevision: number,
   kind?: string,
 ): Promise<ReadonlyMap<string, boolean>> {
   const kindFilter = kind === undefined ? sql`` : sql`AND kind = ${kind}`;
   const rows = await target.execute<ClosedRow>(
     asCompiledRowsSql(sql`
       UPDATE ${table}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         ${kindFilter}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
         AND id IN (${sqlValueList(ids)})
       RETURNING id, deleted_at
     `),
@@ -140,10 +165,11 @@ function recordedInsertsFor<
 
 export async function flushNodes(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedNode[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   const chunkSize = recordedNodeChunkSize(target);
   for (const [kind, group] of groupNodesByKind(entities)) {
@@ -154,17 +180,17 @@ export async function flushNodes(
         schema.recordedNodesTable,
         graphId,
         ids,
-        recordedCommit,
+        recordedRevision,
         kind,
       );
       const afterById = await resolveAfterImages(entityChunk, (missing) =>
-        getNodeRowsByIds(target, graphId, kind, missing),
+        getNodeRowsByIds(target, batchPointRead, graphId, kind, missing),
       );
       await insertRecordedNodeRows(
         target,
         schema.recordedNodesTable,
         recordedInsertsFor(afterById, closed),
-        recordedCommit,
+        recordedRevision,
       );
     }
   }
@@ -172,10 +198,11 @@ export async function flushNodes(
 
 export async function flushEdges(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedEdge[],
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   const chunkSize = recordedEdgeChunkSize(target);
   for (const entityChunk of chunk(entities, chunkSize)) {
@@ -185,16 +212,110 @@ export async function flushEdges(
       schema.recordedEdgesTable,
       graphId,
       ids,
-      recordedCommit,
+      recordedRevision,
     );
     const afterById = await resolveAfterImages(entityChunk, (missing) =>
-      getEdgeRowsByIds(target, graphId, missing),
+      getEdgeRowsByIds(target, batchPointRead, graphId, missing),
     );
     await insertRecordedEdgeRows(
       target,
       schema.recordedEdgesTable,
       recordedInsertsFor(afterById, closed),
-      recordedCommit,
+      recordedRevision,
+    );
+  }
+}
+
+async function getIdentityAssertionRowsByIds(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  ids: readonly string[],
+): Promise<ReadonlyMap<string, IdentityAssertionStorageRow>> {
+  if (ids.length === 0) return new Map();
+  const rows = await target.execute<IdentityAssertionStorageRow>(
+    asCompiledRowsSql(sql`
+      SELECT ${IDENTITY_ASSERTION_COLUMNS}
+      FROM ${schema.identityAssertionsTable}
+      WHERE graph_id = ${graphId}
+        AND id IN (${sqlValueList(ids)})
+    `),
+  );
+  return new Map(rows.map((row) => [row.id, row] as const));
+}
+
+export async function flushIdentityAssertions(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  entities: readonly TouchedIdentityAssertion[],
+  recordedRevision: number,
+): Promise<void> {
+  if (entities.length === 0) return;
+  const chunkSize = recordedIdentityAssertionChunkSize(target);
+  for (const entityChunk of chunk(entities, chunkSize)) {
+    const ids = entityChunk.map((entity) => entity.id);
+    const closed = await closeOpenReturning(
+      target,
+      schema.recordedIdentityAssertionsTable,
+      graphId,
+      ids,
+      recordedRevision,
+    );
+    const afterById = await resolveAfterImages(entityChunk, (missing) =>
+      getIdentityAssertionRowsByIds(target, schema, graphId, missing),
+    );
+    // A hard deletion closes the prior recorded row without leaving a current
+    // after-image; the insert below is then empty and the UPDATE above is the
+    // complete capture.
+    await insertRecordedIdentityAssertionRows(
+      target,
+      schema.recordedIdentityAssertionsTable,
+      recordedInsertsFor(afterById, closed),
+      recordedRevision,
+    );
+  }
+}
+
+/**
+ * Flushes buffered identity-transition notes to the append-only transition
+ * log. Unlike the node/edge/identity-assertion relations, this relation has
+ * no prior open row to close and no `op` classification — a transition is
+ * pure history from the moment it exists, so this is a plain chunked INSERT.
+ */
+export async function flushIdentityTransitions(
+  target: TransactionBackend,
+  schema: SqlSchema,
+  graphId: string,
+  notes: readonly IdentityTransitionNote[],
+  revision: number,
+  recordedAt: string,
+): Promise<void> {
+  if (notes.length === 0) return;
+  const chunkSize = recordedIdentityTransitionChunkSize(target);
+  // Ids that sort in recording order, so the readers' (revision, id) order
+  // lists the transitions of one flush the way they were noted.
+  const transitionIdAt = identityTransitionIdSequence();
+  const rows = notes.map((note, position) =>
+    encodeIdentityTransitionRow(
+      note,
+      revision,
+      recordedAt,
+      transitionIdAt(position),
+    ),
+  );
+  for (const values of chunk(rows, chunkSize)) {
+    await withIdentityTransitionLogRelations(
+      schema,
+      target.dialect,
+      "capture-flush",
+      executeStatement(
+        target,
+        sql`
+          INSERT INTO ${schema.identityTransitionsTable} (${IDENTITY_TRANSITION_COLUMNS})
+          VALUES ${sql.join(values, sql`, `)}
+        `,
+      ),
     );
   }
 }
@@ -204,16 +325,16 @@ async function closeOpenByKind(
   table: SqlFragment,
   graphId: string,
   kind: string,
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
       UPDATE ${table}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         AND kind = ${kind}
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `,
   );
 }
@@ -223,16 +344,16 @@ async function closeOpenEdgesByNodeKind(
   schema: SqlSchema,
   graphId: string,
   nodeKind: string,
-  recordedCommit: string,
+  recordedRevision: number,
 ): Promise<void> {
   await executeStatement(
     target,
     sql`
       UPDATE ${schema.recordedEdgesTable}
-      SET recorded_to = ${recordedCommit}
+      SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}
         AND (from_kind = ${nodeKind} OR to_kind = ${nodeKind})
-        AND recorded_to = ${RECORDED_MAX}
+        AND recorded_to = ${RECORDED_MAX_REVISION}
     `,
   );
 }
@@ -249,6 +370,8 @@ export async function closeRecordedHardDeletedKind(
     schema,
     graphId,
     ownsWriteLock,
+    undefined,
+    true,
   );
   if (removal.entity === "node") {
     await closeOpenByKind(
@@ -256,14 +379,14 @@ export async function closeRecordedHardDeletedKind(
       schema.recordedNodesTable,
       graphId,
       removal.kind,
-      recordedCommit,
+      recordedCommit.revision,
     );
     await closeOpenEdgesByNodeKind(
       target,
       schema,
       graphId,
       removal.kind,
-      recordedCommit,
+      recordedCommit.revision,
     );
     return;
   }
@@ -272,10 +395,21 @@ export async function closeRecordedHardDeletedKind(
     schema.recordedEdgesTable,
     graphId,
     removal.kind,
-    recordedCommit,
+    recordedCommit.revision,
   );
 }
 
+/**
+ * The ids of the edges a hard delete of the node removes, at either endpoint.
+ *
+ * Spelled like `edgeAtEitherEndpoint` (`backend/drizzle/operations/shared.ts`),
+ * the predicate of the delete this capture mirrors: the graph equality is
+ * repeated inside each arm with no conjunct shared by both, so SQLite without
+ * planner statistics seeks both endpoint indexes instead of walking the
+ * graph's edges. That builder renders Drizzle columns and this one a portable
+ * fragment, so the two spellings stay side by side rather than share code;
+ * `tests/backends/sqlite/edge-endpoint-delete-plan.test.ts` plans both.
+ */
 export async function queryConnectedEdgeIds(
   target: TransactionBackend,
   schema: SqlSchema,
@@ -285,11 +419,8 @@ export async function queryConnectedEdgeIds(
     asCompiledRowsSql(sql`
       SELECT id
       FROM ${schema.edgesTable}
-      WHERE graph_id = ${params.graphId}
-        AND (
-          (from_kind = ${params.kind} AND from_id = ${params.id})
-          OR (to_kind = ${params.kind} AND to_id = ${params.id})
-        )
+      WHERE (graph_id = ${params.graphId} AND from_kind = ${params.kind} AND from_id = ${params.id})
+        OR (graph_id = ${params.graphId} AND to_kind = ${params.kind} AND to_id = ${params.id})
     `),
   );
   return rows.map((row) => row.id);

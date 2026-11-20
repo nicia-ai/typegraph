@@ -22,6 +22,21 @@ appropriate for that field's type. Edge fields work the same way:
 .whereEdge("e", (e) => e.role.eq("admin"))
 ```
 
+New queries can also use the typed expression context passed as the second callback argument. This
+is the recommended form when a predicate combines fields, arithmetic, parameters, or subqueries:
+
+```typescript
+import { expr } from "@nicia-ai/typegraph";
+
+.whereNode("p", (_person, e) =>
+  expr.gt(e.p.age, expr.literal(18)),
+)
+```
+
+The first argument preserves the existing accessor API. Both forms compile through the same
+predicate representation. See [Database Expressions](/queries/expressions) for composition and
+null semantics.
+
 ## Predicate Types
 
 | Type | Predicates | Section |
@@ -35,6 +50,7 @@ appropriate for that field's type. Edge fields work the same way:
 | Array | `contains`, `containsAll`, `containsAny`, `isEmpty`, `isNotEmpty`, `lengthEq/Gt/Gte/Lt/Lte` | [Array](#array) |
 | Object | `get`, `field`, `hasKey`, `hasPath`, `pathEquals`, `pathContains`, `pathIsNull`, `pathIsNotNull` | [Object](#object) |
 | Embedding | `similarTo` | [Embedding](#embedding) |
+| System metadata (`$meta`) | Date operators on timestamps, number operators on `version` | [Metadata](/queries/filter#metadata) |
 | Subquery | `exists`, `notExists`, `inSubquery`, `notInSubquery` | [Subqueries](/queries/advanced) |
 
 ## Combining Predicates
@@ -86,7 +102,15 @@ These predicates are available on **all** field types:
 | `isNotNull()` | Is not null | `IS NOT NULL` |
 
 `eq` and `neq` accept `param()` references for [prepared queries](/queries/execute#prepared-queries).
-`in` and `notIn` do **not** support `param()` because the array length must be known at compile time.
+`in` and `notIn` accept one in place of the **whole** list — `p.id.in(param("ids"))`, bound with
+`execute({ ids: [...] })` — but not in place of an individual element.
+
+Equality and membership values follow the field's schema type. For example, a `number` field
+accepts numbers (or a parameter), while a `string` field accepts strings. `eq` and `neq` also
+accept a compatible explicit `fieldRef<T>` when comparing two query fields. Values that enter
+through a dynamic accessor or another unchecked boundary are validated while the predicate is
+built and are refused before TypeGraph compiles SQL when their runtime type disagrees with the
+registered schema.
 
 ---
 
@@ -144,7 +168,7 @@ p.email.isNotNull()
 | `contains(str)` | `string \| param()` | Substring match | `ILIKE '%str%'` | insensitive |
 | `startsWith(str)` | `string \| param()` | Prefix match | `ILIKE 'str%'` | insensitive |
 | `endsWith(str)` | `string \| param()` | Suffix match | `ILIKE '%str'` | insensitive |
-| `like(pattern)` | `string \| param()` | SQL LIKE pattern | `LIKE` | sensitive |
+| `like(pattern)` | `string \| param()` | SQL LIKE pattern | `LIKE` (`GLOB` on SQLite) | sensitive |
 | `ilike(pattern)` | `string \| param()` | Case-insensitive LIKE | `ILIKE` | insensitive |
 | `in(values[])` | `string[]` | In array | `IN (...)` | sensitive |
 | `notIn(values[])` | `string[]` | Not in array | `NOT IN (...)` | sensitive |
@@ -154,6 +178,16 @@ p.email.isNotNull()
 > **Wildcard escaping:** User input passed to `contains`, `startsWith`, and `endsWith` is
 > automatically escaped — `%` and `_` characters are treated as literals. Use `like` or `ilike`
 > when you need wildcard control.
+>
+> **Case:** `like` is case-sensitive on both backends. `ilike`, `contains`, `startsWith`, and
+> `endsWith` fold case the way the database does. SQLite folds ASCII letters only, unless the ICU
+> extension is loaded. PostgreSQL follows the database's `LC_CTYPE`: a UTF-8 locale folds `É` to `é`,
+> while the `C` locale folds ASCII only. Characters other than `%`, `_`, and `\` have no special
+> meaning in a `like` pattern on either backend.
+>
+> **Trailing escape:** a `like` or `ilike` pattern that ends with a single `\` escapes nothing. A
+> literal pattern like that throws `ConfigurationError` (`LIKE_PATTERN_TRAILING_ESCAPE`) when the
+> predicate is built; a `param()` pattern like that matches nothing. Write `\\` for a literal backslash.
 
 ---
 
@@ -233,34 +267,67 @@ typical cases.
 
 ## Date
 
-Date predicates for temporal comparisons. Accepts `Date` objects or ISO 8601 strings.
+Date predicates for fields whose schema type is a date (`z.date()`). A `Date` operand is compared as
+its `toISOString()` value.
+
+Equality and membership (`eq`, `neq`, `in`, `notIn`) take a `Date`, not a string. A string operand is
+refused when the predicate is built, with `UnsupportedPredicateError`
+(`Expected a date literal for field "…", got string.`); convert it with `new Date(value)`.
+
+The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, but only in the
+canonical form the store writes a date property in: UTC ISO-8601 with exactly three fractional
+digits, `YYYY-MM-DDTHH:mm:ss.sssZ` (`new Date(value).toISOString()` produces one). Any other string
+— `"2024-01-01"`, `"2024-01-01T00:00:00Z"`, an offset such as `"+01:00"`, a string with no zone, or an
+impossible date such as `"2024-02-30T00:00:00.000Z"` — is refused when the predicate is built, with
+`UnsupportedPredicateError`. SQLite compares the stored value as text and PostgreSQL as a
+`timestamptz` instant, and the two agree only on canonical text, so a refused string would have matched
+different rows on the two backends. Converting it yourself makes you choose the time zone it names;
+TypeGraph does not guess.
+
+A `Date` or string operand must fall in the years 0001 to 9999. After 9999 a `Date`'s `toISOString()` is
+the extended `+010000-…` form, which sorts as text before every four-digit year. Year 0000 is canonical
+text that SQLite compares, but PostgreSQL's `timestamptz` cast refuses it (`date/time field value out of
+range`), so `gte("0000-01-01T00:00:00.000Z")` failed there. Both are refused the same way.
+The check covers operands, not stored values: a date property stored in year 0000, which `z.date()`
+accepts, is written on every backend, but on PostgreSQL a predicate that casts that row, such as
+`gte(cutoff)`, fails with the same error.
+
+The same check applies to every operator, to each bound of `between`, to each element of an `in` /
+`notIn` list, to a nested date property reached through `get()`, to values bound to a `param()` when a
+prepared query executes, and in the expression context to a literal or parameter compared with any
+date-valued expression, including one a `coalesce` or `when` forwards
+(`expr.gte(expr.coalesce(ctx.d.publishedAt, expr.literal(fallback)), expr.param("from", "date"))`
+checks both `fallback` and `from`), so a refused operand never reaches SQL. An accepted string and a
+`Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
+`param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
+see [Metadata](/queries/filter#metadata).
 
 ### Equality
 
 ```typescript
-p.createdAt.eq("2024-01-01")
-p.createdAt.neq(new Date("2024-01-01"))
+p.createdAt.eq(new Date("2024-01-01T00:00:00.000Z"))
+p.createdAt.neq(new Date("2024-01-01T00:00:00.000Z"))
 ```
 
 ### Comparisons
 
 ```typescript
-p.createdAt.gt("2024-01-01")         // After
-p.createdAt.gte("2024-01-01")        // On or after
-p.createdAt.lt(new Date())           // Before now
-p.createdAt.lte("2024-12-31")        // On or before
+p.createdAt.gt("2024-01-01T00:00:00.000Z")   // After
+p.createdAt.gte("2024-01-01T00:00:00.000Z")  // On or after
+p.createdAt.lt(new Date())                   // Before now
+p.createdAt.lte("2024-12-31T23:59:59.999Z")  // On or before
 ```
 
 ### Range
 
 ```typescript
-p.createdAt.between("2024-01-01", "2024-12-31")
+p.createdAt.between("2024-01-01T00:00:00.000Z", "2024-12-31T23:59:59.999Z")
 ```
 
 ### List Membership
 
 ```typescript
-p.birthday.in(["2024-01-01", "2024-07-04"])
+p.birthday.in([new Date("2024-01-01T00:00:00.000Z"), new Date("2024-07-04T00:00:00.000Z")])
 ```
 
 ### Null Checks
@@ -274,15 +341,15 @@ p.verifiedAt.isNotNull()
 
 | Predicate | Accepts | Description | SQL |
 |-----------|---------|-------------|-----|
-| `eq(value)` | `Date \| string \| param()` | Equals | `=` |
-| `neq(value)` | `Date \| string \| param()` | Not equals | `!=` |
+| `eq(value)` | `Date \| param()` | Equals | `=` |
+| `neq(value)` | `Date \| param()` | Not equals | `!=` |
 | `gt(value)` | `Date \| string \| param()` | After | `>` |
 | `gte(value)` | `Date \| string \| param()` | On or after | `>=` |
 | `lt(value)` | `Date \| string \| param()` | Before | `<` |
 | `lte(value)` | `Date \| string \| param()` | On or before | `<=` |
 | `between(lo, hi)` | `Date \| string \| param()` | Inclusive range | `BETWEEN lo AND hi` |
-| `in(values[])` | `(Date \| string)[]` | In array | `IN (...)` |
-| `notIn(values[])` | `(Date \| string)[]` | Not in array | `NOT IN (...)` |
+| `in(values[])` | `Date[] \| param()` | In array | `IN (...)` |
+| `notIn(values[])` | `Date[] \| param()` | Not in array | `NOT IN (...)` |
 | `isNull()` | — | Is null | `IS NULL` |
 | `isNotNull()` | — | Is not null | `IS NOT NULL` |
 
@@ -588,7 +655,8 @@ const results = await prepared.execute({ name: "Alice" });
 | Scalar comparisons (`eq`, `neq`, `gt`, `gte`, `lt`, `lte`) | Yes | `p.age.gt(param("minAge"))` |
 | `between` bounds | Yes | `p.age.between(param("lo"), param("hi"))` |
 | String operations (`contains`, `startsWith`, `endsWith`, `like`, `ilike`) | Yes | `p.name.contains(param("search"))` |
-| `in` / `notIn` | No | Array length must be known at compile time |
+| `in` / `notIn` (whole list) | Yes | `p.id.in(param("ids"))` with `execute({ ids: [...] })` |
+| `in` / `notIn` (one element) | No | Bind the whole list instead |
 | Array predicates | No | — |
 | Subquery predicates | No | — |
 

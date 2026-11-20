@@ -1,3 +1,4 @@
+import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
  * Per-kind blocking (design §9 phase 2): bucket a kind's NEW nodes by a cheap
@@ -81,6 +82,22 @@ export function isUniqueBucketKey(key: string): boolean {
 }
 
 /**
+ * Returns the declared constraint name encoded in a unique bucket key. This is
+ * the single decoder for the private bucket-key format, so candidate evidence
+ * never has to parse an implementation detail or retain the compared value.
+ */
+export function uniqueConstraintNameForBucket(key: string): string | undefined {
+  if (!isUniqueBucketKey(key)) {
+    return undefined;
+  }
+  const constraintStart = UNIQUE_KEY_PREFIX.length + KEY_PART_SEPARATOR.length;
+  const constraintEnd = key.indexOf(KEY_PART_SEPARATOR, constraintStart);
+  return constraintEnd === -1 ? undefined : (
+      key.slice(constraintStart, constraintEnd)
+    );
+}
+
+/**
  * Builds the exact-match signature for one unique constraint from a node's
  * field values, or `undefined` when ANY of the constraint's fields is `null` /
  * `undefined` (a partial key cannot establish exact-match equality, and — since
@@ -103,7 +120,11 @@ function constraintSignature(
 ): string | undefined {
   const props = node as unknown as Record<string, unknown>;
   for (const field of constraint.fields) {
-    const value = props[field];
+    // Own-key read: a constraint over a prototype-named field ("toString")
+    // must see an absent value as absent here, exactly as computeUniqueKey
+    // below does — a raw read would mint a signature for a value the
+    // commit-time uniqueness check treats as missing.
+    const value = readOwnProperty(props, field);
     if (value === undefined || value === null) {
       return undefined;
     }

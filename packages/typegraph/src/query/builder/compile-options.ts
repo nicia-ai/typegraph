@@ -3,10 +3,16 @@
  * aggregate query, and unionable query builders. Keeps one source of
  * truth for which config fields are propagated to the compiler.
  */
+import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
+import { resolveRecursiveTraversal } from "../../backend/capabilities/recursive-traversal";
 import { resolveEmbeddingFields } from "../../core/embedding";
 import { resolveDeclaredFulltextLanguage } from "../../core/searchable";
+import { identityActiveKinds } from "../../identity/service-components";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { type CompileQueryOptions } from "../compiler/index";
+import {
+  type CompileQueryOptions,
+  COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
+} from "../compiler/index";
 import {
   type VectorSlotDescriptor,
   vectorSlotKey,
@@ -18,18 +24,33 @@ import { type QueryBuilderConfig } from "./types";
 export function buildCompileOptions(
   config: QueryBuilderConfig,
 ): CompileQueryOptions {
-  const fulltextStrategy = config.backend?.fulltextStrategy;
+  const fulltextStrategy =
+    config.backend === undefined ?
+      undefined
+    : resolveBackendFulltext(config.backend);
   const vectorStrategy = config.backend?.vectorStrategy;
   const { recordedReadBinding } = getQueryBuilderInternalContext(config);
   return {
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
     windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
+    orderedAggregates:
+      config.backend === undefined ?
+        false
+      : config.backend.capabilities.orderedAggregates === true,
+    recursiveTraversal:
+      config.backend === undefined ?
+        COMPILER_DEFAULT_RECURSIVE_TRAVERSAL
+      : resolveRecursiveTraversal(config.backend.capabilities),
+    identitySameIdAcrossKinds: config.identitySameIdAcrossKinds,
+    identityRegisteredKinds: [...identityActiveKinds(config.registry)],
     ...(fulltextStrategy === undefined ?
       {}
     : {
         fulltextStrategy,
-        fulltextLanguages: buildFulltextLanguages(config.registry),
+        ...(fulltextStrategy === false ?
+          {}
+        : { fulltextLanguages: buildFulltextLanguages(config.registry) }),
       }),
     ...(vectorStrategy === undefined ?
       {}

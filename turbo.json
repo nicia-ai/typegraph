@@ -12,15 +12,24 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": [
+        "TYPEGRAPH_LIBSQL_TMPDIR",
+        "TYPEGRAPH_HEAVY_FILE_PARALLELISM"
+      ]
     },
     "test:unit": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": [
+        "TYPEGRAPH_LIBSQL_TMPDIR",
+        "TYPEGRAPH_HEAVY_FILE_PARALLELISM"
+      ]
     },
     "test:property": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["TYPEGRAPH_PROPERTY_RUNS_SCALE"]
     },
     "bench": {
       "dependsOn": ["^build"],

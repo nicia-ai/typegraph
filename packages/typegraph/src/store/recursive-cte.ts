@@ -1,34 +1,49 @@
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../backend/capabilities/recursive-traversal";
 import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
 import { type RecursiveCyclePolicy } from "../query/ast";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
+import { compileKindQualifiedPathToken } from "../query/compiler/recursive";
 import {
   type RecordedReadBinding,
   recordedReadSchemaFor,
   type SqlSchema,
 } from "../query/compiler/schema";
 import {
+  compileEdgeMembershipFilters,
   compileTemporalFilter,
   currentReadInstant,
+  type EdgeKindMembership,
 } from "../query/compiler/temporal";
 import { type DialectAdapter } from "../query/dialect/types";
 import { sql, type SqlFragment } from "../query/sql-fragment";
+import {
+  type AcyclicRelationMember,
+  type ProposedRelationEdge,
+} from "./acyclicity";
 import { type TraversalDirection } from "./algorithms/types";
+import { edgeOrderColumnName, type EdgeReadWindow } from "./neighbors";
 
-type BuildReachableCteOptions = Readonly<{
+/** A node the walk starts from, named by its (kind, id) identity. */
+export type ReachableSeed = Readonly<{ kind: string; id: string }>;
+
+/**
+ * The row-visibility inputs every reachable CTE shares, however it is bounded:
+ * the graph, the temporal coordinate, the recorded relation, and the engine
+ * verdict. Neither the walk's bounds nor its source set live here.
+ */
+type ReachableCteFiltersCore = Readonly<{
   graphId: string;
-  sourceId: string;
-  edgeKinds: readonly string[];
-  maxHops: number;
-  direction: TraversalDirection;
-  cyclePolicy: RecursiveCyclePolicy;
-  includePath: boolean;
   /**
    * Temporal mode applied to both nodes and edges along the traversal.
    * Callers that want the pre-temporal behavior (soft-delete only) should
    * pass `"includeEnded"`.
    */
   temporalMode: TemporalMode;
+  currentTimestamp?: SqlFragment;
   /** ISO-8601 timestamp used when `temporalMode === "asOf"`. */
   asOf?: string;
   /** Recorded/system-time timestamp for recorded-pinned reads. */
@@ -41,31 +56,122 @@ type BuildReachableCteOptions = Readonly<{
    */
   schema: SqlSchema;
   recordedReadBinding?: RecordedReadBinding;
+  /** Resolved verdict for the engine this CTE will run on. */
+  recursiveTraversal: RecursiveTraversalVerdict;
+  /** Operation label echoed in the refusal's `details.operation`. */
+  operation: string;
 }>;
 
-export function buildReachableCte(
-  options: BuildReachableCteOptions,
-): SqlFragment {
-  const trackPath = options.cyclePolicy === "prevent" || options.includePath;
+/**
+ * {@link ReachableCteFiltersCore} plus the three members only a HOP-BOUNDED
+ * walk can state, and its one-or-many source set. An exhaustive walk has no
+ * depth ceiling to cap, no path to emit, and no cycle policy to apply (its
+ * visited set subsumes all three), so it does not take this type: stating the
+ * absence structurally keeps an exhaustive caller from being asked for a
+ * `maxHops` that would be silently ignored.
+ */
+type ReachableCteCore = ReachableCteFiltersCore &
+  Readonly<{
+    maxHops: number;
+    cyclePolicy: RecursiveCyclePolicy;
+    includePath: boolean;
+  }> &
+  (
+    | Readonly<{ source: ReachableSeed; sources?: never }>
+    | Readonly<{ source?: never; sources: readonly ReachableSeed[] }>
+  );
+
+function compileSeedFilter(seed: ReachableSeed): SqlFragment {
+  return sql`(n.kind = ${seed.kind} AND n.id = ${seed.id})`;
+}
+
+type BuildReachableCteOptions = ReachableCteCore &
+  Readonly<{
+    edgeKinds: readonly string[];
+    direction: TraversalDirection;
+    edgeWindows?: Readonly<Record<string, EdgeReadWindow | undefined>>;
+  }>;
+
+type PreparedReachableCte = Readonly<{
+  baseCase: SqlFragment;
+  recursiveColumns: readonly SqlFragment[];
+  recursiveWhere: readonly SqlFragment[];
+  /**
+   * The edge-row visibility predicates (graph, kind, temporal) the recursive
+   * WHERE opens with — also the filter a pre-ranked edge relation applies
+   * before its window, so both read the same rows.
+   */
+  edgeWhere: readonly SqlFragment[];
+  forceWorktableOuterJoinOrder: boolean;
+  schema: SqlSchema;
+}>;
+
+type ReachableCteFilters = Readonly<{
+  edgeWhere: readonly SqlFragment[];
+  nodeTemporalFilter: SqlFragment;
+  schema: SqlSchema;
+  forceWorktableOuterJoinOrder: boolean;
+}>;
+
+/**
+ * Everything a reachable-CTE's base case and recursive WHERE clauses need
+ * that does not depend on direction OR on how the walk is bounded: the
+ * edge-kind filter (evaluated against whatever superset of kinds the caller's
+ * shape requires), the node temporal filter and the edge row filter, the
+ * recorded-schema swap, and the dialect's worktable join-order fact.
+ *
+ * The edge row filter is the read's validity window, unless the walk is over
+ * a membership relation (`edgeMembership`): then it is that relation's
+ * membership at the read's coordinate ({@link compileEdgeMembershipFilters}),
+ * because an owned part is reached through the rows that bind it, not through
+ * the rows still valid.
+ *
+ * Shared by the hop-bounded preparation ({@link prepareReachableCte}, used by
+ * {@link buildReachableCte}) and by the
+ * exhaustive, set-semantics one
+ * ({@link prepareExhaustiveReachableCte}, used by
+ * {@link buildExhaustiveDirectedReachableCte}), so no traversal can differ
+ * from another in WHICH rows it is allowed to see — only in how it terminates.
+ */
+function prepareReachableFilters(
+  options: ReachableCteFiltersCore,
+  edgeKindsForFilter: readonly string[],
+  edgeMembership?: readonly EdgeKindMembership[],
+): ReachableCteFilters {
+  assertRecursiveTraversal(options.recursiveTraversal, options.operation);
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),
-    options.edgeKinds,
+    edgeKindsForFilter,
   );
-  const currentTimestamp = currentReadInstant();
+  const currentTimestamp = options.currentTimestamp ?? currentReadInstant();
   const nodeTemporalFilter = compileTemporalFilter({
     mode: options.temporalMode,
     asOf: options.asOf,
     recordedAsOf: options.recordedAsOf,
     tableAlias: "n",
     currentTimestamp,
+    recordedReadBinding: options.recordedReadBinding,
   });
-  const edgeTemporalFilter = compileTemporalFilter({
-    mode: options.temporalMode,
-    asOf: options.asOf,
-    recordedAsOf: options.recordedAsOf,
-    tableAlias: "e",
-    currentTimestamp,
-  });
+  const edgeRowFilters =
+    edgeMembership === undefined ?
+      [
+        compileTemporalFilter({
+          mode: options.temporalMode,
+          asOf: options.asOf,
+          recordedAsOf: options.recordedAsOf,
+          tableAlias: "e",
+          currentTimestamp,
+          recordedReadBinding: options.recordedReadBinding,
+        }),
+      ]
+    : compileEdgeMembershipFilters({
+        members: edgeMembership,
+        tableAlias: "e",
+        mode: options.temporalMode,
+        asOf: options.asOf,
+        recordedAsOf: options.recordedAsOf,
+        recordedReadBinding: options.recordedReadBinding,
+      });
   // Derive the read schema from the same `recordedAsOf` that drives the temporal
   // filters above: when a recorded pin is set the node/edge sources become the
   // recorded relations, matching the `recorded_from/to` interval predicate. One
@@ -77,15 +183,47 @@ export function buildReachableCte(
     "recorded-recursive-cte",
   );
 
+  return {
+    edgeWhere: [
+      sql`e.graph_id = ${options.graphId}`,
+      edgeKindFilter,
+      ...edgeRowFilters,
+    ],
+    nodeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder:
+      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+  };
+}
+
+/**
+ * The HOP-BOUNDED preparation: a `depth` column capped at `maxHops`, plus the
+ * path tracking `cyclePolicy: "prevent"` / `includePath` ask for. Termination
+ * is numeric, which is what lets the recursive term be `UNION ALL` (one row
+ * per distinct path) and what makes `includePath`/cycle prevention
+ * expressible at all.
+ */
+function prepareReachableCte(
+  options: ReachableCteCore,
+  edgeKindsForFilter: readonly string[],
+): PreparedReachableCte {
+  const {
+    edgeWhere,
+    nodeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder,
+  } = prepareReachableFilters(options, edgeKindsForFilter);
+  const trackPath = options.cyclePolicy === "prevent" || options.includePath;
+  const pathToken = compileKindQualifiedPathToken("n");
   const initialPath =
-    trackPath ? options.dialect.initializePath(sql.raw("n.id")) : undefined;
+    trackPath ? options.dialect.initializePath(pathToken) : undefined;
   const pathExtension =
     trackPath ?
-      options.dialect.extendPath(sql.raw("r.path"), sql.raw("n.id"))
+      options.dialect.extendPath(sql.raw("r.path"), pathToken)
     : undefined;
   const cycleCheck =
     options.cyclePolicy === "prevent" ?
-      options.dialect.cycleCheck(sql.raw("n.id"), sql.raw("r.path"))
+      options.dialect.cycleCheck(pathToken, sql.raw("r.path"))
     : undefined;
 
   const baseColumns: SqlFragment[] = [sql`n.id`, sql`n.kind`, sql`0 AS depth`];
@@ -93,7 +231,16 @@ export function buildReachableCte(
     baseColumns.push(sql`${initialPath} AS path`);
   }
 
-  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND n.id = ${options.sourceId} AND ${nodeTemporalFilter}`;
+  if (options.sources !== undefined)
+    baseColumns.push(sql`n.kind AS origin_kind`, sql`n.id AS origin_id`);
+  const sourceFilter =
+    options.sources === undefined ? compileSeedFilter(options.source)
+    : options.sources.length === 0 ? sql`1 = 0`
+    : sql`(${sql.join(
+        options.sources.map((seed) => compileSeedFilter(seed)),
+        sql` OR `,
+      )})`;
+  const baseCase = sql`SELECT ${sql.join(baseColumns, sql`, `)} FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${sourceFilter} AND ${nodeTemporalFilter}`;
 
   const recursiveColumns: SqlFragment[] = [
     sql`n.id`,
@@ -104,27 +251,183 @@ export function buildReachableCte(
     recursiveColumns.push(sql`${pathExtension} AS path`);
   }
 
+  if (options.sources !== undefined)
+    recursiveColumns.push(sql`r.origin_kind`, sql`r.origin_id`);
+
   const recursiveWhere: SqlFragment[] = [
-    sql`e.graph_id = ${options.graphId}`,
-    edgeKindFilter,
-    edgeTemporalFilter,
+    ...edgeWhere,
     nodeTemporalFilter,
     sql`r.depth < ${options.maxHops}`,
   ];
   if (cycleCheck !== undefined) recursiveWhere.push(cycleCheck);
 
-  const forceWorktableOuterJoinOrder =
-    options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder;
-
-  const recursiveCase = compileRecursiveBranch({
+  return {
+    baseCase,
     recursiveColumns,
-    whereClauses: recursiveWhere,
-    direction: options.direction,
+    recursiveWhere,
+    edgeWhere,
     forceWorktableOuterJoinOrder,
     schema,
+  };
+}
+
+/**
+ * The EXHAUSTIVE preparation: `(id, kind)` and nothing else — no `depth`, no
+ * `path` — so the recursive term can be `UNION` and the visited set itself is
+ * the bound. This is the same device the acyclicity probe uses
+ * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's full
+ * column list is what makes an unbounded recursion terminate on a finite
+ * graph with no depth ceiling and no cycle check, and it is why a `depth`
+ * column must NOT be added back here — a per-path depth would make the same
+ * node distinct once per path length and turn the fixpoint into an open walk.
+ */
+function prepareExhaustiveReachableCte(
+  options: BuildExhaustiveDirectedReachableCteOptions,
+  edgeKindsForFilter: readonly string[],
+): PreparedReachableCte {
+  const {
+    edgeWhere,
+    nodeTemporalFilter,
+    schema,
+    forceWorktableOuterJoinOrder,
+  } = prepareReachableFilters(
+    options,
+    edgeKindsForFilter,
+    options.edgeMembership,
+  );
+
+  return {
+    baseCase: sql`SELECT n.id, n.kind FROM ${schema.nodesTable} n WHERE n.graph_id = ${options.graphId} AND ${compileSeedFilter(options.source)} AND ${nodeTemporalFilter}`,
+    recursiveColumns: [sql`n.id`, sql`n.kind`],
+    recursiveWhere: [...edgeWhere, nodeTemporalFilter],
+    edgeWhere,
+    forceWorktableOuterJoinOrder,
+    schema,
+  };
+}
+
+/**
+ * The pre-ranked edge relation a windowed walk expands through. Each window
+ * keeps only the newest N edges per source endpoint, oriented uniformly as
+ * `typegraph_source_*` / `typegraph_target_*`, so the recursive term walks it
+ * "out" whatever direction each kind was requested in.
+ */
+const WINDOWED_EDGES_CTE = "typegraph_windowed_edges";
+
+export function buildReachableCte(
+  options: BuildReachableCteOptions,
+): SqlFragment {
+  const prepared = prepareReachableCte(options, options.edgeKinds);
+  const windowed = Object.values(options.edgeWindows ?? {}).some(
+    (window) => window !== undefined,
+  );
+
+  const recursiveCase = compileRecursiveBranch({
+    recursiveColumns: prepared.recursiveColumns,
+    whereClauses: prepared.recursiveWhere,
+    direction: windowed ? "out" : options.direction,
+    forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
+    schema: prepared.schema,
+    edgesTable:
+      windowed ?
+        sql.identifier(WINDOWED_EDGES_CTE)
+      : prepared.schema.edgesTable,
+    ...(windowed && {
+      joinKindField: "typegraph_source_kind",
+      joinField: "typegraph_source_id",
+      targetField: "typegraph_target_id",
+      targetKindField: "typegraph_target_kind",
+    }),
   });
 
-  return sql`WITH RECURSIVE reachable AS (${baseCase} UNION ALL ${recursiveCase})`;
+  if (!windowed) {
+    return sql`WITH RECURSIVE reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
+  }
+  const windowedEdges = buildWindowedEdgesCte(
+    prepared.schema.edgesTable,
+    options.direction,
+    options.edgeKinds.map((kind) => [kind, options.edgeWindows?.[kind]]),
+    sql.join([...prepared.edgeWhere], sql` AND `),
+  );
+  return sql`WITH RECURSIVE ${sql.raw(WINDOWED_EDGES_CTE)} AS (${windowedEdges}), reachable AS (${prepared.baseCase} UNION ALL ${recursiveCase})`;
+}
+
+type BuildExhaustiveDirectedReachableCteOptions = ReachableCteFiltersCore &
+  Readonly<{
+    /**
+     * The node the walk starts from. The walk is keyed by `(kind, id)` end to
+     * end — seeded from this node, and each hop following an edge from the
+     * frontier row's own `(kind, id)` — so a node of another kind that shares
+     * an id is never mistaken for a member of the closure.
+     */
+    source: ReachableSeed;
+    /** Edge kinds walked in the "out" direction (`e.from_id = r.id`). */
+    outEdgeKinds: readonly string[];
+    /** Edge kinds walked in the "in" direction (`e.to_id = r.id`). */
+    inEdgeKinds: readonly string[];
+    /**
+     * The membership rule of every walked edge kind. The closure follows the
+     * rows that bind a part to its whole at the read's instant, never the
+     * read's validity window: an ended row of an `"allRows"` kind still binds,
+     * and a read that widens visibility (`includeEnded`) does not re-attach an
+     * ended `"openRows"` row.
+     */
+    edgeMembership: readonly EdgeKindMembership[];
+  }>;
+
+/**
+ * A reachable CTE whose recursive term walks two edge-kind groups in two
+ * different, FIXED directions, bounded by its visited set rather than by a hop
+ * ceiling. Every hop tries both groups against the current frontier row,
+ * unioned within the SAME recursive term via an OR on the join condition,
+ * never as two separate recursive terms (PostgreSQL refuses more than one
+ * self-reference in a recursive CTE, even split across `UNION` branches).
+ *
+ * Two fixed directions are what let a composition closure cross a relation
+ * that mixes `part -> whole` and `whole -> part` (`has_*`) realizing edges
+ * across levels of the same tree, without walking `direction: "both"` — which
+ * would also climb from a mid-tree root to its ancestors and re-descend into
+ * siblings. A uniform `edgeKinds`+`direction` traversal
+ * ({@link buildReachableCte}) cannot express "these kinds forward, those kinds
+ * reversed" in one term.
+ *
+ * `UNION`, never `UNION ALL`, over a frontier of exactly `(id, kind)` — the
+ * device the acyclicity probe uses
+ * ({@link buildEdgeAcyclicityProbe}): set semantics on the frontier's whole
+ * column list makes the recursion reach a fixpoint on any finite graph, so
+ * there is no depth ceiling to exceed and no cycle check to carry. A cyclic
+ * relation terminates too (a revisited node adds no new row), which is what
+ * lets the caller drop `cyclePolicy` rather than choose one.
+ *
+ * Exists for the one reader whose correctness IS completeness:
+ * `subgraph({ composition: true })` returns a whole plus its owned unit, and
+ * a truncated prefix of a part tree is not an export unit — reloading it
+ * would silently drop the tail of every deep subtree, and a required part cut
+ * off from its whole cannot even be recreated. Every other traversal is a
+ * breadth CHOICE the caller states in hops, and keeps
+ * {@link buildReachableCte}.
+ */
+export function buildExhaustiveDirectedReachableCte(
+  options: BuildExhaustiveDirectedReachableCteOptions,
+): SqlFragment {
+  const prepared = prepareExhaustiveReachableCte(options, [
+    ...options.outEdgeKinds,
+    ...options.inEdgeKinds,
+  ]);
+
+  const recursiveCase = buildDirectedGroupsBranch({
+    recursiveColumns: prepared.recursiveColumns,
+    whereClauses: prepared.recursiveWhere,
+    outEdgeKinds: options.outEdgeKinds,
+    inEdgeKinds: options.inEdgeKinds,
+    forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
+    schema: prepared.schema,
+  });
+
+  // The explicit `(id, kind)` column list is what the `UNION` dedupes on, and
+  // it names the columns `included_ids` reads back (the same device
+  // `ancestry(origin_key, node_kind, node_id)` uses in the acyclicity probe).
+  return sql`WITH RECURSIVE reachable(id, kind) AS (${prepared.baseCase} UNION ${recursiveCase})`;
 }
 
 type CompileRecursiveBranchOptions = Readonly<{
@@ -133,6 +436,11 @@ type CompileRecursiveBranchOptions = Readonly<{
   direction: TraversalDirection;
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
+  edgesTable: SqlFragment;
+  joinKindField?: "from_kind" | "to_kind" | "typegraph_source_kind";
+  joinField?: "from_id" | "to_id" | "typegraph_source_id";
+  targetField?: "from_id" | "to_id" | "typegraph_target_id";
+  targetKindField?: "from_kind" | "to_kind" | "typegraph_target_kind";
 }>;
 
 function compileRecursiveBranch(
@@ -145,22 +453,26 @@ function compileRecursiveBranch(
       return buildDirectionalBranch({
         selectClause,
         whereClauses: options.whereClauses,
-        joinField: "from_id",
-        targetField: "to_id",
-        targetKindField: "to_kind",
+        joinKindField: options.joinKindField ?? "from_kind",
+        joinField: options.joinField ?? "from_id",
+        targetField: options.targetField ?? "to_id",
+        targetKindField: options.targetKindField ?? "to_kind",
         forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
         schema: options.schema,
+        edgesTable: options.edgesTable,
       });
     }
     case "in": {
       return buildDirectionalBranch({
         selectClause,
         whereClauses: options.whereClauses,
+        joinKindField: "to_kind",
         joinField: "to_id",
         targetField: "from_id",
         targetKindField: "from_kind",
         forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
         schema: options.schema,
+        edgesTable: options.edgesTable,
       });
     }
     case "both": {
@@ -169,19 +481,54 @@ function compileRecursiveBranch(
         whereClauses: options.whereClauses,
         forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
         schema: options.schema,
+        edgesTable: options.edgesTable,
       });
     }
   }
 }
 
+type RecursiveFrontierBranchOptions = Readonly<{
+  selectClause: SqlFragment;
+  /** How an edge row matches the frontier row `r`. */
+  joinCondition: SqlFragment;
+  /** The nodes-table join that resolves the matched row's far endpoint. */
+  nodeJoin: SqlFragment;
+  whereClauses: readonly SqlFragment[];
+  forceWorktableOuterJoinOrder: boolean;
+  /** The edge relation `e` reads: the edges table or a pre-ranked window of it. */
+  edgesTable: SqlFragment;
+}>;
+
+/**
+ * THE recursive term every frontier traversal emits: the one owner of the
+ * `forceWorktableOuterJoinOrder` fork, so each branch builder supplies only
+ * its own `joinCondition` and `nodeJoin`.
+ *
+ * A dialect that forces worktable-outer join order cannot take the frontier
+ * join as a `JOIN ... ON`; the condition moves into the `WHERE` list behind a
+ * `CROSS JOIN` instead, which is semantically the same predicate and leaves
+ * the planner the order it requires.
+ */
+function recursiveFrontierBranch(
+  options: RecursiveFrontierBranchOptions,
+): SqlFragment {
+  if (options.forceWorktableOuterJoinOrder) {
+    const allWhere = [...options.whereClauses, options.joinCondition];
+    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.edgesTable} e ${options.nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
+  }
+  return sql`${options.selectClause} FROM reachable r JOIN ${options.edgesTable} e ON ${options.joinCondition} ${options.nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+}
+
 type DirectionalBranchOptions = Readonly<{
   selectClause: SqlFragment;
   whereClauses: readonly SqlFragment[];
-  joinField: "from_id" | "to_id";
-  targetField: "from_id" | "to_id";
-  targetKindField: "from_kind" | "to_kind";
+  joinKindField: "from_kind" | "to_kind" | "typegraph_source_kind";
+  joinField: "from_id" | "to_id" | "typegraph_source_id";
+  targetField: "from_id" | "to_id" | "typegraph_target_id";
+  targetKindField: "from_kind" | "to_kind" | "typegraph_target_kind";
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
+  edgesTable: SqlFragment;
 }>;
 
 function buildDirectionalBranch(
@@ -189,15 +536,14 @@ function buildDirectionalBranch(
 ): SqlFragment {
   const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND n.id = e.${sql.raw(options.targetField)} AND n.kind = e.${sql.raw(options.targetKindField)}`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`e.${sql.raw(options.joinField)} = r.id`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
-  }
-
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON e.${sql.raw(options.joinField)} = r.id ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`e.${sql.raw(options.joinKindField)} = r.kind AND e.${sql.raw(options.joinField)} = r.id`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    edgesTable: options.edgesTable,
+  });
 }
 
 type BidirectionalBranchOptions = Readonly<{
@@ -205,6 +551,7 @@ type BidirectionalBranchOptions = Readonly<{
   whereClauses: readonly SqlFragment[];
   forceWorktableOuterJoinOrder: boolean;
   schema: SqlSchema;
+  edgesTable: SqlFragment;
 }>;
 
 function buildBidirectionalBranch(
@@ -212,15 +559,547 @@ function buildBidirectionalBranch(
 ): SqlFragment {
   // PostgreSQL rejects multiple non-recursive terms, so both directions are
   // folded into a single UNION ALL branch via an OR on the join condition.
-  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
+  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.to_kind = r.kind AND e.to_id = r.id AND n.id = e.from_id AND n.kind = e.from_kind) OR (e.from_kind = r.kind AND e.from_id = r.id AND n.id = e.to_id AND n.kind = e.to_kind))`;
 
-  if (options.forceWorktableOuterJoinOrder) {
-    const allWhere = [
-      ...options.whereClauses,
-      sql`(e.from_id = r.id OR e.to_id = r.id)`,
-    ];
-    return sql`${options.selectClause} FROM reachable r CROSS JOIN ${options.schema.edgesTable} e ${nodeJoin} WHERE ${sql.join(allWhere, sql` AND `)}`;
+  return recursiveFrontierBranch({
+    selectClause: options.selectClause,
+    joinCondition: sql`((e.from_kind = r.kind AND e.from_id = r.id) OR (e.to_kind = r.kind AND e.to_id = r.id))`,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    edgesTable: options.edgesTable,
+  });
+}
+
+export function buildWindowedEdgesCte(
+  edgesTable: SqlFragment,
+  defaultDirection: TraversalDirection,
+  edgeKinds: readonly [string, EdgeReadWindow | undefined][],
+  where: SqlFragment,
+): SqlFragment {
+  const branches = edgeKinds.flatMap(([kind, window]) => {
+    const direction = window?.direction ?? defaultDirection;
+    const directions: readonly Exclude<TraversalDirection, "both">[] =
+      direction === "both" ? ["out", "in"] : [direction];
+    return directions.map((orientedDirection) => {
+      const sourceKind = orientedDirection === "out" ? "from_kind" : "to_kind";
+      const sourceId = orientedDirection === "out" ? "from_id" : "to_id";
+      const targetKind = orientedDirection === "out" ? "to_kind" : "from_kind";
+      const targetId = orientedDirection === "out" ? "to_id" : "from_id";
+      const column = edgeOrderColumnName(window?.orderBy?.field ?? "id");
+      const orderDirection = window?.orderBy?.direction ?? "asc";
+      const omitReverseSelfLoop =
+        direction === "both" && orientedDirection === "in" ?
+          sql` AND NOT (e.from_kind = e.to_kind AND e.from_id = e.to_id)`
+        : sql.empty();
+      const oriented = sql`SELECT e.*, e.${sql.raw(sourceKind)} AS typegraph_source_kind, e.${sql.raw(sourceId)} AS typegraph_source_id, e.${sql.raw(targetKind)} AS typegraph_target_kind, e.${sql.raw(targetId)} AS typegraph_target_id`;
+      if (window === undefined) {
+        return sql`${oriented}, 1 AS typegraphedgerank FROM ${edgesTable} e WHERE ${where} AND e.kind = ${kind}${omitReverseSelfLoop}`;
+      }
+      const rank = sql`ROW_NUMBER() OVER (PARTITION BY e.kind, e.${sql.raw(sourceKind)}, e.${sql.raw(sourceId)} ORDER BY CASE WHEN e.${sql.raw(column)} IS NULL THEN 1 ELSE 0 END ASC, e.${sql.raw(column)} ${sql.raw(orderDirection.toUpperCase())}, e.id ASC)`;
+      const ranked = sql`${oriented}, ${rank} AS typegraphedgerank FROM ${edgesTable} e WHERE ${where} AND e.kind = ${kind}${omitReverseSelfLoop}`;
+      return sql`SELECT * FROM (${ranked}) ranked WHERE ranked.typegraphedgerank <= ${window.limit}`;
+    });
+  });
+  return sql.join(branches, sql` UNION ALL `);
+}
+
+type DirectedGroupsBranchOptions = Readonly<{
+  recursiveColumns: readonly SqlFragment[];
+  whereClauses: readonly SqlFragment[];
+  outEdgeKinds: readonly string[];
+  inEdgeKinds: readonly string[];
+  forceWorktableOuterJoinOrder: boolean;
+  schema: SqlSchema;
+}>;
+
+/**
+ * The directed-groups counterpart of {@link buildBidirectionalBranch}: an
+ * edge row matches this frontier row either by starting from it (`e.from_kind
+ * = r.kind AND e.from_id = r.id`), restricted to `outEdgeKinds`, or by ending
+ * at it (`e.to_kind = r.kind AND e.to_id = r.id`), restricted to
+ * `inEdgeKinds` — never both regardless of kind, which is what
+ * `buildBidirectionalBranch` does instead. Both arms match the frontier
+ * row's KIND as well as its id: node ids are unique per kind only, and the
+ * composition closure this serves is keyed by `(kind, id)` like `parts()` and
+ * the cascade. An edge kind present in
+ * neither group can never match (`compileKindFilter([])` compiles to
+ * `1 = 0`), so a caller may pass one empty group for a uniform-orientation
+ * relation and get exactly the single-direction shape.
+ */
+function buildDirectedGroupsBranch(
+  options: DirectedGroupsBranchOptions,
+): SqlFragment {
+  const selectClause = sql`SELECT ${sql.join([...options.recursiveColumns], sql`, `)}`;
+  const outKindFilter = compileKindFilter(
+    sql.raw("e.kind"),
+    options.outEdgeKinds,
+  );
+  const inKindFilter = compileKindFilter(
+    sql.raw("e.kind"),
+    options.inEdgeKinds,
+  );
+  const joinCondition = sql`((e.from_id = r.id AND e.from_kind = r.kind AND (${outKindFilter})) OR (e.to_id = r.id AND e.to_kind = r.kind AND (${inKindFilter})))`;
+  const nodeJoin = sql`JOIN ${options.schema.nodesTable} n ON n.graph_id = e.graph_id AND ((e.from_id = r.id AND e.from_kind = r.kind AND (${outKindFilter}) AND n.id = e.to_id AND n.kind = e.to_kind) OR (e.to_id = r.id AND e.to_kind = r.kind AND (${inKindFilter}) AND n.id = e.from_id AND n.kind = e.from_kind))`;
+
+  return recursiveFrontierBranch({
+    selectClause,
+    joinCondition,
+    nodeJoin,
+    whereClauses: options.whereClauses,
+    forceWorktableOuterJoinOrder: options.forceWorktableOuterJoinOrder,
+    edgesTable: options.schema.edgesTable,
+  });
+}
+
+// ============================================================
+// Edge-acyclicity probe
+// ============================================================
+
+/**
+ * The row source `buildEdgeAcyclicityProbe`'s `seed` CTE reads from, and —
+ * critically — whether `ancestry` may hop THROUGH those rows on top of the
+ * relation's live edges:
+ *
+ * - `"proposed"` — edges the calling write path has already made visible to
+ *   the probing transaction (an insert earlier in the SAME transaction), OR
+ *   a single row. A single row never needs a seed-hop: the question this
+ *   probe answers is "does `to` already reach `from`", and a row cannot help
+ *   answer that about ITSELF by being hopped through as an intermediate
+ *   step. **Contract:** a caller passing more than one `"proposed"` row
+ *   thereby asserts those rows are already inserted in the probing
+ *   transaction (import and resurrection satisfy this; single create
+ *   proposes exactly one row).
+ * - `"unwritten"` — rows NOT YET written anywhere: a batch probed before its
+ *   first write (`assertUnwrittenEdgeRelationsAcyclic`,
+ *   `src/store/acyclicity.ts`) and the graph-merge plan-time preview
+ *   (`readProposedEdgeAcyclicityViolations`). The walk is the `"proposed"`
+ *   one — live edges only, joined directly, so it stays an index seek — but
+ *   the closing select differs: it returns one `(origin_key, reached_key)`
+ *   row for every `targets` row whose `from` an origin's `to` reaches. The
+ *   caller composes those reaches with the unwritten edges in memory, which
+ *   is what finds a cycle unwritten rows close through each other without the
+ *   walk hopping through rows that do not exist. Origins (`edges`) and
+ *   `targets` are separate row lists so a caller can send them in slices that
+ *   fit the engine's bind budget and still collect every origin/target pair.
+ * - `"relation"` — every live edge of the relation (the audit and
+ *   schema-tightening forms). `ancestry` joins `typegraph_edges` directly,
+ *   same as `"proposed"`.
+ */
+export type AcyclicityProbeSeed =
+  | Readonly<{ kind: "proposed"; edges: readonly ProposedRelationEdge[] }>
+  | Readonly<{
+      kind: "unwritten";
+      edges: readonly ProposedRelationEdge[];
+      targets: readonly ProposedRelationEdge[];
+    }>
+  | Readonly<{ kind: "relation" }>;
+
+/** Bound parameters one `seed` row of a row-list form renders. */
+export const ACYCLICITY_SEED_ROW_PARAM_COUNT = 5;
+/** Bound parameters one `targets` row of the `"unwritten"` form renders. */
+export const ACYCLICITY_TARGET_ROW_PARAM_COUNT = 3;
+
+function kindKeys(members: readonly AcyclicRelationMember[]): {
+  forward: readonly string[];
+  reversed: readonly string[];
+  all: readonly string[];
+} {
+  const forward = members
+    .filter((member) => !member.reversed)
+    .map((member) => member.edgeKind);
+  const reversed = members
+    .filter((member) => member.reversed)
+    .map((member) => member.edgeKind);
+  return { forward, reversed, all: [...forward, ...reversed] };
+}
+
+/**
+ * Which stored rows are in the relation now, each member under its own rule
+ * ({@link compileEdgeMembershipFilters}): the one spelling every reader of
+ * stored rows below appends, so the seed and the walk cannot disagree about
+ * which rows are in it. A relation whose members all count every row reads
+ * `deleted_at IS NULL` alone, so every standalone relation's statement stays
+ * byte-identical. Rows the caller supplies (`proposedSeedRow`,
+ * `buildAcyclicityTargets`) were already judged by the same rule
+ * (`acyclicRelationCountsRow`, `src/store/acyclicity.ts`) before they reach a
+ * statement.
+ */
+function relationMembershipFilters(
+  members: readonly AcyclicRelationMember[],
+): readonly SqlFragment[] {
+  return compileEdgeMembershipFilters({
+    members,
+    tableAlias: "e",
+    mode: "current",
+  });
+}
+
+function reversedForEdgeKind(
+  members: readonly AcyclicRelationMember[],
+  edgeKind: string,
+): boolean {
+  return members.some(
+    (member) => member.edgeKind === edgeKind && member.reversed,
+  );
+}
+
+/** {@link orientedEndpointColumns}'s return shape: the row's "part" (`match`) and "whole" (`next`) endpoint columns. */
+type OrientedEndpointColumns = Readonly<{
+  matchKind: SqlFragment;
+  matchId: SqlFragment;
+  nextKind: SqlFragment;
+  nextId: SqlFragment;
+}>;
+
+/**
+ * The ONE owner of "which stored endpoint (`from` or `to`) is the relation's
+ * part (`match`) and which is the whole (`next`), for a table-aliased edges
+ * row." Every member forward — the only shape a standalone `acyclic: true`
+ * relation ever produces — is a plain column pair with no `CASE`,
+ * byte-identical to a hand-written `SELECT` (the benchmark's
+ * index-only-scan assumption depends on this). A relation with a reversed
+ * member instead needs a `CASE`
+ * on the row's own `kind` to pick the pair per row.
+ *
+ * `buildAcyclicitySeed`'s `"relation"` form, `buildLiveEdgeCandidates`, and
+ * `buildAcyclicityAncestryStepDirect`'s next-node projection all call this
+ * instead of re-spelling the `CASE` — see AGENTS.md "one predicate, one
+ * owner". `buildAcyclicityAncestryStepDirect`'s JOIN predicate is the one
+ * caller that CANNOT use `matchKind`/`matchId` here: a `CASE`-wrapped
+ * equality is not sargable, and that predicate must stay an OR of two
+ * plain-column arms for SQLite's OR-optimization / PostgreSQL's `BitmapOr`
+ * to seek both `typegraph_edges_from_idx` and `typegraph_edges_to_idx` (see
+ * that function's own docblock). `proposedSeedRow` answers the identical
+ * question at the single-edge, JS-value level via {@link reversedForEdgeKind}
+ * rather than a `SqlFragment` — both trace back to `member.reversed` on
+ * `members` with no independent re-derivation of the decision.
+ */
+function orientedEndpointColumns(
+  members: readonly AcyclicRelationMember[],
+  alias: string,
+): OrientedEndpointColumns {
+  const { forward, all } = kindKeys(members);
+  const fromKind = sql.raw(`${alias}.from_kind`);
+  const fromId = sql.raw(`${alias}.from_id`);
+  const toKind = sql.raw(`${alias}.to_kind`);
+  const toId = sql.raw(`${alias}.to_id`);
+
+  if (forward.length === all.length) {
+    return {
+      matchKind: fromKind,
+      matchId: fromId,
+      nextKind: toKind,
+      nextId: toId,
+    };
   }
 
-  return sql`${options.selectClause} FROM reachable r JOIN ${options.schema.edgesTable} e ON (e.from_id = r.id OR e.to_id = r.id) ${nodeJoin} WHERE ${sql.join([...options.whereClauses], sql` AND `)}`;
+  const isForwardRow = compileKindFilter(sql.raw(`${alias}.kind`), forward);
+  return {
+    matchKind: sql`CASE WHEN ${isForwardRow} THEN ${fromKind} ELSE ${toKind} END`,
+    matchId: sql`CASE WHEN ${isForwardRow} THEN ${fromId} ELSE ${toId} END`,
+    nextKind: sql`CASE WHEN ${isForwardRow} THEN ${toKind} ELSE ${fromKind} END`,
+    nextId: sql`CASE WHEN ${isForwardRow} THEN ${toId} ELSE ${fromId} END`,
+  };
+}
+
+/** A proposed edge's endpoints in the relation's part->whole orientation. */
+export function orientProposedEdge(
+  edge: ProposedRelationEdge,
+  members: readonly AcyclicRelationMember[],
+): Readonly<{
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}> {
+  return reversedForEdgeKind(members, edge.edgeKind) ?
+      {
+        fromKind: edge.toKind,
+        fromId: edge.toId,
+        toKind: edge.fromKind,
+        toId: edge.fromId,
+      }
+    : {
+        fromKind: edge.fromKind,
+        fromId: edge.fromId,
+        toKind: edge.toKind,
+        toId: edge.toId,
+      };
+}
+
+/** One literal `seed` row for the `"proposed"` form, oriented part->whole. */
+function proposedSeedRow(
+  edge: ProposedRelationEdge,
+  members: readonly AcyclicRelationMember[],
+): SqlFragment {
+  const { fromKind, fromId, toKind, toId } = orientProposedEdge(edge, members);
+  return sql`(CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT), CAST(${toKind} AS TEXT), CAST(${toId} AS TEXT))`;
+}
+
+/**
+ * The `seed` CTE body, oriented endpoints throughout: a `VALUES` row list
+ * for the row-list forms (`"proposed"` and `"unwritten"` — identical shape, since each names rows the caller supplies rather than
+ * reading the table), or the relation's own live edges for the `"relation"` (audit)
+ * form.
+ */
+function buildAcyclicitySeed(
+  seed: AcyclicityProbeSeed,
+  members: readonly AcyclicRelationMember[],
+  graphId: string,
+  schema: SqlSchema,
+): SqlFragment {
+  if (seed.kind !== "relation") {
+    // A `VALUES` row list, never `SELECT ... UNION ALL SELECT ...`: a batch
+    // create can propose thousands of origins in one probe, and SQLite caps
+    // a compound SELECT at `SQLITE_LIMIT_COMPOUND_SELECT` (500 terms by
+    // default) — a limit `VALUES` is not subject to.
+    const rows = seed.edges.map((edge) => proposedSeedRow(edge, members));
+    return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
+  }
+  const { all } = kindKeys(members);
+  const edgeKindFilter = compileKindFilter(sql.raw("e.kind"), all);
+  const { matchKind, matchId, nextKind, nextId } = orientedEndpointColumns(
+    members,
+    "e",
+  );
+  const rowFilters = [
+    sql`e.graph_id = ${graphId}`,
+    edgeKindFilter,
+    ...relationMembershipFilters(members),
+  ];
+  return sql`seed(origin_key, from_kind, from_id, to_kind, to_id) AS (SELECT e.id, ${matchKind}, ${matchId}, ${nextKind}, ${nextId} FROM ${schema.edgesTable} e WHERE ${sql.join(rowFilters, sql` AND `)})`;
+}
+
+/**
+ * The `"unwritten"` form's `targets` CTE: one row per unwritten edge whose
+ * oriented `from` the closing select tests each origin's ancestry against.
+ */
+function buildAcyclicityTargets(
+  targets: readonly ProposedRelationEdge[],
+  members: readonly AcyclicRelationMember[],
+): SqlFragment {
+  const rows = targets.map((edge) => {
+    const { fromKind, fromId } = orientProposedEdge(edge, members);
+    return sql`(CAST(${edge.edgeId} AS TEXT), CAST(${fromKind} AS TEXT), CAST(${fromId} AS TEXT))`;
+  });
+  return sql`targets(reached_key, from_kind, from_id) AS (VALUES ${sql.join(rows, sql`, `)})`;
+}
+
+/** What the `ancestry` step needs beyond the seed it starts from. */
+type AcyclicityProbeBodyOptions = Readonly<{
+  members: readonly AcyclicRelationMember[];
+  graphId: string;
+  schema: SqlSchema;
+  dialect: DialectAdapter;
+  forceWorktableOuterJoinOrder: boolean;
+  excludedEdgeIds: readonly string[];
+  /** Reuse the same join and population for the rejection-only edge read. */
+  witnessEdges?: boolean;
+}>;
+
+/**
+ * The `ancestry` recursive term, the same for every seed form: one hop
+ * DIRECTLY against `typegraph_edges`. A compound CTE between `ancestry` and
+ * the edges table could not be flattened by SQLite's query flattener (rule
+ * 17d) and would be materialized — the entire relation copied into an
+ * ephemeral table on every probe — where this shape is an index seek.
+ *
+ * `excludedEdgeIds` drops stored rows a caller knows will be gone when its
+ * own rows land (a merge plan's edge deletions). They travel as ONE packed
+ * bound value through the dialect's `inListParameter` seam, so their number
+ * never counts against the engine's bind budget.
+ *
+ * The common case (no `reversed` member — the only shape a standalone
+ * `acyclic: true` relation ever produces) is a plain equality join on `from_kind`/`from_id`, seekable by
+ * `typegraph_edges_from_idx`. `forceWorktableOuterJoinOrder` moves the join
+ * field predicate into the `WHERE` clause behind a `CROSS JOIN`, the same fork
+ * {@link recursiveFrontierBranch} owns above — every other predicate (`graph_id`, the
+ * edge-kind filter, `deleted_at`) always lives in `WHERE` regardless.
+ *
+ * A relation with a `reversed` member (the composition relation's mixed
+ * orientation — a standalone `acyclic: true` relation never produces one, but
+ * the type and this code path are exercised by the mixed-orientation fixture) is still ONE join, never a compound: an
+ * OR of two index-seekable arms, one per orientation —
+ * `(e.kind IN (forward) AND e.from_kind = a.node_kind AND e.from_id =
+ * a.node_id) OR (e.kind IN (reversed) AND e.to_kind = a.node_kind AND
+ * e.to_id = a.node_id)` — with the "next node" projected by a `CASE` on
+ * which arm matched. This is what lets SQLite's OR-optimization and
+ * PostgreSQL's `BitmapOr` seek both `typegraph_edges_from_idx` and
+ * `typegraph_edges_to_idx` in the same step, mirroring
+ * `buildBidirectionalBranch`'s two-direction device above.
+ */
+function buildAcyclicityAncestryStepDirect(
+  options: AcyclicityProbeBodyOptions,
+): SqlFragment {
+  const { members, graphId, schema, forceWorktableOuterJoinOrder } = options;
+  const { forward, reversed, all } = kindKeys(members);
+  const commonWhere = [
+    sql`e.graph_id = ${graphId}`,
+    ...relationMembershipFilters(members),
+    ...(options.excludedEdgeIds.length === 0 ?
+      []
+    : [
+        options.dialect.inListParameter(
+          sql.raw("e.id"),
+          sql`${options.dialect.packListValue(options.excludedEdgeIds)}`,
+          { negated: true, elementType: undefined },
+        ),
+      ]),
+  ];
+  // The "next node" projection is shared via `orientedEndpointColumns`. The
+  // JOIN predicate below is NOT: see that function's docblock for why a
+  // CASE-wrapped equality can't stand in for the OR-of-arms shape here.
+  const { nextKind, nextId } = orientedEndpointColumns(members, "e");
+
+  const { joinPredicate, whereClauses } =
+    reversed.length === 0 ?
+      {
+        joinPredicate: sql`e.from_kind = a.node_kind AND e.from_id = a.node_id`,
+        whereClauses: [
+          ...commonWhere,
+          compileKindFilter(sql.raw("e.kind"), all),
+        ],
+      }
+    : {
+        joinPredicate: mixedOrientationJoinPredicate(forward, reversed),
+        whereClauses: commonWhere,
+      };
+  const selectClause =
+    options.witnessEdges ?
+      sql`SELECT a.origin_key, e.id AS edge_id, e.kind AS edge_kind, a.node_kind AS from_kind, a.node_id AS from_id, ${nextKind} AS to_kind, ${nextId} AS to_id FROM ancestry a`
+    : sql`SELECT a.origin_key, ${nextKind}, ${nextId} FROM ancestry a`;
+  if (forceWorktableOuterJoinOrder) {
+    return sql`${selectClause} CROSS JOIN ${schema.edgesTable} e WHERE ${sql.join([...whereClauses, joinPredicate], sql` AND `)}`;
+  }
+  return sql`${selectClause} JOIN ${schema.edgesTable} e ON ${joinPredicate} WHERE ${sql.join(whereClauses, sql` AND `)}`;
+}
+
+/**
+ * The mixed-orientation ancestry JOIN predicate. A `CASE`-wrapped equality
+ * (`CASE WHEN ... END = a.node_kind`) is not sargable, so it stays a
+ * hand-written OR of two plain-column, index-seekable arms rather than
+ * routing through {@link orientedEndpointColumns}'s `matchKind`/`matchId` —
+ * that's what lets SQLite's OR-optimization and PostgreSQL's `BitmapOr` seek
+ * both `typegraph_edges_from_idx` and `typegraph_edges_to_idx` in one step
+ * (see {@link buildAcyclicityAncestryStepDirect}'s docblock).
+ */
+function mixedOrientationJoinPredicate(
+  forward: readonly string[],
+  reversed: readonly string[],
+): SqlFragment {
+  const forwardFilter = compileKindFilter(sql.raw("e.kind"), forward);
+  const reversedFilter = compileKindFilter(sql.raw("e.kind"), reversed);
+  const forwardArm = sql`(${forwardFilter} AND e.from_kind = a.node_kind AND e.from_id = a.node_id)`;
+  const reversedArm = sql`(${reversedFilter} AND e.to_kind = a.node_kind AND e.to_id = a.node_id)`;
+  return sql`(${forwardArm} OR ${reversedArm})`;
+}
+
+/**
+ * Builds the exhaustive, set-semantics reachability probe the acyclicity
+ * check runs: "does `from` lie in the reflexive-transitive
+ * closure of `to`" over one acyclic relation's live edges.
+ *
+ * Deliberately a sibling export in this file rather than a new emitter: the
+ * seed forms are the ONLY difference between the write-path probe, the audit
+ * reader, and the merge plan-time preview, so all are built by this one
+ * function and cannot answer the question differently.
+ *
+ * `UNION`, never `UNION ALL`, on the `ancestry` term: set semantics on
+ * `(origin_key, node_kind, node_id)` is what makes an unbounded recursion
+ * terminate on a finite graph with no path tracking and no depth bound —
+ * `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply to this probe.
+ *
+ * Exactly ONE literal `WITH RECURSIVE` occurs in this function (the return
+ * below) regardless of which seed form runs, so
+ * `tests/recursive-traversal-inventory.test.ts`'s emission-site inventory
+ * still counts exactly one site here.
+ *
+ * Every literal seed column is `CAST(... AS TEXT)`: PostgreSQL cannot infer
+ * the type of a bare bound parameter in a `SELECT` list with no surrounding
+ * column context.
+ */
+export function buildEdgeAcyclicityProbe(
+  options: Readonly<{
+    graphId: string;
+    members: readonly AcyclicRelationMember[];
+    seed: AcyclicityProbeSeed;
+    dialect: DialectAdapter;
+    schema: SqlSchema;
+    recursiveTraversal: RecursiveTraversalVerdict;
+    operation: string;
+    /** Stored edges to leave out of the walk; see {@link buildAcyclicityAncestryStepDirect}. */
+    excludedEdgeIds?: readonly string[];
+    /** Rejection-only read: return reachable edges, without tracking paths in SQL. */
+    witnessEdges?: boolean;
+  }>,
+): SqlFragment {
+  assertRecursiveTraversal(options.recursiveTraversal, options.operation);
+
+  const { seed, members } = options;
+  const seedCte = buildAcyclicitySeed(
+    seed,
+    members,
+    options.graphId,
+    options.schema,
+  );
+  // Merge all diagnostic origins into one frontier. In an overlay every
+  // stored leg starts at one proposed edge's `to`, so this visits each node
+  // once even when several proposed edges share its reachable subgraph.
+  const anchor =
+    options.witnessEdges ?
+      sql`SELECT DISTINCT CAST('' AS TEXT), s.to_kind, s.to_id FROM seed s`
+    : sql`SELECT s.origin_key, s.to_kind, s.to_id FROM seed s`;
+  const ancestryStep = buildAcyclicityAncestryStepDirect({
+    members,
+    graphId: options.graphId,
+    schema: options.schema,
+    dialect: options.dialect,
+    forceWorktableOuterJoinOrder:
+      options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+    excludedEdgeIds: options.excludedEdgeIds ?? [],
+  });
+  const ancestry = sql`ancestry(origin_key, node_kind, node_id) AS (${anchor} UNION ${ancestryStep})`;
+
+  const closing =
+    options.witnessEdges ?
+      buildAcyclicityAncestryStepDirect({
+        members,
+        graphId: options.graphId,
+        schema: options.schema,
+        dialect: options.dialect,
+        forceWorktableOuterJoinOrder:
+          options.dialect.capabilities.forceRecursiveWorktableOuterJoinOrder,
+        excludedEdgeIds: options.excludedEdgeIds ?? [],
+        witnessEdges: true,
+      })
+    : acyclicityProbeClosing(seed, members);
+  const body =
+    options.witnessEdges ?
+      sql`${seedCte}, ${ancestry} ${closing}`
+    : sql`${seedCte}, ${ancestry}${closing}`;
+  return sql`WITH RECURSIVE ${body}`;
+}
+
+/**
+ * What a probe reads off its finished walk: for the `"unwritten"` form the
+ * `targets` CTE and every origin/target reach; otherwise the origins whose
+ * own `from` their `to` reaches.
+ */
+function acyclicityProbeClosing(
+  seed: AcyclicityProbeSeed,
+  members: readonly AcyclicRelationMember[],
+): SqlFragment {
+  if (seed.kind === "unwritten") {
+    const targets = buildAcyclicityTargets(seed.targets, members);
+    return sql`, ${targets} SELECT DISTINCT a.origin_key, t.reached_key FROM ancestry a JOIN targets t ON t.from_kind = a.node_kind AND t.from_id = a.node_id`;
+  }
+  const closingSelect = sql` SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id`;
+  // A single-row `"proposed"` seed has only one possible `origin_key`, so it
+  // stops at the first witness: both engines pipeline a recursive CTE, and a
+  // `LIMIT 1` short-circuits the walk instead of running to fixpoint. Several
+  // origins must return every offending one so a refusal can name the edge.
+  return seed.kind === "proposed" && seed.edges.length === 1 ?
+      sql`${closingSelect} LIMIT 1`
+    : closingSelect;
 }

@@ -85,6 +85,18 @@ function createSchema(
 // computeSchemaDiff - Empty/No Changes
 // ============================================================
 
+function worksAtEdge(endpointExistence: "notDeleted" | "ever") {
+  return {
+    kind: "worksAt",
+    fromKinds: ["Person"],
+    toKinds: ["Company"],
+    properties: { type: "object" as const, properties: {} },
+    cardinality: "many" as const,
+    endpointExistence,
+    description: undefined,
+  };
+}
+
 describe("computeSchemaDiff", () => {
   describe("empty and unchanged schemas", () => {
     it("returns no changes for identical empty schemas", () => {
@@ -307,6 +319,69 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.nodes[0]).details).toContain("removed");
     });
 
+    /**
+     * A schema's `properties` map is parsed JSON, so a declared field may be named
+     * after an `Object.prototype` member, and membership must be an OWN-key
+     * question. Under `in`, `"toString" in afterProperties` is true even though the
+     * field is gone, so the field never reaches the removal list; instead
+     * `afterProperties["toString"]` resolves to `Object.prototype.toString` — a
+     * FUNCTION — which is then compared as though it were this field's new schema.
+     *
+     * The severity survives that by luck (comparing a schema against a function
+     * reports SOME incompatibility, so the change still lands as breaking), which is
+     * why this pin asserts the REASON: the operator is told the property's schema
+     * changed incompatibly when the property was in fact removed, and the migration
+     * actions that follow from those two diagnoses differ.
+     */
+    it("detects removal of a property named after a prototype member as breaking", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                toString: { type: "string" },
+              },
+              required: ["name"],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: { name: { type: "string" } },
+              required: ["name"],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.nodes[0]).toMatchObject({
+        type: "modified",
+        kind: "Person",
+        severity: "breaking",
+      });
+      expect(requireDefined(diff.nodes[0]).details).toContain("toString");
+      expect(requireDefined(diff.nodes[0]).details).toContain("removed");
+    });
+
     it("detects new required property as breaking change", () => {
       const before = createSchema({
         version: 1,
@@ -356,6 +431,49 @@ describe("computeSchemaDiff", () => {
       });
       expect(requireDefined(diff.nodes[0]).details).toContain("email");
       expect(requireDefined(diff.nodes[0]).details).toContain("required");
+    });
+
+    it("reports nested array differences at their JSON Pointer index", () => {
+      const before = createSchema({
+        version: 1,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                tags: { type: "array", items: { enum: ["a", "b"] } },
+              },
+              required: [],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+      const after = createSchema({
+        version: 2,
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {
+              type: "object",
+              properties: {
+                tags: { type: "array", items: { enum: ["a", "c"] } },
+              },
+              required: [],
+            },
+            uniqueConstraints: [],
+            onDelete: "restrict",
+            description: undefined,
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(requireDefined(diff.nodes[0]).details).toContain("/items/enum/1");
     });
 
     it("detects onDelete change as warning", () => {
@@ -652,6 +770,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -680,6 +799,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -709,6 +829,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -723,6 +844,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -751,6 +873,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -765,6 +888,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person", "Organization"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -791,6 +915,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -805,6 +930,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "one",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -823,6 +949,31 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.edges[0]).details).toContain("one");
     });
 
+    it("detects endpointExistence change as warning", () => {
+      const before = createSchema({
+        version: 1,
+        edges: { worksAt: worksAtEdge("notDeleted") },
+      });
+      const after = createSchema({
+        version: 2,
+        edges: { worksAt: worksAtEdge("ever") },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(true);
+      expect(diff.edges).toHaveLength(1);
+      expect(diff.edges[0]).toMatchObject({
+        type: "modified",
+        severity: "warning",
+      });
+      expect(requireDefined(diff.edges[0]).details).toContain(
+        'endpointExistence changed from "notDeleted" to "ever"',
+      );
+      expect(computeSchemaDiff(before, before).hasChanges).toBe(false);
+    });
+
     it("detects edge property change as safe", () => {
       const before = createSchema({
         version: 1,
@@ -833,6 +984,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Company"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -850,6 +1002,7 @@ describe("computeSchemaDiff", () => {
               properties: { role: { type: "string" } },
             },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -876,6 +1029,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
@@ -893,6 +1047,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
@@ -925,6 +1080,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -939,6 +1095,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person", "Organization"], // toKinds changed
             properties: { type: "object", properties: {} },
             cardinality: "one", // cardinality changed
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -960,23 +1117,18 @@ describe("computeSchemaDiff", () => {
   // ============================================================
 
   describe("ontology changes", () => {
-    it("detects added meta-edge as safe change", () => {
+    // `SerializedOntology.metaEdges` is derived 1:1 from `relations` by the
+    // serializer (see its docblock in `src/schema/types.ts`) — the classifier
+    // has exactly one owner for ontology-change severity, the relation-level
+    // diff below, so these two cases exercise that diff directly rather than
+    // a synthetic catalog-only change a real serializer never produces.
+    it("detects an added relation with an inert meta-edge as a safe change", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 
@@ -987,28 +1139,18 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "safe",
       });
+      expect(requireDefined(diff.ontology[0]).details).toContain("broader");
     });
 
-    it("detects removed meta-edge as breaking change", () => {
+    it("detects a removed inverseOf relation as a breaking change", () => {
       const before = createSchema({
         version: 1,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
         },
       });
       const after = createSchema({ version: 2 });
@@ -1020,13 +1162,12 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology).toHaveLength(1);
       expect(diff.ontology[0]).toMatchObject({
         type: "removed",
-        entity: "metaEdge",
-        name: "subClassOf",
+        entity: "relation",
         severity: "breaking",
       });
     });
 
-    it("detects added relation as safe change", () => {
+    it("detects added relation as data-validated warning", () => {
       const before = createSchema({ version: 1 });
       const after = createSchema({
         version: 2,
@@ -1046,11 +1187,76 @@ describe("computeSchemaDiff", () => {
       expect(diff.ontology[0]).toMatchObject({
         type: "added",
         entity: "relation",
-        severity: "safe",
+        severity: "warning",
       });
       expect(requireDefined(diff.ontology[0]).details).toContain("subClassOf");
       expect(requireDefined(diff.ontology[0]).details).toContain("Employee");
       expect(requireDefined(diff.ontology[0]).details).toContain("Person");
+    });
+
+    it("classifies an added equivalentTo relation exactly like an added subClassOf relation", () => {
+      // `equivalentTo` is mutual subsumption, but `diffOntology` is
+      // meta-edge-agnostic — it keys relations as `${metaEdge}:${from}:${to}`
+      // and assigns `severity: "safe"` to every addition regardless of which
+      // meta-edge it is. Pin that this stays true after the fold: an
+      // `equivalentTo` addition must produce the identical shape (module its
+      // own metaEdge/from/to text) a `subClassOf` addition does.
+      const before = createSchema({ version: 1 });
+      const afterSubClassOf = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "subClassOf", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+      const afterEquivalentTo = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [
+            { metaEdge: "equivalentTo", from: "Company", to: "Corporation" },
+          ],
+        },
+      });
+
+      const subClassOfDiff = computeSchemaDiff(before, afterSubClassOf);
+      const equivalentToDiff = computeSchemaDiff(before, afterEquivalentTo);
+
+      const shapeOf = (
+        diff: ReturnType<typeof computeSchemaDiff>,
+      ): Readonly<{
+        hasChanges: boolean;
+        hasBreakingChanges: boolean;
+        isBackwardsCompatible: boolean;
+        entityCount: number;
+        type: string;
+        entity: string;
+        severity: string;
+      }> => ({
+        hasChanges: diff.hasChanges,
+        hasBreakingChanges: diff.hasBreakingChanges,
+        isBackwardsCompatible: isBackwardsCompatible(diff),
+        entityCount: diff.ontology.length,
+        type: requireDefined(diff.ontology[0]).type,
+        entity: requireDefined(diff.ontology[0]).entity,
+        severity: requireDefined(diff.ontology[0]).severity,
+      });
+
+      expect(shapeOf(equivalentToDiff)).toEqual(shapeOf(subClassOfDiff));
+      // Both are tightenings: they widen a subsumption component, so the
+      // classifier marks them `warning` and attaches the data probes a
+      // commit must run (see ontology-change.ts).
+      expect(shapeOf(equivalentToDiff)).toEqual({
+        hasChanges: true,
+        hasBreakingChanges: false,
+        isBackwardsCompatible: true,
+        entityCount: 1,
+        type: "added",
+        entity: "relation",
+        severity: "warning",
+      });
     });
 
     it("detects removed relation as warning", () => {
@@ -1074,6 +1280,94 @@ describe("computeSchemaDiff", () => {
         type: "removed",
         entity: "relation",
         severity: "warning",
+      });
+    });
+
+    it("classifies an added inverseOf relation as breaking", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        ontology: {
+          ...emptyOntology(),
+          relations: [{ metaEdge: "inverseOf", from: "likes", to: "likedBy" }],
+        },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.ontology).toHaveLength(1);
+      expect(diff.ontology[0]).toMatchObject({
+        type: "added",
+        entity: "relation",
+        severity: "breaking",
+      });
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(false);
+    });
+  });
+
+  describe("Operational Identity capability", () => {
+    it("classifies enablement as safe/backwards-compatible and removal as breaking", () => {
+      const disabled = createSchema({ version: 1 });
+      const enabled = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const enablementDiff = computeSchemaDiff(disabled, enabled);
+      expect(enablementDiff.identity).toEqual({
+        type: "added",
+        severity: "safe",
+        details: "Operational Identity enabled",
+      });
+      expect(enablementDiff.hasBreakingChanges).toBe(false);
+      expect(enablementDiff.isBackwardsCompatible).toBe(true);
+
+      const removalDiff = computeSchemaDiff(enabled, disabled);
+      expect(removalDiff.identity).toEqual({
+        type: "removed",
+        severity: "breaking",
+        details: "Operational Identity disabled",
+      });
+      expect(removalDiff.hasBreakingChanges).toBe(true);
+      expect(removalDiff.isBackwardsCompatible).toBe(false);
+    });
+
+    it("classifies a sameIdAcrossKinds profile flip as breaking in both directions", () => {
+      // A fold<->ignore flip rewrites the materialized identity closure and
+      // changes every areSame/membersOf/includeIdentityMembers answer against
+      // existing data, so it must never auto-migrate silently — it needs the
+      // same explicit opt-in as any other breaking change (identity removal
+      // included, tested above).
+      const ignored = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const folded = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const ignoreToFold = computeSchemaDiff(ignored, folded);
+      expect(ignoreToFold).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: true,
+        isBackwardsCompatible: false,
+        identity: {
+          type: "modified",
+          severity: "breaking",
+        },
+      });
+
+      const foldToIgnore = computeSchemaDiff(folded, ignored);
+      expect(foldToIgnore).toMatchObject({
+        hasChanges: true,
+        hasBreakingChanges: true,
+        isBackwardsCompatible: false,
+        identity: {
+          type: "modified",
+          severity: "breaking",
+        },
       });
     });
   });
@@ -1122,6 +1416,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["Person"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1140,17 +1435,7 @@ describe("computeSchemaDiff", () => {
         version: 2,
         ontology: {
           ...emptyOntology(),
-          metaEdges: {
-            subClassOf: {
-              name: "subClassOf",
-              transitive: true,
-              symmetric: false,
-              reflexive: false,
-              inverse: undefined,
-              inference: "none",
-              description: undefined,
-            },
-          },
+          relations: [{ metaEdge: "broader", from: "Employee", to: "Person" }],
         },
       });
 
@@ -1159,6 +1444,53 @@ describe("computeSchemaDiff", () => {
       expect(diff.summary).toContain("Ontology:");
       expect(diff.summary).toContain("1 added");
     });
+
+    // LOAD-BEARING CHECK: counting only `added`/`removed` ontology changes
+    // again makes this summary "No changes" beside `hasChanges: true`.
+    it("reports an edge kind's acyclic flag in the edge diff, never as an ontology change", () => {
+      const follows = {
+        kind: "follows",
+        fromKinds: ["Person"],
+        toKinds: ["Person"],
+        properties: { type: "object", properties: {} },
+        cardinality: "many",
+        targetCardinality: "many",
+        endpointExistence: "notDeleted",
+        description: undefined,
+      } as const;
+      const before = createSchema({ version: 1, edges: { follows } });
+      const after = createSchema({
+        version: 2,
+        edges: { follows: { ...follows, acyclic: true } },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+
+      expect(diff.hasChanges).toBe(true);
+      expect(diff.ontology).toEqual([]);
+      expect(diff.edges).toEqual([
+        expect.objectContaining({
+          type: "modified",
+          kind: "follows",
+          severity: "warning",
+          details: 'Edge "follows" declared acyclic: true',
+        }),
+      ]);
+      expect(diff.summary).toBe("Edges: 0 added, 0 removed, 1 modified");
+
+      const dropped = computeSchemaDiff(after, before);
+      expect(dropped.edges).toEqual([
+        expect.objectContaining({
+          type: "modified",
+          kind: "follows",
+          severity: "safe",
+          details: 'Edge "follows" dropped acyclic: true',
+        }),
+      ]);
+      expect(dropped.ontology).toEqual([]);
+    });
+    // MUTATION CHECK: removing the `acyclicFlagTransition` arm from
+    // `diffEdgeDef` leaves `diff.edges` empty and `hasChanges` false.
 
     it("generates combined summary for multiple change types", () => {
       const before = createSchema({
@@ -1191,6 +1523,7 @@ describe("computeSchemaDiff", () => {
             toKinds: ["NewNode"],
             properties: { type: "object", properties: {} },
             cardinality: "many",
+            targetCardinality: "many",
             endpointExistence: "notDeleted",
             description: undefined,
           },
@@ -1521,6 +1854,7 @@ describe("getMigrationActions", () => {
           toKinds: ["Person"],
           properties: { type: "object", properties: {} },
           cardinality: "many",
+          targetCardinality: "many",
           endpointExistence: "notDeleted",
           description: undefined,
         },
@@ -1607,6 +1941,7 @@ describe("getMigrationActions", () => {
           toKinds: ["Company"],
           properties: { type: "object", properties: {} },
           cardinality: "many",
+          targetCardinality: "many",
           endpointExistence: "notDeleted",
           description: undefined,
         },
@@ -1665,5 +2000,58 @@ describe("getMigrationActions", () => {
     const actions = getMigrationActions(diff);
 
     expect(actions).toHaveLength(0);
+  });
+
+  describe("Operational Identity actions", () => {
+    it("returns a BUILD action describing closure materialization for enablement", () => {
+      const before = createSchema({ version: 1 });
+      const after = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("BUILD");
+      expect(actions[0]).toContain("closure");
+      expect(actions[0]).toContain("Operational Identity enabled");
+    });
+
+    it("returns a REBUILD action describing closure recomputation for a profile flip", () => {
+      const before = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "ignore" },
+      });
+      const after = createSchema({
+        version: 2,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("REBUILD");
+      expect(actions[0]).toContain("closure");
+      expect(actions[0]).toContain("ignore");
+      expect(actions[0]).toContain("fold");
+    });
+
+    it("returns a DISABLE action describing the orphaned closure for removal", () => {
+      const before = createSchema({
+        version: 1,
+        identity: { sameIdAcrossKinds: "fold" },
+      });
+      const after = createSchema({ version: 2 });
+
+      const diff = computeSchemaDiff(before, after);
+      const actions = getMigrationActions(diff);
+
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toContain("DISABLE");
+      expect(actions[0]).toContain("Operational Identity disabled");
+    });
   });
 });

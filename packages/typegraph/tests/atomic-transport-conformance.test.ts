@@ -1,0 +1,506 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { createClient } from "@libsql/client";
+import { describe, expect, it } from "vitest";
+
+import type {
+  AtomicSqlBatchExecutor,
+  AtomicSqlRow,
+  CompiledAtomicSqlStatement,
+} from "../src/backend/capabilities/atomic-sql-program";
+import {
+  registerAtomicSqlProgram,
+  resolveRegisteredAtomicSqlBatchExecutor,
+} from "../src/backend/capabilities/atomic-sql-program";
+import {
+  type AtomicTransportConformanceFixture,
+  type AtomicTransportEquality,
+  runAtomicTransportConformance,
+} from "../src/backend/conformance/atomic-transport";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
+import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import { TypeGraphError } from "../src/errors";
+
+type FakeState = Readonly<{
+  primary: readonly string[];
+  sidecar: readonly string[];
+}>;
+
+interface MutableFakeState {
+  primary: string[];
+  sidecar: string[];
+}
+
+const equal: AtomicTransportEquality = (actual, expected) =>
+  JSON.stringify(actual) === JSON.stringify(expected);
+
+const ORDERED_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
+  { sql: "ORDERED first", params: ["first"] },
+  { sql: "ORDERED second", params: ["second"] },
+];
+
+const PARAMETER_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
+  { sql: "PARAMETERS", params: ["alpha", 7, undefined, new Date(0)] },
+];
+
+const ROLLBACK_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
+  { sql: "INSERT primary", params: ["row-1"] },
+  { sql: "FAIL after sidecar", params: ["sidecar-1"] },
+];
+
+function snapshotState(state: MutableFakeState): MutableFakeState {
+  return structuredClone(state);
+}
+
+function createFixture(
+  atomic: boolean,
+  wrapExecutor?: (
+    executeAtomicBatch: AtomicSqlBatchExecutor,
+  ) => AtomicSqlBatchExecutor,
+  scope: "root" | "session" = "root",
+): AtomicTransportConformanceFixture<FakeState> {
+  let state: MutableFakeState = { primary: [], sidecar: [] };
+  let receivedStatements: readonly CompiledAtomicSqlStatement[] | undefined;
+  const baseExecutor: AtomicSqlBatchExecutor = async <TRow>(
+    statements: readonly CompiledAtomicSqlStatement[],
+  ) => {
+    await Promise.resolve();
+    receivedStatements = structuredClone(statements);
+    if (statements.length === 0) return [];
+    if (statements[0]?.sql.startsWith("ORDERED")) {
+      return statements.map((statement: CompiledAtomicSqlStatement) => [
+        { slot: statement.params[0] },
+      ]) as unknown as readonly (readonly TRow[])[];
+    }
+    if (statements[0]?.sql === "PARAMETERS") {
+      return [
+        [{ params: [...statements[0].params] }],
+      ] as unknown as readonly (readonly TRow[])[];
+    }
+
+    const before = snapshotState(state);
+    state.primary = [...state.primary, String(statements[0]?.params[0])];
+    state.sidecar = [...state.sidecar, String(statements[1]?.params[0])];
+    if (statements[1]?.sql === "FAIL after sidecar") {
+      if (atomic) state = structuredClone(before);
+      throw new Error("intentional later-statement failure");
+    }
+    return statements.map(() => [] as readonly TRow[]);
+  };
+  const executeAtomicBatch = wrapExecutor?.(baseExecutor) ?? baseExecutor;
+  const backend = {
+    capabilities: {
+      execution: {
+        atomicBatch: scope,
+        interactiveTransactions: scope === "session",
+      },
+    },
+    commands: {
+      session: scope === "root" ? "root" : "transaction",
+      execute: () => Promise.reject(new Error("unused command port")),
+    },
+  } as unknown as GraphBackend | TransactionBackend;
+  registerAtomicSqlProgram(backend, executeAtomicBatch);
+
+  return {
+    backend,
+    derivedBackends: [deriveBackend(backend, {})],
+    executeAtomicBatch,
+    equal,
+    orderedResults: {
+      statements: ORDERED_STATEMENTS,
+      expected: [[{ slot: "first" }], [{ slot: "second" }]],
+    },
+    parameterPreservation: {
+      statements: PARAMETER_STATEMENTS,
+      expected: structuredClone(PARAMETER_STATEMENTS),
+      observe: () => receivedStatements,
+    },
+    rollback: {
+      prepare: () => {
+        state = { primary: [], sidecar: [] };
+      },
+      statements: ROLLBACK_STATEMENTS,
+      observe: () => snapshotState(state),
+      expectedBefore: { primary: [], sidecar: [] },
+      errorMatches: (error) =>
+        error instanceof Error &&
+        error.message === "intentional later-statement failure",
+    },
+    emptyBatch: {
+      prepare: () => {
+        state = { primary: [], sidecar: [] };
+      },
+      observe: () => snapshotState(state),
+      expected: { primary: [], sidecar: [] },
+    },
+  };
+}
+
+describe("atomic transport conformance runner", () => {
+  it("accepts an atomic transport with ordered slots and no rollback leak", async () => {
+    const report = await runAtomicTransportConformance(createFixture(true));
+
+    expect(report.passed).toEqual([
+      "ordered result slots",
+      "parameter preservation",
+      "later-statement rollback",
+      "empty batch",
+      "provenance: exact root registration",
+      "provenance: derived backend lineage",
+      "provenance: derived backend isolation",
+    ]);
+    expect(report.skipped).toEqual([
+      "provenance: transaction backend isolation",
+    ]);
+  });
+
+  it("certifies an exact transaction-session transport", async () => {
+    const report = await runAtomicTransportConformance(
+      createFixture(true, undefined, "session"),
+    );
+
+    expect(report.passed).toContain("provenance: exact root registration");
+    expect(report.skipped).toEqual([
+      "provenance: transaction backend isolation",
+    ]);
+  });
+
+  it("catches a transport that leaks primary and sidecar writes", async () => {
+    const attempt = runAtomicTransportConformance(createFixture(false));
+
+    await expect(attempt).rejects.toBeInstanceOf(TypeGraphError);
+    await expect(attempt).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      code: "ATOMIC_TRANSPORT_CONFORMANCE_ERROR",
+      category: "system",
+      details: { check: "later-statement rollback" },
+    });
+  });
+
+  it("catches a transport that mutates bound parameters", async () => {
+    const invalidFixture = createFixture(
+      true,
+      (executeAtomicBatch) =>
+        async <TRow>(statements: readonly CompiledAtomicSqlStatement[]) => {
+          const alteredStatements = statements.map((statement) =>
+            statement.sql === "PARAMETERS" ?
+              { ...statement, params: ["mutated"] }
+            : statement,
+          );
+          return executeAtomicBatch<TRow>(alteredStatements);
+        },
+    );
+
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "parameter preservation" },
+    });
+  });
+
+  it("rejects a batch function borrowed from another registered root", async () => {
+    const fixture = createFixture(true);
+    const foreign = createFixture(true);
+    const invalidFixture = {
+      ...fixture,
+      backend: foreign.backend,
+    } satisfies AtomicTransportConformanceFixture<FakeState>;
+
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "registration binding" },
+    });
+  });
+
+  it("rejects an unlinked object presented as a derived backend", async () => {
+    const fixture = createFixture(true);
+    const fabricated = createFixture(true).backend;
+
+    await expect(
+      runAtomicTransportConformance({
+        ...fixture,
+        derivedBackends: [fabricated],
+      }),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "provenance: derived backend lineage" },
+    });
+  });
+
+  it("requires the transport to return an empty slot list for an empty batch", async () => {
+    const invalidFixture = createFixture(
+      true,
+      (executeAtomicBatch) =>
+        async <TRow>(statements: readonly CompiledAtomicSqlStatement[]) =>
+          statements.length === 0 ?
+            [[{ unexpected: true }] as unknown as readonly TRow[]]
+          : executeAtomicBatch<TRow>(statements),
+    );
+
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "empty-batch result" },
+    });
+  });
+
+  it("retains the row type at the fixture boundary", () => {
+    const row: AtomicSqlRow = { marker: "fixture" };
+    expect(row["marker"]).toBe("fixture");
+  });
+});
+
+type LibsqlSnapshot = Readonly<{
+  primary: readonly string[];
+  sidecar: readonly string[];
+}>;
+
+function idsFromLibsqlRows(rows: readonly unknown[]): readonly string[] {
+  return rows.map((row) => {
+    if (typeof row !== "object" || row === null) {
+      throw new TypeError("libSQL returned a non-object row");
+    }
+    const id = (row as Readonly<Record<string, unknown>>)["id"];
+    if (typeof id !== "string") {
+      throw new TypeError("libSQL returned a non-string conformance id");
+    }
+    return id;
+  });
+}
+
+async function readLibsqlSnapshot(
+  client: ReturnType<typeof createClient>,
+): Promise<LibsqlSnapshot> {
+  const [primary, sidecar] = await Promise.all([
+    client.execute("SELECT id FROM atomic_transport_primary ORDER BY id"),
+    client.execute("SELECT id FROM atomic_transport_sidecar ORDER BY id"),
+  ]);
+  return {
+    primary: idsFromLibsqlRows(primary.rows),
+    sidecar: idsFromLibsqlRows(sidecar.rows),
+  };
+}
+
+describe("atomic transport conformance: libSQL file client", () => {
+  it("proves the production batch adapter contract end to end", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-transport-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "conformance.db")}`,
+    });
+
+    try {
+      const { backend } = await createLibsqlBackend(client);
+      await client.execute(
+        "CREATE TABLE atomic_transport_primary (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      );
+      await client.execute(
+        "CREATE TABLE atomic_transport_sidecar (id TEXT PRIMARY KEY, primary_id TEXT NOT NULL)",
+      );
+
+      const executeAtomicBatch =
+        resolveRegisteredAtomicSqlBatchExecutor(backend);
+      if (executeAtomicBatch === undefined) {
+        throw new Error(
+          "libSQL file client did not expose atomic batch execution",
+        );
+      }
+      const report = await runAtomicTransportConformance<
+        LibsqlSnapshot,
+        LibsqlSnapshot
+      >({
+        backend,
+        derivedBackends: [deriveBackend(backend, {})],
+        executeAtomicBatch,
+        equal,
+        orderedResults: {
+          statements: [
+            { sql: "SELECT ? AS slot", params: ["first"] },
+            { sql: "SELECT ? AS slot", params: ["second"] },
+          ],
+          expected: [[{ slot: "first" }], [{ slot: "second" }]],
+        },
+        parameterPreservation: {
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES (?, ?)",
+              params: ["parameter-id", "parameter-value"],
+            },
+          ],
+          expected: { primary: ["parameter-id"], sidecar: [] },
+          observe: () => readLibsqlSnapshot(client),
+        },
+        rollback: {
+          prepare: async () => {
+            await client.execute("DELETE FROM atomic_transport_sidecar");
+            await client.execute("DELETE FROM atomic_transport_primary");
+          },
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES (?, ?)",
+              params: ["primary-1", "value"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES (?, ?)",
+              params: ["sidecar-1", "primary-1"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES (?, ?)",
+              params: ["sidecar-1", "primary-1"],
+            },
+          ],
+          observe: () => readLibsqlSnapshot(client),
+          expectedBefore: { primary: [], sidecar: [] },
+        },
+        emptyBatch: {
+          prepare: async () => {
+            await client.execute("DELETE FROM atomic_transport_sidecar");
+            await client.execute("DELETE FROM atomic_transport_primary");
+          },
+          observe: () => readLibsqlSnapshot(client),
+          expected: { primary: [], sidecar: [] },
+        },
+      });
+
+      expect(report.passed).toEqual([
+        "ordered result slots",
+        "parameter preservation",
+        "later-statement rollback",
+        "empty batch",
+        "provenance: exact root registration",
+        "provenance: derived backend lineage",
+        "provenance: derived backend isolation",
+        "provenance: transaction backend isolation",
+      ]);
+      expect(report.skipped).toEqual([]);
+      await backend.close();
+      client.close();
+    } finally {
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+});
+
+async function readPgliteSnapshot(
+  query: <T extends Record<string, unknown>>(
+    sqlText: string,
+  ) => Promise<Readonly<{ rows: readonly T[] }>>,
+): Promise<LibsqlSnapshot> {
+  const [primary, sidecar] = await Promise.all([
+    query<{ id: string }>(
+      "SELECT id FROM atomic_transport_primary ORDER BY id",
+    ),
+    query<{ id: string }>(
+      "SELECT id FROM atomic_transport_sidecar ORDER BY id",
+    ),
+  ]);
+  return {
+    primary: primary.rows.map((row) => row.id),
+    sidecar: sidecar.rows.map((row) => row.id),
+  };
+}
+
+describe("atomic transport conformance: interactive PGlite", () => {
+  it("proves the transaction-backed production adapter contract end to end", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      await local.client.exec(
+        "CREATE TABLE atomic_transport_primary (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      );
+      await local.client.exec(
+        "CREATE TABLE atomic_transport_sidecar (id TEXT PRIMARY KEY, primary_id TEXT NOT NULL)",
+      );
+      const executeAtomicBatch =
+        resolveRegisteredAtomicSqlBatchExecutor(backend);
+      if (executeAtomicBatch === undefined) {
+        throw new Error("PGlite did not expose atomic batch execution");
+      }
+      const observe = () =>
+        readPgliteSnapshot(
+          <T extends Record<string, unknown>>(sqlText: string) =>
+            local.client.query<T>(sqlText),
+        );
+      const clear = async () => {
+        await local.client.exec("DELETE FROM atomic_transport_sidecar");
+        await local.client.exec("DELETE FROM atomic_transport_primary");
+      };
+      const report = await runAtomicTransportConformance<
+        LibsqlSnapshot,
+        LibsqlSnapshot
+      >({
+        backend,
+        derivedBackends: [deriveBackend(backend, {})],
+        executeAtomicBatch,
+        equal,
+        orderedResults: {
+          statements: [
+            { sql: "SELECT $1::text AS slot", params: ["first"] },
+            { sql: "SELECT $1::text AS slot", params: ["second"] },
+          ],
+          expected: [[{ slot: "first" }], [{ slot: "second" }]],
+        },
+        parameterPreservation: {
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES ($1, $2)",
+              params: ["parameter-id", "parameter-value"],
+            },
+          ],
+          expected: { primary: ["parameter-id"], sidecar: [] },
+          observe,
+        },
+        rollback: {
+          prepare: clear,
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES ($1, $2)",
+              params: ["primary-1", "value"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES ($1, $2)",
+              params: ["sidecar-1", "primary-1"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES ($1, $2)",
+              params: ["sidecar-1", "primary-1"],
+            },
+          ],
+          observe,
+          expectedBefore: { primary: [], sidecar: [] },
+        },
+        emptyBatch: {
+          prepare: clear,
+          observe,
+          expected: { primary: [], sidecar: [] },
+        },
+      });
+
+      expect(report.passed).toEqual([
+        "ordered result slots",
+        "parameter preservation",
+        "later-statement rollback",
+        "empty batch",
+        "provenance: exact root registration",
+        "provenance: derived backend lineage",
+        "provenance: derived backend isolation",
+        "provenance: transaction backend isolation",
+      ]);
+      expect(report.skipped).toEqual([]);
+    } finally {
+      await local.backend.close();
+    }
+  });
+});

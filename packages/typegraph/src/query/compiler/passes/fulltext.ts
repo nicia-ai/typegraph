@@ -1,4 +1,7 @@
-import { UnsupportedPredicateError } from "../../../errors";
+import {
+  UnsupportedBackendCapabilityError,
+  UnsupportedPredicateError,
+} from "../../../errors";
 import type { FulltextMatchPredicate, QueryAst } from "../../ast";
 import type { DialectAdapter } from "../../dialect";
 import { extractFulltextMatchPredicates } from "../predicates";
@@ -32,8 +35,11 @@ export function runFulltextPredicatePass(
   }
 
   if (!dialect.capabilities.supportsFulltext) {
-    throw new UnsupportedPredicateError(
-      `Fulltext match predicates are not supported for dialect "${dialect.name}"`,
+    throw new UnsupportedBackendCapabilityError(
+      "$fulltext.matches()",
+      "fulltext",
+      { dialect: dialect.name, reason: "fulltext_unsupported" },
+      "This backend declares no fulltext capability: it was created with `fulltext: false`, or it omits `capabilities.fulltext`.",
     );
   }
 
@@ -78,24 +84,4 @@ export function runFulltextPredicatePass(
   }
 
   return { fulltextPredicate };
-}
-
-/**
- * Resolves query LIMIT in the presence of a fulltext predicate.
- *
- * Mirrors resolveVectorAwareLimit. When a fulltext predicate is present
- * without an explicit AST limit, the predicate's own limit bounds the
- * result set; when both are present the tighter wins.
- */
-export function resolveFulltextAwareLimit(
-  astLimit?: number,
-  fulltextPredicate?: FulltextMatchPredicate,
-): number | undefined {
-  if (fulltextPredicate === undefined) {
-    return astLimit;
-  }
-  if (astLimit === undefined) {
-    return fulltextPredicate.limit;
-  }
-  return Math.min(astLimit, fulltextPredicate.limit);
 }

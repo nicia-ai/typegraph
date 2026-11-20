@@ -13,6 +13,10 @@ import {
   type QueryAst,
   type SelectiveField,
 } from "../query/ast";
+import {
+  collectOperandExpressions,
+  type DatabaseExpression,
+} from "../query/expressions";
 import { jsonPointer } from "../query/json-pointer";
 import { requireDefined } from "../utils/presence";
 import {
@@ -65,30 +69,32 @@ export function extractPropertyAccesses(
     accesses.push(...extracted);
   }
 
+  if (ast.resultPredicate !== undefined) {
+    accesses.push(
+      ...extractFromExpression(ast.resultPredicate, undefined, ast),
+    );
+  }
+
   // Extract from orderBy (sorts)
   if (ast.orderBy) {
     for (const order of ast.orderBy) {
-      const extracted = extractFromOrderSpec(order, ast);
-      if (extracted) {
-        accesses.push(extracted);
-      }
+      accesses.push(...extractFromOrderSpec(order, ast));
     }
   }
 
   // Extract from projection (selects)
   for (const field of ast.projection.fields) {
-    const extracted = extractFromProjectedField(field, ast);
-    if (extracted) {
-      accesses.push(extracted);
-    }
+    accesses.push(...extractFromProjectedField(field, ast));
   }
 
   // Extract from groupBy
   if (ast.groupBy) {
     for (const field of ast.groupBy.fields) {
-      const extracted = extractFromFieldRef(field, "groupBy", ast);
-      if (extracted) {
-        accesses.push(extracted);
+      if (field.__type === "field_ref") {
+        const extracted = extractFromFieldRef(field, "groupBy", ast);
+        if (extracted) accesses.push(extracted);
+      } else {
+        accesses.push(...extractFromDatabaseExpression(field, "groupBy", ast));
       }
     }
   }
@@ -139,6 +145,16 @@ function extractFromExpression(
       const extracted = extractFromFieldRef(expr.left, "filter", ast);
       if (extracted) {
         accesses.push({ ...extracted, predicateType: expr.op });
+      }
+      break;
+    }
+
+    case "tuple_comparison": {
+      for (const field of expr.fields) {
+        const extracted = extractFromFieldRef(field, "filter", ast);
+        if (extracted) {
+          accesses.push({ ...extracted, predicateType: expr.op });
+        }
       }
       break;
     }
@@ -250,6 +266,13 @@ function extractFromExpression(
       }
       break;
     }
+
+    case "database_expression_predicate": {
+      accesses.push(
+        ...extractFromDatabaseExpression(expr.expression, "filter", ast),
+      );
+      break;
+    }
   }
 
   return accesses;
@@ -262,19 +285,108 @@ function extractFromExpression(
 function extractFromOrderSpec(
   order: OrderSpec,
   ast: QueryAst,
-): ExtractedAccess | undefined {
-  return extractFromFieldRef(order.field, "sort", ast);
+): ExtractedAccess[] {
+  if (order.field.__type === "database_expression") {
+    return extractFromDatabaseExpression(order.field, "sort", ast);
+  }
+  const extracted = extractFromFieldRef(order.field, "sort", ast);
+  return extracted === undefined ? [] : [extracted];
 }
 
 function extractFromProjectedField(
   field: ProjectedField,
   ast: QueryAst,
-): ExtractedAccess | undefined {
+): ExtractedAccess[] {
   if (field.source.__type === "aggregate") {
     // For aggregates, extract the field being aggregated
-    return extractFromFieldRef(field.source.field, "select", ast);
+    const extracted = extractFromFieldRef(field.source.field, "select", ast);
+    return extracted === undefined ? [] : [extracted];
   }
-  return extractFromFieldRef(field.source, "select", ast);
+  if (field.source.__type === "database_expression") {
+    return extractFromDatabaseExpression(field.source, "select", ast);
+  }
+  const extracted = extractFromFieldRef(field.source, "select", ast);
+  return extracted === undefined ? [] : [extracted];
+}
+
+function extractFromDatabaseExpression(
+  expression: DatabaseExpression,
+  usage: UsageContext,
+  ast: QueryAst,
+): ExtractedAccess[] {
+  const accesses: ExtractedAccess[] = [];
+  const node = expression.node;
+  function collect(operand: DatabaseExpression): void {
+    accesses.push(...extractFromDatabaseExpression(operand, usage, ast));
+  }
+  switch (node.kind) {
+    case "field": {
+      const extracted = extractFromFieldRef(node.field, usage, ast);
+      if (extracted) accesses.push(extracted);
+      break;
+    }
+    case "arithmetic":
+    case "comparison": {
+      collect(node.left);
+      collect(node.right);
+      break;
+    }
+    case "array_contains": {
+      collect(node.array);
+      collect(node.element);
+      break;
+    }
+    case "boolean":
+    case "coalesce": {
+      for (const operand of node.operands) collect(operand);
+      break;
+    }
+    case "not":
+    case "null_check":
+    case "numeric_conversion": {
+      collect(node.operand);
+      break;
+    }
+    case "aggregate": {
+      if (node.operand !== undefined) collect(node.operand);
+      break;
+    }
+    case "collect": {
+      for (const operand of collectOperandExpressions(node.operand))
+        collect(operand);
+      for (const order of node.orderBy) {
+        accesses.push(
+          ...extractFromDatabaseExpression(order.expression, "sort", ast),
+        );
+      }
+      if (node.filter !== undefined) {
+        accesses.push(
+          ...extractFromDatabaseExpression(node.filter, "filter", ast),
+        );
+      }
+      break;
+    }
+    case "conditional": {
+      collect(node.condition);
+      collect(node.then);
+      collect(node.otherwise);
+      break;
+    }
+    case "outer_reference": {
+      collect(node.expression);
+      break;
+    }
+    case "exists_subquery":
+    case "scalar_subquery": {
+      accesses.push(...extractPropertyAccesses(node.subquery));
+      break;
+    }
+    case "literal":
+    case "parameter": {
+      break;
+    }
+  }
+  return accesses;
 }
 
 /**

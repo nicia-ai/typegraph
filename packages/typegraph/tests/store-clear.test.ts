@@ -4,11 +4,32 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
-import type { GraphBackend } from "../src/backend/types";
+import {
+  createAdapterStore,
+  createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  MigrationError,
+} from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
+import type {
+  EngineRevision,
+  GraphBackend,
+  LineageMembers,
+} from "../src/backend/types";
+import {
+  computeBaseVersion,
+  contentOriginOf,
+  hasRevisionAnchor,
+} from "../src/graph-merge/base-version";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
+import { mintsOriginNamespacedAnchor } from "../src/store/recorded-capture/lineage";
 import { createTestBackend } from "./test-utils";
 
 function dropTableSql(tableName: string): string {
@@ -16,8 +37,7 @@ function dropTableSql(tableName: string): string {
 }
 
 function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
-  return {
-    ...base,
+  return deriveBackend(base, {
     dialect: "postgres",
     async transaction(fn, options) {
       return base.transaction(
@@ -34,7 +54,7 @@ function withSerializablePostgresProbe(base: GraphBackend): GraphBackend {
         options,
       );
     },
-  };
+  });
 }
 
 // ============================================================
@@ -86,6 +106,43 @@ describe("store.clear()", () => {
 
   beforeEach(() => {
     backend = createTestBackend();
+  });
+
+  it("clears a graph whose breaking schema prevents store initialization", async () => {
+    const adapterBackend = createTestBackend();
+    const [oldStore] = await createAdapterStoreWithSchema(
+      graph,
+      adapterBackend,
+    );
+    await oldStore.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const renamedPerson = defineNode("Person", {
+      schema: z.object({ email: z.string(), fullName: z.string() }),
+    });
+    const breakingGraph = defineGraph({
+      id: graph.id,
+      nodes: { Person: { type: renamedPerson } },
+      edges: {},
+    });
+    await expect(
+      createAdapterStoreWithSchema(breakingGraph, adapterBackend),
+    ).rejects.toThrow(MigrationError);
+
+    const recoveryStore = createAdapterStore(breakingGraph, adapterBackend);
+    await recoveryStore.clear();
+    expect(await adapterBackend.getActiveSchema(graph.id)).toBeUndefined();
+
+    const [reopened] = await createAdapterStoreWithSchema(
+      breakingGraph,
+      adapterBackend,
+    );
+    const person = await reopened.nodes.Person.create({
+      email: "alice@example.com",
+      fullName: "Alice",
+    });
+    expect(person.fullName).toBe("Alice");
   });
 
   it("removes all nodes and edges for the graph", async () => {
@@ -154,6 +211,24 @@ describe("store.clear()", () => {
     expect(await store.nodes.Person.count()).toBe(1);
   });
 
+  it("resets schema metadata so an initialized store is usable after clear", async () => {
+    const [store] = await createStoreWithSchema(graph, backend);
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await store.clear();
+
+    expect(store.introspect().schemaVersion).toBeUndefined();
+    await expect(
+      store.nodes.Person.create({
+        email: "bob@example.com",
+        name: "Bob",
+      }),
+    ).resolves.toMatchObject({ name: "Bob" });
+  });
+
   it("does not affect other graphs", async () => {
     const graph2 = defineGraph({
       id: "store_clear_test_other",
@@ -218,5 +293,124 @@ describe("store.clear()", () => {
     );
 
     await expect(historyStore.clear()).resolves.toBeUndefined();
+  });
+});
+
+describe("store.clear() rotates the durable revision origin", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  it("mints a different allocationOwner() after clear(), under history", async () => {
+    const store = createStore(graph, backend, { history: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
+
+    await store.clear();
+
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
+    // Mutation-proof: the origin row is deleted both by the `revisionOrigins`
+    // step of the graph-relation clear sequence and by `clear()`'s own
+    // `resetRevisionOrigin` call (`store.ts`, the guarantee for a backend whose
+    // `clearGraph` skips the inventory). Removing BOTH makes this equality hold
+    // instead — a pre-clear branch's revision anchor would silently match
+    // again once the graph is repopulated to the same revision count.
+    expect(originAfterClear).not.toBe(originBeforeClear);
+  });
+
+  it("mints a different allocationOwner() after clear(), under plain revisionTracking (no history)", async () => {
+    const store = createStore(graph, backend, { revisionTracking: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const originBeforeClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
+
+    await store.clear();
+
+    const originAfterClear = await store
+      .allocationOwner()
+      .then((owner) => owner.origin);
+    expect(originAfterClear).not.toBe(originBeforeClear);
+  });
+
+  it("rotates the origin even when allocationOwner() was never called before the first clear()", async () => {
+    // Proves rotation does not depend on a prior `allocationOwner()` call
+    // having minted the row. It does NOT exercise `ensureRevisionOriginsRelation`'s
+    // own lazy-bootstrap path on this fixture: `createTestBackend()`'s local
+    // SQLite backend installs the FULL base schema — `typegraph_revision_origins`
+    // included — at construction time (`installLocalSqliteBaseSchema`,
+    // `src/backend/sqlite/local.ts`), so the table already exists before
+    // `clear()` ever runs here, the same as it does on the bundled PGlite and
+    // server-Postgres factories. `clear()`'s upfront `ensureRevisionOriginsRelation`
+    // call is a proven no-op on every bundled backend for this reason; it exists
+    // only for a custom backend whose `ensureRevisionOriginsTable` provisions
+    // the relation lazily instead.
+    const store = createStore(graph, backend, { history: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await expect(store.clear()).resolves.toBeUndefined();
+    await expect(
+      store.allocationOwner().then((owner) => owner.origin),
+    ).resolves.toEqual(expect.any(String));
+  });
+});
+
+function scriptedLineage(): LineageMembers {
+  return {
+    revision: () => Promise.resolve("r1" as EngineRevision),
+    changesSince: () => Promise.resolve({ kind: "unbounded" as const }),
+  };
+}
+
+describe("store.clear() and the anchor-origin predicate", () => {
+  it("mintsOriginNamespacedAnchor agrees with the form of the token computeBaseVersion mints", async () => {
+    const tracked = createStore(graph, createTestBackend(), {
+      revisionTracking: true,
+    });
+    const lineageStore = createStore(
+      graph,
+      deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
+    );
+    const fingerprinted = createStore(graph, createTestBackend());
+    for (const store of [tracked, lineageStore, fingerprinted]) {
+      const token = await computeBaseVersion(store);
+      const originNamespaced =
+        hasRevisionAnchor(token) || contentOriginOf(token) !== undefined;
+      expect(mintsOriginNamespacedAnchor(store, true)).toBe(originNamespaced);
+    }
+    expect(mintsOriginNamespacedAnchor(fingerprinted, true)).toBe(false);
+  });
+
+  it("clears a store whose backend declares lineage but cannot bootstrap revision origins", async () => {
+    // An untracked store with lineage still uses a content fingerprint,
+    // so no origin needs rotation during clear().
+    const backend = projectBackendWithout(
+      deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
+      ["ensureRevisionOriginsTable"],
+    ) as unknown as GraphBackend;
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await expect(store.clear()).resolves.toBeUndefined();
+    const remaining = await store.nodes.Person.find();
+    expect(remaining).toHaveLength(0);
   });
 });

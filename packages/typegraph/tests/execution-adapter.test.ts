@@ -1,9 +1,10 @@
-import { sql } from "drizzle-orm";
+import { entityKind, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
+  isNeonHttpClient,
   resetStatementNameCacheForTests,
 } from "../src/backend/drizzle/execution/postgres-execution";
 import {
@@ -17,6 +18,11 @@ import {
 } from "../src/backend/types";
 import { sql as portableSql } from "../src/query/sql-fragment";
 import { createTestDatabase } from "./test-utils";
+
+class RecognizedNodePgDatabase {
+  static readonly [entityKind] = "NodePgDatabase";
+  readonly testFixture = true;
+}
 
 describe("sqlite execution adapter", () => {
   it("renders TypeGraph fragments without binding nested fragments as values", () => {
@@ -258,6 +264,44 @@ describe("sqlite execution adapter", () => {
       });
     });
 
+    it("routes sql.js through Drizzle instead of the compiled path", async () => {
+      // sql.js `prepare()` returns a Statement with bind/step/getAsObject and
+      // NO `all()`, so driving it from the compiled path throws on the first
+      // statement — the advertised sql.js support could never have executed a
+      // query. The client is positively identified and excluded, and Drizzle's
+      // own sql-js session (which drives that statement shape correctly) runs
+      // the query instead.
+      const prepare = vi.fn(() => ({
+        bind: () => true,
+        step: () => false,
+        getAsObject: () => ({}),
+        free: () => true,
+      }));
+      const all = vi.fn(() => [{ value: 1 }]);
+      const db = {
+        $client: {
+          prepare,
+          exec: () => [],
+          run: () => ({}),
+          export: () => new Uint8Array(),
+          getRowsModified: () => 0,
+        },
+        get: () => ({}),
+        all,
+      } as unknown as AnySqliteDatabase;
+
+      const adapter = createSqliteExecutionAdapter(db);
+
+      expect(adapter.profile.supportsCompiledExecution).toBe(false);
+      expect(adapter.executeCompiled).toBeUndefined();
+      await expect(
+        adapter.execute<{ value: number }>(sql`SELECT 1 AS value`),
+      ).resolves.toEqual([{ value: 1 }]);
+      expect(all).toHaveBeenCalledOnce();
+      // The sql.js Statement was never asked for rows it cannot return.
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
     it("keeps detected D1 limits and transaction mode authoritative", () => {
       const db = {
         session: { constructor: { name: "SQLiteD1Session" } },
@@ -320,6 +364,288 @@ function makeMockPgDb(): { db: AnyPgDatabase; query: MockPgQueryFunction } {
 }
 
 describe("postgres execution adapter", () => {
+  it("runs compiled atomic programs on one pinned interactive transaction", async () => {
+    type QueryArgument =
+      string | Readonly<{ text: string; values: readonly unknown[] }>;
+    const transactionQuery = vi.fn(
+      (configOrSql: QueryArgument, positional?: readonly unknown[]) => {
+        const sqlText =
+          typeof configOrSql === "string" ? configOrSql : configOrSql.text;
+        const params =
+          typeof configOrSql === "string" ?
+            (positional ?? [])
+          : configOrSql.values;
+        return Promise.resolve({ rows: [{ params, sqlText }] });
+      },
+    );
+    const transaction = vi.fn(
+      async (run: (tx: AnyPgDatabase) => Promise<unknown>) =>
+        run({
+          session: { client: { query: transactionQuery } },
+        } as unknown as AnyPgDatabase),
+    );
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
+    }).executeAtomicBatch;
+    expect(executeAtomicBatch).toBeDefined();
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch<{ params: readonly unknown[]; sqlText: string }>([
+        { sql: "SELECT $1 AS slot", params: ["first"] },
+        { sql: "SELECT $1 AS slot", params: ["second"] },
+      ]),
+    ).resolves.toEqual([
+      [{ params: ["first"], sqlText: "SELECT $1 AS slot" }],
+      [{ params: ["second"], sqlText: "SELECT $1 AS slot" }],
+    ]);
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(transactionQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not infer atomic transaction authority from query-shaped methods", () => {
+    const db = {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    expect(
+      createPostgresExecutionAdapter(db).executeAtomicBatch,
+    ).toBeUndefined();
+  });
+
+  it("requires affirmative factory authorization for an interactive batch", () => {
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction: vi.fn(),
+    }) as unknown as AnyPgDatabase;
+
+    expect(
+      createPostgresExecutionAdapter(db, {
+        interactiveAtomicBatch: false,
+      }).executeAtomicBatch,
+    ).toBeUndefined();
+  });
+
+  it("validates an interactive program before opening its transaction", async () => {
+    const transaction = vi.fn();
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
+      maxBindParameters: 1,
+    }).executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(executeAtomicBatch([])).resolves.toEqual([]);
+    await expect(
+      executeAtomicBatch([{ params: [1, 2], sql: "SELECT $1, $2" }]),
+    ).rejects.toMatchObject({
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the transaction client cannot execute the program", async () => {
+    const transaction = vi.fn(
+      async (run: (tx: AnyPgDatabase) => Promise<unknown>) =>
+        run({ session: { client: {} } } as unknown as AnyPgDatabase),
+    );
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
+    }).executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ params: [], sql: "SELECT 1" }]),
+    ).rejects.toMatchObject({
+      details: { capability: "execution.atomicBatch" },
+      message:
+        "PostgreSQL atomic batch execution could not bind to its transaction client.",
+    });
+    expect(transaction).toHaveBeenCalledOnce();
+  });
+
+  it("uses Neon HTTP transaction batches when the client exposes query", async () => {
+    type NeonQuery = Promise<readonly unknown[]>;
+    const query = vi.fn<
+      (sqlText: string, params: readonly unknown[]) => NeonQuery
+    >((sqlText, params) => Promise.resolve([{ sqlText, params }]));
+    const transaction = vi.fn(async (queries: readonly NeonQuery[]) =>
+      Promise.all(queries),
+    );
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: {
+        sqlToQuery() {
+          return { params: [], sql: "unused" };
+        },
+      },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    const adapter = createPostgresExecutionAdapter(db);
+    expect(isNeonHttpClient(db)).toBe(true);
+    expect(adapter.executeAtomicBatch).toBeDefined();
+
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+    await expect(
+      executeAtomicBatch<{ sqlText: string; params: readonly unknown[] }>([
+        { sql: "INSERT 1", params: [1] },
+        { sql: "INSERT 2", params: [2] },
+      ]),
+    ).resolves.toEqual([
+      [{ sqlText: "INSERT 1", params: [1] }],
+      [{ sqlText: "INSERT 2", params: [2] }],
+    ]);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(transaction.mock.calls[0]?.[0]).toHaveLength(2);
+  });
+
+  it("keeps detecting legacy Neon HTTP clients but does not advertise batches", () => {
+    const neonClient = Object.assign(vi.fn(), {
+      transaction: vi.fn(),
+    });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    const adapter = createPostgresExecutionAdapter(db);
+    expect(isNeonHttpClient(db)).toBe(true);
+    expect(adapter.executeAtomicBatch).toBeUndefined();
+  });
+
+  it("enforces each Neon batch statement's bind limit before dispatch", async () => {
+    const query = vi.fn<
+      (
+        sqlText: string,
+        params: readonly unknown[],
+      ) => Promise<readonly unknown[]>
+    >(() => Promise.resolve([]));
+    const transaction = vi.fn(
+      async (queries: readonly PromiseLike<readonly unknown[]>[]) =>
+        Promise.all(queries),
+    );
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db, {
+      maxBindParameters: 1,
+    });
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([
+        { sql: "SELECT $1", params: [1] },
+        { sql: "SELECT $1, $2", params: [1, 2] },
+      ]),
+    ).rejects.toMatchObject({
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    });
+    expect(query).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("propagates a Neon transaction rejection without Drizzle fallback", async () => {
+    const batchError = new Error("Neon transaction failed");
+    const query = vi.fn<
+      (
+        sqlText: string,
+        params: readonly unknown[],
+      ) => Promise<readonly unknown[]>
+    >(() => Promise.resolve([]));
+    const transaction = vi.fn(
+      async (queries: readonly PromiseLike<readonly unknown[]>[]) => {
+        await Promise.all(queries);
+        throw batchError;
+      },
+    );
+    const execute = vi.fn(() => Promise.resolve({ rows: [] }));
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute,
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db);
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ sql: "INSERT", params: [1] }]),
+    ).rejects.toBe(batchError);
+    expect(query).toHaveBeenCalledOnce();
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not classify non-Neon callable clients as Neon HTTP batches", () => {
+    const callableWithBegin = Object.assign(vi.fn(), {
+      begin: vi.fn(),
+      query: vi.fn(),
+      transaction: vi.fn(),
+    });
+    const nonCallable = {
+      query: vi.fn(),
+      transaction: vi.fn(),
+    };
+    for (const client of [callableWithBegin, nonCallable]) {
+      const db = {
+        $client: client,
+        dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+        execute: vi.fn(),
+      } as unknown as AnyPgDatabase;
+
+      const adapter = createPostgresExecutionAdapter(db);
+      expect(isNeonHttpClient(db)).toBe(false);
+      expect(adapter.executeAtomicBatch).toBeUndefined();
+    }
+  });
+
   it("renders TypeGraph fragments with PostgreSQL placeholders", () => {
     const { db } = makeMockPgDb();
     const adapter = createPostgresExecutionAdapter(db);
@@ -360,6 +686,47 @@ describe("postgres execution adapter", () => {
     const compiled = adapter.compile(sql`SELECT ${1}`);
     expect(compiled.sql).toBe("SELECT $1");
     expect(compiled.params).toEqual([1]);
+  });
+
+  it("rejects statements over the configured bind limit before dispatch", async () => {
+    const query = vi.fn(() =>
+      Promise.resolve({ rows: [] as readonly unknown[] }),
+    );
+    const db = {
+      $client: { query },
+      dialect: {
+        sqlToQuery() {
+          return {
+            params: [1, 2] as const,
+            sql: "SELECT $1, $2",
+          };
+        },
+      },
+      execute: vi.fn(() => Promise.resolve({ rows: [] as readonly unknown[] })),
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db, {
+      maxBindParameters: 1,
+    });
+    const expectedError = {
+      code: "CONFIGURATION_ERROR",
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    };
+
+    await expect(adapter.execute(sql`SELECT ${1}, ${2}`)).rejects.toMatchObject(
+      expectedError,
+    );
+    await expect(
+      adapter.executeCompiled?.({ params: [1, 2], sql: "SELECT $1, $2" }),
+    ).rejects.toMatchObject(expectedError);
+    await expect(
+      adapter.prepare?.("SELECT $1, $2").execute([1, 2]),
+    ).rejects.toMatchObject(expectedError);
+
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("exposes executeCompiled and prepare when raw client is available", async () => {
@@ -465,28 +832,58 @@ describe("postgres execution adapter", () => {
       expect(new Set(namesUsed).size).toBe(3);
     });
 
-    it("never recycles statement names after eviction", async () => {
+    it("keeps names unique after eviction on a connection that remembers prepared SQL", async () => {
       resetStatementNameCacheForTests();
       const { db, query } = makeMockPgDb();
+      // node-postgres remembers each prepared statement's SQL text for the
+      // lifetime of a connection and rejects a name paired with different
+      // text. Model that contract here rather than only counting generated
+      // names: a name-reuse regression fails at the same second eviction that
+      // reaches a real long-lived connection.
+      const preparedSqlByName = new Map<string, string>();
+      query.mockImplementation((configOrSql) => {
+        if (typeof configOrSql === "string") {
+          return Promise.resolve({ rows: [] });
+        }
+        const config = configOrSql as Readonly<{
+          name: string;
+          text: string;
+        }>;
+        const existingSql = preparedSqlByName.get(config.name);
+        if (existingSql !== undefined && existingSql !== config.text) {
+          return Promise.reject(
+            new Error(
+              `Prepared statements must be unique - '${config.name}' was used for a different statement`,
+            ),
+          );
+        }
+        preparedSqlByName.set(config.name, config.text);
+        return Promise.resolve({ rows: [{ sqlText: config.text }] });
+      });
       const adapter = createPostgresExecutionAdapter(db, {
         preparedStatementCacheMax: 2,
       });
 
-      await adapter.execute(sql`q1`);
-      const firstName = (query.mock.calls[0]?.[0] as { name: string }).name;
-
-      await adapter.execute(sql`q2`);
-      await adapter.execute(sql`q3`); // evicts q1
-      await adapter.execute(sql`q4`); // evicts q2
+      // Four distinct statements exceed a two-entry LRU twice. A cache that
+      // recycled either evicted name would be rejected by the modeled pg
+      // connection instead of safely preparing the new SQL text.
+      const executedSql = await Promise.all(
+        [sql`q1`, sql`q2`, sql`q3`, sql`q4`].map(async (statement) => {
+          const rows = await adapter.execute<{ sqlText: string }>(statement);
+          return rows[0]?.sqlText;
+        }),
+      );
 
       const namesUsed = query.mock.calls.map(
         (call) => (call[0] as { name: string }).name,
       );
-      // After two evictions, four distinct names must have been issued —
-      // recycling firstName for q3 or q4 would collide with the still-
-      // prepared statement on a long-lived pg connection.
+      expect(executedSql).toEqual([
+        "SELECT 1 AS x",
+        "SELECT 2 AS x",
+        "SELECT 3 AS x",
+        "SELECT 4 AS x",
+      ]);
       expect(new Set(namesUsed).size).toBe(4);
-      expect(namesUsed.slice(1)).not.toContain(firstName);
     });
 
     it("promotes recently-used entries so they are not evicted next", async () => {

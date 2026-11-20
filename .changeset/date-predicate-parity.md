@@ -1,0 +1,15 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+A range predicate on a date property (`gt`, `gte`, `lt`, `lte`, `between`) now refuses a string operand that is not canonical UTC ISO-8601 (`YYYY-MM-DDTHH:mm:ss.sssZ`) with `UnsupportedPredicateError`, before any SQL runs. SQLite compared such a string with the stored value as text and PostgreSQL as a `timestamptz` instant, so the same query matched different rows on the two backends: `gte("2024-01-01")` matched on SQLite and not on PostgreSQL, and `gte("2024-01-01T00:00:00Z")` the reverse. This changes what was accepted: a date-only string, a string without fractional milliseconds or with fewer than three digits, a UTC offset, a zoneless string, or an impossible date such as `"2024-02-30T00:00:00.000Z"` previously reached the database and now throws. Convert one with `new Date(value).toISOString()` after deciding which time zone it names, or pass a `Date`. A canonical string and a `Date` are accepted as before and compare identically on every backend, because the store writes a date property as its `toISOString()` text.
+
+A date operand, string or `Date`, must also fall in the years 0001 to 9999. After 9999 a `Date`'s `toISOString()` is the extended `+010000-…` form, which sorts as text before every four-digit year. Year 0000 is canonical text that SQLite compared, while PostgreSQL's `timestamptz` cast refuses it, so `gte("0000-01-01T00:00:00.000Z")` matched rows on SQLite and failed on PostgreSQL. Both are now refused on every backend, including on `$meta` timestamps, which previously accepted a canonical year-0000 string and a `Date` in either range.
+
+The check covers every element of an `in` / `notIn` list, both bounds of `between`, nested date properties reached through `get()`, values bound to a `param()` when a prepared query executes, and, in the expression context, every literal or parameter compared with a date-valued expression, including one a `coalesce` or `when` forwards: `expr.gte(expr.coalesce(ctx.d.publishedAt, expr.literal(fallback)), expr.param("from", "date"))` checks both `fallback` and `from`. A bound `eq`, `neq`, `in` or `notIn` value on a date property, and an `expr.param(name, "date")` value compared with any date expression, which previously took any string, now takes a `Date` or a canonical string. `between` on a date property also refuses a bound that is neither a `Date` nor a string, which previously reached the database.
+
+An accepted string and a `Date` now compile as the same kind of operand. `between(new Date(…), "…Z")` and, on a backend without raw SQL execution, a list bound to `in(param(…))` that mixes the two previously failed with `Mixed literal value types are not supported in predicates`; both now run, as the packed raw-SQL path already did.
+
+The `$meta` timestamp predicates make the same decision through the same owner (refusing with `ValidationError`, as before for their other refusals), so the two surfaces cannot drift.
+
+Error messages for a date, comparison or field-compatibility refusal now name the property (`"d.publishedAt"`, `"d.metadata.publishedAt"`) instead of the `props` column (`"d.props"`).

@@ -1,14 +1,15 @@
 import { z } from "zod";
 
-import type { GraphBackend, HistoryStore, Store } from "../../../src";
+import type { GraphBackend, Store } from "../../../src";
 import {
   defineEdge,
   defineGraph,
   defineNode,
-  defineNodeIndex,
   embedding,
   searchable,
 } from "../../../src";
+import { defineNodeIndex } from "../../../src/indexes";
+import type { HistoryStore } from "../../../src/store-entry";
 
 /**
  * Test graph definition used across all backend integration tests.
@@ -51,9 +52,11 @@ const Document = defineNode("Document", {
     metadata: z
       .object({
         author: z.string().optional(),
+        node: z.string().optional(),
         // Nullable so pointer-predicate tests can pin the JSON-null case.
         reviewer: z.string().nullable().optional(),
         version: z.number().optional(),
+        publishedAt: z.date().optional(),
         flags: z
           .object({
             published: z.boolean().optional(),
@@ -80,6 +83,17 @@ const Article = defineNode("Article", {
   }),
 });
 
+/**
+ * Task node for the edge-acyclicity suite. Kept separate from `Person` /
+ * `Company` so `dependsOn` / `blockedBy` are self-edges with no unrelated
+ * endpoint-validation surface to reason about.
+ */
+const Task = defineNode("Task", {
+  schema: z.object({
+    name: z.string(),
+  }),
+});
+
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
@@ -93,6 +107,24 @@ const knows = defineEdge("knows", {
     // Nullable so weighted-traversal tests can pin the JSON-null case.
     weight: z.number().nullable().optional(),
   }),
+});
+
+/** Primary acyclicity fixture: `cardinality: "many"` with `acyclic: true`. */
+const dependsOn = defineEdge("dependsOn", {
+  schema: z.object({}),
+});
+
+/**
+ * A second, independent acyclic relation over the same node kind — pins
+ * The per-kind scope of acyclicity: `a --dependsOn--> b` and `b --blockedBy--> a` are
+ * both accepted because neither relation alone has a cycle.
+ */
+const blockedBy = defineEdge("blockedBy", {
+  schema: z.object({}),
+});
+
+const authoredBy = defineEdge("authoredBy", {
+  schema: z.object({}),
 });
 
 /**
@@ -135,6 +167,11 @@ const companyIdCoveringIndex = defineNodeIndex(Company, {
   coveringFields: ["name"],
 });
 
+const companyNewestIndex = defineNodeIndex(Company, {
+  name: "company_newest",
+  keys: [{ system: "created_at", direction: "desc" }],
+});
+
 export const integrationTestGraph = defineGraph({
   id: "integration_test",
   nodes: {
@@ -143,6 +180,7 @@ export const integrationTestGraph = defineGraph({
     Company: { type: Company },
     Document: { type: Document },
     Article: { type: Article },
+    Task: { type: Task },
   },
   indexes: [
     productCategoryIndex,
@@ -151,8 +189,15 @@ export const integrationTestGraph = defineGraph({
     documentAuthorIndex,
     documentPublishedAtIndex,
     companyIdCoveringIndex,
+    companyNewestIndex,
   ],
   edges: {
+    authoredBy: {
+      type: authoredBy,
+      from: [Article],
+      to: [Person],
+      cardinality: "many",
+    },
     worksAt: {
       type: worksAt,
       from: [Person],
@@ -165,7 +210,21 @@ export const integrationTestGraph = defineGraph({
       to: [Person],
       cardinality: "many",
     },
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+    blockedBy: {
+      type: blockedBy,
+      from: [Task],
+      to: [Task],
+      acyclic: true,
+    },
   },
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 type IntegrationTestGraph = typeof integrationTestGraph;

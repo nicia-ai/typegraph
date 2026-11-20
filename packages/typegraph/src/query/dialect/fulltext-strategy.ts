@@ -19,6 +19,7 @@ import {
   type FulltextBatchRow,
   type FulltextCapabilities,
   type FulltextQueryMode,
+  type NodeInsertProjection,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
 } from "../../backend/types";
@@ -143,7 +144,7 @@ export type FulltextStrategy = Readonly<{
    * The tables this strategy owns, as Drizzle-free, already
    * authoritative `TableContribution`s (`logicalName`, `owner`,
    * resolved `tableName`, idempotent `createDdl` for the table **and
-   * its supporting indexes**, `runtimeEnsure`). A strategy never
+   * its supporting indexes**, `runtimeEnsure`, `scope`). A strategy never
    * constructs a Drizzle table itself; drizzle-kit visibility, when
    * applicable, is the schema barrel's responsibility (the default
    * Postgres strategy's `schema/postgres.ts` exports a matching
@@ -152,6 +153,14 @@ export type FulltextStrategy = Readonly<{
    * Replaces the former `generateDdl(tableName)`: DDL is now one field
    * of a contribution rather than the strategy's whole storage
    * surface. (Public API change — see #129.)
+   *
+   * Declare `dropDdl` on each contribution to opt the strategy into the
+   * destructive `store.rebuildContribution("fulltext")` path — the only
+   * repair for storage provisioned at a shape `createDdl` no longer
+   * produces. Fulltext content is reconstructed from the node rows, so a
+   * rebuild loses nothing; a strategy that omits `dropDdl` is reported
+   * as not rebuildable instead of being dropped through a synthesized
+   * statement.
    */
   ownedTables: (
     this: void,
@@ -169,6 +178,20 @@ export type FulltextStrategy = Readonly<{
     params: UpsertFulltextParams,
     timestamp: string,
   ) => readonly SqlFragment[];
+
+  /**
+   * Emits one atomic projection write sourced from an `inserted_node` CTE.
+   * Strategies that need more than one statement for a sync (SQLite FTS5 is
+   * the shipped example) omit this capability and use the ordinary sidecar
+   * path. The source alias is trusted backend-owned SQL, never caller input.
+   */
+  buildSyncFromInsertedNode?: (
+    this: void,
+    tableName: string,
+    sourceAlias: string,
+    projection: Extract<NodeInsertProjection, { kind: "fulltext" }>,
+    timestamp: string,
+  ) => SqlFragment;
 
   /**
    * Emits the statements that upsert many fulltext rows at once. Input
@@ -205,6 +228,53 @@ export type FulltextStrategy = Readonly<{
     params: DeleteFulltextBatchParams,
   ) => readonly SqlFragment[];
 }>;
+
+// ============================================================
+// Shared graph-scoped statements
+// ============================================================
+
+/**
+ * Deletes every fulltext row one graph contributed.
+ *
+ * The fulltext table is DATABASE-global: one physical table whose rows are
+ * keyed by `graph_id` and shared by every graph in the database. "Remove this
+ * graph's fulltext content" therefore has more than one caller — `clearGraph`
+ * and the destructive contribution rebuild — and it is one exported statement
+ * both use rather than two spellings that would be free to drift.
+ */
+export function buildFulltextGraphDelete(
+  tableName: string,
+  graphId: string,
+): SqlFragment {
+  return sql`
+    DELETE FROM ${sql.identifier(tableName)}
+    WHERE "graph_id" = ${graphId}
+  `;
+}
+
+/**
+ * The graph ids OTHER than `graphId` that currently have rows in the shared
+ * fulltext table, capped at `limit` (the probe only needs to know whether the
+ * set is empty, plus a few names for the operator-facing message).
+ *
+ * The predicate behind "would tearing this table down destroy content this
+ * process cannot put back?". Fulltext content is derived from a graph's own
+ * node rows through its own schema, so only the graph that owns those rows
+ * can reconstruct them — another graph's rows are exactly the content a
+ * `DROP TABLE` must never take with it.
+ */
+export function buildForeignFulltextGraphProbe(
+  tableName: string,
+  graphId: string,
+  limit: number,
+): SqlFragment {
+  return sql`
+    SELECT DISTINCT "graph_id"
+    FROM ${sql.identifier(tableName)}
+    WHERE "graph_id" <> ${graphId}
+    LIMIT ${limit}
+  `;
+}
 
 // ============================================================
 // Internal helpers
@@ -367,11 +437,20 @@ export const tsvectorStrategy: FulltextStrategy = {
     // this strategy-owned one.
     return [
       {
+        scope: "deployment",
         logicalName: FULLTEXT_CONTRIBUTION_NAME,
         owner: "tsvector",
         tableName: primaryTableName,
         createDdl,
+        // Both indexes belong to the table, so Postgres drops them with
+        // it; no separate DROP INDEX is needed or wanted (naming them
+        // would break the moment a future createDdl renames one).
+        dropDdl: [`DROP TABLE IF EXISTS ${name};`],
         runtimeEnsure: true,
+        workingCopyClonePolicy: {
+          kind: "graphRows",
+          graphIdColumn: "graph_id",
+        },
       },
     ];
   },
@@ -396,6 +475,40 @@ export const tsvectorStrategy: FulltextStrategy = {
           "updated_at" = EXCLUDED."updated_at"
       `,
     ];
+  },
+
+  buildSyncFromInsertedNode(tableName, sourceAlias, projection, timestamp) {
+    const table = sql.identifier(tableName);
+    const source = sql.identifier(sourceAlias);
+    const sourceColumn = (name: string): SqlFragment =>
+      sql`${source}.${sql.identifier(name)}`;
+
+    if (projection.action === "delete") {
+      return sql`
+        DELETE FROM ${table} AS "fulltext_target"
+        USING ${source}
+        WHERE "fulltext_target"."graph_id" = ${sourceColumn("graph_id")}
+          AND "fulltext_target"."node_kind" = ${sourceColumn("kind")}
+          AND "fulltext_target"."node_id" = ${sourceColumn("id")}
+        RETURNING 1
+      `;
+    }
+
+    return sql`
+      INSERT INTO ${table}
+        ("graph_id", "node_kind", "node_id", "content", "language", "updated_at")
+      SELECT
+        ${sourceColumn("graph_id")}, ${sourceColumn("kind")},
+        ${sourceColumn("id")}, ${projection.content}, ${projection.language}::regconfig,
+        ${timestamp}
+      FROM ${source}
+      ON CONFLICT ("graph_id", "node_kind", "node_id")
+      DO UPDATE SET
+        "content" = EXCLUDED."content",
+        "language" = EXCLUDED."language",
+        "updated_at" = EXCLUDED."updated_at"
+      RETURNING 1
+    `;
   },
 
   buildBatchUpsert(tableName, params, timestamp) {
@@ -570,6 +683,7 @@ export const fts5Strategy: FulltextStrategy = {
     // can create it.
     return [
       {
+        scope: "deployment",
         logicalName: FULLTEXT_CONTRIBUTION_NAME,
         owner: "fts5",
         tableName: primaryTableName,
@@ -584,6 +698,10 @@ export const fts5Strategy: FulltextStrategy = {
   tokenize='porter unicode61 remove_diacritics 2'
 );`,
         ],
+        // `DROP TABLE` on an FTS5 virtual table also removes the shadow
+        // tables (`_data`, `_idx`, `_content`, …) the module created, so
+        // one statement is the whole teardown.
+        dropDdl: [`DROP TABLE IF EXISTS ${name};`],
         runtimeEnsure: true,
       },
     ];
