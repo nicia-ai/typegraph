@@ -325,6 +325,14 @@ const relatedToAlice = await store.algorithms.personalizedPageRank({
   ],
 });
 // [{ id, kind, score }, ...] — highest score first
+
+// Edge weights: rank leaves a node in proportion to each edge's `strength`.
+const weightedRelatedToAlice = await store.algorithms.personalizedPageRank({
+  edges: ["knows"],
+  weightProperty: "strength",
+  defaultWeight: 1, // for edges that do not store a strength
+  seeds: [{ id: alice.id, kind: "Person" }],
+});
 ```
 
 | Option | Type | Default | Description |
@@ -332,6 +340,8 @@ const relatedToAlice = await store.algorithms.personalizedPageRank({
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds defining transitions |
 | `nodeKinds` | `readonly NodeKinds<G>[]` | all visible kinds | Induced node subgraph to rank |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Follow stored, reversed, or undirected transitions |
+| `weightProperty` | `string` | *(none: every edge counts 1)* | Top-level edge property holding each edge's non-negative numeric weight |
+| `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; requires `weightProperty`, and must be non-negative and within the audit's upper bound (~9.7e288) |
 | `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
 | `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |
 | `maxIterations` | positive integer | `1000` | Power-iteration backstop; exceeding it throws |
@@ -348,6 +358,21 @@ Dangling-node mass is redistributed through the same teleport vector, keeping
 the scores normalized to approximately one. Parallel physical edges retain
 their multiplicity. With `direction: "both"`, a physical self-loop contributes
 once rather than once per expansion direction.
+
+With `weightProperty`, a node's rank is distributed over its out-edges in
+proportion to their weights instead of equally: parallel edges add their
+weights, and a zero-weight edge carries nothing. A node whose out-edge weights
+sum to zero is dangling, exactly as a node with no out-edge is. The weights go
+through the same up-front audit as `weightedShortestPath` (see
+[weightedShortestPath](#weightedshortestpath)): before any round runs, a
+negative, non-numeric or out-of-range weight on any visible edge of the
+selected kinds, or a missing one with no `defaultWeight`, throws
+`InvalidEdgeWeightError`. The audit covers the selected edge kinds as a whole,
+including edges whose endpoints `nodeKinds` leaves out. `defaultWeight` without
+`weightProperty` throws `ConfigurationError`. Without `weightProperty` the
+walk, its statements and its scores are the unweighted ones. Weights within
+one call that differ by hundreds of orders of magnitude can underflow the
+double range, which PostgreSQL reports as an error and SQLite rounds to zero.
 
 PageRank uses double-precision arithmetic on both backends. Repeated runs on
 SQLite are deterministic; on PostgreSQL a plan change between runs can reorder

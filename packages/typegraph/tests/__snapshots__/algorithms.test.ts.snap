@@ -1,0 +1,116 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`store.algorithms > PageRank > issues the unweighted statements unchanged by the edge-weight options > both 1`] = `
+{
+  "distinctStatements": [
+    "CREATE TEMP TABLE "typegraph_iterative_RUN" ( graph_id TEXT NOT NULL, run_id TEXT NOT NULL, node_id TEXT NOT NULL, node_kind TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, next_score DOUBLE PRECISION NOT NULL, personalization DOUBLE PRECISION NOT NULL, out_weight DOUBLE PRECISION NOT NULL, PRIMARY KEY (graph_id, run_id, node_kind, node_id) )",
+    "INSERT INTO "typegraph_iterative_RUN" (graph_id, run_id, node_id, node_kind, "score", "next_score", "personalization", "out_weight") SELECT ?, ?, n.id, n.kind, 0.0, 0.0, 0.0, 0.0 FROM "typegraph_nodes" n WHERE n.graph_id = ? AND TRUE AND n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)",
+    "SELECT COUNT(*) AS count FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "UPDATE "typegraph_iterative_RUN" SET score = ?, personalization = ? WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.source_id, expanded.source_kind, CASE WHEN expanded.source_id = expanded.target_id AND expanded.source_kind = expanded.target_kind THEN 0.5 ELSE 1.0 END AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?) UNION ALL SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.from_id AS target_id, e.from_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.to_id = w.node_id AND e.to_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind ), degrees AS ( SELECT source_id, source_kind, SUM(transition_weight) AS out_weight FROM scoped_edges GROUP BY source_id, source_kind ) UPDATE "typegraph_iterative_RUN" AS target SET out_weight = target.out_weight + degrees.out_weight FROM degrees WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = degrees.source_id AND target.node_kind = degrees.source_kind",
+    "UPDATE "typegraph_iterative_RUN" SET "next_score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, CASE WHEN expanded.source_id = expanded.target_id AND expanded.source_kind = expanded.target_kind THEN 0.5 ELSE 1.0 END AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?) UNION ALL SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."score" AS source_score, w.out_weight AS source_out_weight, e.from_id AS target_id, e.from_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.to_id = w.node_id AND e.to_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "next_score" = target."next_score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("next_score" - "score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "UPDATE "typegraph_iterative_RUN" SET "score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."next_score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, CASE WHEN expanded.source_id = expanded.target_id AND expanded.source_kind = expanded.target_kind THEN 0.5 ELSE 1.0 END AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."next_score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?) UNION ALL SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."next_score" AS source_score, w.out_weight AS source_out_weight, e.from_id AS target_id, e.from_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.to_id = w.node_id AND e.to_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "score" = target."score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("score" - "next_score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "SELECT node_id, node_kind, "score" AS score FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ? ORDER BY "score" DESC, node_id, node_kind",
+    "DROP TABLE IF EXISTS "typegraph_iterative_RUN"",
+  ],
+  "scores": [
+    {
+      "id": "rank-b",
+      "kind": "Person",
+      "score": 0.3987945723408236,
+    },
+    {
+      "id": "rank-c",
+      "kind": "Person",
+      "score": 0.3817177310251624,
+    },
+    {
+      "id": "rank-a",
+      "kind": "Person",
+      "score": 0.21948769663401374,
+    },
+  ],
+  "statementCount": 145,
+}
+`;
+
+exports[`store.algorithms > PageRank > issues the unweighted statements unchanged by the edge-weight options > out 1`] = `
+{
+  "distinctStatements": [
+    "CREATE TEMP TABLE "typegraph_iterative_RUN" ( graph_id TEXT NOT NULL, run_id TEXT NOT NULL, node_id TEXT NOT NULL, node_kind TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, next_score DOUBLE PRECISION NOT NULL, personalization DOUBLE PRECISION NOT NULL, out_weight DOUBLE PRECISION NOT NULL, PRIMARY KEY (graph_id, run_id, node_kind, node_id) )",
+    "INSERT INTO "typegraph_iterative_RUN" (graph_id, run_id, node_id, node_kind, "score", "next_score", "personalization", "out_weight") SELECT ?, ?, n.id, n.kind, 0.0, 0.0, 0.0, 0.0 FROM "typegraph_nodes" n WHERE n.graph_id = ? AND TRUE AND n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)",
+    "SELECT COUNT(*) AS count FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "UPDATE "typegraph_iterative_RUN" SET score = ?, personalization = ? WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.source_id, expanded.source_kind, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind ), degrees AS ( SELECT source_id, source_kind, SUM(transition_weight) AS out_weight FROM scoped_edges GROUP BY source_id, source_kind ) UPDATE "typegraph_iterative_RUN" AS target SET out_weight = target.out_weight + degrees.out_weight FROM degrees WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = degrees.source_id AND target.node_kind = degrees.source_kind",
+    "UPDATE "typegraph_iterative_RUN" SET "next_score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "next_score" = target."next_score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("next_score" - "score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "UPDATE "typegraph_iterative_RUN" SET "score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."next_score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."next_score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "score" = target."score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("score" - "next_score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "SELECT node_id, node_kind, "next_score" AS score FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ? ORDER BY "next_score" DESC, node_id, node_kind",
+    "DROP TABLE IF EXISTS "typegraph_iterative_RUN"",
+  ],
+  "scores": [
+    {
+      "id": "rank-c",
+      "kind": "Person",
+      "score": 0.8575,
+    },
+    {
+      "id": "rank-b",
+      "kind": "Person",
+      "score": 0.0925,
+    },
+    {
+      "id": "rank-a",
+      "kind": "Person",
+      "score": 0.05,
+    },
+  ],
+  "statementCount": 16,
+}
+`;
+
+exports[`store.algorithms > PageRank > issues the unweighted statements unchanged by the edge-weight options > personalized 1`] = `
+{
+  "distinctStatements": [
+    "CREATE TEMP TABLE "typegraph_iterative_RUN" ( graph_id TEXT NOT NULL, run_id TEXT NOT NULL, node_id TEXT NOT NULL, node_kind TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, next_score DOUBLE PRECISION NOT NULL, personalization DOUBLE PRECISION NOT NULL, out_weight DOUBLE PRECISION NOT NULL, PRIMARY KEY (graph_id, run_id, node_kind, node_id) )",
+    "INSERT INTO "typegraph_iterative_RUN" (graph_id, run_id, node_id, node_kind, "score", "next_score", "personalization", "out_weight") SELECT ?, ?, n.id, n.kind, 0.0, 0.0, 0.0, 0.0 FROM "typegraph_nodes" n WHERE n.graph_id = ? AND TRUE AND n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)",
+    "SELECT COUNT(*) AS count FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "WITH seed_values(node_id, node_kind, weight) AS (VALUES (?, ?, CAST(? AS DOUBLE PRECISION))) UPDATE "typegraph_iterative_RUN" AS target SET score = seed_values.weight, personalization = seed_values.weight FROM seed_values WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = seed_values.node_id AND target.node_kind = seed_values.node_kind",
+    "SELECT node_id, node_kind FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ? AND personalization > 0",
+    "WITH scoped_edges AS ( SELECT expanded.source_id, expanded.source_kind, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind ), degrees AS ( SELECT source_id, source_kind, SUM(transition_weight) AS out_weight FROM scoped_edges GROUP BY source_id, source_kind ) UPDATE "typegraph_iterative_RUN" AS target SET out_weight = target.out_weight + degrees.out_weight FROM degrees WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = degrees.source_id AND target.node_kind = degrees.source_kind",
+    "UPDATE "typegraph_iterative_RUN" SET "next_score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "next_score" = target."next_score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("next_score" - "score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "UPDATE "typegraph_iterative_RUN" SET "score" = personalization * ( ? + ? * ( SELECT COALESCE(SUM(dangling."next_score"), 0.0) FROM "typegraph_iterative_RUN" dangling WHERE dangling.graph_id = ? AND dangling.run_id = ? AND dangling.out_weight = 0.0 ) ) WHERE graph_id = ? AND run_id = ?",
+    "WITH scoped_edges AS ( SELECT expanded.target_id, expanded.target_kind, expanded.source_score, expanded.source_out_weight, 1.0 AS transition_weight FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, w."next_score" AS source_score, w.out_weight AS source_out_weight, e.to_id AS target_id, e.to_kind AS target_kind FROM "typegraph_iterative_RUN" w JOIN "typegraph_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE w.graph_id = ? AND w.run_id = ? AND e.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) expanded JOIN "typegraph_iterative_RUN" scoped_target ON scoped_target.graph_id = ? AND scoped_target.run_id = ? AND scoped_target.node_id = expanded.target_id AND scoped_target.node_kind = expanded.target_kind WHERE expanded.source_out_weight > 0.0 ), contributions AS ( SELECT target_id, target_kind, SUM(source_score * transition_weight / source_out_weight) AS score FROM scoped_edges GROUP BY target_id, target_kind ) UPDATE "typegraph_iterative_RUN" AS target SET "score" = target."score" + ? * contributions.score FROM contributions WHERE target.graph_id = ? AND target.run_id = ? AND target.node_id = contributions.target_id AND target.node_kind = contributions.target_kind",
+    "SELECT COALESCE(MAX(ABS("score" - "next_score")), 0.0) AS value FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ?",
+    "SELECT node_id, node_kind, "next_score" AS score FROM "typegraph_iterative_RUN" WHERE graph_id = ? AND run_id = ? ORDER BY "next_score" DESC, node_id, node_kind",
+    "DROP TABLE IF EXISTS "typegraph_iterative_RUN"",
+  ],
+  "scores": [
+    {
+      "id": "rank-c",
+      "kind": "Person",
+      "score": 0.7224999999999999,
+    },
+    {
+      "id": "rank-a",
+      "kind": "Person",
+      "score": 0.15000000000000002,
+    },
+    {
+      "id": "rank-b",
+      "kind": "Person",
+      "score": 0.1275,
+    },
+  ],
+  "statementCount": 17,
+}
+`;

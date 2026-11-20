@@ -153,6 +153,152 @@ async function seedWeightedTriangle(store: IntegrationStore) {
   return { anna, bruno, clara };
 }
 
+type ReferenceEdge = Readonly<{ from: string; to: string; weight: number }>;
+
+type ReferencePageRankInput = Readonly<{
+  nodes: readonly string[];
+  edges: readonly ReferenceEdge[];
+  direction?: "out" | "both";
+  /** Relative teleport weights; omitted for the uniform global walk. */
+  seeds?: ReadonlyMap<string, number>;
+  dampingFactor?: number;
+}>;
+
+const REFERENCE_PAGE_RANK_TOLERANCE = 1e-14;
+const REFERENCE_PAGE_RANK_MAX_ROUNDS = 10_000;
+const WEIGHTED_PAGE_RANK_TOLERANCE = 1e-12;
+const WEIGHTED_PAGE_RANK_SCORE_DIGITS = 10;
+
+/**
+ * Plain power iteration, the oracle for weighted PageRank: rank leaves a node
+ * in proportion to its out-edge weights, a node whose out-weights sum to zero
+ * hands its rank to the teleport distribution, and an undirected walk counts
+ * a self-loop once.
+ */
+function referencePageRank(
+  input: ReferencePageRankInput,
+): ReadonlyMap<string, number> {
+  const dampingFactor = input.dampingFactor ?? 0.85;
+  const transitions =
+    input.direction === "both" ?
+      input.edges.flatMap((edge) =>
+        edge.from === edge.to ?
+          [edge]
+        : [edge, { from: edge.to, to: edge.from, weight: edge.weight }],
+      )
+    : input.edges;
+  const outWeights = new Map<string, number>();
+  for (const edge of transitions) {
+    outWeights.set(edge.from, (outWeights.get(edge.from) ?? 0) + edge.weight);
+  }
+  const seedTotal = [...(input.seeds?.values() ?? [])].reduce(
+    (total, weight) => total + weight,
+    0,
+  );
+  const personalization = new Map(
+    input.nodes.map((node) => [
+      node,
+      input.seeds === undefined ?
+        1 / input.nodes.length
+      : (input.seeds.get(node) ?? 0) / seedTotal,
+    ]),
+  );
+
+  let scores: ReadonlyMap<string, number> = personalization;
+  for (let round = 0; round < REFERENCE_PAGE_RANK_MAX_ROUNDS; round++) {
+    const current = scores;
+    const danglingMass = input.nodes
+      .filter((node) => (outWeights.get(node) ?? 0) === 0)
+      .reduce((total, node) => total + requireDefined(current.get(node)), 0);
+    const next = new Map(
+      input.nodes.map((node) => [
+        node,
+        requireDefined(personalization.get(node)) *
+          (1 - dampingFactor + dampingFactor * danglingMass),
+      ]),
+    );
+    for (const edge of transitions) {
+      const outWeight = requireDefined(outWeights.get(edge.from));
+      if (outWeight === 0) continue;
+      next.set(
+        edge.to,
+        requireDefined(next.get(edge.to)) +
+          (dampingFactor *
+            requireDefined(current.get(edge.from)) *
+            edge.weight) /
+            outWeight,
+      );
+    }
+    const maximumChange = Math.max(
+      ...input.nodes.map((node) =>
+        Math.abs(
+          requireDefined(next.get(node)) - requireDefined(current.get(node)),
+        ),
+      ),
+    );
+    scores = next;
+    if (maximumChange <= REFERENCE_PAGE_RANK_TOLERANCE) return scores;
+  }
+  throw new Error("The reference PageRank did not converge.");
+}
+
+function expectScoresToMatchReference(
+  actual: readonly Readonly<{ id: string; score: number }>[],
+  reference: ReadonlyMap<string, number>,
+): void {
+  expect(actual.map((row) => row.id).toSorted()).toEqual(
+    [...reference.keys()].toSorted(),
+  );
+  for (const row of actual) {
+    expect(row.score, `score of ${row.id}`).toBeCloseTo(
+      requireDefined(reference.get(row.id)),
+      WEIGHTED_PAGE_RANK_SCORE_DIGITS,
+    );
+  }
+}
+
+const WEIGHTED_RANK_NODES = ["wr-a", "wr-b", "wr-c", "wr-d", "wr-e"] as const;
+
+/**
+ * Mixed weights (a, b), a self-loop (c), a zero-weight edge beside positive
+ * ones (a -> d), a node whose only out-edge weighs zero (d) and a node with
+ * no out-edge at all (e).
+ */
+const WEIGHTED_RANK_EDGES: readonly ReferenceEdge[] = [
+  { from: "wr-a", to: "wr-b", weight: 3 },
+  { from: "wr-a", to: "wr-c", weight: 1 },
+  { from: "wr-a", to: "wr-d", weight: 0 },
+  { from: "wr-b", to: "wr-c", weight: 2 },
+  { from: "wr-b", to: "wr-a", weight: 0.5 },
+  { from: "wr-c", to: "wr-a", weight: 1 },
+  { from: "wr-c", to: "wr-c", weight: 4 },
+  { from: "wr-d", to: "wr-e", weight: 0 },
+];
+
+async function seedWeightedRankGraph(store: IntegrationStore): Promise<void> {
+  for (const id of WEIGHTED_RANK_NODES) {
+    await store.nodes.Person.create({ name: `Weighted rank ${id}` }, { id });
+  }
+  for (const edge of WEIGHTED_RANK_EDGES) {
+    await createWeightedRankEdge(store, edge.from, edge.to, {
+      weight: edge.weight,
+    });
+  }
+}
+
+async function createWeightedRankEdge(
+  store: IntegrationStore,
+  from: string,
+  to: string,
+  props: Readonly<{ weight?: number; since?: string }>,
+): Promise<void> {
+  await store.edges.knows.create(
+    { kind: "Person", id: from },
+    { kind: "Person", id: to },
+    props,
+  );
+}
+
 type CompiledStatement = Readonly<{
   sql: string;
   params: readonly unknown[];
@@ -1598,6 +1744,283 @@ export function registerAlgorithmIntegrationTests(
           { id: "rank-shared", kind: "Company", score: 1 },
           { id: "rank-shared", kind: "Person", score: 0 },
         ]);
+      });
+
+      it("distributes rank in proportion to edge weights", async () => {
+        const store = context.getStore();
+        await seedWeightedRankGraph(store);
+
+        for (const direction of ["out", "both"] as const) {
+          const weighted = await store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            direction,
+            weightProperty: "weight",
+            tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+          });
+          expectScoresToMatchReference(
+            weighted,
+            referencePageRank({
+              nodes: WEIGHTED_RANK_NODES,
+              edges: WEIGHTED_RANK_EDGES,
+              direction,
+            }),
+          );
+          expect(
+            weighted.reduce((total, row) => total + row.score, 0),
+          ).toBeCloseTo(1, WEIGHTED_PAGE_RANK_SCORE_DIGITS);
+
+          // The same call without the option still walks every edge equally.
+          const unweighted = await store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            direction,
+            tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+          });
+          expectScoresToMatchReference(
+            unweighted,
+            referencePageRank({
+              nodes: WEIGHTED_RANK_NODES,
+              edges: WEIGHTED_RANK_EDGES.map((edge) => ({
+                ...edge,
+                weight: 1,
+              })),
+              direction,
+            }),
+          );
+        }
+      });
+
+      it("treats zero total out-weight as a dangling node", async () => {
+        const store = context.getStore();
+        await seedWeightedRankGraph(store);
+
+        const weighted = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          weightProperty: "weight",
+          tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+        });
+        const byId = new Map(weighted.map((row) => [row.id, row.score]));
+
+        // wr-d's only out-edge weighs zero and wr-a reaches it only through a
+        // zero-weight edge, so wr-d and the edgeless wr-e both hold exactly
+        // the teleport share and pass nothing along their edges.
+        expect(byId.get("wr-d")).toBeCloseTo(
+          requireDefined(byId.get("wr-e")),
+          WEIGHTED_PAGE_RANK_SCORE_DIGITS,
+        );
+        const withoutZeroWeightEdges = referencePageRank({
+          nodes: WEIGHTED_RANK_NODES,
+          edges: WEIGHTED_RANK_EDGES.filter((edge) => edge.weight > 0),
+        });
+        expectScoresToMatchReference(weighted, withoutZeroWeightEdges);
+      });
+
+      it("refuses a missing edge weight unless defaultWeight supplies it", async () => {
+        const store = context.getStore();
+        await seedWeightedRankGraph(store);
+        await createWeightedRankEdge(store, "wr-e", "wr-a", {});
+        await createWeightedRankEdge(store, "wr-e", "wr-b", { weight: 1 });
+
+        await expect(
+          store.algorithms.pageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            weightProperty: "weight",
+          }),
+        ).rejects.toMatchObject({
+          name: "InvalidEdgeWeightError",
+          details: { reason: "missing", property: "weight" },
+        });
+
+        const defaultWeight = 2;
+        const withDefault = await store.algorithms.pageRank({
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          weightProperty: "weight",
+          defaultWeight,
+          tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+        });
+        expectScoresToMatchReference(
+          withDefault,
+          referencePageRank({
+            nodes: WEIGHTED_RANK_NODES,
+            edges: [
+              ...WEIGHTED_RANK_EDGES,
+              { from: "wr-e", to: "wr-a", weight: defaultWeight },
+              { from: "wr-e", to: "wr-b", weight: 1 },
+            ],
+          }),
+        );
+      });
+
+      it("combines weighted seeds with weighted edges", async () => {
+        const store = context.getStore();
+        await seedWeightedRankGraph(store);
+
+        for (const direction of ["out", "both"] as const) {
+          const personalized = await store.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            direction,
+            weightProperty: "weight",
+            seeds: [
+              { id: "wr-a", kind: "Person", weight: 3 },
+              { id: "wr-e", kind: "Person" },
+            ],
+            tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+          });
+          expectScoresToMatchReference(
+            personalized,
+            referencePageRank({
+              nodes: WEIGHTED_RANK_NODES,
+              edges: WEIGHTED_RANK_EDGES,
+              direction,
+              seeds: new Map([
+                ["wr-a", 3],
+                ["wr-e", 1],
+              ]),
+            }),
+          );
+        }
+      });
+
+      it("refuses invalid edge weights and weight options before ranking", async () => {
+        const store = context.getStore();
+        await seedWeightedRankGraph(store);
+        await createWeightedRankEdge(store, "wr-e", "wr-a", {
+          weight: -1,
+          since: "2020",
+        });
+        const seeds = [{ id: "wr-a", kind: "Person" }] as const;
+        const base = { edges: ["knows"], nodeKinds: ["Person"] } as const;
+        const algorithms = [
+          {
+            name: "pageRank",
+            run: (
+              weights: Readonly<{
+                weightProperty?: string;
+                defaultWeight?: number;
+              }>,
+            ) => store.algorithms.pageRank({ ...base, ...weights }),
+          },
+          {
+            name: "personalizedPageRank",
+            run: (
+              weights: Readonly<{
+                weightProperty?: string;
+                defaultWeight?: number;
+              }>,
+            ) =>
+              store.algorithms.personalizedPageRank({
+                ...base,
+                ...weights,
+                seeds,
+              }),
+          },
+        ];
+
+        for (const algorithm of algorithms) {
+          await expect(
+            algorithm.run({ weightProperty: "weight" }),
+          ).rejects.toMatchObject({
+            name: "InvalidEdgeWeightError",
+            details: { reason: "negative", property: "weight", value: "-1" },
+          });
+          await expect(
+            algorithm.run({ weightProperty: "since", defaultWeight: 1 }),
+          ).rejects.toMatchObject({
+            name: "InvalidEdgeWeightError",
+            details: { reason: "non_numeric", value: "2020" },
+          });
+          await expect(
+            algorithm.run({ defaultWeight: 1 }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            message: `${algorithm.name} defaultWeight requires weightProperty.`,
+          });
+          await expect(
+            algorithm.run({ weightProperty: "" }),
+          ).rejects.toMatchObject({
+            code: "CONFIGURATION_ERROR",
+            message: `${algorithm.name} weightProperty must be a non-empty string.`,
+          });
+          for (const defaultWeight of [-1, Number.NaN, Number.MAX_VALUE]) {
+            await expect(
+              algorithm.run({ weightProperty: "weight", defaultWeight }),
+            ).rejects.toMatchObject({
+              code: "CONFIGURATION_ERROR",
+              details: { defaultWeight },
+            });
+          }
+        }
+      });
+
+      it("reads edge weights at the temporal coordinate, including through a pinned StoreView", async () => {
+        const store = context.getStore();
+        const { PAST, BEFORE, EDGE_ENDED } = TEMPORAL_ANCHORS;
+        const nodes = ["wt-a", "wt-b", "wt-c"];
+        for (const id of nodes) {
+          await store.nodes.Person.create(
+            { name: `Weighted temporal ${id}` },
+            { id, validFrom: PAST },
+          );
+        }
+        const [alpha, beta, gamma] = nodes.map((id) => ({
+          kind: "Person" as const,
+          id,
+        }));
+        // A heavy edge that ended, beside two equal ones still valid.
+        await store.edges.knows.create(
+          requireDefined(alpha),
+          requireDefined(beta),
+          { weight: 9 },
+          { validFrom: PAST, validTo: EDGE_ENDED },
+        );
+        await store.edges.knows.create(
+          requireDefined(alpha),
+          requireDefined(beta),
+          { weight: 1 },
+          { validFrom: PAST },
+        );
+        await store.edges.knows.create(
+          requireDefined(alpha),
+          requireDefined(gamma),
+          { weight: 1 },
+          { validFrom: PAST },
+        );
+        const options = {
+          edges: ["knows"],
+          nodeKinds: ["Person"],
+          weightProperty: "weight",
+          tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+        } as const;
+        const currentEdges: readonly ReferenceEdge[] = [
+          { from: "wt-a", to: "wt-b", weight: 1 },
+          { from: "wt-a", to: "wt-c", weight: 1 },
+        ];
+
+        expectScoresToMatchReference(
+          await store.algorithms.pageRank(options),
+          referencePageRank({ nodes, edges: currentEdges }),
+        );
+        const historical = referencePageRank({
+          nodes,
+          edges: [...currentEdges, { from: "wt-a", to: "wt-b", weight: 9 }],
+        });
+        expectScoresToMatchReference(
+          await store.asOf(BEFORE).algorithms.pageRank(options),
+          historical,
+        );
+        expectScoresToMatchReference(
+          await store.algorithms.pageRank({
+            ...options,
+            temporalMode: "asOf",
+            asOf: BEFORE,
+          }),
+          historical,
+        );
       });
 
       it("throws rather than returning unconverged scores", async () => {

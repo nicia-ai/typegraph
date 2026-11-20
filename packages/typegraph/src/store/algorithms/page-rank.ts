@@ -13,10 +13,15 @@ import {
   resolveMaxIterations,
 } from "./context";
 import {
+  assertValidEdgeWeights,
+  assertWeightOptions,
+} from "./edge-weight-audit";
+import {
   compareNodeIdentity,
   compileWorkingTableEdgeExpansion,
   countWorkingTableRows,
   DEFAULT_MAX_BIND_PARAMETERS,
+  type IterativeGraphOperation,
   type IterativeGraphRunContext,
   type NodeIdentityKey,
   nodeIdentityKey,
@@ -28,7 +33,6 @@ import type {
   InternalPersonalizedPageRankOptions,
   PageRankScore,
   PersonalizedPageRankSeed,
-  TraversalDirection,
 } from "./types";
 
 type IterationState = Readonly<{
@@ -45,6 +49,13 @@ type ResolvedPageRankOptions = Readonly<{
   maxIterations: number;
   nodeKinds: readonly string[] | undefined;
   topK: number | undefined;
+  edgeWeights: EdgeWeightSource | undefined;
+}>;
+
+/** The caller's edge-weight source; absent for an unweighted run. */
+type EdgeWeightSource = Readonly<{
+  weightProperty: string;
+  defaultWeight: number | undefined;
 }>;
 
 type PageRankAlgorithm = "pageRank" | "personalizedPageRank";
@@ -105,13 +116,22 @@ function executePageRankOperation<G extends GraphDef>(
     ...(options.workingMemory === undefined ?
       {}
     : { workingMemory: options.workingMemory }),
+    ...(resolved.edgeWeights === undefined ?
+      {}
+    : {
+        weightProperty: resolved.edgeWeights.weightProperty,
+        ...(resolved.edgeWeights.defaultWeight === undefined ?
+          {}
+        : { defaultWeight: resolved.edgeWeights.defaultWeight }),
+      }),
   };
 
   return runIterativeGraphOperation(ctx, traversalOptions, {
     algorithm,
     maxIterations: resolved.maxIterations,
     createWorkingTable,
-    populate: (context) => populateWorkingTable(context, resolved.nodeKinds),
+    populate: (context) =>
+      populateWorkingTable(context, resolved.nodeKinds, resolved.edgeWeights),
     initialize: (context, populatedRowCount) =>
       initializeWorkingTable(context, populatedRowCount, seeds),
     runRound: (context, state) =>
@@ -160,7 +180,24 @@ function resolvePageRankOptions<G extends GraphDef>(
     ),
     nodeKinds: options.nodeKinds,
     topK: options.topK,
+    edgeWeights: resolveEdgeWeightSource(options, algorithm),
   };
+}
+
+function resolveEdgeWeightSource<G extends GraphDef>(
+  options: InternalPageRankOptions<G>,
+  algorithm: PageRankAlgorithm,
+): EdgeWeightSource | undefined {
+  const { weightProperty, defaultWeight } = options;
+  if (weightProperty === undefined) {
+    if (defaultWeight === undefined) return undefined;
+    throw new ConfigurationError(
+      `${algorithm} defaultWeight requires weightProperty.`,
+      { defaultWeight },
+    );
+  }
+  assertWeightOptions(algorithm, weightProperty, defaultWeight);
+  return { weightProperty, defaultWeight };
 }
 
 function normalizeSeeds<G extends GraphDef>(
@@ -251,7 +288,17 @@ function createWorkingTable(context: IterativeGraphRunContext): SqlFragment {
 async function populateWorkingTable(
   context: IterativeGraphRunContext,
   nodeKinds: readonly string[] | undefined,
+  edgeWeights: EdgeWeightSource | undefined,
 ): Promise<number> {
+  // Before any working-table statement, so an invalid weight is reported the
+  // same way whatever the node scope, seeds or reachability turn out to be.
+  if (edgeWeights !== undefined) {
+    await assertValidEdgeWeights(
+      context.operation,
+      edgeWeights.weightProperty,
+      edgeWeights.defaultWeight,
+    );
+  }
   await seedWorkingTableFromNodes(context, nodeKinds, [
     { name: "score", value: sql.raw("0.0") },
     { name: "next_score", value: sql.raw("0.0") },
@@ -379,7 +426,7 @@ async function accumulateOutWeights(
     operation.direction,
     edgeKinds,
   );
-  const transitionWeight = compileTransitionWeight(operation.direction);
+  const transitionWeight = compileTransitionWeight(operation);
 
   await context.executeTemporary(sql`
     WITH scoped_edges AS (
@@ -408,17 +455,33 @@ async function accumulateOutWeights(
   `);
 }
 
-function compileTransitionWeight(direction: TraversalDirection): SqlFragment {
-  if (direction !== "both") return sql`1.0`;
+/**
+ * The share of a source's rank one expanded edge row carries, before it is
+ * divided by the source's total: the edge's own weight on a weighted run
+ * (the `weight` column every weighted expansion carries), one otherwise.
+ * Summed per source it is the out-weight; a source whose total is zero is
+ * dangling, weighted or not.
+ */
+function compileTransitionWeight(
+  operation: IterativeGraphOperation,
+): SqlFragment {
+  const edgeWeight =
+    operation.weightExpression === undefined ? sql`1.0` : sql`expanded.weight`;
+  if (operation.direction !== "both") return edgeWeight;
   // `both` emits one row per edge endpoint. A self-loop appears in both
   // branches, so each incidence contributes one half and the physical edge
-  // retains total transition weight one. Parallel self-loops remain distinct.
+  // retains its own total transition weight. Parallel self-loops remain
+  // distinct.
+  const selfLoopWeight =
+    operation.weightExpression === undefined ?
+      sql`0.5`
+    : sql`0.5 * expanded.weight`;
   return sql`
     CASE
       WHEN expanded.source_id = expanded.target_id
        AND expanded.source_kind = expanded.target_kind
-      THEN 0.5
-      ELSE 1.0
+      THEN ${selfLoopWeight}
+      ELSE ${edgeWeight}
     END
   `;
 }
@@ -501,7 +564,7 @@ async function accumulateContributions(
     edgeKinds,
     sql`w.${sourceScore} AS source_score, w.out_weight AS source_out_weight`,
   );
-  const transitionWeight = compileTransitionWeight(operation.direction);
+  const transitionWeight = compileTransitionWeight(operation);
 
   await context.executeTemporary(sql`
     WITH scoped_edges AS (

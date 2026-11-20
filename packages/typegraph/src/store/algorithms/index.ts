@@ -173,12 +173,15 @@ export type GraphAlgorithms<G extends GraphDef> = Readonly<{
 
   /**
    * Computes global PageRank over the visible induced graph. Scores sum to
-   * approximately one and are returned from highest to lowest.
+   * approximately one and are returned from highest to lowest. With
+   * `weightProperty`, rank follows each out-edge in proportion to its
+   * weight.
    */
   pageRank: (options: PageRankOptions<G>) => Promise<readonly PageRankScore[]>;
 
   /**
    * Computes PageRank with teleport mass distributed across weighted seeds.
+   * Takes the same `weightProperty` and `defaultWeight` as `pageRank`.
    */
   personalizedPageRank: (
     options: PersonalizedPageRankOptions<G>,
