@@ -595,7 +595,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   purgeNode: {
     run: async (raw) => {
       await seed(raw, "i");
-       
+
       return (session) =>
         session.purgeNode({
           kind: "Doc",
@@ -615,7 +615,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   purgeNodes: {
     run: async (raw) => {
       await seed(raw, "pn");
-       
+
       return (session) =>
         session.purgeNodes({
           kind: "Doc",
