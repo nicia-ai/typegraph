@@ -53,6 +53,7 @@ const NODE_COLLECTION_MEMBERS = {
   bulkReplaceById: "session-unit",
   bulkInsert: "session-unit",
   bulkDelete: "session-unit",
+  bulkHardDelete: "session-unit",
   findByConstraint: "session-unit",
   bulkFindByConstraint: "session-unit",
   bulkFindByIndex: "session-unit",
