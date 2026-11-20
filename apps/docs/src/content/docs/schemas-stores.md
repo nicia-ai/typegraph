@@ -1320,6 +1320,31 @@ const run = await store.nodes.Run.upsertByIdFromRecord(
 );
 ```
 
+#### Batch methods and failures
+
+The batch methods take a whole input in one call: on node collections `bulkCreate`, `bulkInsert`,
+`bulkUpsertById`, `bulkReplaceById`, `bulkDelete`, `bulkHardDelete`, `bulkGetOrCreateByConstraint` and
+`bulkReparent`; on edge collections `bulkCreate`, `bulkInsert`, `bulkUpsertById`, `bulkDelete`,
+`bulkHardDelete` and `bulkGetOrCreateByEndpoints`.
+
+Inside `store.transaction()` a batch method runs in the caller's transaction, and what a failure
+leaves behind when the callback catches the error and the transaction commits depends on the method:
+
+- **Node and edge `bulkHardDelete`** run their writes behind a savepoint. A failure among them rolls the
+  savepoint back before the error reaches the callback, so the commit keeps none of the call's writes.
+- **Every other batch method** takes no savepoint. The statements it ran before the failure stay in the
+  transaction, and the commit keeps them: a node `bulkCreate` whose second row write fails commits the
+  first row, and an edge `bulkDelete` whose second delete fails commits the first delete.
+  A refusal the method reaches before its first write leaves nothing, but a failure among its writes
+  does; [Limitations](/limitations#a-bulk-refusal-caught-inside-storetransaction-can-keep-earlier-rows)
+  lists which refusals each method reaches before writing and which can follow a write.
+
+Either way the failed call counts 0 in [transaction receipts](#transaction-receipts). To discard a
+partial batch, let the error leave the callback, so the whole transaction rolls back. A savepoint's
+rollback also undoes other calls on the same transaction that overlap it, so await a `bulkHardDelete`
+before starting other work on that transaction (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+
 #### `bulkCreate(items)`
 
 Creates multiple nodes efficiently. Uses a single multi-row INSERT when the backend supports it.
@@ -1457,7 +1482,11 @@ Like the other batch methods, it fires no operation hooks.
 On its own the call is one write transaction. Inside `store.transaction()` it
 runs in the caller's transaction, and its writes sit behind a savepoint: if one
 of them fails and the callback catches the error, the commit keeps none of the
-call's writes. On a raw store over a driver without interactive transactions
+call's writes (see [Batch methods and failures](#batch-methods-and-failures)).
+Await the call before starting other work on the same transaction: the
+savepoint's rollback also undoes calls that overlap it (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+On a raw store over a driver without interactive transactions
 (Cloudflare D1, `drizzle-orm/neon-http`) the statements run separately; every
 refusal still comes before the first delete, but a failure in a later statement
 leaves the earlier ones applied. As in `hardDelete()`, a node's row is removed
@@ -1992,7 +2021,12 @@ operation hooks.
 On its own the call is one write transaction. Inside `store.transaction()` it
 runs in the caller's transaction, and its deletes and claim releases sit behind
 a savepoint: if one of them fails and the callback catches the error, the
-commit keeps none of the call's writes. On a raw store over a driver without
+commit keeps none of the call's writes (see
+[Batch methods and failures](#batch-methods-and-failures)). Await the call
+before starting other work on the same transaction: the savepoint's rollback
+also undoes calls that overlap it (see
+[Overlapping calls in one transaction](#overlapping-calls-in-one-transaction)).
+On a raw store over a driver without
 interactive transactions (Cloudflare D1, `drizzle-orm/neon-http`) the chunks
 run as separate statements, so a failure in a later chunk leaves the earlier
 chunks deleted; a schema-managed store on those drivers refuses the call before
@@ -2226,6 +2260,46 @@ await store.transaction(async (tx) => {
 });
 ```
 
+#### Overlapping calls in one transaction
+
+Some calls take a TypeGraph savepoint inside the transaction they write to, so that a failure among their
+writes keeps none of them:
+
+- node and edge `bulkHardDelete`
+  (see [Batch methods and failures](#batch-methods-and-failures));
+- `importGraph` writing into a transaction that other calls also use (its window-end updates, edge rounds
+  and composition moves each run behind a savepoint; see [Interchange](/interchange));
+- `applyMergePlanInTransaction`, the adopted merge apply
+  (see [Apply a plan with application writes](/graph-merge#apply-a-plan-with-application-writes)).
+
+A savepoint's rollback undoes every statement issued on its transaction since the savepoint was taken,
+whichever call issued it. When another call on the same transaction starts without awaiting one of these
+calls, for example under `Promise.all`, and the savepoint-guarded call fails after it has written, a
+callback that catches the failure and commits loses the other call's writes, even though that call
+completed and reported success. The same rollback can drop that call's recorded-history row and its count
+in the transaction receipt while its write still commits.
+
+Await each of these calls before starting other work on the same transaction:
+
+```typescript
+// Unsafe: the bulkHardDelete's rollback can undo the bulkCreate.
+await store.transaction(async (tx) => {
+  await Promise.all([
+    tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined),
+    tx.nodes.Person.bulkCreate(newPeople),
+  ]);
+});
+
+// Safe: one call at a time.
+await store.transaction(async (tx) => {
+  await tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined);
+  await tx.nodes.Person.bulkCreate(newPeople);
+});
+```
+
+TypeGraph does not detect or refuse overlapping calls; see
+[Limitations](/limitations#overlapping-calls-inside-one-transaction).
+
 #### Return values
 
 The callback's return value is forwarded to the caller:
@@ -2273,7 +2347,8 @@ affected:
   input before failing. On SQLite a failed statement does not abort the
   surrounding transaction, so a caller that catches the rejection and commits
   can persist rows the receipt never counted. Do not read the receipt as
-  rows-affected in that scenario.
+  rows-affected in that scenario (see
+  [Batch methods and failures](#batch-methods-and-failures)).
 - A node `delete` under `cascade` / `disconnect` removes connected edges through
   the backend, not the edge-collection surface; those removals do not appear in
   `edges`.
@@ -3909,7 +3984,8 @@ type OperationHookContext = HookContext &
 `bulkReparent`) skip per-item operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationStart` /
 `onBulkOperationEnd`) do not stand in for them — those fire only for node `updateWhere` and `compareAndSet`, so a
 batch method emits no hook events at all, neither
-per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally.
+per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally. For what a
+failed batch leaves behind inside a transaction, see [Batch methods and failures](#batch-methods-and-failures).
 
 `onOperationEnd.result.outcome` is `"written"` when durable graph state
 changed. It is `"unchanged"` when an authoritative write attempt completed

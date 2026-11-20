@@ -473,6 +473,13 @@ custom or non-transactional backend that cannot prove that rollback refuses
 the import with `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT`; retrying a
 possibly committed prefix could otherwise double-count or misattribute rows.
 
+These savepoints, and the ones the window-end updates and
+[composition moves](#a-composition-part-that-moved) below take, roll back every statement
+issued on the import's transaction since they were taken, not only the
+import's own. When the import writes into a transaction that other calls also
+use, await it before starting them (see
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
+
 When the document carries an `identity` section, `result.identity` reports
 `{ created, skipped }` counts for imported assertions (skipped covers an
 exact re-import of an assertion that already exists under the same id).

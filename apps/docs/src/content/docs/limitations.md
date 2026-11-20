@@ -770,6 +770,22 @@ Let the refusal propagate so the transaction rolls back, or rethrow after
 handling it. See
 [Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
 
+## Overlapping Calls Inside One Transaction
+
+Node and edge `bulkHardDelete`, `importGraph` writing into a transaction other calls also use, and
+`applyMergePlanInTransaction` run their writes behind a TypeGraph savepoint. A savepoint's rollback undoes
+every statement issued on its transaction since the savepoint was taken, not only the statements of the
+call that took it. Inside `store.transaction()`, a call started without awaiting one of these calls (for
+example under `Promise.all`) can have its completed, successfully reported writes undone when the
+savepoint-guarded call fails, the callback catches the failure, and the transaction commits. The same
+rollback can drop that call's recorded-history row and its count in the transaction receipt while its
+write commits.
+
+Await those calls before starting other work on the same transaction. TypeGraph does not detect or refuse
+the overlap. See
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction) and
+issue #909 in the TypeGraph repository.
+
 ## Graph Analytics Limits
 
 TypeGraph ships focused algorithms on `store.algorithms.*` — shortest path
@@ -908,6 +924,9 @@ read.
 
 Temporal queries (`asOf`, `includeEnded`) work correctly but have some constraints:
 
+- `asOf` and `includeEnded` filter the one stored row of each node and edge by its validity window.
+  An update rewrites that row in place, so neither returns an earlier version or earlier property
+  values; earlier versions are readable only through recorded time (`history: true`, below)
 - Point-in-time queries cannot be combined with streaming (`.stream()`)
 - `validFrom` defaults to the record's own creation timestamp when omitted, so `asOf` queries
   work out of the box; an end boundary still requires an explicit `validTo` — an open `validTo`
