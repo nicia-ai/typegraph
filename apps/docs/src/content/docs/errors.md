@@ -1649,7 +1649,6 @@ ontology checks around it raise these `ConfigurationError` codes:
 | `ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED` | `expansion: "narrower"` on a traversal target expands to a kind the traversed edge does not admit as an endpoint (`details.rootKind`, `details.narrowerKind`, `details.edgeKind`). Widen the edge's endpoints or drop the relation. |
 | `SEARCH_EXPANSION_KIND_UNINDEXED` | A `store.search()` expansion would silently skip rows of some expanded kinds: fulltext, because they declare no `searchable()` field the index covers; vector, because they declare the field with a different `embedding()` tag. `details.capability` says which, `details.kinds` lists them. Declare the field identically on them, search the kinds separately, or pass `expansion: "exact"`. |
 | `SET_UPDATE_CANDIDATE_MULTIPLE_KINDS_UNSUPPORTED` | The candidate query of `updateWhere()` selects more than one concrete node kind (`details.candidateKinds`), typically because its source expands through subclasses. Pass `{ expansion: "exact" }` to `from()` or run one `updateWhere()` per kind. |
-| `SET_UPDATE_CANDIDATE_VERSION_MISSING` | The candidate selection passed to `updateWhere()` names no version column, so the write cannot be limited to rows still at the version the candidate query read. A query built by the Store always names one; this arises only from a hand-built `NodeCandidateQuery`. |
 | `EMPTY_KIND_SET` | `toKindSet()` was given no kinds. An empty set would compile to a filter nothing matches. |
 
 #### Composition read and write guard codes

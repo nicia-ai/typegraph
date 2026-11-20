@@ -1132,21 +1132,23 @@ history, and revision state in the same transaction. If any row or sidecar is
 invalid, the whole update rolls back. Backends without transactional set-write
 and batched sidecar support reject the operation before writing.
 
-The selectors are evaluated once, in one statement that reads each matching
-row's id and version, and the write applies only to a row whose stored version
-is still the one that read selected. Under PostgreSQL `READ COMMITTED`, a row
-that another transaction changes and commits after that read (before the write
-reaches it, or while the write waits for its row lock) is skipped rather than
-patched on the strength of its previous state, and `affectedCount` does not
-count it. Re-run `updateWhere()` to apply the patch to rows that still match.
+The selectors are evaluated once, against the snapshot of the one statement
+that also writes, and the write applies only to a row whose stored version is
+still the one that snapshot selected. Under PostgreSQL `READ COMMITTED`, a row
+that another transaction changes and commits after that snapshot (while this
+update waits for its row lock) is skipped rather than patched on the strength
+of its previous state, and `affectedCount` does not count it. The same holds
+for a row deleted and re-created under the same id, even though the new row's
+version starts again at the one the snapshot read: it is a different row, and
+it is written only when it already matched the selectors in that snapshot.
+Re-run `updateWhere()` to apply the patch to rows that still match.
 
-The write itself binds the selected keys rather than joining the selector
-query into the `UPDATE`, so its cost is linear in the number of matching rows
-whatever the database's planner statistics say. That matters after a bulk load
-into a large shared table, which can leave PostgreSQL believing the kind holds
-almost no rows. The keys travel to the client and back, in as many statements
-as the backend's bind budget requires, so an `all: true` update of a very large
-kind holds its id list in memory for the duration of the call.
+The statement looks each selected row up by its key, so its cost is linear in
+the number of matching rows whatever the database's planner statistics say.
+That matters after a bulk load into a large shared table, which can leave
+PostgreSQL believing the kind holds almost no rows. Because the update is one
+statement, a backend's `updateNodeSet` called directly on an autocommit
+connection is as atomic as one inside a transaction.
 
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:

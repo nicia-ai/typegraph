@@ -434,8 +434,6 @@ type CommonOperationStrategy = Readonly<{
     buildAssertAtomicNodeProjectionEvidence: (timestamp: string, evidence: readonly AtomicContributionEvidence[]) => SQL;
     buildReadAtomicNodeMutationPostimages: (graphId: string, kind: string, ids: readonly string[], schemaFence: SchemaWriteFenceParams) => SQL;
     buildUpdateNodeSet: (params: CompareAndSetNodeParams | UpdateNodeSetParams, timestamp: string) => SQL;
-    buildSelectNodeSetCandidateKeys?: (candidateIds: CompiledSelectSql, read: NodeSetKeyRead) => SQL;
-    buildUpdateNodeSetForKeys?: (params: CompareAndSetNodeParams | UpdateNodeSetParams, timestamp: string, keys: readonly NodeSetCandidateKey[]) => SQL;
     buildResolvedNodeUpdateBatch: (params: ResolvedNodeUpdateBatchParams, timestamp: string) => SQL;
     buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
     buildAtomicNodeDeleteBatchWithSchemaFence: (input: AtomicNodeDeleteBatchInput, timestamp: string, schemaLockClause: SQL) => SQL;
@@ -10043,18 +10041,6 @@ type NodeRowLock = "edgeEndpoint" | "delete";
 type NodeRowLockClauses = Readonly<Record<NodeRowLock, RowLockClause>>;
 
 // @public
-export type NodeSetCandidateKey = Readonly<{
-    id: string;
-    versionKey: string | undefined;
-}>;
-
-// @public
-export type NodeSetKeyRead = Readonly<{
-    idColumn: string;
-    versionColumn: string | undefined;
-}>;
-
-// @public
 type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
@@ -10785,7 +10771,6 @@ type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
-    candidateVersionColumn?: string;
 }>;
 
 // @public

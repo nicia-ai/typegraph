@@ -6646,7 +6646,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       backend,
       (session) =>
         session.reviseNodeSet(
-          request.operation === "compareAndSet" ?
+          operation === "compareAndSet" ?
             {
               operation: "compareAndSet",
               kind,
@@ -6667,7 +6667,6 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
               unsetProperties,
               candidateIds,
               candidateIdColumn,
-              candidateVersionColumn: request.candidateVersionColumn,
             },
           // This path states no window — it patches properties — so the write
           // asserts no stored lower bound. The set UPDATE has no field to

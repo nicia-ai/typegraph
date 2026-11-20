@@ -62,6 +62,69 @@ async function compareAndSetNode(
   return requireDefined(backend.compareAndSetNode)(params);
 }
 
+/** The messages of `error` and every cause beneath it. */
+function errorMessages(error: unknown): readonly string[] {
+  if (!(error instanceof Error)) return [];
+  return [error.message, ...errorMessages(error.cause)];
+}
+
+/** The row, counted from one, at which {@link installSetUpdatePoison} fails. */
+const POISONED_ROW = 4;
+
+/**
+ * Installs a trigger that fails the {@link POISONED_ROW}th node row any
+ * UPDATE touches in `graphId`, counting across statements — so a set update
+ * that writes its keys in several statements fails in a later one, after the
+ * earlier ones ran. The count lives in a sequence on PostgreSQL (outside any
+ * transaction) and in a counter table on SQLite. Returns the teardown.
+ */
+async function installSetUpdatePoison(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl" | "tableNames">,
+  graphId: string,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const graphLiteral = `'${graphId.replaceAll("'", "''")}'`;
+  const message = "'poisoned set update'";
+  if (backend.dialect === "postgres") {
+    await executeDdl(`CREATE SEQUENCE tg_poison_seq`);
+    await executeDdl(
+      `CREATE FUNCTION tg_poison_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF nextval('tg_poison_seq') = ${POISONED_ROW} THEN
+           RAISE EXCEPTION ${message};
+         END IF;
+         RETURN NEW;
+       END $$`,
+    );
+    await executeDdl(
+      `CREATE TRIGGER tg_poison BEFORE UPDATE ON ${nodesTable}
+       FOR EACH ROW WHEN (OLD.graph_id = ${graphLiteral})
+       EXECUTE FUNCTION tg_poison_fn()`,
+    );
+    return async () => {
+      await executeDdl(`DROP TRIGGER tg_poison ON ${nodesTable}`);
+      await executeDdl(`DROP FUNCTION tg_poison_fn()`);
+      await executeDdl(`DROP SEQUENCE tg_poison_seq`);
+    };
+  }
+  await executeDdl(`CREATE TABLE tg_poison_counter (n INTEGER NOT NULL)`);
+  await executeDdl(`INSERT INTO tg_poison_counter (n) VALUES (0)`);
+  await executeDdl(
+    `CREATE TRIGGER tg_poison BEFORE UPDATE ON ${nodesTable}
+     WHEN OLD.graph_id = ${graphLiteral}
+     BEGIN
+       UPDATE tg_poison_counter SET n = n + 1;
+       SELECT RAISE(ABORT, ${message})
+       WHERE (SELECT n FROM tg_poison_counter) = ${POISONED_ROW};
+     END`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER tg_poison`);
+    await executeDdl(`DROP TABLE tg_poison_counter`);
+  };
+}
+
 /**
  * Shared SQLite/PostgreSQL coverage for the storage primitive that the public
  * set-based Store mutation composes with validation and sidecar maintenance.
@@ -856,43 +919,6 @@ export function registerSetNodeMutationIntegrationTests(
       });
     });
 
-    it("refuses a candidate selection that names no version column, writing nothing", async () => {
-      const store = context.getStore();
-      const person = await store.nodes.Person.create({ name: "Unversioned" });
-      const query = store
-        .query()
-        .from("Person", "person", { expansion: "exact" })
-        .whereNode("person", (candidate) => candidate.id.eq(person.id))
-        .select((ctx) => ctx.person.id);
-      const candidates = {
-        compileNodeCandidateIds: (readInstant?: string) =>
-          query.compileNodeCandidateIds(readInstant),
-        toNodeCandidateSelection: () => {
-          const { versionColumn, ...selection } =
-            query.toNodeCandidateSelection();
-          expect(versionColumn).toBe("person_version");
-          return selection;
-        },
-      };
-
-      await expect(
-        store.nodes.Person.updateWhere({
-          candidates,
-          patch: { isActive: true },
-        }),
-      ).rejects.toMatchObject({
-        name: "ConfigurationError",
-        details: {
-          code: "SET_UPDATE_CANDIDATE_VERSION_MISSING",
-          operation: "updateWhere",
-        },
-      });
-      const stored = requireDefined(
-        await store.nodes.Person.getById(person.id),
-      );
-      expect(stored.meta.version).toBe(1);
-    });
-
     it("refuses checked-read candidates before applying a set update", async () => {
       const store = context.getStore();
       const person = await store.nodes.Person.create({
@@ -1018,7 +1044,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
-        candidateVersionColumn: "person_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1083,7 +1108,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
-        candidateVersionColumn: "person_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1304,7 +1328,6 @@ export function registerSetNodeMutationIntegrationTests(
         },
         candidateIds,
         candidateIdColumn: "document_id",
-        candidateVersionColumn: "document_version",
       });
 
       expect(result.affectedCount).toBe(1);
@@ -1341,7 +1364,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { "0": "zero", "01": "zero-one" },
         candidateIds,
         candidateIdColumn: "document_id",
-        candidateVersionColumn: "document_version",
       });
 
       expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
@@ -1376,7 +1398,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch,
         candidateIds,
         candidateIdColumn: "document_id",
-        candidateVersionColumn: "document_version",
       });
 
       expect(rowPropsToObject(requireDefined(result.rows[0]).props)).toEqual({
@@ -1385,39 +1406,92 @@ export function registerSetNodeMutationIntegrationTests(
       });
     });
 
-    it("writes a candidate only at the version its candidate column states, and reads the version itself when no column is named", async () => {
+    it("commits none of a direct set update that fails partway on an autocommit connection", async () => {
       const store = context.getStore();
       const backend = context.getBackend();
-      const alice = await store.nodes.Person.create({ name: "Alice" });
-      // The projected version is deliberately not the stored one: a write
-      // keyed by it must skip the row, exactly as it skips a row a concurrent
-      // writer moved past the version the candidate query read.
-      const candidateIds = asCompiledSelectSql(sql`
-        SELECT id AS person_id, version + 1 AS person_version
-        FROM ${createSqlSchema(backend.tableNames).nodesTable}
-        WHERE graph_id = ${store.graphId} AND kind = 'Person' AND id = ${alice.id}
-      `);
-      const params = {
-        operation: "updateWhere",
-        graphId: store.graphId,
-        kind: "Person",
+      // On PostgreSQL a tiny bind budget is what would split a write of the
+      // keys into several statements (three keys per statement); the set
+      // update must stay one statement whatever the budget. SQLite's
+      // serialized handle is a separate database, so its own connection is
+      // used there; it has no construction-time budget to shrink.
+      const direct =
+        backend.dialect === "postgres" ?
+          await context.createSerializedBackend({
+            capabilities: { maxBindParameters: 10 },
+          })
+        : { backend, close: () => Promise.resolve() };
+      const people = [];
+      for (let index = 0; index < 6; index += 1) {
+        people.push(
+          await store.nodes.Person.create({ name: `Autocommit ${index}` }),
+        );
+      }
+      const removePoison = await installSetUpdatePoison(
+        direct.backend,
+        store.graphId,
+      );
+      try {
+        const failure = await updateNodeSet(direct.backend, {
+          operation: "updateWhere",
+          graphId: store.graphId,
+          kind: "Person",
+          patch: { isActive: true },
+          candidateIds: asCompiledSelectSql(sql`
+            SELECT id AS person_id
+            FROM ${createSqlSchema(backend.tableNames).nodesTable}
+            WHERE graph_id = ${store.graphId} AND kind = 'Person'
+          `),
+          candidateIdColumn: "person_id",
+        }).catch((error: unknown) => error);
+        // Drivers wrap the trigger's error; it is the cause of what surfaces.
+        expect(errorMessages(failure).join("\n")).toContain(
+          "poisoned set update",
+        );
+      } finally {
+        await removePoison();
+        await direct.close();
+      }
+      const stored = await Promise.all(
+        people.map(async (person) =>
+          requireDefined(await store.nodes.Person.getById(person.id)),
+        ),
+      );
+
+      expect(
+        stored.map((person) => [person.meta.version, person.isActive]),
+      ).toEqual(people.map(() => [1, undefined]));
+    });
+
+    // 61 characters is the longest root alias whose generated `<alias>_id`
+    // column PostgreSQL's 63-byte clipping still tells apart from the
+    // alias's other generated columns (`…_i` is unique; at 62 every column
+    // clips to `…_`). The set update must add no generated candidate column
+    // that collides sooner — a projected `<alias>_version` clips to `…_v`,
+    // the same name as `valid_from` and `valid_to`.
+    it("updates through candidates whose root alias is 61 characters long", async () => {
+      const store = context.getStore();
+      const alias = `a${"b".repeat(60)}`;
+      const person = await store.nodes.Person.create({ name: "Long alias" });
+      const candidates = store
+        .query()
+        .from("Person", alias)
+        .whereNode(alias, (candidate) => candidate.id.eq(person.id))
+        .select((ctx) => requireDefined(ctx[alias]).id);
+
+      const { affectedCount } = await store.nodes.Person.updateWhere({
+        candidates,
         patch: { isActive: true },
-        candidateIds,
-        candidateIdColumn: "person_id",
-      } as const;
-
-      const keyed = await updateNodeSet(backend, {
-        ...params,
-        candidateVersionColumn: "person_version",
       });
-      // Without a version column the backend reads the stored version itself
-      // (the one-statement semi-join), so the same candidate is written.
-      const unkeyed = await updateNodeSet(backend, params);
+      const stored = requireDefined(
+        await store.nodes.Person.getById(person.id),
+      );
 
+      expect(alias).toHaveLength(61);
       expect({
-        keyed: keyed.affectedCount,
-        unkeyed: unkeyed.rows.map((row) => [row.id, row.version]),
-      }).toEqual({ keyed: 0, unkeyed: [[alice.id, 2]] });
+        affectedCount,
+        isActive: stored.isActive,
+        version: stored.meta.version,
+      }).toEqual({ affectedCount: 1, isActive: true, version: 2 });
     });
 
     it("never resurrects tombstoned candidates", async () => {
@@ -1444,7 +1518,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
-        candidateVersionColumn: "person_version",
       });
 
       expect(result).toEqual({ affectedCount: 0, rows: [] });
@@ -1478,7 +1551,6 @@ export function registerSetNodeMutationIntegrationTests(
         patch: { isActive: true },
         candidateIds,
         candidateIdColumn: "person_id",
-        candidateVersionColumn: "person_version",
       });
       const afterUpdate = requireDefined(await store.recordedNow());
 
@@ -1515,7 +1587,6 @@ export function registerSetNodeMutationIntegrationTests(
           patch: {},
           candidateIds,
           candidateIdColumn: "person_id",
-          candidateVersionColumn: "person_version",
         }),
       ).rejects.toBeInstanceOf(ConfigurationError);
     });

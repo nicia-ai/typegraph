@@ -53,8 +53,7 @@ export function asCompiledTemporaryStatementSql(
 type SqlIntentRegistry = Readonly<{
   recursivePlanCounts?: WeakMap<SqlFragment, number>;
   annIndexScanQueries: WeakMap<SqlFragment, readonly string[]>;
-  /** Portable fragments and the backend layer's Drizzle `SQL` statements. */
-  forceCustomPlanQueries: WeakSet<object>;
+  forceCustomPlanQueries: WeakSet<SqlFragment>;
 }>;
 
 const SQL_INTENT_REGISTRY: unique symbol = typeGraphGlobalSymbol(
@@ -90,16 +89,11 @@ if (sqlIntentRegistry.recursivePlanCounts === undefined)
     value: recursivePlanCounts,
   });
 
-/**
- * Marks a statement for unnamed execution (see the registry note above). A
- * backend statement built as Drizzle `SQL` can be marked too: the registry
- * keys on object identity, whichever builder produced the statement.
- */
-export function markForceCustomPlan(query: object): void {
+export function markForceCustomPlan(query: SqlFragment): void {
   sqlIntentRegistry.forceCustomPlanQueries.add(query);
 }
 
-export function shouldForceCustomPlan(query: object): boolean {
+export function shouldForceCustomPlan(query: SqlFragment): boolean {
   return sqlIntentRegistry.forceCustomPlanQueries.has(query);
 }
 

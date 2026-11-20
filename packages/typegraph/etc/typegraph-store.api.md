@@ -4844,7 +4844,6 @@ type NodeCandidateSelection = Readonly<{
     executionTarget: object | undefined;
     kind: string;
     idColumn: string;
-    versionColumn?: string;
     temporalMode: "current" | "asOf" | "includeEnded" | "includeTombstones";
     recordedAsOf: string | undefined;
 }>;
@@ -8360,7 +8359,6 @@ type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
-    candidateVersionColumn?: string;
 }>;
 
 // @public

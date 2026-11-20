@@ -622,8 +622,9 @@ PostgreSQL's autovacuum re-analyzes a table only after changes reach
 count (50 rows + 10% by default). On a nodes table shared by many graphs, a load
 of tens of thousands of nodes of one kind can stay below that trigger
 indefinitely, and until it is crossed the planner estimates the new kind at
-about one row. Set-wise writes such as `updateWhere()` bind their keys, so their
-plans do not depend on that estimate. A point lookup by id, however, can then
+about one row. `updateWhere()` and `compareAndSet()` reach the nodes table only
+through the selected rows' keys, so their plans do not depend on that estimate.
+A point lookup by id, however, can then
 pick any index that starts with `(graph_id, kind)` and filter every row of the
 kind. In a benchmark with 300,000 analyzed rows of other graphs, one
 primary-key `UPDATE` took 6.5 ms instead of 0.06 ms against 40,000
