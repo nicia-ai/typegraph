@@ -89,9 +89,10 @@ Timestamp operators take a `Date`; the range operators also take an ISO-8601 UTC
 canonical stored form, `YYYY-MM-DDTHH:mm:ss.sssZ` (`new Date(value).toISOString()` produces
 one). Any other string, such as `"2025-01-01T00:00:00Z"`, is refused with `ValidationError`:
 SQLite compares the stored text and PostgreSQL the parsed instant, so a shorter form of the same
-instant would match differently on the two. For the same reason a `Date` must fall in the
-four-digit years 0000 to 9999: outside them its ISO form is the extended `+010000-…` shape, which
-sorts as text before every four-digit year, and it is refused with `ValidationError` as well. Date
+instant would match differently on the two. For the same reason a `Date` or string must fall in the
+years 0001 to 9999: after 9999 a `Date`'s ISO form is the extended `+010000-…` shape, which sorts as
+text before every four-digit year, and PostgreSQL's `timestamptz` cast refuses year 0000, which
+SQLite compares as text. Both are refused with `ValidationError` as well. Date
 properties share this check; see [Date predicates](/queries/predicates#date).
 `$meta.version` takes an integer from -2147483648 to 2147483647, the range of PostgreSQL's
 `integer` column, and refuses anything else, such as `1.5`, with `ValidationError`. The same

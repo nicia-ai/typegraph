@@ -284,14 +284,23 @@ impossible date such as `"2024-02-30T00:00:00.000Z"` — is refused when the pre
 different rows on the two backends. Converting it yourself makes you choose the time zone it names;
 TypeGraph does not guess.
 
-A `Date` operand must fall in the four-digit years 0000 to 9999. Outside them its `toISOString()` is the
-extended `+010000-…` form, which sorts as text before every four-digit year, so it is refused the same
-way.
+A `Date` or string operand must fall in the years 0001 to 9999. After 9999 a `Date`'s `toISOString()` is
+the extended `+010000-…` form, which sorts as text before every four-digit year. Year 0000 is canonical
+text that SQLite compares, but PostgreSQL's `timestamptz` cast refuses it (`date/time field value out of
+range`), so `gte("0000-01-01T00:00:00.000Z")` failed there. Both are refused the same way.
+The check covers operands, not stored values: a date property stored in year 0000, which `z.date()`
+accepts, is written on every backend, but on PostgreSQL a predicate that casts that row, such as
+`gte(cutoff)`, fails with the same error.
 
 The same check applies to every operator, to each bound of `between`, to each element of an `in` /
-`notIn` list, to a nested date property reached through `get()`, and to values bound to a `param()`
-when a prepared query executes, so a refused operand never reaches SQL. `$meta` timestamps make the
-same decision (refusing with `ValidationError`); see [Metadata](/queries/filter#metadata).
+`notIn` list, to a nested date property reached through `get()`, to values bound to a `param()` when a
+prepared query executes, and in the expression context to a literal or parameter compared with any
+date-valued expression, including one a `coalesce` or `when` forwards
+(`expr.gte(expr.coalesce(ctx.d.publishedAt, expr.literal(fallback)), expr.param("from", "date"))`
+checks both `fallback` and `from`), so a refused operand never reaches SQL. An accepted string and a
+`Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
+`param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
+see [Metadata](/queries/filter#metadata).
 
 ### Equality
 

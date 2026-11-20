@@ -198,11 +198,15 @@ export function isCanonicalIsoDate(value: string): boolean {
   );
 }
 
+/** The prefix of the canonical text PostgreSQL's `timestamptz` cast refuses. */
+const YEAR_ZERO_PREFIX = "0000-";
+
 /**
- * Whether a predicate operand compared against a stored timestamp compares
- * the same way on every backend: a valid `Date` whose `toISOString()` is
- * canonical, or a string that already is canonical
- * ({@link isCanonicalIsoDate}).
+ * The canonical UTC text a predicate operand compared against a stored
+ * timestamp compares as, when every backend compares it the same way, or
+ * `undefined` when one would not: the `toISOString()` of a valid `Date`, or a
+ * string that already is canonical ({@link isCanonicalIsoDate}) — in either
+ * case outside year 0000.
  *
  * SQLite compares the stored text and PostgreSQL the parsed `timestamptz`
  * instant. The two agree only when the operand is the same fixed-width UTC
@@ -210,25 +214,38 @@ export function isCanonicalIsoDate(value: string): boolean {
  * (`"2024-01-01T00:00:00Z"`), a date-only or zoneless string, an offset, or a
  * `Date` whose ISO form uses the six-digit extended year (`+010000-…`, which
  * sorts before every four-digit year as text) each matched different rows on
- * the two engines. The one decision every timestamp operand check makes —
- * `$meta` timestamps and date-typed properties alike — so the surfaces cannot
- * disagree about which operands are comparable.
+ * the two engines. Year 0000 is canonical text, inside the JavaScript `Date`
+ * contract `isCanonicalIsoDate` keeps, but PostgreSQL's `timestamptz` cast
+ * refuses it (`date/time field value out of range`; ISO year 0 is its
+ * `0001 BC`) while SQLite compares it as text. Every other canonical string,
+ * through `9999-12-31T23:59:59.999Z`, casts. The one decision every timestamp
+ * operand check makes — `$meta` timestamps and date-typed properties alike —
+ * so the surfaces cannot disagree about which operands are comparable.
+ */
+export function canonicalDateOperandText(operand: unknown): string | undefined {
+  const text =
+    operand instanceof Date ?
+      Number.isNaN(operand.getTime()) ?
+        undefined
+      : operand.toISOString()
+    : operand;
+  if (typeof text !== "string" || !isCanonicalIsoDate(text)) return undefined;
+  return text.startsWith(YEAR_ZERO_PREFIX) ? undefined : text;
+}
+
+/**
+ * Whether {@link canonicalDateOperandText} accepts an operand: whether it
+ * compares with a stored timestamp the same way on every backend.
  */
 export function isCanonicalDateOperand(
   operand: unknown,
 ): operand is Date | string {
-  if (operand instanceof Date) {
-    return (
-      !Number.isNaN(operand.getTime()) &&
-      isCanonicalIsoDate(operand.toISOString())
-    );
-  }
-  return typeof operand === "string" && isCanonicalIsoDate(operand);
+  return canonicalDateOperandText(operand) !== undefined;
 }
 
 /** What {@link isCanonicalDateOperand} accepts, as a refusal names it. */
 export const CANONICAL_DATE_OPERAND_EXPECTATION =
-  "a Date with a four-digit year or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ)";
+  "a Date or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999";
 
 /**
  * An operand {@link isCanonicalDateOperand} refused, as an error message

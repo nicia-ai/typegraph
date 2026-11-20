@@ -8,8 +8,8 @@ import { type NullCheckOp } from "../core/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../errors";
 import {
   CANONICAL_DATE_OPERAND_EXPECTATION,
+  canonicalDateOperandText,
   describeDateOperand,
-  isCanonicalDateOperand,
 } from "../utils/date";
 import {
   type ArrayOp,
@@ -492,33 +492,97 @@ function describeFieldRef(field: FieldRef): string {
 }
 
 /**
- * Refuses an operand compared with a date-typed property unless every
- * backend compares it the same way — the decision `isCanonicalDateOperand`
+ * Whether a comparison against a value of `valueType` is a date comparison:
+ * one SQLite decides on the stored text and PostgreSQL on the parsed
+ * `timestamptz`. The one place that decision is made. A date-typed property
+ * (`FieldRef.valueType`), a `$meta` timestamp, and a composed expression
+ * whose value is a date (`expr.coalesce(d.publishedAt, …)`,
+ * `DatabaseExpression.valueType`) all reach it, so a literal and a binding
+ * compared with any of them are held to the same operand contract.
+ */
+function isDateComparison(valueType: ValueType | undefined): boolean {
+  return valueType === "date";
+}
+
+/** The side of a comparison an operand is compared with, as a refusal names it. */
+export type DateComparedSide = Readonly<{
+  valueType: ValueType | undefined;
+  /** `date field "d.publishedAt"`, or `a date expression`. */
+  description: string;
+  /** The property path an error's details name, when the side is one. */
+  field?: string;
+}>;
+
+/**
+ * The canonical text an operand compared with `compared` binds as, when the
+ * comparison is a date comparison ({@link isDateComparison}); `undefined` for
+ * any other comparison. Refuses an operand of a date comparison unless every
+ * backend compares it the same way — the decision `canonicalDateOperandText`
  * owns for `$meta` timestamps too. SQLite compares the stored text and
  * PostgreSQL the parsed `timestamptz`, so `gte("2024-01-01")` matched on one
- * and not the other. The store writes a date property as its canonical
- * `toISOString()` text, so a canonical operand compares identically on both.
+ * and not the other, and PostgreSQL refused a year-0000 operand that SQLite
+ * compared. The store writes a date property as its canonical `toISOString()`
+ * text, so an accepted operand compares identically on both.
  *
- * The one check for a literal (the field builders call it before building the
- * predicate), an expression-context literal, and a `param()` binding
- * (prepared-query validation calls it for every value bound against the
- * field), so each refuses before any SQL runs. A reference that is not
- * date-typed is not checked here.
+ * The one check for a predicate-builder literal, an expression-context
+ * literal, and a `param()` binding, so each refuses before any SQL runs.
  */
-export function assertDateFieldOperand(
-  field: FieldRef,
+export function dateComparisonOperandText(
+  compared: DateComparedSide,
   operand: unknown,
-): void {
-  if (field.valueType !== "date" || isCanonicalDateOperand(operand)) return;
-  const name = describeFieldRef(field);
+): string | undefined {
+  if (!isDateComparison(compared.valueType)) return undefined;
+  const text = canonicalDateOperandText(operand);
+  if (text !== undefined) return text;
   throw new UnsupportedPredicateError(
-    `Invalid operand for date field "${name}": expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(operand)}.`,
-    { field: name, receivedValueType: typeof operand },
+    `Invalid operand compared with ${compared.description}: expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, got ${describeDateOperand(operand)}.`,
+    {
+      ...(compared.field === undefined ? {} : { field: compared.field }),
+      receivedValueType: typeof operand,
+    },
     {
       suggestion:
         "Pass a Date, or convert the string with new Date(value).toISOString() after deciding which time zone it names.",
     },
   );
+}
+
+/** A field reference as the side of a date comparison. */
+function fieldComparedSide(field: FieldRef): DateComparedSide {
+  const name = describeFieldRef(field);
+  return {
+    valueType: field.valueType,
+    description: `date field "${name}"`,
+    field: name,
+  };
+}
+
+/**
+ * Refuses an operand compared with a date-typed field reference unless every
+ * backend compares it the same way ({@link dateComparisonOperandText}). A
+ * reference that is not date-typed is not checked here.
+ */
+export function assertDateFieldOperand(
+  field: FieldRef,
+  operand: unknown,
+): void {
+  dateComparisonOperandText(fieldComparedSide(field), operand);
+}
+
+/**
+ * The literal a scalar operand compared with `field` compiles as, after the
+ * field's date contract has accepted it. An operand of a date comparison is a
+ * `date` literal of its canonical text whether it was given as a `Date` or a
+ * string, so a list or `between` mixing the two resolves one literal type —
+ * the same one on a literal predicate and a prepared query's bound fallback.
+ */
+export function comparedOperandLiteral(
+  field: FieldRef,
+  value: string | number | boolean | Date,
+): LiteralValue {
+  const dateText = dateComparisonOperandText(fieldComparedSide(field), value);
+  if (dateText === undefined) return literal(value);
+  return { __type: "literal", value: dateText, valueType: "date" };
 }
 
 function assertCompatibleFieldReferences(
@@ -645,13 +709,11 @@ function comparison(
     } satisfies ComparisonPredicate);
   }
   assertLiteralMatchesField(field, value, op !== "eq" && op !== "neq");
-  assertDateFieldOperand(field, value);
-  const coercedValue = coerceLiteralValue(value);
   const expr: ComparisonPredicate = {
     __type: "comparison",
     op,
     left: field,
-    right: literal(coercedValue),
+    right: comparedOperandLiteral(field, coerceLiteralValue(value)),
   };
   return predicate(expr);
 }
@@ -691,8 +753,7 @@ function inComparison(
       );
     }
     assertLiteralMatchesField(field, value);
-    assertDateFieldOperand(field, value);
-    return literal(coerceLiteralValue(value));
+    return comparedOperandLiteral(field, coerceLiteralValue(value));
   });
   const expr: ComparisonPredicate = {
     __type: "comparison",
@@ -769,14 +830,11 @@ function between(
   lower: string | number | boolean | Date | ParameterRef,
   upper: string | number | boolean | Date | ParameterRef,
 ): Predicate {
-  for (const bound of [lower, upper]) {
-    if (!isParameterRef(bound)) assertDateFieldOperand(field, bound);
-  }
   const expr: BetweenPredicate = {
     __type: "between",
     field,
-    lower: isParameterRef(lower) ? lower : literal(lower),
-    upper: isParameterRef(upper) ? upper : literal(upper),
+    lower: isParameterRef(lower) ? lower : comparedOperandLiteral(field, lower),
+    upper: isParameterRef(upper) ? upper : comparedOperandLiteral(field, upper),
   };
   return predicate(expr);
 }
