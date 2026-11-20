@@ -4,6 +4,7 @@ import {
   assertPortableScalarValueType,
 } from "../aggregate-value-types";
 import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
+import { dateTypedComparisonSubqueries } from "../compared-operands";
 import { type DialectAdapter } from "../dialect/types";
 import {
   type AggregateOperator,
@@ -43,7 +44,30 @@ export type DatabaseExpressionCompilerContext = Readonly<{
     expression: DatabaseExpression,
     outerScopeIdentity: symbol,
   ) => SqlFragment;
+  /**
+   * The `$scalar()` subqueries an enclosing comparison compares with a date
+   * whose projected literal or parameter the engine cannot type
+   * (`dateTypedComparisonSubqueries`); each compiles typed as a date.
+   */
+  dateTypedSubqueries?: ReadonlySet<DatabaseExpression>;
 }>;
+
+/**
+ * `context` with `subqueries` added to the subqueries it types as dates.
+ */
+function withDateTypedSubqueries(
+  context: DatabaseExpressionCompilerContext,
+  subqueries: readonly DatabaseExpression[],
+): DatabaseExpressionCompilerContext {
+  if (subqueries.length === 0) return context;
+  return {
+    ...context,
+    dateTypedSubqueries: new Set([
+      ...(context.dateTypedSubqueries ?? []),
+      ...subqueries,
+    ]),
+  };
+}
 
 function compileLiteral(
   value: DatabaseLiteral,
@@ -182,7 +206,13 @@ function compileNode(
       );
     }
     case "comparison": {
-      return sql`(${compile(node.left)} ${comparisonOperator(node.operator)} ${compile(node.right)})`;
+      const sideContext = withDateTypedSubqueries(
+        context,
+        dateTypedComparisonSubqueries(expression),
+      );
+      const left = compileNode(node.left, sideContext, aggregateDepth);
+      const right = compileNode(node.right, sideContext, aggregateDepth);
+      return sql`(${left} ${comparisonOperator(node.operator)} ${right})`;
     }
     case "array_contains": {
       const elementType = arrayExpressionElementType(node.array);
@@ -319,7 +349,10 @@ function compileNode(
           "Expression subqueries are not available in this compiler scope",
         );
       }
-      return sql`(${context.compileSubquery(node.subquery, "scalar")})`;
+      const subquery = sql`(${context.compileSubquery(node.subquery, "scalar")})`;
+      return context.dateTypedSubqueries?.has(expression) === true ?
+          context.dialect.dateValue(subquery)
+        : subquery;
     }
   }
 

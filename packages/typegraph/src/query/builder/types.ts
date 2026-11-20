@@ -927,11 +927,20 @@ export type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> &
     ) => Predicate;
   }>;
 
+/**
+ * Array membership on a date array takes a `Date` or a canonical UTC ISO-8601
+ * string element, the same operands a date comparison takes; any other string
+ * is refused when the predicate is built.
+ */
 export type ArrayFieldAccessor<U> = NullFieldAccessor &
   Readonly<{
-    contains: (value: U) => Predicate;
-    containsAny: (values: readonly U[]) => Predicate;
-    containsAll: (values: readonly U[]) => Predicate;
+    contains: (value: [U] extends [Date] ? U | string : U) => Predicate;
+    containsAny: (
+      values: readonly ([U] extends [Date] ? U | string : U)[],
+    ) => Predicate;
+    containsAll: (
+      values: readonly ([U] extends [Date] ? U | string : U)[],
+    ) => Predicate;
     isEmpty: () => Predicate;
     isNotEmpty: () => Predicate;
     lengthEq: (length: number) => Predicate;

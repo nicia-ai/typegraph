@@ -11,12 +11,27 @@ import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
 import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
+import {
+  fieldTypeHoldsDate,
+  findUnstorableDateValue,
+} from "../query/field-type-info";
+import {
+  type FieldTypeInfo,
+  schemaIntrospectorFor,
+} from "../query/schema-introspector";
 import { acyclicEdgeKinds } from "../store/acyclicity";
 import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import { storeBackend, storeCaptureEnabled } from "../store/runtime-port";
 import type { Store } from "../store/store";
-import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
+import {
+  CANONICAL_DATE_OPERAND_EXPECTATION,
+  describeDateOperand,
+  isInvertedValidityWindow,
+  isPortableTimestamp,
+  type PropsDateValue,
+} from "../utils/date";
+import { readOwnProperty } from "../utils/object";
 import { serializedStreamRefusal, withImportStreamLease } from "./import";
 import { exportStreamBackend } from "./stream-source";
 import type {
@@ -184,7 +199,7 @@ type NonCanonicalWindow = Readonly<{
  *
  * A trusted stream is never re-parsed, so this is the only place its timestamps
  * are held to the format the rest of the system assumes. It is deliberately
- * format-ONLY — the same {@link isCanonicalIsoDate} decision the untrusted
+ * format-ONLY — the same {@link isPortableTimestamp} decision the untrusted
  * path's schema and the store's own write validation make, and nothing more —
  * because a non-canonical instant is not merely ugly: every temporal filter
  * compares these values AS TEXT against an `asOf` coordinate, so a variable-width
@@ -201,10 +216,10 @@ function nonCanonicalWindowOf(
   entity: StatedValidityWindow,
 ): NonCanonicalWindow | undefined {
   const { validFrom, validTo } = entity;
-  if (typeof validFrom === "string" && !isCanonicalIsoDate(validFrom)) {
+  if (typeof validFrom === "string" && !isPortableTimestamp(validFrom)) {
     return { field: "validFrom", value: validFrom };
   }
-  if (typeof validTo === "string" && !isCanonicalIsoDate(validTo)) {
+  if (typeof validTo === "string" && !isPortableTimestamp(validTo)) {
     return { field: "validTo", value: validTo };
   }
   return undefined;
@@ -233,7 +248,7 @@ function nonCanonicalWindowMessage(
 ): string {
   return (
     `Non-canonical ${field} in trusted import: ${subject} states "${value}". ` +
-    `Expected canonical fixed-width UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), ` +
+    `Expected canonical fixed-width UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999, ` +
     `which is what makes a stored timestamp sort chronologically against an asOf ` +
     `coordinate. Convert with new Date(value).toISOString().`
   );
@@ -256,6 +271,90 @@ function hasInvertedWindow(entity: StatedValidityWindow): boolean {
   return isInvertedValidityWindow(
     entity.validFrom ?? undefined,
     entity.validTo,
+  );
+}
+
+/** The date-bearing properties of one kind, with the schema type of each. */
+type DatedFields = readonly (readonly [string, FieldTypeInfo])[];
+
+/** A streamed node or edge, as its date properties are checked. */
+type StreamedEntity = Readonly<{
+  kind: string;
+  id: string;
+  properties: Readonly<Record<string, unknown>>;
+}>;
+
+/**
+ * The date-bearing properties of each streamed kind, resolved once per kind
+ * from its schema through the query compiler's own field typing — the typing
+ * that decides where PostgreSQL casts a stored value to `timestamptz`. A kind
+ * with none costs one map read per row.
+ */
+function datedFieldResolver<G extends GraphDef>(
+  store: Store<G>,
+  entity: "node" | "edge",
+): (kind: string) => DatedFields {
+  const introspector = schemaIntrospectorFor(store.registry);
+  const cache = new Map<string, DatedFields>();
+  return (kind) => {
+    const cached = cache.get(kind);
+    if (cached !== undefined) return cached;
+    const registration =
+      entity === "node" ? store.graph.nodes[kind] : store.graph.edges[kind];
+    const fieldNames =
+      registration === undefined ?
+        []
+      : Object.keys(registration.type.schema.shape);
+    const dated = fieldNames.flatMap((fieldName) => {
+      const info =
+        entity === "node" ?
+          introspector.getFieldTypeInfo(kind, fieldName)
+        : introspector.getEdgeFieldTypeInfo(kind, fieldName);
+      return info !== undefined && fieldTypeHoldsDate(info) ?
+          [[fieldName, info] as const]
+        : [];
+    });
+    cache.set(kind, dated);
+    return dated;
+  };
+}
+
+/**
+ * The first streamed entity holding a value at a date-typed property that no
+ * backend stores as a date — anything but a canonical UTC instant in the years
+ * 0001 to 9999 (`findUnstorableDateValue`, the decision every store write makes
+ * on a `Date`). Trusted import writes props verbatim and skips schema
+ * validation, so this is the only place its date properties are checked: a
+ * year-0000 instant made every later date predicate, ordering or typed read of
+ * the property fail on PostgreSQL, and a short or zoned form compared with a
+ * cutoff differently on SQLite (as text) and PostgreSQL (as an instant).
+ */
+function findUnstorableDateProperty<Entity extends StreamedEntity>(
+  entities: readonly Entity[],
+  datedFields: (kind: string) => DatedFields,
+): (PropsDateValue & Readonly<{ entity: Entity }>) | undefined {
+  for (const entity of entities) {
+    for (const [fieldName, info] of datedFields(entity.kind)) {
+      const found = findUnstorableDateValue(
+        readOwnProperty(entity.properties, fieldName),
+        info,
+        fieldName,
+      );
+      if (found !== undefined) return { entity, ...found };
+    }
+  }
+  return undefined;
+}
+
+/** The refusal message for an unstorable date property on `subject`. */
+function unstorableDatePropertyMessage(
+  subject: string,
+  found: PropsDateValue,
+): string {
+  return (
+    `Invalid date property in trusted import: ${subject} states ${describeDateOperand(found.value)} at "${found.path}". ` +
+    `Expected ${CANONICAL_DATE_OPERAND_EXPECTATION}, the only form every backend stores and compares as a date. ` +
+    `Convert with new Date(value).toISOString().`
   );
 }
 
@@ -317,6 +416,8 @@ async function consumeTrustedChunks<G extends GraphDef>(
       (registration) => registration.type.kind,
     ),
   );
+  const nodeDatedFields = datedFieldResolver(store, "node");
+  const edgeDatedFields = datedFieldResolver(store, "edge");
   let receivedHeader = false;
   let receivedEdges = false;
   let nodeCount = 0;
@@ -369,6 +470,18 @@ async function consumeTrustedChunks<G extends GraphDef>(
             ),
           );
         }
+        const unstorableNode = findUnstorableDateProperty(
+          chunk.nodes,
+          nodeDatedFields,
+        );
+        if (unstorableNode !== undefined) {
+          throw invalidStream(
+            unstorableDatePropertyMessage(
+              `${unstorableNode.entity.kind} "${unstorableNode.entity.id}"`,
+              unstorableNode,
+            ),
+          );
+        }
         const invertedNode = chunk.nodes.find((node) =>
           hasInvertedWindow(node),
         );
@@ -410,6 +523,18 @@ async function consumeTrustedChunks<G extends GraphDef>(
               `${entity.kind} edge "${entity.id}"`,
               field,
               value,
+            ),
+          );
+        }
+        const unstorableEdge = findUnstorableDateProperty(
+          chunk.edges,
+          edgeDatedFields,
+        );
+        if (unstorableEdge !== undefined) {
+          throw invalidStream(
+            unstorableDatePropertyMessage(
+              `${unstorableEdge.entity.kind} edge "${unstorableEdge.entity.id}"`,
+              unstorableEdge,
             ),
           );
         }

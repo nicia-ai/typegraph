@@ -243,6 +243,63 @@ export function isCanonicalDateOperand(
   return canonicalDateOperandText(operand) !== undefined;
 }
 
+/**
+ * Whether a timestamp string is one every backend stores and compares the
+ * same way: canonical text ({@link isCanonicalIsoDate}) in the years 0001 to
+ * 9999 — {@link canonicalDateOperandText}'s decision, applied to a stated
+ * timestamp. Validity bounds, `asOf` and recorded-time coordinates, and the
+ * timestamps of interchange and merge documents are all stored in or compared
+ * with a `timestamptz` column on PostgreSQL, whose cast refuses year 0000,
+ * while SQLite stores and compares the text.
+ */
+export function isPortableTimestamp(value: string): boolean {
+  return (
+    typeof value === "string" && canonicalDateOperandText(value) !== undefined
+  );
+}
+
+/** A value inside a props object, with its path from the props root. */
+export type PropsDateValue = Readonly<{ path: string; value: unknown }>;
+
+function propsPath(parent: string, key: string | number): string {
+  if (typeof key === "number") return `${parent}[${key}]`;
+  return parent === "" ? key : `${parent}.${key}`;
+}
+
+/**
+ * The first `Date` a props value holds that no backend can store as a date
+ * — one {@link canonicalDateOperandText} refuses — or `undefined`. The store
+ * writes a `Date` as its `toISOString()` text wherever it appears in props,
+ * so this walks every array element and plain-object value. PostgreSQL's
+ * `timestamptz` cast refuses the text of a `Date` in year 0000, before the
+ * common era (`-000001-…`) or after 9999 (`+010000-…`), so once stored, every
+ * date predicate, ordering or typed read of that property failed there while
+ * SQLite answered (and sorted the latter two out of chronological order).
+ */
+export function findUnstorableDate(
+  value: unknown,
+  path = "",
+): PropsDateValue | undefined {
+  if (value instanceof Date) {
+    return canonicalDateOperandText(value) === undefined ?
+        { path, value }
+      : undefined;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, element] of (value as readonly unknown[]).entries()) {
+      const found = findUnstorableDate(element, propsPath(path, index));
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  for (const [key, element] of Object.entries(value)) {
+    const found = findUnstorableDate(element, propsPath(path, key));
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 /** What {@link isCanonicalDateOperand} accepts, as a refusal names it. */
 export const CANONICAL_DATE_OPERAND_EXPECTATION =
   "a Date or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999";
@@ -250,7 +307,10 @@ export const CANONICAL_DATE_OPERAND_EXPECTATION =
 /**
  * An operand {@link isCanonicalDateOperand} refused, as an error message
  * should name it: an invalid `Date`, a `Date` by its ISO form, or any other
- * value by its type and text.
+ * value by its type and text. Total: it runs while a refusal is being built,
+ * so a value whose own conversion throws — a parsed JSON object such as
+ * `{"toString": 4, "valueOf": 5}`, which `String()` cannot convert — is named
+ * by its type rather than turning the refusal into a raw `TypeError`.
  */
 export function describeDateOperand(operand: unknown): string {
   if (operand instanceof Date) {
@@ -258,7 +318,16 @@ export function describeDateOperand(operand: unknown): string {
         `the Date ${operand.toISOString()}`
       );
   }
-  return `${typeof operand} ${String(operand)}`;
+  return `${typeof operand} ${operandText(operand)}`;
+}
+
+/** `String(operand)`, or the object tag when the value refuses conversion. */
+function operandText(operand: unknown): string {
+  try {
+    return String(operand);
+  } catch {
+    return Object.prototype.toString.call(operand);
+  }
 }
 
 /**
@@ -268,7 +337,10 @@ export function describeDateOperand(operand: unknown): string {
  * is compared **as text** against stored timestamps and must sort
  * chronologically — e.g. a temporal `asOf` coordinate, where a
  * variable-width value would mis-order and silently include or exclude the
- * wrong rows. Produce one with `new Date(value).toISOString()`.
+ * wrong rows. Produce one with `new Date(value).toISOString()`. The value must
+ * also fall in the years 0001 to 9999 ({@link isPortableTimestamp}): these
+ * timestamps are stored in, or compared with, PostgreSQL `timestamptz`
+ * columns, whose cast refuses year 0000 while SQLite stores the text.
  *
  * @param value - String to validate
  * @param fieldName - Name of field for error message
@@ -279,15 +351,15 @@ export function validateCanonicalIsoDate(
   value: string,
   fieldName: string,
 ): string {
-  if (!isCanonicalIsoDate(value)) {
+  if (!isPortableTimestamp(value)) {
     throw new ValidationError(
       `Invalid canonical ISO 8601 datetime for "${fieldName}": "${value}". ` +
-        `Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ`,
+        `Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ, in the years 0001 to 9999`,
       {
         issues: [
           {
             path: fieldName,
-            message: `Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ), got: "${value}"`,
+            message: `Expected canonical UTC ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999, got: "${value}"`,
           },
         ],
       },

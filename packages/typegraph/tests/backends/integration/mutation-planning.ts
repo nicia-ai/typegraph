@@ -87,6 +87,8 @@ export function registerMutationPlanningIntegrationTests(
           "2026-02-30T00:00:00.000Z",
           "2026-01-01T00:00:00Z",
           "2026-01-01T01:00:00.000+01:00",
+          // Canonical text, but PostgreSQL's timestamptz cast refuses it.
+          "0000-01-01T00:00:00.000Z",
         ])
           expect(
             MutationDocumentSchema.safeParse({

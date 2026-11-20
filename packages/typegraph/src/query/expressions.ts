@@ -5,8 +5,15 @@ import {
 } from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
 import { assertComparedOperand } from "./builder/order-by-field";
+import {
+  comparedExpressionOperands,
+  type ExpressionComparedSide,
+} from "./compared-operands";
 import { resolveNullOrdering } from "./order";
-import { dateComparisonOperandText } from "./predicates";
+import {
+  arrayElementComparedSide,
+  dateComparisonOperandText,
+} from "./predicates";
 
 type DatabaseJsonValue =
   | boolean
@@ -586,81 +593,53 @@ function arithmetic<
 }
 
 /**
- * @internal A literal or parameter whose value an expression comparison
- * compares, with the side it is compared against.
- */
-export type ComparedExpressionOperand = Readonly<{
-  compared: DatabaseExpression;
-  operand: DatabaseExpression;
-}>;
-
-/**
- * The literal and parameter leaves whose value becomes `expression`'s value:
- * the expression itself when it is one, or a leaf a `coalesce` operand or a
- * conditional branch forwards. Any other node computes its value, so no leaf
- * under it is compared as-is.
- */
-function forwardedValueLeaves(
-  expression: DatabaseExpression,
-): readonly DatabaseExpression[] {
-  const node = expression.node;
-  if (node.kind === "literal" || node.kind === "parameter") return [expression];
-  if (node.kind === "coalesce")
-    return node.operands.flatMap((operand) => forwardedValueLeaves(operand));
-  if (node.kind === "conditional")
-    return [
-      ...forwardedValueLeaves(node.then),
-      ...forwardedValueLeaves(node.otherwise),
-    ];
-  return [];
-}
-
-/**
- * @internal Every literal and parameter an expression comparison compares,
- * each with the side it is compared against — a bare operand, or one a
- * `coalesce` or conditional on either side forwards
- * (`expr.gte(expr.coalesce(d.publishedAt, expr.literal(fallback)),
- * expr.param("from", "date"))` compares both `fallback` and `from`). The one
- * enumeration the build-time literal check and prepared-query binding
- * validation share, so neither can see a different set of operands.
- */
-export function comparedExpressionOperands(
-  left: DatabaseExpression,
-  right: DatabaseExpression,
-): readonly ComparedExpressionOperand[] {
-  return [
-    ...forwardedValueLeaves(right).map((operand) => ({
-      compared: left,
-      operand,
-    })),
-    ...forwardedValueLeaves(left).map((operand) => ({
-      compared: right,
-      operand,
-    })),
-  ];
-}
-
-/**
  * @internal The operand check a value compared with `compared` gets, as a
- * literal when the comparison is built or as a binding when a prepared query
+ * literal when the expression is built or as a binding when a prepared query
  * executes. A bare field reference applies its own contract
  * (`assertComparedOperand`: a metadata column's, then a date property's); any
  * other side whose value is a date — `expr.coalesce(d.publishedAt, …)`, a
  * conditional, an aggregate, a scalar subquery, a parameter — applies the
- * date contract, decided by the same `isDateComparison` a field's is.
+ * date contract, decided by the same `isDateComparison` a field's is. A value
+ * tested for membership in an array is compared with each element, so it
+ * gets the contract of the array's element type.
  */
 export function assertExpressionComparedOperand(
-  compared: DatabaseExpression,
+  compared: ExpressionComparedSide,
   operand: unknown,
 ): void {
-  if (compared.node.kind === "field") {
-    assertComparedOperand(compared.node.field, operand);
+  const expression = compared.expression;
+  if (compared.position === "element") {
+    dateComparisonOperandText(
+      expression.node.kind === "field" ?
+        arrayElementComparedSide(expression.node.field)
+      : {
+          valueType: arrayExpressionElementType(expression),
+          description: "an element of a date array expression",
+        },
+      operand,
+    );
+    return;
+  }
+  if (expression.node.kind === "field") {
+    assertComparedOperand(expression.node.field, operand);
     return;
   }
   dateComparisonOperandText(
-    { valueType: compared.valueType, description: "a date expression" },
+    { valueType: expression.valueType, description: "a date expression" },
     operand,
   );
+}
+
+/**
+ * Refuses, when an expression is built, every literal it compares that the
+ * side it is compared with does not accept ({@link comparedExpressionOperands}).
+ * A parameter is checked the same way when its binding arrives.
+ */
+function assertComparedLiterals(expression: DatabaseExpression): void {
+  for (const { compared, operand } of comparedExpressionOperands(expression)) {
+    if (operand.node.kind === "literal")
+      assertExpressionComparedOperand(compared, operand.node.value);
+  }
 }
 
 function comparison<
@@ -674,16 +653,17 @@ function comparison<
 ): DatabaseExpression<NullIfEitherUndefined<Left, Right, boolean>, Scope> {
   const scopeIdentity = resolveScope([left, right]);
   assertSameValueType([left, right]);
-  for (const { compared, operand } of comparedExpressionOperands(left, right)) {
-    if (operand.node.kind === "literal")
-      assertExpressionComparedOperand(compared, operand.node.value);
-  }
-  return createExpression(
+  const expression = createExpression<
+    NullIfEitherUndefined<Left, Right, boolean>,
+    Scope
+  >(
     { kind: "comparison", left, operator, right },
     "boolean",
     left.nullable || right.nullable,
     scopeIdentity,
   );
+  assertComparedLiterals(expression);
+  return expression;
 }
 
 type ArrayExpressionElement<ArrayValue> =
@@ -710,12 +690,14 @@ function arrayContains<
     throw new TypeError(
       "arrayContains operands have incompatible element types",
     );
-  return createExpression<boolean, Scope>(
+  const expression = createExpression<boolean, Scope>(
     { array, element, kind: "array_contains" },
     "boolean",
     false,
     scopeIdentity,
   );
+  assertComparedLiterals(expression);
+  return expression;
 }
 
 function booleanComposition<Scope extends string>(

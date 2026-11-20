@@ -1,5 +1,5 @@
 import {
-  isCanonicalIsoDate,
+  isPortableTimestamp,
   preservesImmutableLowerBound,
   statedBoundMatchesStored,
 } from "../../utils/date";
@@ -119,7 +119,7 @@ function windowFieldChanges(
     stored === UNKNOWN_VALIDITY_LOWER_BOUND ||
     (requested === null ?
       field !== "validFrom"
-    : !isCanonicalIsoDate(requested))
+    : !isPortableTimestamp(requested))
   ) {
     return true;
   }
@@ -138,7 +138,7 @@ function lowerBoundRequiresWrite(
   return (
     requestedValidFrom !== undefined &&
     requestedValidFrom !== null &&
-    !isCanonicalIsoDate(requestedValidFrom)
+    !isPortableTimestamp(requestedValidFrom)
   );
 }
 

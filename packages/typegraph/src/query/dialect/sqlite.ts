@@ -130,6 +130,10 @@ function isArrayIndex(segment: string): boolean {
  * SQLite dialect adapter implementation.
  */
 export const sqliteDialect: BuiltinDialectAdapter = {
+  dateValue(value) {
+    return value;
+  },
+
   safeNumericConversion(expression) {
     const trimmed = sql`trim(${expression})`;
     const wrapped = sql`'[' || ${trimmed} || ']'`;

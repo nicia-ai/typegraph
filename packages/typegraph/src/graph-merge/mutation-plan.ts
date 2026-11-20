@@ -22,7 +22,7 @@ import {
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
 import { type ValidityEndMutation } from "../store/types";
-import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
+import { isInvertedValidityWindow, isPortableTimestamp } from "../utils/date";
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { branch } from "./branch";
@@ -278,8 +278,9 @@ const mutationReferenceSchema = z
 const mutationPropsSchema = z.record(z.string(), z.json());
 const mutationInstantSchema = z
   .string()
-  .refine((value) => isCanonicalIsoDate(value), {
-    message: "Expected canonical UTC ISO 8601 with fixed milliseconds.",
+  .refine((value) => isPortableTimestamp(value), {
+    message:
+      "Expected canonical UTC ISO 8601 with fixed milliseconds in the years 0001 to 9999.",
   });
 const mutationCreateSchema = z
   .object({
@@ -344,8 +345,8 @@ export const MutationDocumentSchema = z
         operation.options !== undefined &&
         typeof operation.options.validFrom === "string" &&
         operation.options.validTo !== undefined &&
-        isCanonicalIsoDate(operation.options.validFrom) &&
-        isCanonicalIsoDate(operation.options.validTo) &&
+        isPortableTimestamp(operation.options.validFrom) &&
+        isPortableTimestamp(operation.options.validTo) &&
         isInvertedValidityWindow(
           operation.options.validFrom,
           operation.options.validTo,

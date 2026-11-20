@@ -1923,6 +1923,7 @@ export interface DialectAdapter {
     readonly capabilities: DialectCapabilities;
     readonly compilePath: (this: void, pointer: JsonPointer) => SqlFragment;
     readonly cycleCheck: (this: void, nodeId: SqlFragment, path: SqlFragment) => SqlFragment;
+    readonly dateValue: (this: void, value: SqlFragment) => SqlFragment;
     readonly extendPath: (this: void, currentPath: SqlFragment, nodeId: SqlFragment) => SqlFragment;
     readonly fulltext: FulltextStrategy | undefined;
     readonly ilike: (this: void, column: SqlFragment, pattern: SqlFragment | string) => SqlFragment;

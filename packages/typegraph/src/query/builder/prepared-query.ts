@@ -40,6 +40,11 @@ import {
   type StringPredicate,
   type ValueType,
 } from "../ast";
+import {
+  comparedExpressionOperands,
+  type ExpressionComparedSide,
+  subqueryProjectedValueLeaves,
+} from "../compared-operands";
 import { compileQuery, type CompileQueryOptions } from "../compiler/index";
 import { resolveParameterValueType } from "../compiler/predicates";
 import { type SqlDialect } from "../dialect/types";
@@ -52,12 +57,15 @@ import {
 import {
   assertExpressionComparedOperand,
   collectOperandExpressions,
-  comparedExpressionOperands,
   type DatabaseExpression,
   isCollectRecordOperand,
   normalizeDatabaseLiteral,
 } from "../expressions";
-import { comparedOperandLiteral, isParameterRef } from "../predicates";
+import {
+  comparedOperandLiteral,
+  inSubqueryComparedField,
+  isParameterRef,
+} from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import { assertComparedOperand } from "./order-by-field";
 import {
@@ -717,12 +725,13 @@ export type ParameterMetadata = Readonly<{
    */
   comparedFields: ReadonlyMap<string, readonly FieldRef[]>;
   /**
-   * The sides each parameter of an expression comparison is compared
-   * against — directly, or through a `coalesce` or conditional that forwards
-   * it (`comparedExpressionOperands`) — so its binding gets the check
+   * The sides each parameter of an expression comparison or array membership
+   * test is compared against — directly, or through a `coalesce`,
+   * conditional or `$scalar()` subquery that forwards it
+   * (`comparedExpressionOperands`) — so its binding gets the check
    * (`assertExpressionComparedOperand`) the same literal would.
    */
-  comparedExpressions: ReadonlyMap<string, readonly DatabaseExpression[]>;
+  comparedExpressions: ReadonlyMap<string, readonly ExpressionComparedSide[]>;
 }>;
 
 /** The mutable form {@link collectParameterMetadataFromAst} fills. */
@@ -736,7 +745,7 @@ type ParameterMetadataAccumulator = Readonly<{
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: Set<string>;
   comparedFields: Map<string, FieldRef[]>;
-  comparedExpressions: Map<string, DatabaseExpression[]>;
+  comparedExpressions: Map<string, ExpressionComparedSide[]>;
 }>;
 
 export function collectParameterMetadata(
@@ -752,7 +761,7 @@ export function collectParameterMetadata(
     expressionParameterTypes: new Map<string, ValueType>(),
     conflictingElementTypes: new Set<string>(),
     comparedFields: new Map<string, FieldRef[]>(),
-    comparedExpressions: new Map<string, DatabaseExpression[]>(),
+    comparedExpressions: new Map<string, ExpressionComparedSide[]>(),
   };
 
   const queries: readonly QueryAst[] =
@@ -833,7 +842,7 @@ function recordComparedField(
 function recordComparedExpression(
   accumulator: ParameterMetadataAccumulator,
   name: string,
-  compared: DatabaseExpression,
+  compared: ExpressionComparedSide,
 ): void {
   const expressions = accumulator.comparedExpressions.get(name);
   if (expressions === undefined) {
@@ -905,6 +914,10 @@ function collectParameterMetadataFromDatabaseExpression(
   function collect(operand: DatabaseExpression): void {
     collectParameterMetadataFromDatabaseExpression(operand, accumulator);
   }
+  for (const { compared, operand } of comparedExpressionOperands(expression)) {
+    if (operand.node.kind === "parameter")
+      recordComparedExpression(accumulator, operand.node.name, compared);
+  }
   switch (node.kind) {
     case "parameter": {
       const existingType = accumulator.expressionParameterTypes.get(node.name);
@@ -924,13 +937,6 @@ function collectParameterMetadataFromDatabaseExpression(
       return;
     }
     case "comparison": {
-      for (const { compared, operand } of comparedExpressionOperands(
-        node.left,
-        node.right,
-      )) {
-        if (operand.node.kind === "parameter")
-          recordComparedExpression(accumulator, operand.node.name, compared);
-      }
       collect(node.left);
       collect(node.right);
       return;
@@ -1053,8 +1059,22 @@ function collectParameterMetadataFromExpression(
     case "fulltext_match": {
       return;
     }
-    case "exists":
+    case "exists": {
+      collectParameterMetadataFromAst(expression.subquery, accumulator);
+      return;
+    }
     case "in_subquery": {
+      // The subquery compares the field with each value it projects, so a
+      // parameter it projects gets the field's operand contract, typed as the
+      // compiler compares the two (`inSubqueryComparedField`).
+      const compared = inSubqueryComparedField(
+        expression.field,
+        expression.subquery,
+      );
+      for (const operand of subqueryProjectedValueLeaves(expression.subquery)) {
+        if (operand.node.kind === "parameter")
+          recordComparedField(accumulator, operand.node.name, compared);
+      }
       collectParameterMetadataFromAst(expression.subquery, accumulator);
       return;
     }

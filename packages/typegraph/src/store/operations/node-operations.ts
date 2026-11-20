@@ -8391,7 +8391,8 @@ const INDEX_PROBE_EXPECTED_TYPEOF: Partial<Record<ValueType, string>> = {
 /**
  * Validates a single probe value against its declared index-field type.
  * Missing/null values are valid (null probes); only a present, scalar
- * value of the wrong type is rejected.
+ * value of the wrong type is rejected. A date-typed key never reaches here:
+ * {@link executeNodeBulkFindByIndex} refuses an index with one first.
  */
 function validateIndexProbeValue(
   value: unknown,
@@ -8413,16 +8414,6 @@ function validateIndexProbeValue(
       pointer,
       kind,
       "a scalar (string, number, boolean, or Date)",
-      value,
-    );
-  }
-
-  if (valueType === "date") {
-    if (value instanceof Date || typeof value === "string") return;
-    throw indexProbeTypeError(
-      pointer,
-      kind,
-      "date (Date or ISO string)",
       value,
     );
   }
@@ -8529,7 +8520,9 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
   // Date-typed lookup keys can't satisfy the cross-backend parity guarantee:
   // SQLite compares stored ISO text byte-wise while Postgres compares
   // timestamptz instants, so equal instants in different ISO forms diverge.
-  // Declare the gap rather than return backend-dependent results.
+  // PostgreSQL also cannot build the expression index such a key needs (its
+  // text-to-timestamptz cast is not immutable). Declare the gap rather than
+  // return backend-dependent results.
   if (index.fieldValueTypes.includes("date")) {
     throw new ConfigurationError(
       `bulkFindByIndex does not support date-typed key fields on index "${indexName}" (node kind "${kind}")`,

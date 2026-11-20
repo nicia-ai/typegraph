@@ -155,6 +155,10 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
  * PostgreSQL dialect adapter implementation.
  */
 export const postgresDialect: BuiltinDialectAdapter = {
+  dateValue(value) {
+    return sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES.date)})`;
+  },
+
   safeNumericConversion(expression) {
     const trimmed = sql`btrim(${expression}, ${" \t\r\n"})`;
     const exact = sql`CAST(${trimmed} AS NUMERIC)`;

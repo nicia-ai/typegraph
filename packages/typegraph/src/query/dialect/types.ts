@@ -161,6 +161,18 @@ export type InListParameterOptions = Readonly<{
  * together and rendered by a backend adapter.
  */
 export interface DialectAdapter {
+  /**
+   * Types a value compared with a date as the dialect's date type, where the
+   * engine cannot infer it: a `$scalar()` or `in` / `notIn` subquery that
+   * projects a date literal or parameter (bound as its canonical ISO-8601
+   * text). Compared directly, such a value takes its type from the other
+   * side; projected by a subquery it has none, and PostgreSQL types it as
+   * `text`, so comparing it with a `timestamptz` date property fails. The
+   * compiler applies it only to a value compared with a date, never to a date
+   * a query merely projects. SQLite compares dates as text and returns the
+   * value unchanged.
+   */
+  readonly dateValue: (this: void, value: SqlFragment) => SqlFragment;
   /** Converts strict finite decimal text to a number, returning SQL NULL otherwise. */
   readonly safeNumericConversion: (
     this: void,

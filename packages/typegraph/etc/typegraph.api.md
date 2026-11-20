@@ -252,11 +252,11 @@ type ArrayContainsExpressionNode = Readonly<{
 // @public (undocumented)
 type ArrayExpressionElement<ArrayValue> = ArrayValue extends readonly (infer Element)[] ? Element : never;
 
-// @public (undocumented)
+// @public
 type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
-    contains: (value: U) => Predicate;
-    containsAny: (values: readonly U[]) => Predicate;
-    containsAll: (values: readonly U[]) => Predicate;
+    contains: (value: [U] extends [Date] ? U | string : U) => Predicate;
+    containsAny: (values: readonly ([U] extends [Date] ? U | string : U)[]) => Predicate;
+    containsAll: (values: readonly ([U] extends [Date] ? U | string : U)[]) => Predicate;
     isEmpty: () => Predicate;
     isNotEmpty: () => Predicate;
     lengthEq: (length: number) => Predicate;

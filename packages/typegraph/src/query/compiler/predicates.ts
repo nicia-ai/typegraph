@@ -30,6 +30,10 @@ import {
   type VectorSimilarityPredicate,
 } from "../ast";
 import {
+  inSubqueryComparisonValueType,
+  inSubqueryProjectsDateValue,
+} from "../compared-operands";
+import {
   LIKE_ESCAPE_CHARACTER,
   nullIfTrailingLikeEscape,
 } from "../dialect/like-escape";
@@ -1216,12 +1220,12 @@ function compileInSubquery(
 
   const fieldValueType = normalizeValueType(expr.field.valueType);
   const subqueryValueType = getSingleSubqueryColumnValueType(expr.subquery);
-  const resolvedValueType = fieldValueType ?? subqueryValueType;
+  const valueType = inSubqueryComparisonValueType(expr.field, expr.subquery);
 
-  if (isUnsupportedInSubqueryValueType(resolvedValueType)) {
+  if (isUnsupportedInSubqueryValueType(valueType)) {
     throw new UnsupportedPredicateError(
-      `IN/NOT IN subquery does not support ${String(resolvedValueType)} values`,
-      { valueType: resolvedValueType },
+      `IN/NOT IN subquery does not support ${String(valueType)} values`,
+      { valueType },
     );
   }
 
@@ -1235,7 +1239,6 @@ function compileInSubquery(
     );
   }
 
-  const valueType = fieldValueType ?? subqueryValueType;
   if (expr.subquery.graphId === undefined) {
     throw new UnsupportedPredicateError(
       "IN/NOT IN subquery must have a graphId",
@@ -1249,10 +1252,41 @@ function compileInSubquery(
     undefined,
     ctx.cteColumnPrefix,
   );
-  const subSql = ctx.compileQuery(expr.subquery, expr.subquery.graphId);
+  const compiledSubquery = ctx.compileQuery(
+    expr.subquery,
+    expr.subquery.graphId,
+  );
+  const subSql =
+    inSubqueryProjectsDateValue(expr.field, expr.subquery) ?
+      dateTypedSubqueryValues(expr.subquery, compiledSubquery, ctx.dialect)
+    : compiledSubquery;
   return expr.negated ?
       sql`${fieldSql} NOT IN (${subSql})`
     : sql`${fieldSql} IN (${subSql})`;
+}
+
+/** The derived-table alias {@link dateTypedSubqueryValues} reads through. */
+const DATE_TYPED_SUBQUERY_ALIAS = "tg_date_values";
+
+/**
+ * The values an `in` / `notIn` subquery projects, typed as dates
+ * (`DialectAdapter.dateValue`): a literal or parameter the subquery projects
+ * is typed `text` on PostgreSQL, where comparing a `timestamptz` field with it
+ * fails. Read through a derived table, so the subquery itself compiles as it
+ * would anywhere else and only the compared value is typed.
+ */
+function dateTypedSubqueryValues(
+  subquery: InSubquery["subquery"],
+  compiled: SqlFragment,
+  dialect: DialectAdapter,
+): SqlFragment {
+  const [projected] = subquery.projection.fields;
+  if (projected === undefined)
+    throw new CompilerInvariantError(
+      "A date-typed IN/NOT IN subquery has no projected column",
+    );
+  const column = sql`${sql.identifier(DATE_TYPED_SUBQUERY_ALIAS)}.${sql.identifier(projected.outputName)}`;
+  return sql`SELECT ${dialect.dateValue(column)} FROM (${compiled}) AS ${sql.identifier(DATE_TYPED_SUBQUERY_ALIAS)}`;
 }
 
 /**
