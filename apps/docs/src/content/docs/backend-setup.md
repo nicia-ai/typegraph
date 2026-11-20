@@ -580,8 +580,9 @@ const store = createStore(graph, backend, { autoRefreshStatistics: false });
 ```
 
 Bulk writes inside a `store.transaction(...)` block never auto-refresh —
-statistics collected mid-transaction cannot see the uncommitted rows —
-so refresh manually after the transaction commits. The same applies to
+`refreshStatistics()` runs on the store's own connection, which cannot see
+the transaction's uncommitted rows — so refresh manually after the
+transaction commits. The same applies to
 loops of small `bulkCreate` batches that never individually reach the
 threshold, and to backend-level batch inserts — the loop example below
 covers that pattern.
@@ -613,6 +614,41 @@ failures stay visible through the existing caller warning or rejection. If you
 need to bypass the API for an unusual deployment (for example issuing `ANALYZE`
 over a separate admin connection), call `backend.execute()` with raw SQL as the
 escape hatch.
+
+#### Stale statistics on a large shared table (PostgreSQL)
+
+PostgreSQL's autovacuum re-analyzes a table only after changes reach
+`autovacuum_analyze_threshold` + `autovacuum_analyze_scale_factor` × its row
+count (50 rows + 10% by default). On a nodes table shared by many graphs, a load
+of tens of thousands of nodes of one kind can stay below that trigger
+indefinitely, and until it is crossed the planner estimates the new kind at
+about one row. Set-wise writes such as `updateWhere()` bind their keys, so their
+plans do not depend on that estimate. A point lookup by id, however, can then
+pick any index that starts with `(graph_id, kind)` and filter every row of the
+kind. In a benchmark with 300,000 analyzed rows of other graphs, one
+primary-key `UPDATE` took 6.5 ms instead of 0.06 ms against 40,000
+un-analyzed rows of the kind. Per-row work therefore slows as the kind grows:
+500 transactions of 20 creates plus 20 edges each went from 15 ms to 18 ms per
+batch, and stayed at about 11 ms when the tables were analyzed every 1,000
+rows.
+
+`ANALYZE` samples a bounded number of rows, so its cost does not grow with the
+table: about 0.4 s for `typegraph_nodes` and 0.65 s for `typegraph_edges`,
+both at 300,000 and at 1,000,000 rows. After a large load, call
+`store.refreshStatistics()`. To have autovacuum keep up with a steady stream of
+committed writes instead, give the TypeGraph tables a size-independent
+trigger:
+
+```sql
+ALTER TABLE typegraph_nodes SET (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = 10000);
+ALTER TABLE typegraph_edges SET (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = 10000);
+```
+
+Autovacuum sees only committed rows and wakes every `autovacuum_naptime`
+(one minute by default), so this does not help the remainder of the
+transaction that is doing the load. TypeGraph does not set these parameters
+itself. The right threshold depends on the write rate, and the setting
+outlives the migration that would apply it.
 
 ### pgbouncer / transaction-pool mode
 
