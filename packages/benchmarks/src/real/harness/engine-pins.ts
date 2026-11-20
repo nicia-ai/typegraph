@@ -19,7 +19,7 @@
  * - Graph Data Science 2026.10.2 — the GDS compatibility matrix
  *   (graphdatascience.ninja/versions.json maps Neo4j 2026.10.2 to GDS
  *   2026.10.2) and the GitHub release asset digest.
- * - `ghcr.io/evokoa/pggraph:1.2.1` — the GHCR tag list and the pgGraph GitHub
+ * - pgGraph `1.2.1` — the GHCR tag list and the pgGraph GitHub
  *   releases (1.2.1, 2026-09-23). The image path is the registry location of
  *   the pgGraph image and has to stay as written. The unprefixed tag is the
  *   PostgreSQL 17 build (same digest as `pg17-1.2.1`), the same PostgreSQL
