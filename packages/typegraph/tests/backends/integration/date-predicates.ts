@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { createStoreWithSchema, expr, param as parameter } from "../../../src";
+import {
+  createStoreWithSchema,
+  expr,
+  inSubquery,
+  param as parameter,
+} from "../../../src";
+import { jsonPointer } from "../../../src/query/json-pointer";
+import { fieldRef } from "../../../src/query/predicates";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { createStatementCounter } from "./statement-counter";
 import { type IntegrationTestContext } from "./test-context";
@@ -50,15 +57,22 @@ async function seedDatedDocuments(store: IntegrationStore): Promise<void> {
   await store.nodes.Document.create({
     title: "just-before",
     publishedAt: new Date(JUST_BEFORE),
+    revisedAt: [new Date(JUST_BEFORE)],
   });
   await store.nodes.Document.create({
     title: "midnight",
     publishedAt: new Date(MIDNIGHT),
+    revisedAt: [new Date(MIDNIGHT)],
+    metadata: { revisedAt: [new Date(MIDNIGHT)] },
   });
   await store.nodes.Document.create({
     title: "midyear",
     publishedAt: new Date(MIDYEAR),
-    metadata: { publishedAt: new Date(MIDYEAR) },
+    revisedAt: [new Date(MIDNIGHT), new Date(MIDYEAR)],
+    metadata: {
+      publishedAt: new Date(MIDYEAR),
+      revisedAt: [new Date(MIDYEAR)],
+    },
   });
 }
 
@@ -314,6 +328,191 @@ async function dateValueOutcomes(
   };
 }
 
+/** The `publishedAt` property as an `in`/`notIn` subquery compares it. */
+const PUBLISHED_AT_FIELD = fieldRef("d", ["props"], {
+  jsonPointer: jsonPointer(["publishedAt"]),
+  valueType: "date",
+});
+
+/**
+ * Every membership, subquery and index-probe position a date operand takes,
+ * refused or run: a membership test against a date array (the expression
+ * context's `arrayContains`, directly or through a `coalesce`, and the
+ * predicate builder's `contains`, `containsAll`, `containsAny` and
+ * `pathContains`), a JSON-path equality with a date value, a date projected by
+ * a `$scalar()` or an `in` subquery, and a `bulkFindByIndex` date probe.
+ */
+async function membershipOperandOutcomes(
+  store: Pick<IntegrationStore, "query" | "nodes">,
+  operand: string,
+): Promise<Readonly<Record<string, string>>> {
+  const asDate = operand as unknown as Date;
+  const boundArrayContains = queryDocuments(store)
+    .where((ctx) =>
+      expr.arrayContains(ctx.d.revisedAt, expr.param("at", "date")),
+    )
+    .project((ctx) => ({ title: ctx.d.title }))
+    .prepare();
+  const boundComposedArrayContains = queryDocuments(store)
+    .where((ctx) =>
+      expr.arrayContains(
+        ctx.d.revisedAt,
+        expr.coalesce(
+          expr.param("at", "date"),
+          expr.literal(new Date(MIDYEAR)),
+        ),
+      ),
+    )
+    .project((ctx) => ({ title: ctx.d.title }))
+    .prepare();
+  const boundScalar = queryDocuments(store)
+    .where((ctx) =>
+      expr.gte(
+        ctx.d.publishedAt,
+        ctx.$scalar((subquery) =>
+          subquery
+            .from("Document", "x")
+            .project(() => ({ cutoff: expr.param("from", "date") }))
+            .limit(1),
+        ),
+      ),
+    )
+    .project((ctx) => ({ title: ctx.d.title }))
+    .prepare();
+  const boundInSubquery = queryDocuments(store)
+    .whereNode("d", () =>
+      inSubquery(
+        PUBLISHED_AT_FIELD,
+        store
+          .query()
+          .from("Document", "x")
+          .project(() => ({ instant: expr.param("at", "date") }))
+          .limit(1)
+          .toAst(),
+      ),
+    )
+    .select((ctx) => ctx.d.title)
+    .prepare();
+
+  return {
+    boundArrayContains: await refusal(() =>
+      boundArrayContains.execute({ at: asDate }),
+    ),
+    boundComposedArrayContains: await refusal(() =>
+      boundComposedArrayContains.execute({ at: asDate }),
+    ),
+    contains: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) => d.revisedAt.contains(asDate))
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    containsAll: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) =>
+          d.revisedAt.containsAll([new Date(MIDNIGHT), asDate]),
+        )
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    containsAny: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) =>
+          d.revisedAt.containsAny([new Date(MIDNIGHT), asDate]),
+        )
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    pathContains: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) => d.metadata.pathContains("/revisedAt", asDate))
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    pathEquals: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) => d.metadata.pathEquals("/publishedAt", operand))
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    boundScalar: await refusal(() => boundScalar.execute({ from: asDate })),
+    boundInSubquery: await refusal(() =>
+      boundInSubquery.execute({ at: asDate }),
+    ),
+    indexProbe: await refusal(() =>
+      store.nodes.Document.bulkFindByIndex("document_published_at", [
+        { props: { publishedAt: asDate } },
+      ]),
+    ),
+  };
+}
+
+/** The positions of {@link membershipOperandOutcomes} a `Date` literal takes. */
+async function membershipDateOutcomes(
+  store: Pick<IntegrationStore, "query" | "nodes">,
+  operand: Date,
+): Promise<Readonly<Record<string, string>>> {
+  return {
+    arrayContains: await refusal(() =>
+      queryDocuments(store)
+        .where((ctx) =>
+          expr.arrayContains(ctx.d.revisedAt, expr.literal(operand)),
+        )
+        .project((ctx) => ({ title: ctx.d.title }))
+        .execute(),
+    ),
+    contains: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) => d.revisedAt.contains(operand))
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    pathEquals: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", (d) => d.metadata.pathEquals("/publishedAt", operand))
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    scalar: await refusal(() =>
+      queryDocuments(store)
+        .where((ctx) =>
+          expr.gte(
+            ctx.d.publishedAt,
+            ctx.$scalar((subquery) =>
+              subquery
+                .from("Document", "x")
+                .project(() => ({ cutoff: expr.literal(operand) }))
+                .limit(1),
+            ),
+          ),
+        )
+        .project((ctx) => ({ title: ctx.d.title }))
+        .execute(),
+    ),
+    inSubquery: await refusal(() =>
+      queryDocuments(store)
+        .whereNode("d", () =>
+          inSubquery(
+            PUBLISHED_AT_FIELD,
+            store
+              .query()
+              .from("Document", "x")
+              .project(() => ({ instant: expr.literal(operand) }))
+              .limit(1)
+              .toAst(),
+          ),
+        )
+        .select((ctx) => ctx.d.title)
+        .execute(),
+    ),
+    indexProbe: await refusal(() =>
+      store.nodes.Document.bulkFindByIndex("document_published_at", [
+        { props: { publishedAt: operand } },
+      ]),
+    ),
+  };
+}
+
 export function registerDatePredicateIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -561,6 +760,246 @@ export function registerDatePredicateIntegrationTests(
         });
       },
     );
+
+    it.each(["packed", "fallback"] as const)(
+      "refuses a non-canonical or uncastable string in every membership, subquery and index-probe position, before any SQL runs (%s prepared path)",
+      async (path) => {
+        const { store, counter } = await countedStore(context, path);
+
+        const outcomes: Record<string, Readonly<Record<string, string>>> = {};
+        for (const operand of REFUSED_STRINGS) {
+          outcomes[operand] = await membershipOperandOutcomes(store, operand);
+        }
+        const refusedStatements = counter.count();
+
+        const refusedEverywhere = {
+          boundArrayContains: "UnsupportedPredicateError",
+          boundComposedArrayContains: "UnsupportedPredicateError",
+          contains: "UnsupportedPredicateError",
+          containsAll: "UnsupportedPredicateError",
+          containsAny: "UnsupportedPredicateError",
+          pathContains: "UnsupportedPredicateError",
+          pathEquals: "UnsupportedPredicateError",
+          boundScalar: "UnsupportedPredicateError",
+          boundInSubquery: "UnsupportedPredicateError",
+          indexProbe: "ValidationError",
+        };
+        expect(outcomes).toEqual(
+          Object.fromEntries(
+            REFUSED_STRINGS.map((operand) => [operand, refusedEverywhere]),
+          ),
+        );
+        expect(refusedStatements).toBe(0);
+
+        // The counter observes this store's statements: the same positions
+        // with a canonical operand all run, each through SQL.
+        expect(
+          Object.values(await membershipOperandOutcomes(store, MIDNIGHT)),
+        ).toEqual(Array.from({ length: 10 }, () => "ran"));
+        expect(counter.count()).toBeGreaterThanOrEqual(10);
+      },
+    );
+
+    it("refuses a Date outside the years 0001 to 9999 in every membership, subquery and index-probe position, before any SQL runs", async () => {
+      const { store, counter } = await countedStore(context, "packed");
+
+      const outcomes = {
+        extendedYear: await membershipDateOutcomes(
+          store,
+          REFUSED_DATES.extendedYear,
+        ),
+        yearZero: await membershipDateOutcomes(store, REFUSED_DATES.yearZero),
+      };
+
+      const refusedEverywhere = {
+        arrayContains: "UnsupportedPredicateError",
+        contains: "UnsupportedPredicateError",
+        pathEquals: "UnsupportedPredicateError",
+        scalar: "UnsupportedPredicateError",
+        inSubquery: "UnsupportedPredicateError",
+        indexProbe: "ValidationError",
+      };
+      expect(outcomes).toEqual({
+        extendedYear: refusedEverywhere,
+        yearZero: refusedEverywhere,
+      });
+      expect(counter.count()).toBe(0);
+    });
+
+    it("matches the same rows for a canonical string and the equivalent Date in membership, subquery and index-probe positions on every backend", async () => {
+      const store = context.getStore();
+      const boundArrayContains = queryDocuments(store)
+        .where((ctx) =>
+          expr.arrayContains(ctx.d.revisedAt, expr.param("at", "date")),
+        )
+        .project((ctx) => ({ title: ctx.d.title }))
+        .prepare();
+      function scalarCutoff(cutoff: Date | "param") {
+        return queryDocuments(store)
+          .where((ctx) =>
+            expr.gte(
+              ctx.d.publishedAt,
+              ctx.$scalar((subquery) =>
+                subquery
+                  .from("Document", "x")
+                  .project(() => ({
+                    cutoff:
+                      cutoff === "param" ?
+                        expr.param("from", "date")
+                      : expr.literal(cutoff),
+                  }))
+                  .limit(1),
+              ),
+            ),
+          )
+          .project((ctx) => ({ title: ctx.d.title }));
+      }
+      function inSubqueryOf(instant: Date | "param") {
+        return queryDocuments(store)
+          .whereNode("d", () =>
+            inSubquery(
+              PUBLISHED_AT_FIELD,
+              store
+                .query()
+                .from("Document", "x")
+                .project(() => ({
+                  instant:
+                    instant === "param" ?
+                      expr.param("at", "date")
+                    : expr.literal(instant),
+                }))
+                .limit(1)
+                .toAst(),
+            ),
+          )
+          .select((ctx) => ctx.d.title);
+      }
+      const boundScalar = scalarCutoff("param").prepare();
+      const boundInSubquery = inSubqueryOf("param").prepare();
+      const [byDate, byString] = await Promise.all([
+        store.nodes.Document.bulkFindByIndex("document_published_at", [
+          { props: { publishedAt: new Date(MIDNIGHT) } },
+          { props: { publishedAt: MIDNIGHT as unknown as Date } },
+        ]),
+        store.nodes.Document.bulkFindByIndex("document_published_at", [
+          { props: { publishedAt: new Date(MIDYEAR) } },
+        ]),
+      ]);
+
+      const rows = {
+        arrayContainsString: titlesOf(
+          await boundArrayContains.execute({
+            at: MIDNIGHT,
+          }),
+        ),
+        arrayContainsDate: titlesOf(
+          await boundArrayContains.execute({ at: new Date(MIDNIGHT) }),
+        ),
+        arrayContainsLiteral: titlesOf(
+          await queryDocuments(store)
+            .where((ctx) =>
+              expr.arrayContains(
+                ctx.d.revisedAt,
+                expr.literal(new Date(MIDYEAR)),
+              ),
+            )
+            .project((ctx) => ({ title: ctx.d.title }))
+            .execute(),
+        ),
+        containsString: await queryDocuments(store)
+          .whereNode("d", (d) =>
+            d.revisedAt.contains(MIDNIGHT as unknown as Date),
+          )
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        containsAll: await queryDocuments(store)
+          .whereNode("d", (d) =>
+            d.revisedAt.containsAll([new Date(MIDNIGHT), new Date(MIDYEAR)]),
+          )
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        containsAny: await queryDocuments(store)
+          .whereNode("d", (d) =>
+            d.revisedAt.containsAny([
+              new Date(JUST_BEFORE),
+              MIDYEAR as unknown as Date,
+            ]),
+          )
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        pathContains: await queryDocuments(store)
+          .whereNode("d", (d) =>
+            d.metadata.pathContains("/revisedAt", new Date(MIDNIGHT)),
+          )
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        pathEqualsString: await queryDocuments(store)
+          .whereNode("d", (d) => d.metadata.pathEquals("/publishedAt", MIDYEAR))
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        pathEqualsDate: await queryDocuments(store)
+          .whereNode("d", (d) =>
+            d.metadata.pathEquals("/publishedAt", new Date(MIDYEAR)),
+          )
+          .select((ctx) => ctx.d.title)
+          .execute(),
+        scalarLiteral: titlesOf(
+          await scalarCutoff(new Date(MIDNIGHT)).execute(),
+        ),
+        scalarBoundString: titlesOf(
+          await boundScalar.execute({ from: MIDNIGHT }),
+        ),
+        scalarBoundDate: titlesOf(
+          await boundScalar.execute({ from: new Date(MIDNIGHT) }),
+        ),
+        inSubqueryLiteral: await inSubqueryOf(new Date(MIDYEAR)).execute(),
+        inSubqueryBound: await boundInSubquery.execute({
+          at: MIDNIGHT as unknown as Date,
+        }),
+        indexProbeDate: (byDate[0] ?? []).map((node) => node.title),
+        indexProbeString: (byDate[1] ?? []).map((node) => node.title),
+        indexProbeMidyear: (byString[0] ?? []).map((node) => node.title),
+      };
+
+      expect(sortedRows(rows)).toEqual({
+        arrayContainsString: ["midnight", "midyear"],
+        arrayContainsDate: ["midnight", "midyear"],
+        arrayContainsLiteral: ["midyear"],
+        containsString: ["midnight", "midyear"],
+        containsAll: ["midyear"],
+        containsAny: ["just-before", "midyear"],
+        pathContains: ["midnight"],
+        pathEqualsString: ["midyear"],
+        pathEqualsDate: ["midyear"],
+        scalarLiteral: ["midnight", "midyear"],
+        scalarBoundString: ["midnight", "midyear"],
+        scalarBoundDate: ["midnight", "midyear"],
+        inSubqueryLiteral: ["midyear"],
+        inSubqueryBound: ["midnight"],
+        indexProbeDate: ["midnight"],
+        indexProbeString: ["midnight"],
+        indexProbeMidyear: ["midyear"],
+      });
+    });
+
+    it("projects a date a $scalar() subquery selects as the same value on every backend", async () => {
+      const rows = await queryDocuments(context.getStore())
+        .whereNode("d", (d) => d.title.eq("midnight"))
+        .project((ctx) => ({
+          cutoff: ctx.$scalar((subquery) =>
+            subquery
+              .from("Document", "x")
+              .project(() => ({ cutoff: expr.literal(new Date(MIDYEAR)) }))
+              .limit(1),
+          ),
+          published: ctx.d.publishedAt,
+        }))
+        .execute();
+
+      expect(rows).toEqual([
+        { cutoff: new Date(MIDYEAR), published: new Date(MIDNIGHT) },
+      ]);
+    });
 
     it("names the property, not the props column, when it refuses a date operand", () => {
       const messages = {

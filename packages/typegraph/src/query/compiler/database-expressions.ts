@@ -64,6 +64,19 @@ function compileLiteral(
   return sql`${value}`;
 }
 
+/**
+ * A literal or parameter as SQL, typed as a date when its expression is one
+ * (`DialectAdapter.dateValue`), so a context with nothing to infer its type
+ * from — a `$scalar()` or `in` subquery's projection — still yields a date.
+ */
+function typedBindOnlyValue(
+  expression: DatabaseExpression,
+  value: SqlFragment,
+  dialect: DialectAdapter,
+): SqlFragment {
+  return expression.valueType === "date" ? dialect.dateValue(value) : value;
+}
+
 function comparisonOperator(
   operator: "eq" | "gt" | "gte" | "lt" | "lte" | "neq",
 ): SqlFragment {
@@ -155,10 +168,18 @@ function compileNode(
       );
     }
     case "literal": {
-      return compileLiteral(node.value, context.dialect);
+      return typedBindOnlyValue(
+        expression,
+        compileLiteral(node.value, context.dialect),
+        context.dialect,
+      );
     }
     case "parameter": {
-      return sql.placeholder(node.name);
+      return typedBindOnlyValue(
+        expression,
+        sql.placeholder(node.name),
+        context.dialect,
+      );
     }
     case "arithmetic": {
       const left = compile(node.left);

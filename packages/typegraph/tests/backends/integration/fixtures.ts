@@ -48,6 +48,7 @@ const Document = defineNode("Document", {
     title: z.string(),
     publishedAt: z.date().optional(),
     tags: z.array(z.string()).optional(),
+    revisedAt: z.array(z.date()).optional(),
     scores: z.array(z.number()).optional(),
     metadata: z
       .object({
@@ -57,6 +58,7 @@ const Document = defineNode("Document", {
         reviewer: z.string().nullable().optional(),
         version: z.number().optional(),
         publishedAt: z.date().optional(),
+        revisedAt: z.array(z.date()).optional(),
         flags: z
           .object({
             published: z.boolean().optional(),
@@ -153,7 +155,7 @@ const documentAuthorIndex = defineNodeIndex(Document, {
   fields: [["metadata", "author"] as const],
 });
 
-// Date-typed key — bulkFindByIndex rejects this (no cross-backend parity).
+// Date-typed key — bulkFindByIndex probes it by canonical instant only.
 const documentPublishedAtIndex = defineNodeIndex(Document, {
   name: "document_published_at",
   fields: ["publishedAt"],

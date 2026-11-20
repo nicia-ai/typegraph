@@ -297,7 +297,11 @@ The same check applies to every operator, to each bound of `between`, to each el
 prepared query executes, and in the expression context to a literal or parameter compared with any
 date-valued expression, including one a `coalesce` or `when` forwards
 (`expr.gte(expr.coalesce(ctx.d.publishedAt, expr.literal(fallback)), expr.param("from", "date"))`
-checks both `fallback` and `from`), so a refused operand never reaches SQL. An accepted string and a
+checks both `fallback` and `from`). It also applies to a value tested for membership in a date array —
+`expr.arrayContains`, `contains`, `containsAll`, `containsAny`, and `pathContains` on a date-array JSON
+path — to `pathEquals` on a date JSON path, to a date a `$scalar()` or `in` / `notIn` subquery projects
+and compares with a date property, and to a `bulkFindByIndex` probe of a date key (which refuses with
+`ValidationError`). A refused operand never reaches SQL. An accepted string and a
 `Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
 `param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
 see [Metadata](/queries/filter#metadata).

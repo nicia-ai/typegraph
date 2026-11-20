@@ -1634,10 +1634,10 @@ matches stored `NULL`.
   than via `ROW_NUMBER()` — same result.
 - Throws `NodeIndexNotFoundError` for an unknown index, `ConfigurationError`
   for an index declared without `fields` (only `coveringFields` and/or
-  `keySystemColumns` — nothing to probe by) or for a date-typed key field
-  (which can't compare identically across SQLite and PostgreSQL), and
-  `ValidationError` for a non-positive `limitPerInput` or a non-scalar probe
-  value.
+  `keySystemColumns` — nothing to probe by), and `ValidationError` for a
+  non-positive `limitPerInput`, a non-scalar probe value, or a date-key probe
+  that is not a `Date` or canonical UTC ISO-8601 string in the years 0001 to
+  9999 (the only form SQLite and PostgreSQL compare identically).
 
 See [Index-backed lookup](/performance/indexes#batched-index-lookup-bulkfindbyindex)
 for details.

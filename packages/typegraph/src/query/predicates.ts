@@ -34,6 +34,7 @@ import {
   type VectorMetricType,
   type VectorSimilarityPredicate,
 } from "./ast";
+import { subqueryProjectedValueLeaves } from "./compared-operands";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "./compiler/temporal";
 import { likePatternHasTrailingEscape } from "./dialect/like-escape";
 import { resolveFieldTypeInfoAtJsonPointer } from "./field-type-info";
@@ -547,6 +548,37 @@ export function dateComparisonOperandText(
   );
 }
 
+/**
+ * A date-array field reference as the side a membership test compares a value
+ * with: each of its elements, typed by the field's `elementType`.
+ */
+export function arrayElementComparedSide(field: FieldRef): DateComparedSide {
+  const name = describeFieldRef(field);
+  return {
+    valueType: field.elementType,
+    description: `an element of date array "${name}"`,
+    field: name,
+  };
+}
+
+/**
+ * The literal a value tested for membership in the array `field` compiles
+ * as, after the array's element contract has accepted it: for a date array,
+ * a `date` literal of its canonical text, so a `Date` and the equivalent
+ * canonical string are the same element on every backend.
+ */
+function arrayElementOperandLiteral(
+  field: FieldRef,
+  value: string | number | boolean | Date,
+): LiteralValue {
+  const dateText = dateComparisonOperandText(
+    arrayElementComparedSide(field),
+    value,
+  );
+  if (dateText === undefined) return literal(value);
+  return { __type: "literal", value: dateText, valueType: "date" };
+}
+
 /** A field reference as the side of a date comparison. */
 function fieldComparedSide(field: FieldRef): DateComparedSide {
   const name = describeFieldRef(field);
@@ -1026,7 +1058,9 @@ function arrayOp(
     op,
     field,
     ...(values !== undefined && {
-      values: values.map((value) => literal(coerceLiteralValue(value))),
+      values: values.map((value) =>
+        arrayElementOperandLiteral(field, coerceLiteralValue(value)),
+      ),
     }),
     ...(length !== undefined && { length }),
   };
@@ -1160,7 +1194,7 @@ function objectOp(
   op: ObjectOp,
   field: FieldRef,
   pointer: JsonPointer,
-  value?: unknown,
+  value?: LiteralValue,
   options?: ObjectPredicateOptions,
 ): Predicate {
   const expr: ObjectPredicate = {
@@ -1168,15 +1202,33 @@ function objectOp(
     op,
     field,
     pointer,
-    ...(value !== undefined && {
-      value: literal(coerceLiteralValue(value)),
-    }),
+    ...(value !== undefined && { value }),
     ...(options?.valueType !== undefined && { valueType: options.valueType }),
     ...(options?.elementType !== undefined && {
       elementType: options.elementType,
     }),
   };
   return predicate(expr);
+}
+
+/**
+ * The value at `pointer` under an object field, as a field reference typed
+ * by the schema — the side a JSON-path predicate compares its value with.
+ */
+function pointerFieldRef(
+  field: FieldRef,
+  pointer: JsonPointer,
+  resolved: FieldTypeInfo | undefined,
+): FieldRef {
+  return fieldRef(field.alias, field.path, {
+    jsonPointer: joinJsonPointers(field.jsonPointer, pointer),
+    ...(resolved?.valueType !== undefined && {
+      valueType: resolved.valueType,
+    }),
+    ...(resolved?.elementType !== undefined && {
+      elementType: resolved.elementType,
+    }),
+  });
 }
 
 /**
@@ -1236,7 +1288,16 @@ export function objectField<
         resolved?.valueType === undefined ?
           undefined
         : { valueType: resolved.valueType };
-      return objectOp("pathEquals", field, normalized, value, predicateOptions);
+      return objectOp(
+        "pathEquals",
+        field,
+        normalized,
+        comparedOperandLiteral(
+          pointerFieldRef(field, normalized, resolved),
+          coerceLiteralValue(value),
+        ),
+        predicateOptions,
+      );
     },
     pathContains: <P extends JsonPointerInput<T>>(
       pointer: P,
@@ -1255,7 +1316,10 @@ export function objectField<
         "pathContains",
         field,
         normalized,
-        value,
+        arrayElementOperandLiteral(
+          pointerFieldRef(field, normalized, resolved),
+          coerceLiteralValue(value),
+        ),
         predicateOptions,
       );
     },
@@ -1385,6 +1449,7 @@ export function notExists(subquery: QueryAst): Predicate {
 export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
   assertSingleColumnSubquery(subquery);
   assertCompatibleSubqueryValueTypes(field, subquery);
+  assertSubqueryProjectedOperands(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -1404,6 +1469,7 @@ export function inSubquery(field: FieldRef, subquery: QueryAst): Predicate {
 export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
   assertSingleColumnSubquery(subquery);
   assertCompatibleSubqueryValueTypes(field, subquery);
+  assertSubqueryProjectedOperands(field, subquery);
   const expr: InSubquery = {
     __type: "in_subquery",
     field,
@@ -1411,6 +1477,22 @@ export function notInSubquery(field: FieldRef, subquery: QueryAst): Predicate {
     negated: true,
   };
   return predicate(expr);
+}
+
+/**
+ * Refuses a literal an `in` / `notIn` subquery projects that the field's
+ * own operand contract refuses ({@link assertDateFieldOperand}): the subquery
+ * compares the field with that value as directly as `eq` would. A parameter
+ * it projects gets the same check when its binding arrives.
+ */
+function assertSubqueryProjectedOperands(
+  field: FieldRef,
+  subquery: QueryAst,
+): void {
+  for (const operand of subqueryProjectedValueLeaves(subquery)) {
+    if (operand.node.kind === "literal")
+      assertDateFieldOperand(field, operand.node.value);
+  }
 }
 
 /**
