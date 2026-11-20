@@ -199,6 +199,62 @@ const report = await provenance.retractMany([
 ]);
 ```
 
+### Retracting inside your own transaction
+
+Every retraction verb takes an optional transaction as its last argument:
+`retract(source, tx)`, `retractMany(sources, tx)`, `unRetract(source, tx)`
+and `unRetractMany(sources, tx)`. With it, the transition runs on your
+transaction instead of opening one, so a retraction and the writes that depend
+on it commit or roll back together. Without it, each verb opens, commits and
+reports exactly as before.
+
+```typescript
+await store.transaction(async (tx) => {
+  const report = await provenance.retract({ kind: "Source", id: sourceId }, tx);
+  await tx.nodes.Decision.update(decisionId, { status: "withdrawn" });
+  await provenance.assertHolds(tx, [{ kind: "Fact", id: remainingFactId }]);
+});
+```
+
+On your transaction the verb neither commits nor rolls back. Its writes are
+part of that transaction exactly as any other write on it:
+
+- Your transaction's later reads, `holding(tx)` and `assertHolds(tx, …)` see
+  them, and a later verb on the same transaction transitions from them.
+- Their `onOperationEnd` hooks fire when your transaction commits, and not at
+  all when it rolls back.
+- A [transaction receipt](/schemas-stores#transaction-receipts) and a
+  `tx.measure` scope count each source flag and each fact close or reopen as
+  one write of its kind.
+- They are recorded at your transaction's one recorded revision, alongside
+  your own writes.
+
+The report, and the order `retractMany` and `unRetractMany` apply their
+sources in, are the same with and without your transaction.
+
+The verb refuses a transaction it cannot use before any statement, exactly as
+`holding(tx)` and `assertHolds` do: one from another store or graph, or one
+kept past its callback, with `ConfigurationError`
+(`PROVENANCE_TRANSACTION_NOT_OWNED`, naming the verb), and one opened with
+`accessMode: "read_only"` with `UnsupportedBackendCapabilityError`, after which
+the transaction is still usable. A store handle whose schema version is no
+longer the active one throws `StaleVersionError`.
+
+A failure inside the verb on your transaction takes no savepoint, so it follows
+the rule for any call that fails inside `store.transaction()` and is caught.
+A refusal before the verb's first write — the transaction refusals above, a
+source of a kind outside the configured source kinds, a source with no current
+row — leaves nothing behind. A failure after a write keeps the writes the verb
+already made: an `unRetract` that clears a source's flag and then cannot reopen
+a fact, because a live fact now holds that fact's unique key, leaves the flag
+cleared and the fact closed, and a commit keeps that state. To discard a
+partial transition, let the error leave the callback so the whole transaction
+rolls back.
+
+Await the verb before starting other calls on the same transaction. Its locks
+exclude other transactions, not other calls on yours, so a write that overlaps
+it can land between the transition's support read and its writes.
+
 ## Recorded time
 
 Retraction uses TypeGraph-managed writes, so before and after states are visible
@@ -334,11 +390,16 @@ reads in its own transaction.
 - Inside a transaction, use `holding(tx)`, not `holding()`. The no-argument
   form opens its own transaction and waits for a graph lock that yours already
   holds.
-- `retract`, `retractMany`, `unRetract` and `unRetractMany` each run in a
-  transaction of their own and take the schema-version fence and then the graph
-  write lock before their first read. On a store handle whose schema version is
-  no longer the active one they throw `StaleVersionError`, even when the call
-  would have changed nothing or would have reported a missing source.
+- `retract`, `retractMany`, `unRetract` and `unRetractMany` run in a
+  transaction of their own, or in yours when you pass it, and take the
+  schema-version fence and then the graph write lock before their first read,
+  so they are safe to call before or after your own writes. On a store handle
+  whose schema version is no longer the active one they throw
+  `StaleVersionError`, even when the call would have changed nothing or would
+  have reported a missing source.
+- Inside a transaction, pass it to the retraction verbs. Without it a verb
+  opens a second transaction, which commits independently of yours and waits
+  for the graph lock if yours already holds it.
 - Reacquiring a lock the transaction already holds reuses it.
 - `assertHolds` reads only what is behind the named facts, not the whole
   provenance graph, so its cost follows the size of their derivations.

@@ -1,5 +1,3 @@
-import type { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
-import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   isLiveNodeRow,
   isTombstonedNodeRow,
@@ -28,6 +26,7 @@ import {
   uniqueNodeReferences,
 } from "./keys";
 import { acquireCapabilityWriteLocks } from "./locks";
+import { type CapabilityScope, type TransactionScopeResolver } from "./scope";
 import {
   availableSourceKeys,
   computeSupportSnapshot,
@@ -156,7 +155,8 @@ const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
  * in-frame delete and revive owners — so each fact takes exactly the steps
  * any node delete or revival owes (uniqueness, embeddings, fulltext, identity
  * detach on close and restore on reopen) under the transaction's buffered
- * hook runner, which defers every success hook until the transition's COMMIT.
+ * hook runner, which defers every success hook until the transaction commits —
+ * the transition's own, or the caller's when it runs on one.
  * One fact at a time: the writes share the transaction's one connection.
  */
 async function synchronizeFactCurrency<G extends GraphDef>(
@@ -207,6 +207,56 @@ async function setSourceRetractionState<G extends GraphDef>(
   await collection.update(source.id, { [config.retractedField]: retracted });
 }
 
+/**
+ * What one retraction verb asks for: the sources to flip, the state to flip
+ * them to, and the transaction to run in — `undefined` for one the transition
+ * opens and commits itself — with the operation name a refusal on the
+ * caller's transaction reports.
+ */
+export type TransitionRequest<
+  G extends GraphDef,
+  SourceKind extends NodeKind<G>,
+> = Readonly<{
+  sources: readonly ProvenanceSourceInput<G, SourceKind>[];
+  retracted: boolean;
+  tx: TransactionContext<G> | undefined;
+  operation: string;
+}>;
+
+/** What the write-lock refusal names when the transition owns its transaction. */
+const OWN_TRANSACTION_OPERATION = "provenance retraction transition";
+
+function assertSourceKinds(
+  config: NormalizedConfig,
+  sources: readonly ProvenanceNodeRef[],
+): void {
+  for (const source of sources) {
+    if (config.sourceKinds.includes(source.kind)) continue;
+    throw new ConfigurationError(
+      `Provenance retraction source must be one of: ${config.sourceKinds.join(", ")}.`,
+      { expectedKinds: config.sourceKinds, actualKind: source.kind },
+    );
+  }
+}
+
+/**
+ * Runs one retraction transition, in a transaction of its own or in the
+ * caller's.
+ *
+ * With no `tx` it opens a transaction on `store` and commits it. With a `tx`
+ * the transaction is first resolved through `resolveScope`, the one owner of
+ * the decision every caller-transaction entry point of the capability makes
+ * (another store's or graph's transaction, or one kept past its callback, is
+ * refused before any statement), and the transition runs on it without
+ * committing or rolling back: its writes are the caller's, under the caller's
+ * buffered hooks, receipt and recorded revision, and the caller's commit or
+ * rollback decides them.
+ *
+ * The refusals that need no read come first either way — the transaction's
+ * ownership, then a source of a kind outside the configured source kinds —
+ * and both paths then run {@link transitionInTransaction}, so the locks,
+ * reads, writes and report are one implementation.
+ */
 export async function runTransition<
   G extends GraphDef,
   SourceKind extends NodeKind<G>,
@@ -214,85 +264,111 @@ export async function runTransition<
   JustificationKind extends NodeKind<G>,
 >(
   store: HistoryStore<G>,
-  config: NormalizedConfig,
-  sources: readonly ProvenanceSourceInput<G, SourceKind>[],
-  retracted: boolean,
-  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
+  storeScope: CapabilityScope,
+  resolveScope: TransactionScopeResolver<G>,
+  request: TransitionRequest<G, SourceKind>,
 ): Promise<RetractionReport<G, FactKind, JustificationKind>> {
-  const uniqueSources = uniqueNodeReferences(sources);
-  for (const source of uniqueSources) {
-    if (config.sourceKinds.includes(source.kind)) continue;
-    throw new ConfigurationError(
-      `Provenance retraction source must be one of: ${config.sourceKinds.join(", ")}.`,
-      { expectedKinds: config.sourceKinds, actualKind: source.kind },
-    );
-  }
-
-  return store.transaction(async (tx) => {
-    const backend = transactionBackend(tx);
-    // Serialize the whole read-compute-write transition per graph BEFORE the
-    // first read. `store.transaction` itself takes no lock (write operations
-    // acquire it at their own boundaries), but a transition's support
-    // snapshot must not race a concurrent transition or history write, so
-    // the capability's write locks are acquired explicitly up front.
-    await acquireCapabilityWriteLocks(tx, "provenance retraction transition");
-    const rows = await Promise.all(
-      uniqueSources.map((source) =>
-        backend.getNode(store.graphId, source.kind, source.id),
+  const uniqueSources = uniqueNodeReferences(request.sources);
+  const { tx } = request;
+  if (tx === undefined) {
+    assertSourceKinds(storeScope.config, uniqueSources);
+    return store.transaction((ownTransaction) =>
+      transitionInTransaction<G, FactKind, JustificationKind>(
+        storeScope,
+        ownTransaction,
+        uniqueSources,
+        request.retracted,
+        OWN_TRANSACTION_OPERATION,
       ),
     );
-    const sourceRows = uniqueSources.map((source, index): SourceRow => {
-      const sourceRow = rows[index];
-      if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
-        throw new NodeNotFoundError(source.kind, source.id);
-      }
-      return { source, row: sourceRow };
-    });
+  }
+  const scope = resolveScope(tx, request.operation);
+  assertSourceKinds(scope.config, uniqueSources);
+  return transitionInTransaction<G, FactKind, JustificationKind>(
+    scope,
+    tx,
+    uniqueSources,
+    request.retracted,
+    request.operation,
+  );
+}
 
-    // Load the provenance graph once. Its structure (justifications, facts,
-    // premise/derive edges) is identical before and after the transition — only
-    // source availability changes — so the pre- and post-flip snapshots share
-    // this read instead of scanning the whole graph twice per retraction.
-    const supportGraph = await loadSupportGraph(
-      backend,
-      store.registry,
-      store.graphId,
-      config,
-      batchPointRead,
-    );
-    const availableBefore = availableSourceKeys(
-      supportGraph.sourceRows,
-      config.retractedField,
-    );
-    const before = computeSupportSnapshot(supportGraph, availableBefore);
-
-    const nextState: SourceRetractedState =
-      retracted ? "retracted" : "available";
-    const availableAfter = new Set(availableBefore);
-    for (const { source, row } of sourceRows) {
-      const currentState = sourceRetractedState(row, config.retractedField);
-      if (currentState === nextState) continue;
-      await setSourceRetractionState(tx, config, source, retracted);
-      // Mirror the flip in the in-memory availability so `after` matches the
-      // source rows now persisted, without re-reading the whole graph.
-      if (nextState === "available") {
-        availableAfter.add(refKey(source));
-      } else {
-        availableAfter.delete(refKey(source));
-      }
+async function transitionInTransaction<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+  uniqueSources: readonly ProvenanceNodeRef[],
+  retracted: boolean,
+  operation: string,
+): Promise<RetractionReport<G, FactKind, JustificationKind>> {
+  const { config } = scope;
+  const backend = transactionBackend(tx);
+  // Serialize the whole read-compute-write transition per graph BEFORE the
+  // first read. A transaction takes no lock until a write needs one (write
+  // operations acquire it at their own boundaries), but a transition's
+  // support snapshot must not race a concurrent transition or history write,
+  // so the capability's write locks — the schema-version fence, then the
+  // graph write lock — are acquired explicitly up front. A read-only
+  // transaction is refused there, before any statement.
+  await acquireCapabilityWriteLocks(tx, operation);
+  const rows = await Promise.all(
+    uniqueSources.map((source) =>
+      backend.getNode(scope.graphId, source.kind, source.id),
+    ),
+  );
+  const sourceRows = uniqueSources.map((source, index): SourceRow => {
+    const sourceRow = rows[index];
+    if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
+      throw new NodeNotFoundError(source.kind, source.id);
     }
-    const after = computeSupportSnapshot(supportGraph, availableAfter);
-    const affected = after.affectedFactKeys(
-      uniqueSources,
-      before.supportedFactKeys,
-    );
-    const closing = closingFactRows(after, affected);
-    await synchronizeFactCurrency(tx, after, affected, closing);
-    return buildReport<G, FactKind, JustificationKind>(
-      before,
-      after,
-      affected,
-      closing,
-    );
+    return { source, row: sourceRow };
   });
+
+  // Load the provenance graph once. Its structure (justifications, facts,
+  // premise/derive edges) is identical before and after the transition — only
+  // source availability changes — so the pre- and post-flip snapshots share
+  // this read instead of scanning the whole graph twice per retraction.
+  const supportGraph = await loadSupportGraph(
+    backend,
+    scope.registry,
+    scope.graphId,
+    config,
+    scope.batchPointRead,
+  );
+  const availableBefore = availableSourceKeys(
+    supportGraph.sourceRows,
+    config.retractedField,
+  );
+  const before = computeSupportSnapshot(supportGraph, availableBefore);
+
+  const nextState: SourceRetractedState = retracted ? "retracted" : "available";
+  const availableAfter = new Set(availableBefore);
+  for (const { source, row } of sourceRows) {
+    const currentState = sourceRetractedState(row, config.retractedField);
+    if (currentState === nextState) continue;
+    await setSourceRetractionState(tx, config, source, retracted);
+    // Mirror the flip in the in-memory availability so `after` matches the
+    // source rows now persisted, without re-reading the whole graph.
+    if (nextState === "available") {
+      availableAfter.add(refKey(source));
+    } else {
+      availableAfter.delete(refKey(source));
+    }
+  }
+  const after = computeSupportSnapshot(supportGraph, availableAfter);
+  const affected = after.affectedFactKeys(
+    uniqueSources,
+    before.supportedFactKeys,
+  );
+  const closing = closingFactRows(after, affected);
+  await synchronizeFactCurrency(tx, after, affected, closing);
+  return buildReport<G, FactKind, JustificationKind>(
+    before,
+    after,
+    affected,
+    closing,
+  );
 }

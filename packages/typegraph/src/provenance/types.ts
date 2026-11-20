@@ -119,17 +119,61 @@ export type RetractionCapability<
   FactKind extends NodeKind<G> = NodeKind<G>,
   JustificationKind extends NodeKind<G> = NodeKind<G>,
 > = Readonly<{
+  /**
+   * Retracts one source: sets its retracted flag, recomputes support and
+   * closes the facts that lose it.
+   *
+   * With no `tx` it runs in a transaction of its own and commits it. With
+   * `tx` it runs on that transaction and neither commits nor rolls it back:
+   * its writes are part of the caller's transaction exactly as any other write
+   * on it — visible to the transaction's later reads, `holding(tx)` and
+   * `assertHolds(tx, …)`, reported to hooks and counted in receipts when
+   * the transaction commits, and recorded at its revision. Either way it takes
+   * the schema-version fence, then the per-graph write lock, before its first
+   * read.
+   *
+   * A failure on a caller's `tx` takes no savepoint: if the caller catches
+   * it and commits, the writes the transition made before failing commit too.
+   * Let the error leave the callback to discard them.
+   *
+   * @throws {ConfigurationError} when `tx` does not belong to an active
+   *   callback of the capability's store, or a source's kind is not one of
+   *   the configured source kinds.
+   * @throws {UnsupportedBackendCapabilityError} in a `tx` opened with
+   *   `accessMode: "read_only"`, before any statement.
+   * @throws {StaleVersionError} on a store handle whose schema version is no
+   *   longer the active one.
+   * @throws {NodeNotFoundError} when a source has no current row.
+   */
   retract: (
     source: ProvenanceSourceInput<G, SourceKind>,
+    tx?: TransactionContext<G>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+  /**
+   * Retracts every source in one transition, reported as one
+   * {@link RetractionReport}. Takes `tx`, and
+   * refuses and fails, exactly as `retract` does.
+   */
   retractMany: (
     sources: readonly ProvenanceSourceInput<G, SourceKind>[],
+    tx?: TransactionContext<G>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+  /**
+   * Clears one source's retracted flag, recomputes support and reopens
+   * the facts that regain it. Takes `tx`, and refuses and fails, exactly as
+   * `retract` does.
+   */
   unRetract: (
     source: ProvenanceSourceInput<G, SourceKind>,
+    tx?: TransactionContext<G>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+  /**
+   * Clears every source's retracted flag in one transition. Takes `tx`,
+   * and refuses and fails, exactly as `retract` does.
+   */
   unRetractMany: (
     sources: readonly ProvenanceSourceInput<G, SourceKind>[],
+    tx?: TransactionContext<G>,
   ) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
   /**
    * The facts currently believed: supported, and a live row.

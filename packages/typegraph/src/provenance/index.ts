@@ -1,5 +1,6 @@
 import type { GraphDef } from "../core/define-graph";
 import type { HistoryStore } from "../store/store";
+import { type TransactionContext } from "../store/types";
 import {
   assertFactsHold,
   believedFactsInCallerTransaction,
@@ -46,6 +47,12 @@ export type {
 } from "./types";
 
 const HOLDING_IN_TRANSACTION_OPERATION = "provenance.holding(tx)";
+const RETRACT_IN_TRANSACTION_OPERATION = "provenance.retract(source, tx)";
+const RETRACT_MANY_IN_TRANSACTION_OPERATION =
+  "provenance.retractMany(sources, tx)";
+const UN_RETRACT_IN_TRANSACTION_OPERATION = "provenance.unRetract(source, tx)";
+const UN_RETRACT_MANY_IN_TRANSACTION_OPERATION =
+  "provenance.unRetractMany(sources, tx)";
 
 export function createRetractionCapability<
   G extends GraphDef,
@@ -66,24 +73,36 @@ export function createRetractionCapability<
     scope,
   );
 
-  // The four retract verbs differ only in one/many source shape and the target
-  // retracted flag; the generics are fixed by the config, so hoist one call.
+  // The four retract verbs differ only in one/many source shape, the target
+  // retracted flag and the operation a caller-transaction refusal names; the
+  // generics are fixed by the config, so hoist one call.
   const transition = (
     sources: readonly ProvenanceSourceInput<G, SourceKindsFromConfig<G, C>>[],
     retracted: boolean,
+    tx: TransactionContext<G> | undefined,
+    operation: string,
   ) =>
     runTransition<
       G,
       SourceKindsFromConfig<G, C>,
       FactKindsFromConfig<G, C>,
       JustificationKindFromConfig<G, C>
-    >(store, scope.config, sources, retracted, scope.batchPointRead);
+    >(store, scope, resolveTransactionScope, {
+      sources,
+      retracted,
+      tx,
+      operation,
+    });
 
   return {
-    retract: (source) => transition([source], true),
-    retractMany: (sources) => transition(sources, true),
-    unRetract: (source) => transition([source], false),
-    unRetractMany: (sources) => transition(sources, false),
+    retract: (source, tx) =>
+      transition([source], true, tx, RETRACT_IN_TRANSACTION_OPERATION),
+    retractMany: (sources, tx) =>
+      transition(sources, true, tx, RETRACT_MANY_IN_TRANSACTION_OPERATION),
+    unRetract: (source, tx) =>
+      transition([source], false, tx, UN_RETRACT_IN_TRANSACTION_OPERATION),
+    unRetractMany: (sources, tx) =>
+      transition(sources, false, tx, UN_RETRACT_MANY_IN_TRANSACTION_OPERATION),
 
     async holding(tx) {
       if (tx === undefined) {

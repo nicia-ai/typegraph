@@ -201,7 +201,7 @@ async function seedChain(store: LockStore, suffix: string): Promise<void> {
   });
 }
 
-const SEEDS = ["A", "B", "C", "D", "E", "F", "G"] as const;
+const SEEDS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"] as const;
 
 beforeAll(async () => {
   const client = await PGlite.create();
@@ -259,14 +259,26 @@ function fact(suffix: string) {
   return { kind: "Fact", id: `f${suffix}` } as const;
 }
 
+// Per store: a chain `retract` closes, one a caller's transaction retracts
+// and restores, and one a caller's transaction retracts after its own write.
 const STORES = [
-  ["fused PostgreSQL statement", () => fusedStore, "E"],
-  ["portable two-statement fence", () => portableStore, "G"],
+  ["fused PostgreSQL statement", () => fusedStore, "E", "H", "I"],
+  ["portable two-statement fence", () => portableStore, "G", "J", "K"],
 ] as const;
+
+function queryTexts(): readonly string[] {
+  return statements.map((statement) => statement.query);
+}
 
 describe.each(STORES)(
   "lock order on the %s",
-  (_label, getStore, retractableSuffix) => {
+  (
+    _label,
+    getStore,
+    retractableSuffix,
+    callerRoundTripSuffix,
+    callerAfterWriteSuffix,
+  ) => {
     it("assertHolds before any write takes the schema fence, then the graph lock, before any row work", async () => {
       const store = getStore();
       const provenance = createRetractionCapability(store, config);
@@ -337,6 +349,65 @@ describe.each(STORES)(
       expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
       expect(countGraphLockStatements()).toBe(1);
       expect(indexOfFirstRowWrite()).toBeGreaterThan(indexOfFirstGraphLock());
+    });
+
+    // Load-bearing for "no transaction behaves exactly as before": both
+    // forms run one implementation, so the caller's form inside a fresh
+    // transaction issues the same statements, locks first.
+    it("retract and unRetract on a caller's transaction issue exactly the statements of their own transaction, schema fence then graph lock first", async () => {
+      const store = getStore();
+      const provenance = createRetractionCapability(store, config);
+      const source = {
+        kind: "Source",
+        id: `s${callerRoundTripSuffix}`,
+      } as const;
+
+      const ownRetract = await provenance.retract(source);
+      const ownRetractQueries = queryTexts();
+      statements.splice(0);
+      const ownRestore = await provenance.unRetract(source);
+      const ownRestoreQueries = queryTexts();
+      statements.splice(0);
+
+      const callerRetract = await store.transaction((tx) =>
+        provenance.retract(source, tx),
+      );
+      expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
+      expect(countGraphLockStatements()).toBe(1);
+      expect(indexOfFirstRowWrite()).toBeGreaterThan(indexOfFirstGraphLock());
+      const callerRetractQueries = queryTexts();
+      statements.splice(0);
+      const callerRestore = await store.transaction((tx) =>
+        provenance.unRetract(source, tx),
+      );
+      const callerRestoreQueries = queryTexts();
+
+      expect(ownRetract.died).toEqual([fact(callerRoundTripSuffix)]);
+      expect(callerRetract).toEqual(ownRetract);
+      expect(callerRestore).toEqual(ownRestore);
+      expect(callerRetractQueries).toEqual(ownRetractQueries);
+      expect(callerRestoreQueries).toEqual(ownRestoreQueries);
+    });
+
+    it("retract on a caller's transaction after the caller's own write inverts no lock", async () => {
+      const store = getStore();
+      const provenance = createRetractionCapability(store, config);
+
+      await store.transaction(async (tx) => {
+        await tx.nodes.Fact.create(
+          { label: "before retract" },
+          { id: `before-retract-${_label}` },
+        );
+        await provenance.retract(
+          { kind: "Source", id: `s${callerAfterWriteSuffix}` },
+          tx,
+        );
+      });
+
+      const events = lockEvents();
+      expect(events[0]).toBe("schema fence");
+      expect(events.indexOf("graph lock")).toBeGreaterThan(0);
+      expect(countGraphLockStatements()).toBe(1);
     });
 
     it("holding(tx) in a read-write transaction takes the schema fence, then the graph lock, and a later write and assertHolds add no inverted acquisition", async () => {
