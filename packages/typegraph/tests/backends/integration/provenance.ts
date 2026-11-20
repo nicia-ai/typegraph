@@ -251,6 +251,29 @@ function expectNotOwned(error: unknown, operation: string): void {
   });
 }
 
+/**
+ * Records, in write order, the ids of the Source rows a store updates, as its
+ * `onOperationEnd` hook reports them.
+ */
+function sourceUpdateRecorder() {
+  const updated: string[] = [];
+  const hooks = {
+    onOperationEnd: (
+      ctx: Readonly<{ operation: string; kind: string; id: string }>,
+    ) => {
+      if (ctx.operation === "update" && ctx.kind === "Source") {
+        updated.push(ctx.id);
+      }
+    },
+  };
+  return { updated, hooks };
+}
+
+/** Returns what was recorded so far and clears it. */
+function takeAll(updated: string[]): string[] {
+  return updated.splice(0);
+}
+
 async function captureRejection(work: Promise<unknown>): Promise<unknown> {
   try {
     await work;
@@ -1723,19 +1746,32 @@ export function registerProvenanceIntegrationTests(
       ]);
     });
 
+    // Load-bearing for the stated order contract: each store records the
+    // order its source rows were written in through its hooks, so a path that
+    // flipped the sources in another order than the other fails here even
+    // though the reports, sorted, and the final holding set would agree.
+    // Revert check: reverse the source write loop of `transitionInTransaction`
+    // for a caller's transaction only, and the update sequences differ.
     it("reports and orders retractMany and unRetractMany identically with and without a caller's transaction", async () => {
       // Two stores of one graph on separate databases, seeded alike.
-      const own = await createHistoryStore(context);
+      const ownWrites = sourceUpdateRecorder();
+      const callerWrites = sourceUpdateRecorder();
+      const own = await context.createHistoryStore(provenanceGraph, {
+        hooks: ownWrites.hooks,
+      });
       const [caller] = await createStoreWithSchema(
         provenanceGraph,
         await context.createIsolatedBackend(),
-        { history: true },
+        { history: true, hooks: callerWrites.hooks },
       );
       const ownProvenance = await seedCallerWorld(own);
       const callerProvenance = await seedCallerWorld(caller);
-      // Unsorted, with a duplicate: the report must not depend on input order
-      // or on which transaction ran it.
-      const sources = [dropSource, keepSource, dropSource];
+      takeAll(ownWrites.updated);
+      takeAll(callerWrites.updated);
+      // Unsorted, with a duplicate, and not a palindrome: the sources apply
+      // in first-occurrence order, so retracting writes drop then keep and
+      // restoring the reversed list writes keep then drop.
+      const sources = [dropSource, keepSource, keepSource];
 
       const ownRetract = await ownProvenance.retractMany(sources);
       const callerRetract = await caller.transaction((tx) =>
@@ -1746,6 +1782,14 @@ export function registerProvenanceIntegrationTests(
         "drop-fact",
         "keep-fact",
         "shared-fact",
+      ]);
+      expect(takeAll(ownWrites.updated)).toEqual([
+        dropSource.id,
+        keepSource.id,
+      ]);
+      expect(takeAll(callerWrites.updated)).toEqual([
+        dropSource.id,
+        keepSource.id,
       ]);
 
       const ownRestore = await ownProvenance.unRetractMany(
@@ -1758,6 +1802,14 @@ export function registerProvenanceIntegrationTests(
       expect(await callerProvenance.holding()).toEqual(
         await ownProvenance.holding(),
       );
+      expect(takeAll(ownWrites.updated)).toEqual([
+        keepSource.id,
+        dropSource.id,
+      ]);
+      expect(takeAll(callerWrites.updated)).toEqual([
+        keepSource.id,
+        dropSource.id,
+      ]);
 
       const ownSingle = await ownProvenance.retract(keepSource);
       const callerSingle = await caller.transaction((tx) =>
@@ -1769,6 +1821,7 @@ export function registerProvenanceIntegrationTests(
         callerProvenance.unRetract(keepSource, tx),
       );
       expect(callerUnSingle).toEqual(ownUnSingle);
+      expect(takeAll(callerWrites.updated)).toEqual(takeAll(ownWrites.updated));
     });
 
     // Load-bearing: the verb's writes go through the caller's transaction
@@ -1808,6 +1861,54 @@ export function registerProvenanceIntegrationTests(
         "end:update:Decision:decision",
         "end:update:Source:drop-source",
       ]);
+    });
+
+    // Load-bearing for the adopted-hook contract the docs state: an adopted
+    // context runs hooks as each operation completes, not at the native
+    // commit, so a retraction the native caller then rolls back has already
+    // been reported. Revert check: give the adopted context a runner that
+    // fires no hooks and the in-callback expectation fails.
+    it("in withRecordedTransaction reports the verb's hooks as each write completes, before the native caller's rollback", async () => {
+      const events: string[] = [];
+      const backend = context.getBackend();
+      const [adapterStore] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        backend,
+        {
+          history: true,
+          hooks: {
+            onOperationEnd: (ctx) => {
+              events.push(`end:${ctx.operation}:${ctx.kind}:${ctx.id}`);
+            },
+          },
+        },
+      );
+      const provenance = await seedCallerWorld(adapterStore);
+      events.length = 0;
+
+      const insideCallback: string[] = [];
+      await expect(
+        backend.transactionWithNative(async (_target, nativeTx) => {
+          await adapterStore.withRecordedTransaction(nativeTx, async (tx) => {
+            await provenance.retract(dropSource, tx);
+            insideCallback.push(...events);
+          });
+          throw new Error("native rollback");
+        }),
+      ).rejects.toThrow("native rollback");
+
+      expect(insideCallback.toSorted()).toEqual([
+        "end:delete:Fact:drop-fact",
+        "end:update:Source:drop-source",
+      ]);
+      expect(events.toSorted()).toEqual(insideCallback.toSorted());
+      // The rollback undid what the hooks reported.
+      await expect(sourceFlag(adapterStore, dropSource.id)).resolves.toBe(
+        false,
+      );
+      await expect(
+        adapterStore.nodes.Fact.getById(asNodeId<typeof Fact>(dropFact.id)),
+      ).resolves.toMatchObject({ id: dropFact.id });
     });
 
     it("counts the verb's writes in the caller's receipt and measure scope, at the caller's one recorded revision", async () => {
@@ -1893,6 +1994,120 @@ export function registerProvenanceIntegrationTests(
       await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
     });
 
+    // Load-bearing: handing a verb straight to an array method passes the
+    // element's index where the transaction goes. Revert check: drop the
+    // `isTransactionContext` refusal from the capability's transaction
+    // resolver and these calls fail with the generic
+    // PROVENANCE_TRANSACTION_NOT_OWNED instead.
+    it("refuses a second argument that is not a transaction context, naming it, before any statement", async () => {
+      const store = await createHistoryStore(context);
+      const provenance = await seedCallerWorld(store);
+      const single = [dropSource];
+      const lists = [[dropSource]];
+
+      function expectNotAContext(
+        error: unknown,
+        operation: string,
+        received: string,
+        receivedType: string,
+      ): void {
+        expect(error).toBeInstanceOf(ConfigurationError);
+        const refusal = error as ConfigurationError;
+        expect(refusal.details).toMatchObject({
+          code: "PROVENANCE_TRANSACTION_ARGUMENT_INVALID",
+          operation,
+          receivedType,
+        });
+        expect(refusal.message).toContain(
+          `${operation} received ${received} where a transaction context was expected.`,
+        );
+        expect(refusal.suggestion).toContain(
+          "sources.map((source) => provenance.retract(source))",
+        );
+      }
+
+      /* eslint-disable unicorn/no-array-callback-reference, unicorn/no-null -- the
+         misuse under test: a verb handed straight to `.map`, and a null
+         transaction. */
+      expectNotAContext(
+        await captureRejection(
+          // @ts-expect-error the array index is not a transaction context
+          Promise.all(single.map(provenance.retract)),
+        ),
+        "provenance.retract(source, tx)",
+        "the number 0",
+        "number",
+      );
+      expectNotAContext(
+        await captureRejection(
+          // @ts-expect-error the array index is not a transaction context
+          Promise.all(lists.map(provenance.retractMany)),
+        ),
+        "provenance.retractMany(sources, tx)",
+        "the number 0",
+        "number",
+      );
+      expectNotAContext(
+        await captureRejection(
+          // @ts-expect-error the array index is not a transaction context
+          Promise.all(single.map(provenance.unRetract)),
+        ),
+        "provenance.unRetract(source, tx)",
+        "the number 0",
+        "number",
+      );
+      expectNotAContext(
+        await captureRejection(
+          // @ts-expect-error the array index is not a transaction context
+          Promise.all(lists.map(provenance.unRetractMany)),
+        ),
+        "provenance.unRetractMany(sources, tx)",
+        "the number 0",
+        "number",
+      );
+      expectNotAContext(
+        await captureRejection(
+          provenance.retract(dropSource, null as unknown as CallerTransaction),
+        ),
+        "provenance.retract(source, tx)",
+        "null",
+        "null",
+      );
+      expectNotAContext(
+        await captureRejection(
+          provenance.retract(dropSource, {} as unknown as CallerTransaction),
+        ),
+        "provenance.retract(source, tx)",
+        "a value of type object that is not a transaction context",
+        "object",
+      );
+      /* eslint-enable unicorn/no-array-callback-reference, unicorn/no-null */
+      // The capability's other transaction entry points share the refusal.
+      expectNotAContext(
+        await captureRejection(
+          provenance.holding(0 as unknown as CallerTransaction),
+        ),
+        "provenance.holding(tx)",
+        "the number 0",
+        "number",
+      );
+      expectNotAContext(
+        await captureRejection(
+          provenance.assertHolds(0 as unknown as CallerTransaction, [keepFact]),
+        ),
+        "provenance.assertHolds()",
+        "the number 0",
+        "number",
+      );
+      await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
+
+      // The documented replacement: a function that passes the source alone.
+      const reports = await Promise.all(
+        single.map((source) => provenance.retract(source)),
+      );
+      expect(reports[0]?.died).toEqual([dropFact]);
+    });
+
     it("refuses a read-only transaction before any statement, leaving it usable", async () => {
       const store = await createHistoryStore(context);
       const provenance = await seedCallerWorld(store);
@@ -1949,9 +2164,6 @@ export function registerProvenanceIntegrationTests(
       expect(stale).toBeInstanceOf(StaleVersionError);
     });
 
-    // A caught failure keeps what the verb wrote before it failed: no
-    // savepoint is taken, exactly as for any other call inside
-    // `store.transaction()`.
     it("retracts inside withEvolvedTransaction against the evolved graph and commits with the evolution", async () => {
       const backend = context.getBackend();
       const [adapterStore] = await createAdapterStoreWithSchema(
@@ -1993,6 +2205,9 @@ export function registerProvenanceIntegrationTests(
       await expect(sourceFlag(adapterStore, dropSource.id)).resolves.toBe(true);
     });
 
+    // A caught failure keeps what the verb wrote before it failed: no
+    // savepoint is taken, exactly as for any other call inside
+    // `store.transaction()`.
     it("a caught failure keeps nothing when refused before the first write, and the writes before it otherwise", async () => {
       const store = await createHistoryStore(context);
       const provenance = await seedCallerWorld(store);
@@ -2029,6 +2244,137 @@ export function registerProvenanceIntegrationTests(
       await expect(
         store.nodes.Fact.getById(asNodeId<typeof Fact>(dropFact.id)),
       ).resolves.toBeUndefined();
+    });
+
+    /**
+     * What survives when an adopted callback rejects and the native caller
+     * catches the error and COMMITS instead of rolling back.
+     *
+     * This pins current, general behaviour of both adoption APIs, not of the
+     * verbs: the adopted Store path flushes recorded-time capture only when
+     * the callback resolves, so a rejected callback's writes reach the live
+     * rows while recorded time never sees them. A retraction and an ordinary
+     * node write behave alike. The documented contract is therefore that a
+     * rejected adopted callback must be followed by a rollback of the native
+     * transaction.
+     */
+    async function expectCommittedButUnrecorded(
+      store: ProvenanceStore,
+      expected: Readonly<{ retracted: boolean; label: string }>,
+    ): Promise<void> {
+      await expect(sourceFlag(store, dropSource.id)).resolves.toBe(
+        expected.retracted,
+      );
+      await expect(decisionLabel(store)).resolves.toBe(expected.label);
+      const liveFact = await store.nodes.Fact.getById(
+        asNodeId<typeof Fact>(dropFact.id),
+      );
+      expect(liveFact === undefined).toBe(expected.retracted);
+      // Recorded time still shows the state before the rejected callback.
+      const recorded = store.asOfRecorded(
+        requireDefined(await store.recordedNow()),
+      );
+      await expect(
+        recorded.nodes.Source.getById(asNodeId<typeof Source>(dropSource.id)),
+      ).resolves.toMatchObject({ retracted: false });
+      await expect(decisionLabel(recorded)).resolves.toBe("decision");
+      await expect(
+        recorded.nodes.Fact.getById(asNodeId<typeof Fact>(dropFact.id)),
+      ).resolves.toMatchObject({ id: dropFact.id });
+    }
+
+    const CALLBACK_FAILURE = "callback failed after its writes";
+
+    describe.each([
+      ["an ordinary node write", false],
+      ["a retraction", true],
+    ] as const)(
+      "withRecordedTransaction whose callback rejects after %s, caught and committed by the native caller",
+      (_label, retract) => {
+        it("commits the live write without recording it (pinned current behaviour)", async () => {
+          const backend = context.getBackend();
+          const [adapterStore] = await createAdapterStoreWithSchema(
+            provenanceGraph,
+            backend,
+            { history: true },
+          );
+          const provenance = await seedCallerWorld(adapterStore);
+          const recordedBefore = await adapterStore.recordedNow();
+
+          const caught = await backend.transactionWithNative(
+            async (_target, nativeTx) =>
+              captureRejection(
+                adapterStore.withRecordedTransaction(nativeTx, async (tx) => {
+                  await (retract ?
+                    provenance.retract(dropSource, tx)
+                  : tx.nodes.Decision.update(
+                      asNodeId<typeof Decision>("decision"),
+                      { label: "withdrawn" },
+                    ));
+                  throw new Error(CALLBACK_FAILURE);
+                }),
+              ),
+          );
+
+          expect(String(caught)).toContain(CALLBACK_FAILURE);
+          await expect(adapterStore.recordedNow()).resolves.toBe(
+            recordedBefore,
+          );
+          await expectCommittedButUnrecorded(adapterStore, {
+            retracted: retract,
+            label: retract ? "decision" : "withdrawn",
+          });
+        });
+      },
+    );
+
+    it("withEvolvedTransaction whose callback rejects after a retraction and a node write, caught and committed by the native caller, commits the evolution and the live writes without recording them (pinned current behaviour)", async () => {
+      const backend = context.getBackend();
+      const [adapterStore] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        backend,
+        { history: true },
+      );
+      const provenance = await seedCallerWorld(adapterStore);
+      const plan = await adapterStore.planEvolution(noteExtension);
+      if (plan.status !== "change") throw new Error("Expected change plan.");
+      if (backend.adoptSchemaWriteTransaction === undefined) {
+        await expectUnsupportedAdoption(() =>
+          backend.transactionWithNative(async (_target, nativeTx) =>
+            adapterStore.withEvolvedTransaction(nativeTx, plan, async () => {
+              await Promise.resolve();
+            }),
+          ),
+        );
+        return;
+      }
+      const recordedBefore = await adapterStore.recordedNow();
+
+      const caught = await backend.transactionWithNative(
+        async (_target, nativeTx) =>
+          captureRejection(
+            adapterStore.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+              await provenance.retract(dropSource, tx);
+              await tx.nodes.Decision.update(
+                asNodeId<typeof Decision>("decision"),
+                { label: "withdrawn" },
+              );
+              throw new Error(CALLBACK_FAILURE);
+            }),
+          ),
+      );
+
+      expect(String(caught)).toContain(CALLBACK_FAILURE);
+      await expect(
+        backend.getActiveSchema(adapterStore.graphId),
+      ).resolves.toEqual(
+        expect.objectContaining({ version: plan.result.version }),
+      );
+      await expect(adapterStore.recordedNow()).resolves.toBe(recordedBefore);
+      await expectCommittedButUnrecorded(adapterStore, {
+        retracted: true,
+        label: "withdrawn",
+      });
     });
   });
 }

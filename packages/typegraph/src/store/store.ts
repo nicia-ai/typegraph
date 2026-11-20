@@ -4860,6 +4860,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot silently diverge history from live state. This sealing behavior is
    * unchanged by the receipt return.
    *
+   * **When `fn` rejects, roll back the native transaction.** The rejection
+   * skips the flush and reaches the caller, who owns the commit. If the caller
+   * catches it and commits instead, the graph writes `fn` made before failing
+   * commit to the live rows without being captured: recorded-time reads such
+   * as `asOfRecorded()` keep showing the state before them, and no recorded
+   * revision is allocated for them.
+   *
+   * Operation hooks run as each write completes, not at the native commit:
+   * `onOperationEnd` can report a write the native transaction then rolls
+   * back, so treat it as provisional until that commit succeeds.
+   *
    * Returns a {@link TransactionOutcome} — the adopted path is the only way to
    * get exactly-once cursors and graph writes atomically on a history store, so
    * it surfaces the same receipt `transactionWithReceipt` does: `receipt.writes`
@@ -5937,6 +5948,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     });
   }
 
+  /**
+   * Applies an evolution plan inside a caller-owned native transaction and
+   * runs `fn` against the evolved graph on that same transaction, so the
+   * schema change, the graph writes and the caller's own SQL share the
+   * caller's one commit. See the graph-extensions guide for the full contract.
+   *
+   * **When `fn` rejects, roll back the native transaction.** The rejection
+   * reaches the caller, who owns the commit. If the caller catches it and
+   * commits instead, the schema change commits, and the graph writes `fn`
+   * made before failing commit to the live rows without being captured:
+   * recorded-time reads such as `asOfRecorded()` keep showing the state
+   * before them, and no recorded revision is allocated for them.
+   *
+   * Operation hooks run as each write completes, not at the native commit:
+   * `onOperationEnd` can report a write the native transaction then rolls
+   * back, so treat it as provisional until that commit succeeds.
+   */
   async withEvolvedTransaction<T>(
     this: AdapterHistoryStore<G, TNativeTransaction>,
     externalTx: TNativeTransaction,

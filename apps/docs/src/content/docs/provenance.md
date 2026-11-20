@@ -221,8 +221,15 @@ part of that transaction exactly as any other write on it:
 
 - Your transaction's later reads, `holding(tx)` and `assertHolds(tx, …)` see
   them, and a later verb on the same transaction transitions from them.
-- Their `onOperationEnd` hooks fire when your transaction commits, and not at
-  all when it rolls back.
+- Their hooks follow the hook contract of the context you pass. In
+  `store.transaction()` and `transactionWithReceipt()`, `onOperationEnd` fires
+  when your transaction commits, and not at all when it rolls back. In an
+  adopted context from `withRecordedTransaction()` or
+  `withEvolvedTransaction()`, hooks run as each write completes, before your
+  native transaction commits, so `onOperationEnd` can report a source flag or
+  a fact close that your native rollback then undoes. An audit or cache
+  consumer of those hooks must treat them as provisional until the native
+  commit succeeds.
 - A [transaction receipt](/schemas-stores#transaction-receipts) and a
   `tx.measure` scope count each source flag and each fact close or reopen as
   one write of its kind.
@@ -240,6 +247,18 @@ kept past its callback, with `ConfigurationError`
 the transaction is still usable. A store handle whose schema version is no
 longer the active one throws `StaleVersionError`.
 
+A second argument that is not a transaction context at all is refused with
+`ConfigurationError` (`PROVENANCE_TRANSACTION_ARGUMENT_INVALID`), naming what
+was received. The usual cause is handing a verb directly to an array method:
+`sources.map(provenance.retract)` passes each element's index as the
+transaction. Pass a function instead, or retract the sources together:
+
+```typescript
+await Promise.all(sources.map((source) => provenance.retract(source)));
+// or, as one transition with one report:
+await provenance.retractMany(sources);
+```
+
 A failure inside the verb on your transaction takes no savepoint, so it follows
 the rule for any call that fails inside `store.transaction()` and is caught.
 A refusal before the verb's first write — the transaction refusals above, a
@@ -250,6 +269,16 @@ a fact, because a live fact now holds that fact's unique key, leaves the flag
 cleared and the fact closed, and a commit keeps that state. To discard a
 partial transition, let the error leave the callback so the whole transaction
 rolls back.
+
+In `withRecordedTransaction()` and `withEvolvedTransaction()`, an error that
+leaves the callback rejects the adoption call and reaches your native
+transaction, and TypeGraph cannot roll that back for you: you must. Recorded
+time is captured only when the callback resolves, so if you catch the error and
+commit the native transaction instead, the writes the callback made before the
+error, a retraction's source flag and fact closes included, commit to the live
+rows without being recorded. `asOfRecorded()` and the other recorded-time reads
+keep showing the state before them, and no recorded revision is allocated for
+them. Under `withEvolvedTransaction()` the schema change commits too.
 
 Await the verb before starting other calls on the same transaction. Its locks
 exclude other transactions, not other calls on yours, so a write that overlaps

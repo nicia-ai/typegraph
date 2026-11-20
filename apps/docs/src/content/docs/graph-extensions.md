@@ -510,7 +510,13 @@ const refreshed = await cachedStore.refreshSchema({
 The callback and receipt finish before the outer SQL transaction commits.
 The receipt's schema version/hash and recorded anchor are provisional until
 that commit succeeds. A callback failure must reject the outer transaction;
-catching it and committing does not prove rollback. Callback contexts and
+catching it and committing does not prove rollback. If you commit anyway, the
+schema change commits, and the graph writes the callback made before failing
+commit to the live rows without being captured: recorded-time reads keep
+showing the state before them, and no recorded revision is allocated for them.
+Operation hooks in the callback run as each write completes, not at the outer
+commit, so an `onOperationEnd` can report a write the outer rollback then
+undoes. Callback contexts and
 queries built from them expire when the callback returns, including after a
 failure. Use `refreshSchema()` only after awaiting a successful outer commit.
 When the cached Store already matches `minVersion`, refresh returns it

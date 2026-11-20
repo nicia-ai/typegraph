@@ -978,6 +978,14 @@ adopt a caller-owned transaction:
   fence, and the two transactions can both commit a constraint violation, such
   as a cycle in an `acyclic` relation. Let the error propagate and roll back the
   whole transaction instead.
+- **A rejected `withRecordedTransaction` or `withEvolvedTransaction` callback
+  needs a native rollback.** Recorded time is captured only when the callback
+  resolves. If the callback rejects and you catch the error and commit the
+  native transaction, the graph writes it made before failing commit to the
+  live rows without being recorded, so recorded-time reads do not show them.
+  Roll back the native transaction instead. Operation hooks in these callbacks
+  run as each write completes, before the native commit, so treat an
+  `onOperationEnd` there as provisional until that commit succeeds.
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

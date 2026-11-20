@@ -709,6 +709,21 @@ export function bindEvolvedTransactionStore<TStore extends object>(
 }
 
 /**
+ * Whether `value` is a transaction context some Store built — active or
+ * expired, this Store's or another's. Ownership and liveness are
+ * {@link activeTransactionStore}'s decision; this one only tells a context
+ * apart from a value that never was one (a number, `null`, a plain object),
+ * so a consumer can name that mistake instead of reporting it as a foreign
+ * transaction.
+ */
+export function isTransactionContext(
+  value: unknown,
+): value is TransactionRuntimePort {
+  if (typeof value !== "object" || value === null) return false;
+  return (value as TransactionRuntimePort)[TRANSACTION_RUNTIME] !== undefined;
+}
+
+/**
  * THE ownership decision for a transaction context handed to something built
  * on `store`: the Store whose graph owns the context's callback, or
  * `undefined` when the context is not one of `store`'s.

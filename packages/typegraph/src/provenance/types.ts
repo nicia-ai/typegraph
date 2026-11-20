@@ -127,18 +127,30 @@ export type RetractionCapability<
    * `tx` it runs on that transaction and neither commits nor rolls it back:
    * its writes are part of the caller's transaction exactly as any other write
    * on it — visible to the transaction's later reads, `holding(tx)` and
-   * `assertHolds(tx, …)`, reported to hooks and counted in receipts when
-   * the transaction commits, and recorded at its revision. Either way it takes
-   * the schema-version fence, then the per-graph write lock, before its first
-   * read.
+   * `assertHolds(tx, …)`, counted in its receipts, recorded at its revision,
+   * and reported to hooks under that context's hook contract: at commit in
+   * `store.transaction()` / `transactionWithReceipt()`, but as each write
+   * completes in an adopted `withRecordedTransaction()` /
+   * `withEvolvedTransaction()` context, before the native commit or
+   * rollback. Either way it takes the schema-version fence, then the
+   * per-graph write lock, before its first read.
    *
    * A failure on a caller's `tx` takes no savepoint: if the caller catches
    * it and commits, the writes the transition made before failing commit too.
-   * Let the error leave the callback to discard them.
+   * Let the error leave the callback to discard them. In an adopted context
+   * the native transaction must then be rolled back: committing it after the
+   * callback rejected commits the callback's writes to the live rows without
+   * recording them in recorded time.
    *
-   * @throws {ConfigurationError} when `tx` does not belong to an active
-   *   callback of the capability's store, or a source's kind is not one of
-   *   the configured source kinds.
+   * Pass a function, not the verb itself, to an array method:
+   * `sources.map(provenance.retract)` passes each index as `tx`, which is
+   * refused.
+   *
+   * @throws {ConfigurationError} when `tx` is not a transaction context
+   *   (`PROVENANCE_TRANSACTION_ARGUMENT_INVALID`), when it does not belong to
+   *   an active callback of the capability's store
+   *   (`PROVENANCE_TRANSACTION_NOT_OWNED`), or when a source's kind is not
+   *   one of the configured source kinds.
    * @throws {UnsupportedBackendCapabilityError} in a `tx` opened with
    *   `accessMode: "read_only"`, before any statement.
    * @throws {StaleVersionError} on a store handle whose schema version is no
