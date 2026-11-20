@@ -169,6 +169,37 @@ const noteExtension = defineGraphExtension({
   },
 });
 
+// The provenance roles with `Decision` as a second fact kind, for an
+// evolution that makes a `Decision` a required part of a `Fact`.
+const decisionFactConfig = {
+  ...config,
+  fact: { kinds: ["Fact", "Decision"] },
+} as const;
+
+// Makes a `Decision` a required part of the `Fact` it is recorded under, so
+// closing that fact closes the decision with it. Only the evolved graph's
+// registry knows the composition: support computed with the original graph's
+// registry leaves the decision live under a closed whole.
+const recordedUnderExtension = defineGraphExtension({
+  edges: {
+    recordedUnder: {
+      from: ["Decision"],
+      to: ["Fact"],
+      properties: {},
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    {
+      metaEdge: "partOf",
+      from: "Decision",
+      to: "Fact",
+      via: "recordedUnder",
+      existence: "required",
+    },
+  ],
+});
+
 type ProvenanceStore = HistoryStore<typeof provenanceGraph>;
 type SourceRef = Node<typeof Source>;
 type FactRef = Node<typeof Fact>;
@@ -298,6 +329,73 @@ async function seedProvenance<S extends ProvenanceStore>(store: S) {
   const provenance = createRetractionCapability(store, config);
   await provenance.retract(retractedSource);
   return { store, provenance };
+}
+
+/** Every function member of a backend object, own or inherited. */
+function functionMemberNames(target: object): readonly string[] {
+  const names = new Set<string>();
+  for (
+    let level: object | null = target;
+    level !== null && level !== Object.prototype;
+    level = Reflect.getPrototypeOf(level)
+  ) {
+    for (const key of Reflect.ownKeys(level)) {
+      if (typeof key !== "string") continue;
+      if (typeof Reflect.get(target, key) === "function") names.add(key);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * The transaction target with every function member, and its command port's
+ * `execute`, recording its name in `calls` before it runs: each is a
+ * statement, or several, on the transaction's session.
+ */
+function recordingTransactionTarget(
+  target: TransactionBackend,
+  calls: string[],
+): TransactionBackend {
+  const overlay: Record<string, unknown> = {};
+  for (const name of functionMemberNames(target)) {
+    const member = Reflect.get(target, name) as (
+      ...args: readonly unknown[]
+    ) => unknown;
+    overlay[name] = (...args: readonly unknown[]) => {
+      calls.push(name);
+      return member(...args);
+    };
+  }
+  const { commands } = target;
+  overlay["commands"] = {
+    ...commands,
+    execute: (...args: Parameters<typeof commands.execute>) => {
+      calls.push("commands.execute");
+      return commands.execute(...args);
+    },
+  };
+  return deriveBackend(target, overlay as Partial<TransactionBackend>);
+}
+
+/**
+ * `backend` with every transaction it opens handing its callback a
+ * {@link recordingTransactionTarget}, so a test can count the statements a
+ * call inside a store transaction issued.
+ */
+function recordTransactionCalls(
+  backend: AdapterBackend<unknown>,
+): Readonly<{ backend: AdapterBackend<unknown>; calls: string[] }> {
+  const calls: string[] = [];
+  return {
+    calls,
+    backend: deriveBackend(backend, {
+      transaction: (fn, options) =>
+        backend.transaction(
+          (target) => fn(recordingTransactionTarget(target, calls)),
+          options,
+        ),
+    }),
+  };
 }
 
 /** A backend that cannot adopt a schema write refuses the evolved transaction. */
@@ -2108,19 +2206,42 @@ export function registerProvenanceIntegrationTests(
       expect(reports[0]?.died).toEqual([dropFact]);
     });
 
+    // Load-bearing: the write-access refusal precedes every statement.
+    // Revert check: read the source row (`backend.getNode`) before
+    // `acquireCapabilityWriteLocks` in `transitionInTransaction`
+    // (`src/provenance/transition.ts`) and `issued` records it.
     it("refuses a read-only transaction before any statement, leaving it usable", async () => {
-      const store = await createHistoryStore(context);
+      const recorded = recordTransactionCalls(context.getBackend());
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
       const provenance = await seedCallerWorld(store);
 
       const outcome = await store.transaction(
         async (tx) => {
+          const before = recorded.calls.length;
           const refusal = await captureRejection(
             provenance.retract(dropSource, tx),
           );
-          return { refusal, holding: await provenance.holding(tx) };
+          const issued = recorded.calls.slice(before);
+          const holdingStart = recorded.calls.length;
+          const holding = await provenance.holding(tx);
+          return {
+            refusal,
+            issued,
+            holdingIssued: recorded.calls.length - holdingStart,
+            holding,
+          };
         },
         { accessMode: "read_only" },
       );
+
+      expect(outcome.issued).toEqual([]);
+      // The recorder sees this transaction's statements: the read after the
+      // refusal issued some.
+      expect(outcome.holdingIssued).toBeGreaterThan(0);
 
       expect(outcome.refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
       expect(
@@ -2164,6 +2285,12 @@ export function registerProvenanceIntegrationTests(
       expect(stale).toBeInstanceOf(StaleVersionError);
     });
 
+    // Load-bearing: an evolved callback's transaction is read with the
+    // evolved graph's registry. The evolution makes `ruling` a required part
+    // of `drop-fact`, so retracting `drop-source` closes both. Revert check:
+    // make the capability's transaction resolver return the store's original
+    // scope for an evolved callback, and the transition leaves `ruling` live
+    // under the closed fact, so `died` and `believed` both fail.
     it("retracts inside withEvolvedTransaction against the evolved graph and commits with the evolution", async () => {
       const backend = context.getBackend();
       const [adapterStore] = await createAdapterStoreWithSchema(
@@ -2171,8 +2298,19 @@ export function registerProvenanceIntegrationTests(
         backend,
         { history: true },
       );
-      const provenance = await seedCallerWorld(adapterStore);
-      const plan = await adapterStore.planEvolution(noteExtension);
+      // No decision exists before the evolution: the composition it declares
+      // would refuse a decision recorded under no fact.
+      const keep = await createSource(adapterStore, keepSource.id);
+      const drop = await createSource(adapterStore, dropSource.id);
+      const keepNode = await createFact(adapterStore, keepFact.id);
+      const dropNode = await createFact(adapterStore, dropFact.id);
+      await createJustification(adapterStore, "keep-j", [keep], keepNode);
+      await createJustification(adapterStore, "drop-j", [drop], dropNode);
+      const provenance = createRetractionCapability(
+        adapterStore,
+        decisionFactConfig,
+      );
+      const plan = await adapterStore.planEvolution(recordedUnderExtension);
       if (plan.status !== "change") throw new Error("Expected change plan.");
       if (backend.adoptSchemaWriteTransaction === undefined) {
         await expectUnsupportedAdoption(() =>
@@ -2185,24 +2323,56 @@ export function registerProvenanceIntegrationTests(
         return;
       }
 
+      const ruling = ref("Decision", "ruling");
       const outcome = await backend.transactionWithNative(
         async (_target, nativeTx) =>
           adapterStore.withEvolvedTransaction(nativeTx, plan, async (tx) => {
+            // `ruling` holds through `keep-source` and is recorded under
+            // `drop-fact`, which holds through `drop-source` alone.
+            await tx.nodes.Decision.create(
+              { label: ruling.id },
+              // The original graph declares no composition for `Decision`, so
+              // its typed options cannot name a whole; the evolved one does.
+              { id: ruling.id, partOf: { whole: dropFact as never } },
+            );
+            await tx.nodes.Justification.create(
+              { label: "ruling-j" },
+              { id: "ruling-j" },
+            );
+            const rulingJustification = ref("Justification", "ruling-j");
+            await tx.edges.premiseOf.create(
+              keepSource,
+              rulingJustification,
+              {},
+            );
+            await tx.edges.derives.create(rulingJustification, ruling, {});
+            const before = await provenance.holding(tx);
             const report = await provenance.retract(dropSource, tx);
-            return { report, believed: await provenance.holding(tx) };
+            return {
+              before,
+              report,
+              believed: await provenance.holding(tx),
+            };
           }),
       );
-      expect(outcome.result.report.died).toEqual([dropFact]);
-      expect(sortedIds(outcome.result.believed)).toEqual([
+      expect(sortedIds(outcome.result.before)).toEqual([
+        "drop-fact",
         "keep-fact",
-        "shared-fact",
+        "ruling",
       ]);
+      expect(outcome.result.report.died).toEqual([ruling, dropFact]);
+      expect(sortedIds(outcome.result.believed)).toEqual(["keep-fact"]);
       await expect(
         backend.getActiveSchema(adapterStore.graphId),
       ).resolves.toEqual(
         expect.objectContaining({ version: plan.result.version }),
       );
       await expect(sourceFlag(adapterStore, dropSource.id)).resolves.toBe(true);
+      await expect(
+        adapterStore.nodes.Decision.getById(
+          asNodeId<typeof Decision>("ruling"),
+        ),
+      ).resolves.toBeUndefined();
     });
 
     // A caught failure keeps what the verb wrote before it failed: no
