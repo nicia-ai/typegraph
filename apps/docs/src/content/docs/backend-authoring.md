@@ -1,12 +1,14 @@
 ---
 title: Authoring an engine profile
-description: Derive a variant of a bundled SQL engine profile, and what building one from scratch still requires
+description: Derive a variant of a bundled SQL engine profile, what building one from scratch still requires, and the write and delete port contracts a custom backend implements
 ---
 
 [Backend Setup](/backend-setup) covers using the two bundled backends.
 This page is for adapting one: changing a lock spelling, loosening a
 declared capability, or swapping the resource-audit verdict without
-hand-copying every other field a profile carries.
+hand-copying every other field a profile carries. A backend written by hand
+implements the store's write and delete ports directly; their contracts are
+in [Write and delete port contracts](#write-and-delete-port-contracts).
 
 ## Stability
 
@@ -556,3 +558,153 @@ future exported assembly constructor. Until then, derivation from a
 bundled builder — changing a lock spelling, a capability declaration, a
 resource-audit verdict, or a runtime dependency bag — is the supported
 way to adapt a profile.
+
+## Write and delete port contracts
+
+The sections above derive a profile. A `GraphBackend` you write by hand, or
+decorate through `deriveBackend`, implements the store's ports directly. This
+reference covers the write and delete members: what each must do and return,
+what the store does with that value, and what the store does when an optional
+member is absent. It does not cover the schema, materialization, contribution
+or search members.
+
+The types are exported from the authoring entrypoint only:
+
+```typescript
+import type {
+  GraphBackend,
+  HardDeleteNodesBatchResult,
+  TransactionBackend,
+} from "@nicia-ai/typegraph/backend";
+```
+
+That entrypoint is not covered by semver (see [Stability](#stability)). Pin
+the version a hand-written backend was written against and re-check these
+contracts before upgrading.
+
+### How the store calls a write member
+
+- **The write frame.** Every store write runs in one frame. On a backend whose
+  `capabilities.execution.interactiveTransactions` is `true`, the store opens a
+  transaction (or joins the caller's `store.transaction`) and calls the members
+  on its `TransactionBackend`. On a backend without interactive transactions,
+  it calls them one at a time on the root backend, with no atomicity across
+  them, and refuses a write that enforces a declared constraint with
+  `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`. No member below has to be atomic on its
+  own. A member that runs several statements, such as `hardDeleteNode`, must
+  order them so that a failure part-way through leaves a state a retry can
+  finish.
+- **Absent means undefined.** For an optional member the store checks whether
+  it is defined, on the target it is about to call and for some members also
+  on the root backend, and uses the fallback below when it is not. Members
+  gated by a capability are the exception, noted where they appear. Leave a
+  member you do not implement undefined. A member that throws "not
+  implemented" is a failure, not an absence.
+- **Receiver-free.** Every member is called detached (`this: void`). Close over
+  state rather than reading `this`.
+- **Error shapes the store reads.** An insert that collides on a node or edge
+  id must throw `DatabaseOperationError` with `operation: "insert"`, `entity`
+  set to `"node"` or `"edge"`, `reason: "duplicate_key"` and the attempted
+  rows in `attempted`. The store turns only that shape into its already-exists
+  error and rethrows anything else unchanged. An `updateNode` or `updateEdge`
+  that matches no row must throw `DatabaseOperationError` with
+  `operation: "update"` and `reason: "no_row_returned"`. The store's retry and
+  re-read logic keys on that shape.
+
+### Node writes
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `insertNode` | Required | Insert one node row and return it. | The returned row becomes the created node. It is also the fallback for every optional insert member below. |
+| `insertNodeIfAbsent` | Optional | Insert only when the `(kind, id)` slot is empty. Return the row, or `undefined` when the slot was occupied, without raising a database error and with the transaction still usable. | Used by a single create with a caller-supplied id and no uniqueness or disjointness claims. On `undefined` the store reads the row: a live row is an already-exists error, a tombstone is resurrected through `updateNode`. Absent: `getNode`, then `insertNode`. |
+| `insertNodeWithSchemaFence`, `insertNodeIfAbsentWithSchemaFence` | Optional | As `insertNode` / `insertNodeIfAbsent`, with the active-schema fence taken inside the same INSERT. `undefined` is ambiguous (stale schema or occupied id), and the store diagnoses it. | Used only on a backend carrying the schema-fenced-insert mark. Only the bundled factories and `createSqlBackend` grant that mark, so a hand-written backend never reaches these members. Otherwise the store takes the schema fence itself, then does the ordinary insert. |
+| `insertNodeNoReturn` | Optional | Insert one node row, returning nothing. | Absent: `insertNode`, with the row discarded. |
+| `insertNodesBatch` | Optional | Insert many node rows, returning nothing. | Absent: one `insertNodeNoReturn` (or `insertNode`) per row, in input order. |
+| `insertNodesBatchReturning` | Optional | Insert many node rows and return them. | Rows are matched by `(kind, id)`, so order does not matter. A missing row is an error. Absent: one `insertNode` per row. |
+| `updateNode` | Required | Update the `(kind, id)` row and return its after-image. Apply `expectedValidFrom` when it is present: a mismatch matches no row. | The returned row is the after-image the store syncs sidecars from. A miss must be the `no_row_returned` error above. |
+| `updateResolvedNodesBatch` | Optional | Update a resolved set all-or-nothing behind its version gate. Return every updated row, or `[]` when the gate refused. | Rows are matched by id and checked against the entries. `[]` makes the store recover row by row through `updateNode`; a partial count is a `ConfigurationError`. Absent: the per-row path. |
+| `updateNodeSet`, `compareAndSetNode` | Optional | Apply one set-based update. Return `{ affectedCount, rows }`, with `rows` holding the after-image of every affected row. | `rows` drive validation and the sidecar and claim rebuild; `affectedCount` is returned to the caller. Absent: `updateWhere()` and compare-and-set refuse with `SET_UPDATE_UNSUPPORTED` / `COMPARE_AND_SET_UNSUPPORTED`. They also need interactive transactions. |
+| `upsertHeterogeneousNodes` | Optional | Upsert plain caller-id nodes across kinds behind the stated schema fence. Return one row per entry, in entry order. | Read positionally. A row count different from the entry count is `HETEROGENEOUS_NODE_BATCH_STALE_SCHEMA`. Absent: `tx.writeNodeUpsertBatch()` refuses with `UnsupportedBackendCapabilityError`. |
+| `deleteNode` | Required | Tombstone one node row, returning nothing. | The store then removes the node's uniqueness entries, embeddings and fulltext row itself, through the sidecar members below. |
+| `lockNodes` | Required | Read and lock rows; see [Node-row locks](/backend-setup#node-row-locks-locknodes). | Rows are matched by id. |
+
+### Edge writes
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `commands` | Required | Execute `node.create`, `edge.create` and `edge.converge-create`, or return `unsupported` naming the dimensions not applied; see [Authoritative command sessions](/backend-setup#authoritative-command-sessions). | `unsupported` means no SQL ran. The store re-enters its portable path, except a durable match-identity convergence, which refuses with `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED`. |
+| `insertEdge` | Required | Insert one edge row and return it. | The returned row becomes the created edge. A duplicate id must be the `duplicate_key` error above. |
+| `insertEdgeNoReturn` | Optional | Insert one edge row, returning nothing. | Absent: `insertEdge`. |
+| `insertEdgesBatch` | Optional | Insert many edge rows, returning nothing. | Absent: one `insertEdgeNoReturn` (or `insertEdge`) per row, in input order. |
+| `insertEdgesBatchReturning` | Optional | Insert many edge rows and return them. | Absent: one `insertEdge` per row, in input order. |
+| `insertEdgesDurableBatchReturning` | Optional | Insert rows that all carry `matchIdentity`. Leave a row that loses an identity conflict out of the result instead of throwing. | Rows are matched by id. An id that was not attempted is an invariant error. A bulk create turns any omitted row into `EdgeMatchIdentityConflictError`, and import turns it into a per-row error. Absent: the store decides and creates row by row. |
+| `updateEdge` | Required | Update one row and return it. Apply every stated predicate (`kind`, endpoints, `expectedValidFrom`, `expectedValidTo`). Match no row when a predicate fails. | A miss must be the `no_row_returned` error above. The store re-reads the row to tell a moved row from a removed one. |
+| `deleteEdge` | Required | Tombstone one edge row, asserting `kind` when given. An already-tombstoned row is a no-op. | Return value ignored. |
+
+### Hard deletes and the delete-time read
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `hardDeleteEdge` | Required | Permanently remove one edge row, asserting `kind` when given. Resolve `true` when the statement removed the row, `false` when it matched none (the id is absent, or the row no longer carries the asserted kind). | The store releases the edge's cardinality claims (`purgeEdgeClaims`) only on `true`. A concurrent writer may have committed a different edge under the same id, so releasing on `false` would strip that edge's claims. |
+| `hardDeleteEdgesBatch` | Optional | `hardDeleteEdge` for a set of ids under one optional asserted kind. Resolve the ids of the rows it removed, in any order, and never an id whose row it left in place. | Claims are released for exactly the returned ids. Absent: one `hardDeleteEdge` per id, collecting the ids that resolved `true`. |
+| `deleteEdgesBatch` | Optional | `deleteEdge` for a set of ids: the same per-row semantics, including the optional asserted kind and idempotence on tombstoned rows. | Used by batch soft deletes and the node delete cascade, which asserts no kind because it removes every connected edge. Absent: one `deleteEdge` per id. |
+| `hardDeleteNode` | Required | Permanently remove one node and what it owns: its uniqueness entries, its fulltext row, and every incident edge (either endpoint, any edge kind, live or tombstoned), then the node row last. Returns nothing. | The store judges `onDelete` and removes the edges that verdict names first, releasing their claims. After this call it deletes the node's embeddings through the vector members, because the backend cannot address the per-field vector storage. The bundled implementation removes no embeddings and releases no edge claims, and a custom one need not either. |
+| `hardDeleteNodesBatch` | Optional | `hardDeleteNode` for listed ids of one `kind`, never touching another kind's rows: uniqueness entries, fulltext rows and incident edges first, then the node rows. Resolve `{ removedNodeIds, removedEdgeIds }`: exactly the node rows the delete matched, and every edge row it removed. Neither list may name a row left in place. | Used by bulk `hardDelete` for nodes that need no composition cascade and no identity detach (those take the single path). Embeddings are deleted for `removedNodeIds` only. A history- or revision-capturing store records the removed nodes and edges from the two lists rather than reading connected edges first. Absent: one `hardDeleteNode` per id, in order, in the same frame. |
+| `findEdgesConnectedToNodes` | Optional | Read every live (not tombstoned) edge, of any edge kind, with either endpoint among `nodeIds` of `nodeKind`, each edge once, in any order. It must be kind-blind: `onDelete: "restrict"` is judged against every stored edge, including kinds the current graph no longer declares. | Read inside the delete's frame, after the node rows are locked, to plan a bulk hard delete. The store groups rows by endpoint itself. Absent: one `findEdgesConnectedTo` per node. |
+
+### Uniqueness entries
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `insertUnique` | Required | Reserve one key. Throw `UniquenessError` when a different live owner (another `(concreteKind, nodeId)`) holds it. In the bundled backends the same owner, or a tombstoned holder, takes the row over. | The store issues the reservation before the row it gates, maps a `UniquenessError` to its own error (for example `DisjointError`), and releases the reservation with `deleteUnique` if the row write fails. |
+| `insertUniqueBatch` | Optional | `insertUnique` for many entries, with the same conflict semantics. The store never passes two entries with the same key on the same axis and constraint. | Absent: one `insertUnique` per entry. `updateWhere()` on a constrained kind and resolved writes need it, and refuse with `SET_UPDATE_UNIQUENESS_UNSUPPORTED` / `RESOLVED_NODE_UNIQUENESS_UNSUPPORTED`. |
+| `deleteUnique` | Required | Release an owner's live entry for one constraint and key: across every axis when `nodeKind` is absent, or only that axis when it is present. The bundled backends tombstone the entry. | Return value ignored. |
+| `checkUnique` | Required | Return the entry at the axis, or `undefined`. Include tombstoned entries only when `includeDeleted` is set. | Cached and overlaid with the write's pending claims. |
+| `checkUniqueBatch` | Optional | Return the entries found for the listed keys. A missing key means absent. | Rows are matched by key, so order does not matter. Absent: one `checkUnique` per key. Set updates and resolved writes need it. |
+| `hardDeleteUniquesByNodeIds` | Optional | Permanently remove every entry the listed nodes own. | No fallback. Set updates and resolved writes need it, and refuse as `insertUniqueBatch` does when it is unavailable. |
+| `hardDeleteUniquesByConcreteKind` | Optional by type | Permanently remove every entry owned by nodes of one concrete kind, at whatever axis. | One of the four members `constraintClaims` requires (next table). The store does not call it today: kind removal compiles the same statement itself. |
+
+### Edge cardinality claims
+
+The edge cardinality claim members are gated by the `constraintClaims`
+capability, not by member presence. `claimEdgeCardinality`,
+`claimEdgeCardinalityBatch`, `purgeEdgeClaims` and
+`hardDeleteUniquesByConcreteKind` must be all present when it is `true` and
+all absent when it is not. Any other combination is refused with
+`CONSTRAINT_CLAIM_SURFACE_MISMATCH`. Without the capability, no claim is
+written and the graph's write fence is the only fence for a declared
+cardinality.
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `claimEdgeCardinality` | With the capability | Take the claim on one axis: create-or-lock, then a takeover only when the committed holder is no longer an edge the axis and key describe. Return the outcome. | Issued before the edge row, in the same frame. `refused` becomes `CardinalityError` or `CompositionError` naming the holder. |
+| `claimEdgeCardinalityBatch` | With the capability | `claimEdgeCardinality` for many entries. Return one outcome per entry, by position. The store never passes two entries with the same conflict target. | The store sorts the entries and reads the outcomes positionally, so return exactly one per entry, in order. |
+| `claimEdgeCardinalityGuarded` | Optional | As `claimEdgeCardinality`, and also refuse when a live edge with no claim already matches the axis. | Used only with the capability and for a kind with one constrained axis, and the store then skips its separate cardinality probe. Absent: the probe, then `claimEdgeCardinality`. |
+| `purgeEdgeClaims` | With the capability | Drop the claim rows the named edges hold. Housekeeping only: a claim whose holder is gone is taken over in place anyway. | Called only with ids a hard delete reported removed (see `hardDeleteEdge`). Return value ignored. |
+
+### Embedding and fulltext rows
+
+| Member | Optional | Must do and return | Store use, and fallback when absent |
+| --- | --- | --- | --- |
+| `upsertEmbedding`, `deleteEmbedding` | Optional | Insert or replace, or delete, one node's vector in the slot the params describe. `deleteEmbedding` must succeed when no vector (or no slot storage) exists yet. | Called after the node write. If either is absent, embedding sync is skipped silently: no refusal for a schema with `embedding()` fields. `updateWhere()` on such a kind refuses with `SET_UPDATE_VECTOR_UNSUPPORTED` unless all four embedding members exist. |
+| `upsertEmbeddingBatch`, `deleteEmbeddingBatch` | Optional | Batched forms for one slot. Duplicate node ids in an upsert batch are last-write-wins. | Absent: one `upsertEmbedding` / `deleteEmbedding` per node. |
+| `upsertFulltext`, `deleteFulltext` | Optional | Insert or replace, or delete, one node's fulltext row. | Fulltext availability is `capabilities.fulltext`. Without it, a write to a kind with `searchable()` fields refuses with `UnsupportedBackendCapabilityError`. With it, a missing member is a `ConfigurationError` naming it. A hard delete never calls these: `hardDeleteNode` and `hardDeleteNodesBatch` remove the fulltext row themselves. |
+| `upsertFulltextBatch`, `deleteFulltextBatch` | Optional | Batched forms. Duplicate node ids in an upsert batch are last-write-wins. | Absent: one `upsertFulltext` / `deleteFulltext` per node. |
+
+### Clearing a graph
+
+`clearGraph(graphId)` is required. It must hard-delete every row the graph owns
+in the backend's relations: nodes, edges, uniqueness entries, edge claims,
+fulltext rows, schema versions, and the graph's bookkeeping rows. The bundled
+implementation removes uniqueness entries and edge claims before the nodes and
+edges. It does not clear embeddings. `Store.clear()` resets each declared
+embedding field's vector storage afterwards, outside the transaction, and only
+when the backend has a `vectorStrategy` and `executeDdl`.
+
+`Store.clear()` runs the clear inside a transaction when the backend has
+interactive transactions, and directly on the root backend otherwise. The
+optional `clearGraphPreservingContributionMaterializations` does the same
+while keeping contribution markers. `Store.clear()` uses it when present unless
+`preserveContributionMaterializations: false` is passed. When it is absent, an
+explicit `preserveContributionMaterializations: true` is refused with
+`UNSUPPORTED_BACKEND_CAPABILITY` before anything is deleted.
