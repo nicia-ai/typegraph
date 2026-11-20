@@ -76,7 +76,8 @@
     "bench:snb:generate-smoke-fixture": "tsx src/real/dataset/generate-smoke-fixture.ts",
     "prebench:snb:verify-is2-tie-break": "pnpm --filter @nicia-ai/typegraph build",
     "bench:snb:verify-is2-tie-break": "tsx src/real/verify-is2-tie-break.ts",
-    "typecheck": "tsc --noEmit --skipLibCheck"
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@ladybugdb/core": "^0.20.4",

@@ -3,7 +3,8 @@
  * against Neo4j. Launches its own throwaway Postgres container the same way
  * the Neo4j driver does (imperative docker run + tmpfs + harness-allocated
  * port), so neither side of the server pairing depends on an ambient daemon
- * (docs/design/benchmark-program-plan.md).
+ * (docs/design/benchmark-program-plan.md). Set TYPEGRAPH_BENCH_POSTGRES_URL to
+ * run against an existing server instead (see ../harness/postgres-server.ts).
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -15,7 +16,7 @@ import {
   generatePostgresMigrationSQL,
 } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 
-import { startPostgresContainer } from "../harness/postgres-container";
+import { startPostgresTarget } from "../harness/postgres-server";
 import { assertMessageIndexMaterialized, snbGraph } from "../schema/snb-graph";
 import { createSnbQueries } from "./typegraph-queries";
 import { loadSnbDataset } from "./typegraph-load";
@@ -24,7 +25,7 @@ import { type SnbEngineFactory, type SnbEngineHandle } from "./types";
 export const createTypegraphPostgresEngine: SnbEngineFactory = async (
   options,
 ): Promise<SnbEngineHandle> => {
-  const container = await startPostgresContainer();
+  const container = await startPostgresTarget();
   const pool = new Pool({ connectionString: container.connectionString });
 
   // Anything below can throw (migration SQL, schema bootstrap) after the
@@ -57,7 +58,7 @@ export const createTypegraphPostgresEngine: SnbEngineFactory = async (
     return {
       name: "typegraph-postgres",
       fairness:
-        `imperative docker Postgres container (${container.durabilityLabel}), ` +
+        `Postgres target: ${container.durabilityLabel}; ` +
         "node-postgres over localhost TCP; indexes materialized and statistics " +
         "refreshed after an atomic trusted initial import, matching the " +
         "documented fresh-database path. " +

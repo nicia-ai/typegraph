@@ -18,6 +18,7 @@ import { createServer } from "node:net";
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { readExternalPostgresUrl } from "./postgres-server";
 import { spawnStatus, stringifyError, writeJsonFile } from "./process";
 
 const require = createRequire(import.meta.url);
@@ -237,8 +238,14 @@ export async function runDoctor(
   const checks: DoctorCheck[] = [];
   checks.push(await checkLoopback());
 
+  // TYPEGRAPH_BENCH_POSTGRES_URL moves typegraph-postgres onto an existing
+  // server, so only the container path needs Docker.
+  const typegraphPostgresNeedsDocker =
+    readExternalPostgresUrl(process.env) === undefined;
   const dockerRequired =
-    wants("typegraph-postgres") || wants("neo4j") || wants("pggraph");
+    (wants("typegraph-postgres") && typegraphPostgresNeedsDocker) ||
+    wants("neo4j") ||
+    wants("pggraph");
   const docker = await checkCommand(
     "runtime",
     "Docker daemon",
@@ -261,7 +268,7 @@ export async function runDoctor(
     checks.push(await checkPackage("@ladybugdb/core", true));
   }
 
-  if (wants("typegraph-postgres")) {
+  if (wants("typegraph-postgres") && typegraphPostgresNeedsDocker) {
     checks.push(await checkDockerImage(POSTGRES_IMAGE, docker.status === "ok"));
   }
   if (wants("neo4j")) {
@@ -288,7 +295,10 @@ export async function runDoctor(
       case "typegraph-sqlite":
         return !requiredFailed("node-package", "better-sqlite3");
       case "typegraph-postgres":
-        return docker.status === "ok" && !requiredFailed("node-package", "pg");
+        return (
+          (!typegraphPostgresNeedsDocker || docker.status === "ok") &&
+          !requiredFailed("node-package", "pg")
+        );
       case "neo4j":
         return (
           docker.status === "ok" &&

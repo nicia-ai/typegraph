@@ -8,6 +8,7 @@
  *     [--warmup-requests=N] [--seed=N] [--output=<dir>]
  */
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { parseSnbCliOptions } from "./cli";
 import { type SnbIdPools } from "./dataset/ldbc-csv";
@@ -259,6 +260,11 @@ async function main(argv: readonly string[]): Promise<void> {
   );
   console.log(
     `LDBC SNB short reads (profile=${options.profile}, dataset=${datasetRoot})`,
+  );
+  // A worktree run must measure that worktree's build; print the resolved
+  // library entry so a run against another checkout's build is visible.
+  console.log(
+    `@nicia-ai/typegraph resolved to ${fileURLToPath(import.meta.resolve("@nicia-ai/typegraph"))}`,
   );
 
   const doctorResult = await runDoctor({ engines: options.engines });

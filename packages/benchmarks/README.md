@@ -116,6 +116,15 @@ all four), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
 `--output=<dir>` (default `bench-results/current/snb-<profile>`,
 gitignored).
 
+`typegraph-postgres` launches its own throwaway container by default. On a
+host that cannot start containers but has a PostgreSQL server, set
+`TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:port/db`: the
+engine then creates a fresh per-run database on that server (the role needs
+`CREATEDB`), never touches the database named in the URL, and drops the
+per-run database when the engine closes. The run header prints the server
+settings in the durability label, and the resolved `@nicia-ai/typegraph`
+entry path, so a run that picked up another checkout's build is visible.
+
 #### What every run writes
 
 - `bench-results/current/snb-<profile>/results.json` — per-query,
