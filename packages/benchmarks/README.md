@@ -129,7 +129,9 @@ smoke fixture under `fixtures/` is.
 Useful flags (all scripts): `--engines=typegraph-sqlite,neo4j` (default:
 all five), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
 `--output=<dir>` (default `bench-results/current/snb-<profile>`,
-gitignored).
+gitignored), `--no-history` (do not append to `reports/history.jsonl`),
+`--require-all-engines` (fail instead of skipping a requested engine the
+doctor cannot run).
 
 #### Running against existing servers
 
@@ -161,6 +163,54 @@ The run header prints the resolved `@nicia-ai/typegraph` entry path and the
 TypeGraph version and commit, so a run that picked up another checkout's
 build is visible.
 
+#### Comparison runs (all engines, smoke then SF1)
+
+`bench:snb:compare` is the entry point for a published comparison. It runs
+smoke-scale parity and then each real scale, each as one run of every
+selected engine (one parity check across all of them), and writes
+`report.md` plus the JSON files to `<output-root>/snb-<scale>/`. It passes
+`--check --require-all-engines`, so a parity mismatch, an engine failure, or
+a selected engine the doctor cannot run exits non-zero, and a failed smoke
+run stops before SF1. It does not append to `reports/history.jsonl` unless
+given `--history`.
+
+```bash
+# (a) Smoke parity, all five engines, containers started by the harness
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- --scales=smoke
+
+# (b) SF1, all five engines, containers (smoke parity runs first; omit
+# --data-dir-sf1 to use ~/.cache/typegraph/fixtures/ldbc-snb/sf1)
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- \
+  --scales=smoke,sf1 --data-dir-sf1=<extracted SF1 dir>
+
+# Either one against existing servers instead of containers
+TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:5432/db \
+TYPEGRAPH_BENCH_PGGRAPH_URL=postgresql://user:pass@host:5433/db \
+TYPEGRAPH_BENCH_NEO4J_URL=bolt://user:pass@host:7687 \
+  pnpm --filter @nicia-ai/typegraph-benchmarks bench:snb:compare -- --scales=smoke,sf1
+```
+
+`--engines=a,b` narrows the set, `--output-root=<dir>` picks where reports
+go, and `--requests-per-query`, `--warmup-requests`, `--seed` and
+`--queries` are forwarded to every scale.
+
+What the container path needs. Engines run one at a time, and each engine's
+containers and volumes are removed before the next engine starts.
+
+| Engine | Image | Ports | Volumes and files | Memory |
+| --- | --- | --- | --- | --- |
+| `typegraph-postgres` | `pgvector/pgvector:0.8.7-pg18` (pinned digest) | container 5432 on a free 127.0.0.1 port | anonymous data volume, removed with the container | server defaults, `fsync=off` |
+| `neo4j` | `neo4j:2026.10.2` (pinned digest) | container 7687 on a free 127.0.0.1 port | named `/data` volume (removed on close); the staged import CSVs (about the dataset's size) and the GDS jar bind-mounted from the OS temp dir; 256 MiB tmpfs each for `/logs` and `/tmp`; the GDS jar (about 70 MB, downloaded once from GitHub) cached in `~/.cache/typegraph/neo4j-plugins` | heap and page cache from `neo4j-admin server memory-recommendation` for the memory Docker reports, so most of the host; since 2026.09 the page cache is reserved in full at startup |
+| `pggraph` | `ghcr.io/evokoa/pggraph:1.2.1` (pinned digest, PostgreSQL 17) | container 5432 on a free 127.0.0.1 port | anonymous data volume, removed with the container | image defaults; pgGraph's own `graph.memory_limit_mb` (2 GiB default) bounds the CSR build |
+| `typegraph-sqlite` | none | none | database file in the OS temp dir | page cache sized from host memory |
+| `ladybugdb` | none | none | staged CSVs and database in the OS temp dir | default buffer pool |
+
+The published SF1 numbers come from an EC2 `c7i.4xlarge` (16 vCPU, 32 GiB)
+with a 150 GiB gp3 volume (`docs/ec2-benchmark-runner.md`); that is a known-good
+size for all five engines at SF1. The SF1 archive is 230 MB (zstd); the
+extracted CSVs are larger. Per-engine disk use at SF1 has not been measured
+on this branch.
+
 #### What every run writes
 
 - `bench-results/current/snb-<profile>/results.json` — per-query,
@@ -170,9 +220,13 @@ build is visible.
   engine versions, dataset parameters, hardware, git commit.
 - `bench-results/current/snb-<profile>/competitor-doctor.json` — which
   engines were runnable and why not, for the ones that weren't.
+- `bench-results/current/snb-<profile>/report.md` — the same run for a
+  reader: verdict, engine versions read from the running engines, where each
+  ran and how it loaded, parity per query, p50/p95 per engine.
 - `reports/history.jsonl` — one append per engine per run, labels
   `snb:IS1`..`snb:IS7`, alongside the synthetic suite's rows in the same
-  file.
+  file. `--no-history` skips it; `bench:snb:compare` skips it unless given
+  `--history`.
 
 #### Parity gate
 

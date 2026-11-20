@@ -5,8 +5,15 @@
  * Usage:
  *   tsx src/real/snb-short-reads.ts [--profile=smoke|sf1|sf10] [--engines=a,b,c]
  *     [--data-dir=<extracted-datagen-dir>] [--requests-per-query=N]
- *     [--warmup-requests=N] [--seed=N] [--output=<dir>]
+ *     [--warmup-requests=N] [--seed=N] [--output=<dir>] [--check]
+ *     [--no-history] [--require-all-engines]
+ *
+ * Writes results.json, summary.json, competitor-doctor.json and report.md to
+ * the output directory. For a comparison across chosen engines and scales,
+ * use `./compare.ts` (`bench:snb:compare`), which runs this once per scale.
  */
+import { writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +41,7 @@ import {
 } from "./harness/doctor";
 import { writeLaneHistoryEntry } from "./harness/history";
 import { evaluateParity, type EngineQueryOutcomes } from "./harness/parity";
+import { renderSnbReport } from "./harness/report";
 import { writeJsonFile } from "./harness/process";
 import { computeLatencyStats, type LatencyStats } from "./harness/stats";
 import { writeSummary, type EngineVersion } from "./harness/summary";
@@ -128,6 +136,15 @@ function formatEngineVersions(
         `${version.component} ${version.version}${version.detail === undefined ? "" : ` (${version.detail})`}`,
     )
     .join("; ");
+}
+
+/** One line naming the hardware a run measured on, for the report header. */
+function describeHost(): string {
+  const cpus = os.cpus();
+  return (
+    `${cpus[0]?.model ?? "unknown CPU"} x ${cpus.length}, ` +
+    `${(os.totalmem() / 1024 ** 3).toFixed(1)} GiB RAM, ${os.platform()}/${os.arch()}, node ${process.version}`
+  );
 }
 
 type RunEngineOptions = Readonly<{
@@ -285,6 +302,17 @@ async function main(argv: readonly string[]): Promise<void> {
   const engineNames = options.engines.filter(
     (name) => doctorResult.runnable[name],
   );
+  const skipped = options.engines.filter(
+    (name) => !doctorResult.runnable[name],
+  );
+  if (skipped.length > 0 && options.requireAllEngines) {
+    console.error(
+      `Requested engines are not runnable (see competitor-doctor.json): ${skipped.join(", ")}. ` +
+        "--require-all-engines refuses to compare fewer engines than were asked for.",
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (engineNames.length === 0) {
     console.log(
       "No requested engines are runnable on this machine (see competitor-doctor.json). " +
@@ -292,9 +320,6 @@ async function main(argv: readonly string[]): Promise<void> {
     );
     return;
   }
-  const skipped = options.engines.filter(
-    (name) => !doctorResult.runnable[name],
-  );
   if (skipped.length > 0) {
     console.log(`Skipping unavailable engines: ${skipped.join(", ")}`);
   }
@@ -379,7 +404,7 @@ async function main(argv: readonly string[]): Promise<void> {
     }
   }
 
-  for (const run of runs) {
+  for (const run of options.recordHistory ? runs : []) {
     writeLaneHistoryEntry({
       lane: LANE,
       engine: run.name,
@@ -475,7 +500,53 @@ async function main(argv: readonly string[]): Promise<void> {
     durabilityLabels: runs.map((run) => `${run.name}: ${run.fairness}`),
   });
 
-  console.log(`\nWrote results to ${options.outputDir}`);
+  const reportPath = path.join(options.outputDir, "report.md");
+  await writeFile(
+    reportPath,
+    renderSnbReport({
+      profile: options.profile,
+      generatedAt: new Date().toISOString(),
+      typegraphVersion:
+        (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+      gitSha: resolveGitSha(),
+      gitRefName: resolveGitRefName(),
+      datasetRoot,
+      requestsPerQuery: options.requestsPerQuery,
+      warmupRequests: options.warmupRequests,
+      seed: options.seed,
+      host: describeHost(),
+      command: `tsx src/real/snb-short-reads.ts ${argv.join(" ")}`,
+      skippedEngines: skipped,
+      engines: runs.map((run) => ({
+        name: run.name,
+        versions: run.versions,
+        target: run.target,
+        loadPath: run.loadPath,
+        loadMs: run.loadMs,
+        unsupported: run.unsupported,
+      })),
+      failures,
+      queries: options.queries.map((queryId) => {
+        const summaries = resultsByQuery[queryId];
+        return {
+          queryId,
+          results: summaries.map((entry) => ({
+            engine: entry.engine,
+            stats: entry.stats,
+          })),
+          comparable: summaries[0]?.comparable ?? false,
+          parityReason: summaries[0]?.parityReason,
+        };
+      }),
+    }),
+  );
+
+  console.log(
+    `\nWrote results to ${options.outputDir} (report: ${reportPath})`,
+  );
+  if (!options.recordHistory) {
+    console.log("Not appended to reports/history.jsonl (--no-history).");
+  }
 
   // A doctor-runnable engine that then failed mid-run is a real regression
   // signal (unlike "not runnable", which is expected in a no-Docker CI

@@ -21,6 +21,14 @@ export type SnbCliOptions = Readonly<{
   outputDir: string;
   /** Exit non-zero on a genuine parity mismatch (row count or value digest) between 2+ engines that ran. */
   runChecks: boolean;
+  /** Append one line per engine to `reports/history.jsonl` (`--no-history` turns it off). */
+  recordHistory: boolean;
+  /**
+   * Treat a requested engine the doctor finds unrunnable as a failure
+   * instead of skipping it (`--require-all-engines`), so a comparison of a
+   * chosen engine set cannot quietly become a comparison of fewer engines.
+   */
+  requireAllEngines: boolean;
 }>;
 
 function isSnbQueryId(value: string): value is SnbQueryId {
@@ -131,5 +139,7 @@ export function parseSnbCliOptions(argv: readonly string[]): SnbCliOptions {
     seed: parsePositiveInt(parseArgValue(argv, "seed"), "seed", 42),
     outputDir: parseArgValue(argv, "output") ?? defaultOutputDir(profile),
     runChecks: argv.includes("--check"),
+    recordHistory: !argv.includes("--no-history"),
+    requireAllEngines: argv.includes("--require-all-engines"),
   };
 }
