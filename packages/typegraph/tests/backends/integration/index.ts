@@ -78,7 +78,10 @@ export { registerMultiKindQueryIntegrationTests } from "./multi-kind-queries";
 export { registerMultiRecursiveTraversalIntegrationTests } from "./multi-recursive-traversals";
 export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-subgraph-batch";
 export { registerMutationPlanningIntegrationTests } from "./mutation-planning";
-export { registerNodeBulkHardDeleteIntegrationTests } from "./node-bulk-hard-delete";
+export {
+  registerNodeBulkHardDeleteIntegrationTests,
+  registerNodeHardDeleteClaimReleaseIntegrationTests,
+} from "./node-bulk-hard-delete";
 export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";

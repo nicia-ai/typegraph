@@ -60,6 +60,7 @@ import { isBundledRootAutocommitEligible } from "../../backend/capabilities/auto
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
+  type ENDPOINT_SET_READ,
   type STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
@@ -192,6 +193,7 @@ import {
 } from "../collections/node-collection";
 import {
   checkDisjointnessConstraint,
+  claimHoldingEdgeKinds,
   type ConstraintContext,
   type ConstraintFenceReason,
   edgeWriteNeedsConstraintFence,
@@ -316,6 +318,7 @@ import { assertNodeDeletePlanExpected } from "./node-delete-expectation";
 import { lockNodeRow, lockNodeRows, lockNodeRowsById } from "./node-row-locks";
 import {
   decideNodeDeleteBehavior,
+  type IncidentClaimRelease,
   judgeNodeDeleteBehavior,
   nodeClaimTransition,
   type NodeDeleteMode,
@@ -390,6 +393,8 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   claimsVerdict: ClaimsVerdictThunk;
   /** Threaded from `store.ts`'s `#batchPointRead` — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /** Threaded from `store.ts`'s `#endpointSetRead` — never re-resolved here. */
+  endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
   /** Threaded from `store.ts`'s `#uniqueSidecarBatch` — never re-resolved here. */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /** Threaded from `store.ts`; exact transaction targets bind separately. */
@@ -655,6 +660,19 @@ function withCascadeConsumedEdges(
 }
 
 /**
+ * The claim release this store's node hard deletes owe for the incident edges
+ * the backend's node removal takes with it.
+ */
+function incidentClaimRelease<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+): IncidentClaimRelease {
+  return {
+    edgeKinds: claimHoldingEdgeKinds(ctx.graph, ctx.registry),
+    endpointSetRead: ctx.endpointSetRead,
+  };
+}
+
+/**
  * ONE node row's delete inside an already-open write frame: the registration
  * lookup, the soft path's live pre-image, the `retireNode`/`purgeNode` choice,
  * and the identity detach. Every in-frame node delete — both top-level
@@ -699,6 +717,7 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
         id,
         schema: registration.type.schema,
         onDelete: registration.onDelete,
+        incidentClaims: incidentClaimRelease(ctx),
       },
       policy,
     );
@@ -8037,6 +8056,7 @@ async function applyPlannedNodeHardDeletes<G extends GraphDef>(
       removedEdgeIds: segment.deletes.flatMap(
         (batchedDelete) => batchedDelete.removedEdgeIds,
       ),
+      incidentClaims: incidentClaimRelease(ctx),
     });
   }
   return cascadedParts;
