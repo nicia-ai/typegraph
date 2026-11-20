@@ -18,10 +18,7 @@
 import { type z } from "zod";
 
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
-import {
-  type ENDPOINT_SET_READ,
-  UNIQUE_SIDECAR_BATCH,
-} from "../../backend/capabilities/bundle-registry";
+import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
   type BundleVerdictOf,
@@ -55,7 +52,6 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
-import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
@@ -74,7 +70,6 @@ import {
   resolvedNodeUniqueSidecarBatchIsReachable,
   validateResolvedNodeClaims,
 } from "../claims/resolved-node-claims";
-import { findEdgeRowsByEndpoints } from "../edge-fetch";
 import {
   deleteNodeEmbeddings,
   deleteNodeEmbeddingsBatch,
@@ -445,68 +440,6 @@ export async function deleteEdgesById(
 }
 
 /**
- * Removes the incident edge rows of claim-holding kinds still stored against
- * a set of one kind's nodes, releasing their claims through
- * {@link deleteEdgesById}: tombstoned rows, which no delete-behavior verdict
- * reads and whose soft delete released nothing, and any live row a policy
- * left in place. Runs immediately before the node rows go, because the
- * backend's node removal deletes every incident edge row, live or
- * tombstoned, and knows nothing of claims: a claim kept by a soft-deleted
- * edge would otherwise outlive its edge.
- *
- * Housekeeping, as every claim release is: an orphaned claim fails the
- * takeover statement's liveness predicate, so it never refuses a later
- * write. Every stored row of those kinds is read, whatever endpoint kinds the
- * graph declares for them, so a row the current definition would refuse is
- * released too. A graph with no claim-holding edge kind, or a backend without
- * claim support, pays no statement.
- *
- * The one owner of that release for every node hard delete: the single path
- * and each composition cascade member ({@link applyNodeHardDelete}), and the
- * batch's set-wise path and its per-node fallback
- * ({@link applyNodeHardDeleteBatch}).
- */
-async function releaseRemainingIncidentClaims(
-  ctx: NodeWriteContext,
-  backend: Backend,
-  kind: string,
-  ids: readonly string[],
-  release: IncidentClaimRelease,
-): Promise<void> {
-  if (ids.length === 0 || release.edgeKinds.length === 0) return;
-  if (!claimSupport(backend, ctx.claimsVerdict()).supported) return;
-  const endpoints = ids.map((id) => ({ kind, id }));
-  const edgeIds = new Set<string>();
-  for (const edgeKind of release.edgeKinds) {
-    for (const side of ["from", "to"] as const) {
-      const rows = await findEdgeRowsByEndpoints(
-        backend,
-        release.endpointSetRead,
-        {
-          graphId: ctx.graphId,
-          kind: edgeKind,
-          side,
-          endpoints,
-          temporalMode: "includeTombstones",
-        },
-      );
-      for (const row of rows) edgeIds.add(row.id);
-    }
-  }
-  await deleteEdgesById(ctx, backend, "hard", [...edgeIds]);
-}
-
-/**
- * What {@link releaseRemainingIncidentClaims} needs beside the nodes: the
- * graph's claim-holding edge kinds (`claimHoldingEdgeKinds`) and the threaded
- * `endpointSetRead` verdict its incident-edge read binds.
- */
-export type IncidentClaimRelease = Readonly<{
-  edgeKinds: readonly string[];
-  endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
-}>;
-
-/**
  * The live edges connected to each of a set of one kind's nodes, keyed by node
  * id — what {@link judgeNodeDeleteBehavior} reads for one node, read for all of
  * them with one `findEdgesConnectedToNodes` statement per bind-budget chunk,
@@ -563,17 +496,13 @@ export type NodeHardDeleteBatchWork = Readonly<{
   ids: readonly string[];
   /** Every edge their delete-behavior verdicts remove, in deletion order. */
   removedEdgeIds: readonly string[];
-  /** The claims of the incident edges the node removal takes with it. */
-  incidentClaims: IncidentClaimRelease;
 }>;
 
 /**
  * {@link applyNodeHardDelete} for a run of nodes, as set-wise statements: the
  * verdicts' edges through {@link deleteEdgesById} (claims released for the
- * rows removed), the remaining claim holders through
- * {@link releaseRemainingIncidentClaims}, then the node rows with their
- * uniqueness, fulltext and remaining incident edge rows through
- * `hardDeleteNodesBatch`, then their
+ * rows removed), then the node rows with their uniqueness, fulltext and
+ * remaining incident edge rows through `hardDeleteNodesBatch`, then their
  * embeddings. The state is the one applying {@link applyNodeHardDelete} to
  * each node in turn leaves: every statement is a set delete, and no node of
  * the run is an endpoint another node of the run still needs.
@@ -590,13 +519,6 @@ export async function applyNodeHardDeleteBatch(
   if (work.removedEdgeIds.length > 0) {
     await deleteEdgesById(ctx, backend, "hard", work.removedEdgeIds);
   }
-  await releaseRemainingIncidentClaims(
-    ctx,
-    backend,
-    work.kind,
-    work.ids,
-    work.incidentClaims,
-  );
   const removedNodeIds = await hardDeleteNodeRows(
     ctx.graphId,
     backend,
@@ -1015,9 +937,8 @@ export async function applyNodeSoftDelete(
 }
 
 /**
- * Applies a node hard delete: delete-behavior enforcement, the claims of the
- * remaining incident edges ({@link releaseRemainingIncidentClaims}), permanent
- * removal, then embedding cleanup. Uniqueness and fulltext rows are removed by the
+ * Applies a node hard delete: delete-behavior enforcement, permanent removal,
+ * then embedding cleanup. Uniqueness and fulltext rows are removed by the
  * backend's `hardDeleteNode` cascade; embeddings live in strategy-owned
  * per-`(kind, field)` tables the graph-agnostic cascade cannot reach, so they
  * are cleaned here.
@@ -1034,8 +955,6 @@ export async function applyNodeHardDelete(
     id: string;
     schema: z.ZodType;
     onDelete: DeleteBehavior | undefined;
-    /** The claims of the incident edges the node removal takes with it. */
-    incidentClaims: IncidentClaimRelease;
   }>,
   backend: Backend,
   policy?: NodeDeletePolicy,
@@ -1045,13 +964,6 @@ export async function applyNodeHardDelete(
     { kind: args.kind, id: args.id, mode: "hard", onDelete: args.onDelete },
     backend,
     policy,
-  );
-  await releaseRemainingIncidentClaims(
-    ctx,
-    backend,
-    args.kind,
-    [args.id],
-    args.incidentClaims,
   );
   await backend.hardDeleteNode({
     graphId: ctx.graphId,

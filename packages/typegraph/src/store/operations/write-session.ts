@@ -125,7 +125,6 @@ import {
   applyResolvedNodeUpdateBatch,
   createNodeWriteContext,
   deleteEdgesById,
-  type IncidentClaimRelease,
   type NodeDeleteMode,
   type NodeDeletePolicy,
   type NodeHardDeleteBatchWork,
@@ -360,8 +359,6 @@ type NodeHardDeleteWork = Readonly<{
   id: string;
   schema: z.ZodType;
   onDelete: DeleteBehavior | undefined;
-  /** The claims of the incident edges the node removal takes with it. */
-  incidentClaims: IncidentClaimRelease;
 }>;
 
 /** One node resurrection: reopen a tombstone with its stored props. */

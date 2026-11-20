@@ -7759,7 +7759,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       registry: this.#registry,
       claimsVerdict: this.#claimsVerdict,
       batchPointRead: this.#batchPointRead,
-      endpointSetRead: this.#endpointSetRead,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       ...(identityConfig === undefined ?
         {}

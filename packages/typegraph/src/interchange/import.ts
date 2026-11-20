@@ -141,7 +141,6 @@ import {
 import {
   checkDisjointnessConstraint,
   checkEdgeCardinalityConstraints,
-  claimHoldingEdgeKinds,
   graphOwesClaims,
   graphOwesLockOnlyFence,
 } from "../store/constraints";
@@ -169,7 +168,6 @@ import {
   primeBatchValidationCaches,
 } from "../store/operations/node-operations";
 import { lockNodeRows } from "../store/operations/node-row-locks";
-import { type IncidentClaimRelease } from "../store/operations/node-write-pipeline";
 import {
   type OverlaidSessionMint,
   runWritePlan,
@@ -430,8 +428,6 @@ type ImportWriteFrame = Readonly<{
   lock: GraphWriteLock;
   /** The code-level graph, for `acyclicRelationForEdgeKind`. */
   graph: GraphDef;
-  /** The claims a node purge releases with the incident edges it removes. */
-  incidentClaims: IncidentClaimRelease;
   schema: SqlSchema;
   /**
    * The identity half of a node update that states `validTo`, bound to this
@@ -580,10 +576,6 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     statementExecution: inputs.statementExecution,
     lock,
     graph: inputs.graph,
-    incidentClaims: {
-      edgeKinds: claimHoldingEdgeKinds(inputs.graph, inputs.registry),
-      endpointSetRead: inputs.runtime.endpointSetRead,
-    },
     schema: inputs.schema,
     applyNodeWindowEnd: (input) =>
       inputs.runtime.applyImportedNodeWindowEnd(target, input),
@@ -3794,7 +3786,6 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
         id: part.id,
         schema: registration.type.schema,
         onDelete: registration.onDelete,
-        incidentClaims: frame.incidentClaims,
       },
       { enforceDeleteBehavior: false },
     );

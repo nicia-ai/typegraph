@@ -53,7 +53,6 @@ import {
 } from "../src";
 import {
   createClaimsVerdictThunk,
-  endpointSetReadVerdict,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
 import {
@@ -83,7 +82,6 @@ import {
   edgeCardinalityClaims,
 } from "../src/store/claims/edge-claims";
 import { planNodeCreateClaims } from "../src/store/claims/node-claims";
-import { claimHoldingEdgeKinds } from "../src/store/constraints";
 import {
   runWritePlan,
   type WritePlanContext,
@@ -595,17 +593,13 @@ const CASES: Record<keyof WriteSession, Case> = {
   purgeNode: {
     run: async (raw) => {
       await seed(raw, "i");
-
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work the same way; hoisting this one would make the table read as if it were different.
       return (session) =>
         session.purgeNode({
           kind: "Doc",
           id: "i",
           schema,
           onDelete: "cascade",
-          incidentClaims: {
-            edgeKinds: claimHoldingEdgeKinds(graph, registry),
-            endpointSetRead: endpointSetReadVerdict(raw),
-          },
         });
     },
     sidecars: ["hardDeleteEdgesBatch", "deleteEmbedding"],
@@ -615,7 +609,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   purgeNodes: {
     run: async (raw) => {
       await seed(raw, "pn");
-
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work the same way; hoisting this one would make the table read as if it were different.
       return (session) =>
         session.purgeNodes({
           kind: "Doc",
@@ -623,10 +617,6 @@ const CASES: Record<keyof WriteSession, Case> = {
           ids: ["pn"],
           // The verdict the caller judged: the seeded self-loop.
           removedEdgeIds: ["edge-pn"],
-          incidentClaims: {
-            edgeKinds: claimHoldingEdgeKinds(graph, registry),
-            endpointSetRead: endpointSetReadVerdict(raw),
-          },
         });
     },
     // The verdict's edges, then the rows (with their uniqueness and fulltext

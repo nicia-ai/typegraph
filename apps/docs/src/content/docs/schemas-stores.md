@@ -1176,10 +1176,6 @@ Permanently deletes a node. This is irreversible and should be used carefully.
 store.nodes.Person.hardDelete(id: NodeId<Person>): Promise<void>;
 ```
 
-The node's connected edges go with it, soft-deleted ones included, and so do
-the cardinality and composition claim rows those edges held: a soft delete
-releases no claim, so the hard delete releases them.
-
 #### `find(filter?, temporal?)`
 
 Finds nodes of this kind with optional filtering and pagination. The temporal
@@ -1500,9 +1496,8 @@ A schema-managed store on those drivers refuses
 the call before it writes, as it refuses every write it cannot fence (see
 [Backend support](#backend-support)).
 
-As `hardDelete()` does, the call also releases the cardinality and composition
-claim rows of the removed node's soft-deleted edges, so no claim row outlives
-its edge.
+Claim rows still held by a removed node's soft-deleted edges are left in place,
+as `hardDelete()` leaves them.
 
 #### `getOrCreateByConstraint(constraintName, props, options?)`
 

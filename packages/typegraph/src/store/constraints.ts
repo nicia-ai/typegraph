@@ -54,7 +54,6 @@ import {
   edgeKindIsInAcyclicRelation,
 } from "./acyclicity";
 import { type ConstraintFenceReason } from "./claims/backing";
-import { edgeKindOwesAnyClaim } from "./claims/composition-claims";
 import {
   axisCountsRow,
   claimRefusalFor,
@@ -150,24 +149,6 @@ export function edgeKindCardinalityDeclarations(
   kind: string,
 ): EdgeCardinalityDeclarations {
   return (hasOwnKey(graph.edges, kind) ? graph.edges[kind] : undefined) ?? {};
-}
-
-/**
- * The edge kinds of this graph whose edges take a claim row, in declaration
- * order: each kind {@link edgeKindOwesAnyClaim} answers for. The edge kinds
- * whose rows a node hard delete must release claims for.
- */
-export function claimHoldingEdgeKinds(
-  graph: GraphDef,
-  registry: KindRegistry,
-): readonly string[] {
-  return Object.keys(graph.edges).filter((kind) =>
-    edgeKindOwesAnyClaim(
-      registry,
-      edgeKindCardinalityDeclarations(graph, kind),
-      kind,
-    ),
-  );
 }
 
 /**
