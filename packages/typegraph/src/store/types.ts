@@ -3101,6 +3101,11 @@ export type TransactionRuntime = Readonly<{
    * later rolls back. A caller already inside a `store.transaction` callback
    * — today, merge apply — reaches this transaction-scoped variant instead,
    * via {@link file://./runtime-port.ts transactionDeleteNodeWithPolicy}.
+   *
+   * On resolution it counts one node write of `work.kind` in every receipt
+   * this context's writes count in (its transaction's and each enclosing
+   * `tx.measure` scope's), as a collection `delete` would; a rejected
+   * delete counts 0.
    */
   deleteNodeWithPolicy: (
     work: Readonly<{ kind: string; id: string }>,
@@ -3109,7 +3114,8 @@ export type TransactionRuntime = Readonly<{
   /**
    * Revives one soft-deleted node with its stored props through this SAME
    * transaction's node-operation context — the inverse of a soft delete via
-   * {@link file://./runtime-port.ts transactionReviveNode}.
+   * {@link file://./runtime-port.ts transactionReviveNode}. Counted in this
+   * context's receipts exactly as {@link deleteNodeWithPolicy} is.
    */
   reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
   /**

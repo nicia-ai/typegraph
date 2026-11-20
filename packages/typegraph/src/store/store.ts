@@ -5126,23 +5126,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         edges: scopedEdges,
         identity,
       } = wrapSurfaceForRecorders(surface, chain);
-      // The internal delete port travels with the surface too. It runs
-      // `executeNodeDelete` against a node operation context directly and
-      // never touches `surface.nodes` — the collection wrappers just above
-      // are the only thing that increments a receipt's `writes` counters, so
-      // this delete counts toward NEITHER this scope's nor any enclosing
-      // scope's `writes`, rebound or not. What rebinding decides is
-      // `cascadedParts` alone: a scope that inherited the OUTER context's
-      // port would run the delete against the OUTER surface's node operation
-      // context, attributing its `cascadedParts` to the outer chain's
-      // recorders and leaving THIS scope's own (freshly created) receipt
-      // without them. Taken from the scope's own surface, so
-      // `cascadedParts` reaches this scope's receipt too — the same
-      // attribution-follows-the-context reasoning as the collections above,
-      // for a write those collections cannot see at all. The receipt this
-      // yields is therefore a receipt shape callers must expect: a delete
-      // reported here carries `cascadedParts` while its own `writes` stay at
-      // zero, since no collection ever counted it.
+      // The internal delete and revive ports travel with the surface too.
+      // They run `executeNodeDelete` / `executeNodeRevive` against a node
+      // operation context directly and never touch `surface.nodes`, so the
+      // collection wrappers just above cannot count them; each port counts
+      // its own node write in its surface's recorders instead
+      // (`recordPortNodeWrite`). A scope that inherited the OUTER context's
+      // ports would run them against the OUTER surface, counting the write
+      // and attributing a delete's `cascadedParts` to the outer chain's
+      // recorders only, and leaving THIS scope's own (freshly created)
+      // receipt without either. Taken from the scope's own surface, so the
+      // write and its `cascadedParts` reach this scope's receipt and every
+      // enclosing one — the same attribution-follows-the-context reasoning
+      // as the collections above, for writes those collections cannot see.
       const scopedContext = overlayPropertyDescriptors(context, {
         nodes: scopedNodes,
         edges: scopedEdges,
@@ -5463,21 +5459,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return {
         runtime: {
           backend: txBackend,
-          deleteNodeWithPolicy: (work, policy) =>
-            executeNodeDelete(
+          // The collection wrappers count every write made through
+          // `nodes`; these two ports bypass them, so they count their one
+          // node write in the same receipts themselves, on resolution, as a
+          // collection `delete` would — a rejected write counts 0.
+          deleteNodeWithPolicy: async (work, policy) => {
+            await executeNodeDelete(
               nodeOperationContext,
               work.kind,
               work.id,
               txBackend,
               { policy },
-            ),
-          reviveNode: (work) =>
-            executeNodeRevive(
+            );
+            recordPortNodeWrite(receiptRecorders, work.kind);
+          },
+          reviveNode: async (work) => {
+            await executeNodeRevive(
               nodeOperationContext,
               work.kind,
               work.id,
               txBackend,
-            ),
+            );
+            recordPortNodeWrite(receiptRecorders, work.kind);
+          },
           acquireWriteFences: async (refusal) => {
             if (readOnly) {
               refuseReadOnlyTransactionWrite(
@@ -8477,6 +8481,18 @@ type TransactionWriteSurface<G extends GraphDef> = Readonly<{
   edges: GraphEdgeCollections<G>;
   identity?: IdentityFacade<G>;
 }>;
+
+/**
+ * Counts one node write made through a transaction runtime port, which the
+ * collection wrappers of {@link wrapSurfaceForRecorders} never see, in every
+ * receipt of the surface the port belongs to.
+ */
+function recordPortNodeWrite(
+  recorders: readonly TransactionReceiptRecorder[],
+  kind: string,
+): void {
+  for (const recorder of recorders) recorder.recordNode(kind, 1);
+}
 
 /**
  * Wraps a write surface's collections and identity facade once per recorder,
