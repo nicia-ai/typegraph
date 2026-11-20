@@ -14,11 +14,19 @@ import {
   type GraphCommandIsolation,
   type TransactionBackend,
 } from "../../backend/types";
-import { TypeGraphError } from "../../errors";
+import {
+  TypeGraphError,
+  UnsupportedBackendCapabilityError,
+} from "../../errors";
 import { lockRecordedGraphWrite } from "../recorded-capture";
+import { type GraphWriteLock } from "../recorded-capture/clock";
 import { lockSchemaVersionForStoreWrite } from "./write-transaction";
 
 const STALE_SCHEMA_VERSION_CODE = "STALE_SCHEMA_VERSION";
+
+/** The capability a {@link freshSnapshotUnprovableError} names. */
+const OBSERVED_READ_COMMITTED_ISOLATION_CAPABILITY =
+  "observedReadCommittedIsolation";
 
 /**
  * What {@link lockStoreWriteFence} acquires and how it reports a refusal.
@@ -84,9 +92,43 @@ export async function lockStoreWriteFence(
 
   const lock = await lockRecordedGraphWrite(txBackend, input.graphId);
   if (input.requireFreshSnapshot !== true) return;
-  // Serialized engines already own the writer slot. A keyed acquisition's
-  // token carries what the fence statement observed on this session; a plan
-  // that yields no token has no evidence to offer.
+  requireFreshSnapshotAfterGraphLock(
+    txBackend,
+    input.graphId,
+    lock,
+    input.freshSnapshotError,
+  );
+}
+
+/**
+ * THE one decision whether every read after a held per-graph write lock
+ * observes every earlier holder of that lock, for a caller whose reads span
+ * more than one lock-only decision: `lockStoreWriteFence`'s
+ * `requireFreshSnapshot`, and the transaction runtime's write and read
+ * fences that provenance's support reads take.
+ *
+ * Admitted: a serialized engine, which already owns the writer slot, and a
+ * keyed acquisition bound to this graph and transaction whose own statement
+ * observed read committed on this session. Refused with
+ * `freshSnapshotError(isolation)`: a plan that yields no coordination token,
+ * an acquisition minted for another graph or session, and a snapshot
+ * isolation, whose snapshot can predate a holder it then waited for. The fact
+ * is the isolation the fence statement observed on the pinned session — never
+ * the isolation the transaction requested, nor the server's default.
+ *
+ * `lock` is the evidence the graph-lock acquisition returned.
+ */
+export function requireFreshSnapshotAfterGraphLock(
+  txBackend: TransactionBackend,
+  graphId: string,
+  lock: GraphWriteLock,
+  freshSnapshotError: (
+    isolation: GraphCommandIsolation | undefined,
+  ) => TypeGraphError,
+): void {
+  // A serialized engine (SQLite) gives a write transaction its single writer
+  // slot before the transaction's first statement, so no writer can commit
+  // after its snapshot.
   if (resolveWriteFencePlan(txBackend).kind === "engine-serialized") return;
   const acquisition =
     lock.coordination === undefined ?
@@ -94,12 +136,31 @@ export async function lockStoreWriteFence(
     : graphCommandCoordinationAcquisition(
         txBackend.commands,
         lock.coordination,
-        input.graphId,
+        graphId,
       );
   if (
     acquisition === undefined ||
     !observesEveryEarlierFenceHolder(acquisition)
   ) {
-    throw input.freshSnapshotError(acquisition?.isolation);
+    throw freshSnapshotError(acquisition?.isolation);
   }
+}
+
+/**
+ * The refusal {@link requireFreshSnapshotAfterGraphLock} raises for a caller
+ * that has no refusal of its own: `operation` names the caller, and
+ * `isolation` is what the fence statement observed (absent when the
+ * write-fence plan yields no evidence at all).
+ */
+export function freshSnapshotUnprovableError(
+  operation: string,
+  graphId: string,
+  isolation: GraphCommandIsolation | undefined,
+): UnsupportedBackendCapabilityError {
+  return new UnsupportedBackendCapabilityError(
+    operation,
+    OBSERVED_READ_COMMITTED_ISOLATION_CAPABILITY,
+    { graphId, isolation },
+    "On PostgreSQL, run the transaction at read committed isolation so reads after the graph write lock observe every earlier writer. A backend whose write fence is caller-serialized cannot provide this evidence; use an engine-serialized or advisory-lock write fence.",
+  );
 }

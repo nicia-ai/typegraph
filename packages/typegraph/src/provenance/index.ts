@@ -116,6 +116,7 @@ export function createRetractionCapability<
       return believedFactsInCallerTransaction<G, FactKindsFromConfig<G, C>>(
         resolveTransactionScope(tx, HOLDING_IN_TRANSACTION_OPERATION),
         tx,
+        HOLDING_IN_TRANSACTION_OPERATION,
       );
     },
 

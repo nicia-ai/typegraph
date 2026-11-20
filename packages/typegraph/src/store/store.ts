@@ -405,6 +405,10 @@ import {
 import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
 import { readIdentityParticipants } from "./operations/identity-participation";
 import {
+  freshSnapshotUnprovableError,
+  requireFreshSnapshotAfterGraphLock,
+} from "./operations/write-fence-prelude";
+import {
   acquireManagedWriteFences,
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -4956,6 +4960,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
   }
 
+  /**
+   * The transaction runtime's write fences for a caller that reads and then
+   * decides under them — provenance's retraction transitions, its commit-time
+   * assert and a writable `holding(tx)`: the managed write frame's
+   * schema-version fence and per-graph write lock, then proof, from the lock
+   * acquisition's own evidence, that every read after it observes every
+   * earlier holder. A PostgreSQL session at a snapshot isolation is refused
+   * there, naming `operation`, before the caller's first read and with the
+   * transaction still usable.
+   */
+  async #acquireFreshSnapshotWriteFences(
+    nodeOperationContext: NodeOperationContext<G>,
+    txBackend: TransactionBackend,
+    operation: string,
+  ): Promise<void> {
+    const lock = await acquireManagedWriteFences(
+      nodeOperationContext,
+      txBackend,
+    );
+    requireFreshSnapshotAfterGraphLock(
+      txBackend,
+      this.graphId,
+      lock,
+      (isolation) =>
+        freshSnapshotUnprovableError(operation, this.graphId, isolation),
+    );
+  }
+
   async #runAdoptedRecordedTransaction<T>(
     txBackend: TransactionBackend,
     externalTx: TNativeTransaction,
@@ -5507,14 +5539,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 refusal.suggestion,
               );
             }
-            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+            await this.#acquireFreshSnapshotWriteFences(
+              nodeOperationContext,
+              txBackend,
+              refusal.operation,
+            );
           },
-          acquireReadFences: async () => {
+          acquireReadFences: async (operation) => {
             if (readOnly) {
               await lockRecordedGraphWrite(txBackend, this.graphId);
               return;
             }
-            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+            await this.#acquireFreshSnapshotWriteFences(
+              nodeOperationContext,
+              txBackend,
+              operation,
+            );
           },
           assertWritable: (operation) => {
             for (const recorder of receiptRecorders) {

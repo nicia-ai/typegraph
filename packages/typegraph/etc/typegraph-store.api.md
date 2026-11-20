@@ -7927,7 +7927,7 @@ type TransactionRuntime = Readonly<{
         operation: string;
         suggestion: string;
     }>) => Promise<void>;
-    acquireReadFences: () => Promise<void>;
+    acquireReadFences: (operation: string) => Promise<void>;
     assertWritable: (operation: string) => void;
 }>;
 

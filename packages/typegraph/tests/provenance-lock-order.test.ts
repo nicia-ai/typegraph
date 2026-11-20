@@ -295,6 +295,9 @@ const STORES = [
   ["portable two-statement fence", () => portableStore, "G", "J", "K"],
 ] as const;
 
+/** The isolation a retraction opens its own transaction at. */
+const READ_COMMITTED = { isolationLevel: "read_committed" } as const;
+
 function queryTexts(): readonly string[] {
   return statements.map((statement) => statement.query);
 }
@@ -382,7 +385,8 @@ describe.each(STORES)(
 
     // Load-bearing for "no transaction behaves exactly as before": both
     // forms run one implementation, so the caller's form inside a fresh
-    // transaction issues the same statements, locks first.
+    // transaction at the own form's isolation (read committed, which the own
+    // form requests explicitly) issues the same statements, locks first.
     it("retract and unRetract on a caller's transaction issue exactly the statements of their own transaction, schema fence then graph lock first", async () => {
       const store = getStore();
       const provenance = createRetractionCapability(store, config);
@@ -398,16 +402,21 @@ describe.each(STORES)(
       const ownRestoreQueries = queryTexts();
       statements.splice(0);
 
-      const callerRetract = await store.transaction((tx) =>
-        provenance.retract(source, tx),
+      expect(ownRetractQueries[0]).toBe(
+        "set transaction isolation level read committed",
+      );
+      const callerRetract = await store.transaction(
+        (tx) => provenance.retract(source, tx),
+        READ_COMMITTED,
       );
       expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
       expect(countGraphLockStatements()).toBe(1);
       expectGraphLockBeforeRowWork();
       const callerRetractQueries = queryTexts();
       statements.splice(0);
-      const callerRestore = await store.transaction((tx) =>
-        provenance.unRetract(source, tx),
+      const callerRestore = await store.transaction(
+        (tx) => provenance.unRetract(source, tx),
+        READ_COMMITTED,
       );
       expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
       expectGraphLockBeforeRowWork();

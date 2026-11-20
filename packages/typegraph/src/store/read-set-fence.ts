@@ -9,11 +9,7 @@
  * decision is made from a read taken before the lock, and the fence writes
  * nothing.
  */
-import {
-  type EngineRevision,
-  type GraphCommandIsolation,
-  type TransactionBackend,
-} from "../backend/types";
+import { type EngineRevision, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
   ConfigurationError,
@@ -21,7 +17,10 @@ import {
   ReadSetUnverifiableError,
   UnsupportedBackendCapabilityError,
 } from "../errors";
-import { lockStoreWriteFence } from "./operations/write-fence-prelude";
+import {
+  freshSnapshotUnprovableError,
+  lockStoreWriteFence,
+} from "./operations/write-fence-prelude";
 import {
   refuseReadOnlyTransactionWrite,
   storeWritersTakeGraphWriteFence,
@@ -44,7 +43,6 @@ const ASSERT_UNCHANGED_SINCE_OPERATION = "tx.assertUnchangedSince()";
 const READ_SET_CAPABILITY = {
   lineage: "lineage",
   graphWriteFence: "graphWriteFence",
-  observedReadCommittedIsolation: "observedReadCommittedIsolation",
 } as const;
 
 const READ_SET_SCOPE_INVALID_CODE = "READ_SET_SCOPE_INVALID";
@@ -137,7 +135,11 @@ export async function assertReadSetUnchangedSince<G extends GraphDef>(
     graphLock: "required",
     requireFreshSnapshot: true,
     freshSnapshotError: (isolation) =>
-      freshSnapshotUnprovableError(graphId, isolation),
+      freshSnapshotUnprovableError(
+        ASSERT_UNCHANGED_SINCE_OPERATION,
+        graphId,
+        isolation,
+      ),
     staleSchemaError: (cause) => cause,
   });
 
@@ -180,18 +182,6 @@ function assertReadSetFenceSupported<G extends GraphDef>(
       "Enable TypeGraph-owned history capture or revisionTracking so every writer of this graph takes the graph write fence.",
     );
   }
-}
-
-function freshSnapshotUnprovableError(
-  graphId: string,
-  isolation: GraphCommandIsolation | undefined,
-): UnsupportedBackendCapabilityError {
-  return new UnsupportedBackendCapabilityError(
-    ASSERT_UNCHANGED_SINCE_OPERATION,
-    READ_SET_CAPABILITY.observedReadCommittedIsolation,
-    { graphId, isolation },
-    "On PostgreSQL, run the transaction at read committed isolation so reads after the graph write lock observe every earlier writer. A backend whose write fence is caller-serialized cannot provide this evidence; use an engine-serialized or advisory-lock write fence.",
-  );
 }
 
 function isScopeObject(

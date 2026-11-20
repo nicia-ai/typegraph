@@ -3,6 +3,7 @@ import {
   isTombstonedNodeRow,
   type LiveNodeRow,
   type NodeRow,
+  type TransactionOptions,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
@@ -226,6 +227,20 @@ export type TransitionRequest<
 /** What the write-lock refusal names when the transition owns its transaction. */
 const OWN_TRANSACTION_OPERATION = "provenance retraction transition";
 
+/**
+ * The isolation a transition opens its own transaction at. The support reads
+ * must observe every transition committed before this one took the graph
+ * lock, and only an isolation that takes a fresh snapshot per statement does:
+ * asked for explicitly, so a server or role default of repeatable read or
+ * serializable cannot leave the transition reading a snapshot older than the
+ * lock. The write locks still verify the isolation the lock statement
+ * observed, so a wrapper that drops this option is refused, not trusted.
+ * SQLite ignores the option; its single writer needs none.
+ */
+const OWN_TRANSACTION_OPTIONS = {
+  isolationLevel: "read_committed",
+} as const satisfies TransactionOptions;
+
 function assertSourceKinds(
   config: NormalizedConfig,
   sources: readonly ProvenanceNodeRef[],
@@ -272,14 +287,16 @@ export async function runTransition<
   const { tx } = request;
   if (tx === undefined) {
     assertSourceKinds(storeScope.config, uniqueSources);
-    return store.transaction((ownTransaction) =>
-      transitionInTransaction<G, FactKind, JustificationKind>(
-        storeScope,
-        ownTransaction,
-        uniqueSources,
-        request.retracted,
-        OWN_TRANSACTION_OPERATION,
-      ),
+    return store.transaction(
+      (ownTransaction) =>
+        transitionInTransaction<G, FactKind, JustificationKind>(
+          storeScope,
+          ownTransaction,
+          uniqueSources,
+          request.retracted,
+          OWN_TRANSACTION_OPERATION,
+        ),
+      OWN_TRANSACTION_OPTIONS,
     );
   }
   const scope = resolveScope(tx, request.operation);
@@ -312,7 +329,9 @@ async function transitionInTransaction<
   // support snapshot must not race a concurrent transition or history write,
   // so the capability's write locks — the schema-version fence, then the
   // graph write lock — are acquired explicitly up front. A read-only
-  // transaction is refused there, before any statement.
+  // transaction is refused there, before any statement, and a session whose
+  // reads could miss a transition committed before the lock (a PostgreSQL
+  // snapshot isolation) before the first read.
   await acquireCapabilityWriteLocks(tx, operation);
   const rows = await Promise.all(
     uniqueSources.map((source) =>

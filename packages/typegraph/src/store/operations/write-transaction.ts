@@ -1252,17 +1252,22 @@ function runInWriteTransactionAttempt<T>(
  * owns. The caller's reads need the exclusion either way, so in that case the
  * lock is taken here, behind the schema fence the frame has just taken; on a
  * serialized engine that is no statement.
+ *
+ * Resolves to the graph lock's evidence — the frame's own when it carries a
+ * keyed acquisition, the one taken here otherwise — so a caller that must
+ * prove what its reads observe judges the acquisition that excluded the
+ * writers, not a second one.
  */
 export function acquireManagedWriteFences(
   ctx: WriteTransactionContext,
   backend: TransactionBackend,
-): Promise<void> {
+): Promise<GraphWriteLock> {
   return runInWriteTransaction(
     ctx,
     backend,
     async (target, lock) => {
-      if (lock.coordination !== undefined) return;
-      await lockRecordedGraphWrite(target, ctx.graphId);
+      if (lock.coordination !== undefined) return lock;
+      return lockRecordedGraphWrite(target, ctx.graphId);
     },
     { didWrite: () => false },
   );
