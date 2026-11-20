@@ -14,10 +14,13 @@
  *
  * Launches its own throwaway container from the pgGraph extension image the
  * same imperative way the TypeGraph/PostgreSQL and Neo4j drivers launch
- * theirs (docs/design/benchmark-program-plan.md). `knows` is registered
- * `bidirectional := true` so the CSR is undirected — `graph.shortest_path`
- * has no per-call direction argument, and the dataset already materializes
- * both directions, so this matches every other engine's undirected knows.
+ * theirs (docs/design/benchmark-program-plan.md). Setting
+ * `TYPEGRAPH_BENCH_PGGRAPH_URL` points it at an existing PostgreSQL server
+ * with the `graph` extension available instead (see
+ * `startExternalPgGraphDatabase`). `knows` is registered
+ * `bidirectional := false` over a table that already holds both directed
+ * rows per friendship (see `registerAndBuildGraph`), so the CSR is the same
+ * undirected knows graph every other engine sees.
  */
 import { Client, Pool, type PoolClient } from "pg";
 
@@ -30,6 +33,12 @@ import {
   type SnbPostRow,
 } from "../dataset/ldbc-csv";
 import { PGGRAPH_IMAGE } from "../harness/engine-pins";
+import {
+  EXTERNAL_PGGRAPH_URL_ENV,
+  readExternalUrl,
+  redactUrl,
+} from "../harness/external-servers";
+import { benchDatabaseName, withDatabase } from "../harness/postgres-server";
 import { packageVersion } from "../harness/doctor";
 import { freePort, spawnCapture } from "../harness/process";
 import {
@@ -78,14 +87,100 @@ const PGGRAPH_DB = "graph";
 const PGGRAPH_USER = "postgres";
 const PGGRAPH_PASSWORD = "bench";
 
-type PgGraphContainer = Readonly<{
+type PgGraphTarget = Readonly<{
   connectionString: string;
   /** Where the server runs, for the run header (credentials redacted). */
   target: string;
+  /** e.g. "image default config" or the existing server's fsync setting. */
+  durabilityLabel: string;
   close: () => Promise<void>;
 }>;
 
-async function startPgGraphContainer(): Promise<PgGraphContainer> {
+/** An existing server when `TYPEGRAPH_BENCH_PGGRAPH_URL` is set, else a container. */
+async function startPgGraphTarget(): Promise<PgGraphTarget> {
+  const externalUrl = readExternalUrl(process.env, EXTERNAL_PGGRAPH_URL_ENV);
+  if (externalUrl === undefined) return startPgGraphContainer();
+  return startExternalPgGraphDatabase(externalUrl);
+}
+
+/**
+ * Runs pgGraph on an existing PostgreSQL server that has the `graph`
+ * extension installed. Like `TYPEGRAPH_BENCH_POSTGRES_URL`, the run never
+ * writes to the database named in the URL: it creates a fresh per-run
+ * database, creates the extension there, and drops the database on close.
+ *
+ * The role must be a superuser: the extension is untrusted (`superuser =
+ * true` in its control file) and `graph.sync_mode`, which the load sets, is a
+ * superuser-only setting.
+ *
+ * pgGraph keeps its CSR artifacts under the server's data directory
+ * (`graph.data_dir`, default `$PGDATA/graph`), not in the database. Close
+ * clears the run's projection with `graph.reset(true)` before dropping the
+ * database, but pgGraph 1.2.1 documents that it does not reclaim a dropped
+ * graph's artifact directory, so a run on a shared server leaves that
+ * directory behind (the run's log names the server and database).
+ */
+async function startExternalPgGraphDatabase(
+  serverUrl: string,
+): Promise<PgGraphTarget> {
+  const database = benchDatabaseName(process.pid, Date.now(), "pggraph");
+  const connectionString = withDatabase(serverUrl, database);
+
+  async function withClient<T>(
+    url: string,
+    action: (client: Client) => Promise<T>,
+  ): Promise<T> {
+    const client = new Client({ connectionString: url });
+    await client.connect();
+    try {
+      return await action(client);
+    } finally {
+      await client.end().catch(() => undefined);
+    }
+  }
+
+  const fsync = await withClient(serverUrl, async (client) => {
+    await client.query(`CREATE DATABASE "${database}"`);
+    const result = await client.query<{ fsync: string }>("SHOW fsync");
+    return result.rows[0]?.fsync ?? "unknown";
+  });
+
+  async function dropDatabase(): Promise<void> {
+    await withClient(serverUrl, async (client) => {
+      await client.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+    }).catch(() => undefined);
+  }
+
+  try {
+    // Fail before a long load, not after it, when the extension is missing.
+    await withClient(connectionString, async (client) => {
+      await client.query("CREATE EXTENSION IF NOT EXISTS graph");
+    });
+  } catch (error) {
+    await dropDatabase();
+    throw new Error(
+      `pgGraph: CREATE EXTENSION graph failed in the per-run database on ${redactUrl(serverUrl)} ` +
+        `(the server needs the pgGraph extension installed and the role must be a superuser): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      { cause: error },
+    );
+  }
+
+  return {
+    connectionString,
+    target: `existing server ${redactUrl(serverUrl)}, per-run database ${database}`,
+    durabilityLabel: `existing server (${EXTERNAL_PGGRAPH_URL_ENV}) configuration, fsync=${fsync}`,
+    async close() {
+      await withClient(connectionString, async (client) => {
+        await client.query("SELECT graph.reset(true)");
+      }).catch(() => undefined);
+      await dropDatabase();
+    },
+  };
+}
+
+async function startPgGraphContainer(): Promise<PgGraphTarget> {
   const port = await freePort();
   const name = `typegraph-bench-snb-pggraph-${process.pid}-${Date.now()}`;
   await spawnCapture("docker", [
@@ -114,7 +209,12 @@ async function startPgGraphContainer(): Promise<PgGraphContainer> {
     await close();
     throw error;
   }
-  return { connectionString, target: `container ${PGGRAPH_IMAGE}`, close };
+  return {
+    connectionString,
+    target: `container ${PGGRAPH_IMAGE}`,
+    durabilityLabel: "image default configuration",
+    close,
+  };
 }
 
 // The image runs a temporary init server (unix-socket only) before restarting
@@ -1104,8 +1204,8 @@ const PGGRAPH_UNSUPPORTED: SnbCapabilityGaps = {
 export const createPgGraphEngine: SnbEngineFactory = async (
   options,
 ): Promise<SnbEngineHandle> => {
-  const container = await startPgGraphContainer();
-  const pool = new Pool({ connectionString: container.connectionString });
+  const server = await startPgGraphTarget();
+  const pool = new Pool({ connectionString: server.connectionString });
 
   // A dedicated client held for the whole query workload so named prepared
   // statements persist (pg caches a `name`d statement per connection) — the
@@ -1128,8 +1228,8 @@ export const createPgGraphEngine: SnbEngineFactory = async (
     return {
       name: "pggraph",
       fairness:
-        `${PGGRAPH_IMAGE}, imperative docker container (image default config, ` +
-        "graph database), node-postgres over localhost TCP; LDBC loaded into " +
+        `pgGraph target: ${server.target} (${server.durabilityLabel}); ` +
+        "node-postgres over TCP; LDBC loaded into " +
         "normalized SQL tables via batched multi-row INSERT, point-read " +
         "indexes and the pgGraph CSR index (person nodes + knows edge, two " +
         "directed rows per pair) both built after bulk load with " +
@@ -1168,7 +1268,7 @@ export const createPgGraphEngine: SnbEngineFactory = async (
       },
       queries: createPgGraphQueries(runQuery),
       unsupported: PGGRAPH_UNSUPPORTED,
-      target: container.target,
+      target: server.target,
       loadPath: "batched multi-row INSERT, then graph.build()",
       async versions() {
         return readPgGraphVersions(pool);
@@ -1176,13 +1276,13 @@ export const createPgGraphEngine: SnbEngineFactory = async (
       async close() {
         queryClient?.release();
         await pool.end();
-        await container.close();
+        await server.close();
       },
     };
   } catch (error) {
     queryClient?.release();
     await pool.end().catch(() => undefined);
-    await container.close();
+    await server.close();
     throw error;
   }
 };

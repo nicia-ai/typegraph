@@ -43,6 +43,21 @@ claim of full official schema conformance.
 | --- | --- | --- |
 | Embedded | `typegraph-sqlite` (better-sqlite3, in-process) | `ladybugdb` (`@ladybugdb/core`, Kuzu-family, in-process) |
 | Server | `typegraph-postgres` (node-postgres, imperative docker container) | `neo4j` (pinned image, imperative docker container) |
+| Server | `typegraph-postgres` | `pggraph` (pgGraph PostgreSQL extension, pinned image, imperative docker container) |
+
+Pinned competitor versions (`src/real/harness/engine-pins.ts`, exact in
+`package.json`):
+
+| Engine | Pin |
+| --- | --- |
+| Neo4j | `neo4j:2026.10.2` by digest, Graph Data Science `2026.10.2` jar (SHA-256 checked, mounted as `/plugins`) |
+| pgGraph | `ghcr.io/evokoa/pggraph:1.2.1` by digest (PostgreSQL 17) |
+| LadybugDB | `@ladybugdb/core` `0.22.3` |
+| TypeGraph/PostgreSQL server | `pgvector/pgvector:0.8.7-pg18` by digest |
+
+Every run records the versions each engine reports while running (a version
+query, the extension catalog, `gds.version()`), not the pin, in the log,
+`results.json` and `summary.json`.
 
 Every query is implemented through the TypeGraph query builder for the
 TypeGraph engines (never hand-written SQL — see
@@ -112,18 +127,39 @@ cosmetic; without it, `dynamic/person_0_0.csv` won't be where
 smoke fixture under `fixtures/` is.
 
 Useful flags (all scripts): `--engines=typegraph-sqlite,neo4j` (default:
-all four), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
+all five), `--requests-per-query=N`, `--warmup-requests=N`, `--seed=N`,
 `--output=<dir>` (default `bench-results/current/snb-<profile>`,
 gitignored).
 
-`typegraph-postgres` launches its own throwaway container by default. On a
-host that cannot start containers but has a PostgreSQL server, set
-`TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:port/db`: the
-engine then creates a fresh per-run database on that server (the role needs
-`CREATEDB`), never touches the database named in the URL, and drops the
-per-run database when the engine closes. The run header prints the server
-settings in the durability label, and the resolved `@nicia-ai/typegraph`
-entry path, so a run that picked up another checkout's build is visible.
+#### Running against existing servers
+
+Each server engine launches its own throwaway container by default. On a
+host that cannot start containers, point it at a server instead; the doctor
+then probes that server and does not require Docker for that engine.
+
+| Variable | Engine | Isolation and cleanup | Server requirements |
+| --- | --- | --- | --- |
+| `TYPEGRAPH_BENCH_POSTGRES_URL=postgresql://user:pass@host:port/db` | `typegraph-postgres` | Creates a fresh per-run database, never touches the database in the URL, drops the per-run database on close | Role with `CREATEDB` |
+| `TYPEGRAPH_BENCH_PGGRAPH_URL=postgresql://user:pass@host:port/db` | `pggraph` | Same per-run database, with `CREATE EXTENSION graph` in it; close runs `graph.reset(true)` and drops it | The pgGraph extension installed; a superuser role (the extension is untrusted and the load sets `graph.sync_mode`) |
+| `TYPEGRAPH_BENCH_NEO4J_URL=bolt://user:pass@host:7687` (+ optional `TYPEGRAPH_BENCH_NEO4J_DATABASE`, default `neo4j`) | `neo4j` | Requires the database to be empty (no nodes, constraints, non-lookup indexes or GDS projections) and refuses it otherwise; close deletes the run's nodes, its three `snb_*` constraints and its per-run GDS projection | Graph Data Science installed |
+
+Credentials in a URL are redacted in every log line and report. pgGraph keeps
+its CSR artifacts under the server's data directory; version 1.2.1 does not
+reclaim a dropped graph's artifact directory, so a pgGraph run on a shared
+server leaves that directory behind.
+
+Neo4j on an existing server cannot use the offline `neo4j-admin database
+import` the container path uses, so it loads online: nodes in batched
+`UNWIND` transactions as they stream, relationships after every node exists,
+with the same three uniqueness constraints created first. Every batch is
+checked against the server's created-node and created-relationship counters.
+Query timings stay comparable (same graph, same constraints, same GDS
+projection, same warm-up); load times are not, and every report names the
+load path each engine used.
+
+The run header prints the resolved `@nicia-ai/typegraph` entry path and the
+TypeGraph version and commit, so a run that picked up another checkout's
+build is visible.
 
 #### What every run writes
 
@@ -175,7 +211,9 @@ invocation intentionally allows.
 #### Competitor doctor
 
 `src/real/harness/doctor.ts` checks Docker, `pg`/`better-sqlite3`,
-`neo4j-driver`, `@ladybugdb/core`, and image cache status, and records
+`neo4j-driver`, `@ladybugdb/core`, image cache status, and every server
+named by a `*_URL` variable (reachable, required extension or plugin, role
+privileges), and records
 every missing piece as an explicit `failed`/`skipped` row — never a silent
 skip. The harness only attempts engines the doctor reports runnable.
 
