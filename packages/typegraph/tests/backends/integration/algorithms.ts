@@ -86,6 +86,8 @@ const PATH_LIKE_WEIGHT_PROPERTIES = [
   "1.5",
   "a b",
   "é",
+  "tab\there",
+  "bell\u0007here",
 ] as const;
 const PATH_LIKE_STOPS = ["pl-a", "pl-b", "pl-c"] as const;
 const PathLikeStop = defineNode("PathLikeStop", {
@@ -238,6 +240,8 @@ const REFERENCE_PAGE_RANK_TOLERANCE = 1e-14;
 const REFERENCE_PAGE_RANK_MAX_ROUNDS = 10_000;
 const WEIGHTED_PAGE_RANK_TOLERANCE = 1e-12;
 const WEIGHTED_PAGE_RANK_SCORE_DIGITS = 10;
+/** SQLSTATE of PostgreSQL's float8 underflow ("value out of range"). */
+const POSTGRES_NUMERIC_VALUE_OUT_OF_RANGE = "22003";
 
 /**
  * Plain power iteration, the oracle for weighted PageRank: rank leaves a node
@@ -2177,6 +2181,54 @@ export function registerAlgorithmIntegrationTests(
         }
       });
 
+      it("underflows a vanishing rank contribution as each engine does", async () => {
+        // Each ratio is representable, but the rank that reaches wu-b through
+        // one of them is too small to survive the next: the product falls
+        // below the double range in the second round. No bound on a single
+        // weight can prevent that, so the engines' own answers are declared:
+        // SQLite rounds the product to zero, PostgreSQL raises it.
+        const store = context.getStore();
+        const nodes = ["wu-a", "wu-b", "wu-c", "wu-x", "wu-y"];
+        const edges: readonly ReferenceEdge[] = [
+          { from: "wu-a", to: "wu-b", weight: 1e-170 },
+          { from: "wu-a", to: "wu-x", weight: 1 },
+          { from: "wu-b", to: "wu-c", weight: 1e-170 },
+          { from: "wu-b", to: "wu-y", weight: 1 },
+        ];
+        for (const id of nodes) {
+          await store.nodes.Person.create({ name: `Underflow ${id}` }, { id });
+        }
+        for (const edge of edges) {
+          await createWeightedRankEdge(store, edge.from, edge.to, {
+            weight: edge.weight,
+          });
+        }
+        const run = () =>
+          store.algorithms.personalizedPageRank({
+            edges: ["knows"],
+            nodeKinds: ["Person"],
+            weightProperty: "weight",
+            seeds: [{ id: "wu-a", kind: "Person" }],
+            tolerance: WEIGHTED_PAGE_RANK_TOLERANCE,
+          });
+
+        const outcome = await run().then(
+          (scores) => ({
+            vanishedScore: scores.find((row) => row.id === "wu-c")?.score,
+          }),
+          (error: unknown) => ({
+            sqlState: (error as Readonly<{ cause?: { code?: string } }>).cause
+              ?.code,
+          }),
+        );
+
+        expect(outcome).toEqual(
+          context.getBackend().dialect === "postgres" ?
+            { sqlState: POSTGRES_NUMERIC_VALUE_OUT_OF_RANGE }
+          : { vanishedScore: 0 },
+        );
+      });
+
       it("refuses a weightProperty that cannot be addressed as an object key", async () => {
         const store = context.getStore();
         const algorithms = {
@@ -2212,6 +2264,12 @@ export function registerAlgorithmIntegrationTests(
             reason: "double_quote",
             explanation:
               "a name containing a double quote is not found by the JSON path of some backends",
+          },
+          {
+            weightProperty: "x\u0000y",
+            reason: "nul_character",
+            explanation:
+              "a name containing a NUL character cannot be sent to every backend",
           },
           {
             weightProperty: "-",

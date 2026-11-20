@@ -132,8 +132,19 @@ type SegmentToString<Segment> =
   : Segment extends string ? Segment
   : string;
 
-/** RFC 6901's "after the last array element" token; never queryable. */
 const JSON_POINTER_END_OF_ARRAY_SEGMENT = "-";
+
+/**
+ * Whether a pointer segment is RFC 6901's "after the last array element"
+ * token, which names no value and is never queryable. The one owner of that
+ * decision: the pointer constructor, the pointer validator and the
+ * object-key classifier all ask it.
+ */
+export function isJsonPointerEndOfArraySegment(
+  segment: JsonPointerSegment,
+): boolean {
+  return segment === JSON_POINTER_END_OF_ARRAY_SEGMENT;
+}
 
 /**
  * Whether a decoded pointer segment addresses an array element. A pointer
@@ -145,7 +156,7 @@ export function isJsonPointerArrayIndexSegment(segment: string): boolean {
 }
 
 export type UnaddressableObjectKeyReason =
-  "array_index" | "end_of_array" | "double_quote";
+  "array_index" | "end_of_array" | "double_quote" | "nul_character";
 
 /**
  * Why a pointer segment cannot address the object key of the same name on
@@ -154,13 +165,17 @@ export type UnaddressableObjectKeyReason =
  * refused by {@link jsonPointer} outright, and a double quote has to be
  * escaped inside a quoted SQLite path label, which SQLite 3.45 does not
  * unescape (it finds no such key) while later versions and PostgreSQL read
- * the key. Every other name, including one containing `/`, `~`, a backslash
- * or a single quote, is escaped and round-trips as a key.
+ * the key. A NUL character cannot appear in PostgreSQL text at all, so the
+ * statement carrying the path is rejected by the protocol there while SQLite
+ * runs it. Every other name, including one containing `/`, `~`, a backslash,
+ * a single quote or another control character, is escaped and round-trips
+ * as a key.
  */
 export function unaddressableObjectKeyReason(
   key: string,
 ): UnaddressableObjectKeyReason | undefined {
-  if (key === JSON_POINTER_END_OF_ARRAY_SEGMENT) return "end_of_array";
+  if (isJsonPointerEndOfArraySegment(key)) return "end_of_array";
+  if (key.includes("\u0000")) return "nul_character";
   if (isJsonPointerArrayIndexSegment(key)) return "array_index";
   if (key.includes('"')) return "double_quote";
   return undefined;
@@ -178,7 +193,7 @@ export function jsonPointer(segments: JsonPointerSegments): JsonPointer {
   }
 
   const encoded = segments.map((segment) => {
-    if (segment === JSON_POINTER_END_OF_ARRAY_SEGMENT) {
+    if (isJsonPointerEndOfArraySegment(segment)) {
       throw new Error(
         "JSON Pointer '-' segment is not allowed for query access",
       );
@@ -277,7 +292,7 @@ function assertJsonPointer(pointer: string): JsonPointer {
   }
 
   for (const segment of segments) {
-    if (segment === JSON_POINTER_END_OF_ARRAY_SEGMENT) {
+    if (isJsonPointerEndOfArraySegment(segment)) {
       throw new Error(
         "JSON Pointer '-' segment is not allowed for query access",
       );

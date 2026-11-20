@@ -42,6 +42,8 @@ const UNADDRESSABLE_WEIGHT_PROPERTY_EXPLANATIONS: Readonly<
     "an all-digit name is a JSON array index, not an object key, on some backends",
   end_of_array:
     'the name "-" is the JSON Pointer end-of-array token and cannot be queried',
+  nul_character:
+    "a name containing a NUL character cannot be sent to every backend",
   double_quote:
     "a name containing a double quote is not found by the JSON path of some backends",
 };

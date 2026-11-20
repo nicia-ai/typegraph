@@ -173,8 +173,8 @@ export type WeightedShortestPathOptions<G extends GraphDef> = Omit<
     /**
      * Top-level edge property supplying each edge's non-negative numeric
      * weight. An all-digit name, `"-"`, or a name containing a double quote
-     * throws `ConfigurationError`: a JSON path cannot address it as an
-     * object key on every backend.
+     * or a NUL character throws `ConfigurationError`: a JSON path cannot
+     * address it as an object key on every backend.
      */
     weightProperty: string;
     /**
@@ -384,11 +384,13 @@ export type PageRankOptions<G extends GraphDef> = TemporalAlgorithmOptions &
      * `weightedShortestPath` runs before any round: a negative, non-numeric
      * or out-of-range weight on any visible edge of the selected kinds, or a
      * missing one with no `defaultWeight`, throws `InvalidEdgeWeightError`.
-     * Only the ratio between one node's out-edge weights matters; an edge
-     * more than about 300 orders of magnitude lighter than its node's total
-     * underflows that ratio, which PostgreSQL raises and SQLite rounds to
-     * zero. An all-digit name, `"-"`, or a name containing a double quote
-     * throws `ConfigurationError`. Omit it for the unweighted walk.
+     * Only the ratio between one node's out-edge weights matters. Rank that
+     * shrinks below the double range along very light edges (one ratio, or
+     * a product of ratios along a path, under about 1e-308) is rounded to
+     * zero by SQLite and raised as SQLSTATE 22003 by PostgreSQL. An
+     * all-digit name, `"-"`, or a name containing a double quote or a NUL
+     * character throws `ConfigurationError`. Omit it for the unweighted
+     * walk.
      */
     weightProperty?: string;
     /**

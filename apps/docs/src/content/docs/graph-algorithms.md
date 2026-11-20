@@ -166,7 +166,7 @@ Options differ from the unweighted traversals:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds to follow |
-| `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote throws `ConfigurationError`: a JSON path cannot address it as an object key on every backend |
+| `weightProperty` | `string` | *(required)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote or a NUL character throws `ConfigurationError`: a JSON path cannot address it as an object key on every backend |
 | `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; must be non-negative and within the audit's upper bound (~9.7e288) |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Edge direction |
 | `maxIterations` | `number` | `1000` | Relaxation-round backstop; exceeding it throws `GraphAlgorithmConvergenceError` |
@@ -340,7 +340,7 @@ const weightedRelatedToAlice = await store.algorithms.personalizedPageRank({
 | `edges` | `readonly EdgeKinds<G>[]` | *(required)* | Edge kinds defining transitions |
 | `nodeKinds` | `readonly NodeKinds<G>[]` | all visible kinds | Induced node subgraph to rank |
 | `direction` | `"out" \| "in" \| "both"` | `"out"` | Follow stored, reversed, or undirected transitions |
-| `weightProperty` | `string` | *(none: every edge counts 1)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote throws `ConfigurationError`, as on `weightedShortestPath` |
+| `weightProperty` | `string` | *(none: every edge counts 1)* | Top-level edge property holding each edge's non-negative numeric weight. An all-digit name (`"0"`), `"-"`, or a name containing a double quote or a NUL character throws `ConfigurationError`, as on `weightedShortestPath` |
 | `defaultWeight` | `number` | *(none)* | Substituted for edges missing the property; requires `weightProperty`, and must be non-negative and within the audit's upper bound (~9.7e288) |
 | `dampingFactor` | `number` in `[0, 1)` | `0.85` | Probability of following an edge rather than teleporting |
 | `tolerance` | positive finite `number` | `1e-8` | Maximum per-node score change accepted as convergence |
@@ -374,9 +374,18 @@ walk, its statements and its scores are the unweighted ones.
 
 Only the ratio between one node's out-edge weights matters, so their scale
 does not: a node's lone out-edge carries its whole rank at any accepted weight.
-The one limit is a ratio the double range cannot hold. An edge more than about
-300 orders of magnitude lighter than its node's total out-weight underflows,
-which PostgreSQL reports as an error and SQLite rounds to zero.
+The one limit is the double range itself, and the two engines differ at it.
+Rank that reaches a node through very light edges can become too small to
+represent: a single edge more than about 300 orders of magnitude lighter than
+its node's total out-weight, or a chain of lighter-than-average edges whose
+shares multiply below about `1e-308` (two edges in a row each carrying a
+`1e-170` share of their node's rank, for example). SQLite rounds that rank to
+zero and returns scores. PostgreSQL raises a numeric value out of range error
+(SQLSTATE `22003`) from the round that produced it. No bound on an individual
+weight can rule this out, because the product depends on the path, so the
+audit does not refuse such weights. Keep the weights of one node's edges
+within a few hundred orders of magnitude of each other, well inside any
+practical scale, and the limit is never reached.
 
 PageRank uses double-precision arithmetic on both backends. Repeated runs on
 SQLite are deterministic; on PostgreSQL a plan change between runs can reorder
