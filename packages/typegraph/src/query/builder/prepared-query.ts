@@ -50,14 +50,16 @@ import {
   transformPathColumns,
 } from "../execution";
 import {
+  assertExpressionComparedOperand,
   collectOperandExpressions,
+  comparedExpressionOperands,
   type DatabaseExpression,
   isCollectRecordOperand,
   normalizeDatabaseLiteral,
 } from "../expressions";
-import { isParameterRef } from "../predicates";
+import { comparedOperandLiteral, isParameterRef } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
-import { assertMetadataOperand } from "./order-by-field";
+import { assertComparedOperand } from "./order-by-field";
 import {
   assertListBinding,
   buildQueryTemplate,
@@ -75,24 +77,26 @@ import {
 // Parameter Substitution
 // ============================================================
 
-function toLiteral(value: unknown): LiteralValue {
+/**
+ * The literal a value bound against `field` substitutes as: the one
+ * `comparedOperandLiteral` builds for the same literal operand, so a date
+ * operand is a `date` literal whether it was bound as a `Date` or a canonical
+ * string, exactly as on the packed path and in a literal predicate.
+ */
+function toLiteral(value: unknown, field: FieldRef): LiteralValue {
   if (value === null) {
     throw new ConfigurationError(
       "Parameter value must not be null (use undefined-based patterns instead)",
       { parameterName: "value", valueType: "null" },
     );
   }
-  if (value instanceof Date) {
-    return { __type: "literal", value: value.toISOString(), valueType: "date" };
-  }
-  if (typeof value === "string") {
-    return { __type: "literal", value, valueType: "string" };
-  }
-  if (typeof value === "number") {
-    return { __type: "literal", value, valueType: "number" };
-  }
-  if (typeof value === "boolean") {
-    return { __type: "literal", value, valueType: "boolean" };
+  if (
+    value instanceof Date ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return comparedOperandLiteral(field, value);
   }
   throw new ConfigurationError(
     `Unsupported parameter value type: ${typeof value}`,
@@ -111,9 +115,13 @@ function isListComparisonOp(op: ComparisonOp): boolean {
  * (no `executeRaw`) path — the fast path keeps the list packed behind a
  * single placeholder.
  */
-function toLiteralList(parameterName: string, value: unknown): LiteralValue[] {
+function toLiteralList(
+  parameterName: string,
+  value: unknown,
+  field: FieldRef,
+): LiteralValue[] {
   assertListBinding(parameterName, value);
-  return value.map((element) => toLiteral(element));
+  return value.map((element) => toLiteral(element, field));
 }
 
 /**
@@ -132,8 +140,8 @@ function substitutePredicateExpression(
           ...expr,
           right:
             isListComparisonOp(expr.op) ?
-              toLiteralList(expr.right.name, value)
-            : toLiteral(value),
+              toLiteralList(expr.right.name, value, expr.left)
+            : toLiteral(value, expr.left),
         } satisfies ComparisonPredicate;
       }
       return expr;
@@ -173,11 +181,11 @@ function substitutePredicateExpression(
 
       const lower =
         lowerIsParam ?
-          toLiteral(resolveBinding(bindings, expr.lower.name))
+          toLiteral(resolveBinding(bindings, expr.lower.name), expr.field)
         : expr.lower;
       const upper =
         upperIsParam ?
-          toLiteral(resolveBinding(bindings, expr.upper.name))
+          toLiteral(resolveBinding(bindings, expr.upper.name), expr.field)
         : expr.upper;
       return { ...expr, lower, upper } satisfies BetweenPredicate;
     }
@@ -703,11 +711,18 @@ export type ParameterMetadata = Readonly<{
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: ReadonlySet<string>;
   /**
-   * The field references each comparison or `between` parameter is compared
-   * against, so a binding can be checked against the field's own operand
-   * contract (`assertMetadataOperand`), the same check a literal gets.
+   * The field references each predicate-builder comparison or `between`
+   * parameter is compared against, so a binding can be checked against the field's own operand
+   * contract (`assertComparedOperand`), the same check a literal gets.
    */
   comparedFields: ReadonlyMap<string, readonly FieldRef[]>;
+  /**
+   * The sides each parameter of an expression comparison is compared
+   * against — directly, or through a `coalesce` or conditional that forwards
+   * it (`comparedExpressionOperands`) — so its binding gets the check
+   * (`assertExpressionComparedOperand`) the same literal would.
+   */
+  comparedExpressions: ReadonlyMap<string, readonly DatabaseExpression[]>;
 }>;
 
 /** The mutable form {@link collectParameterMetadataFromAst} fills. */
@@ -721,6 +736,7 @@ type ParameterMetadataAccumulator = Readonly<{
   /** Names bound in two `in`/`notIn` positions with different element types. */
   conflictingElementTypes: Set<string>;
   comparedFields: Map<string, FieldRef[]>;
+  comparedExpressions: Map<string, DatabaseExpression[]>;
 }>;
 
 export function collectParameterMetadata(
@@ -736,6 +752,7 @@ export function collectParameterMetadata(
     expressionParameterTypes: new Map<string, ValueType>(),
     conflictingElementTypes: new Set<string>(),
     comparedFields: new Map<string, FieldRef[]>(),
+    comparedExpressions: new Map<string, DatabaseExpression[]>(),
   };
 
   const queries: readonly QueryAst[] =
@@ -811,6 +828,19 @@ function recordComparedField(
     return;
   }
   fields.push(field);
+}
+
+function recordComparedExpression(
+  accumulator: ParameterMetadataAccumulator,
+  name: string,
+  compared: DatabaseExpression,
+): void {
+  const expressions = accumulator.comparedExpressions.get(name);
+  if (expressions === undefined) {
+    accumulator.comparedExpressions.set(name, [compared]);
+    return;
+  }
+  expressions.push(compared);
 }
 
 export function hasParameterReferences(ast: QueryAst): boolean {
@@ -894,12 +924,12 @@ function collectParameterMetadataFromDatabaseExpression(
       return;
     }
     case "comparison": {
-      for (const [field, operand] of [
-        [node.left, node.right],
-        [node.right, node.left],
-      ] as const) {
-        if (field.node.kind === "field" && operand.node.kind === "parameter")
-          recordComparedField(accumulator, operand.node.name, field.node.field);
+      for (const { compared, operand } of comparedExpressionOperands(
+        node.left,
+        node.right,
+      )) {
+        if (operand.node.kind === "parameter")
+          recordComparedExpression(accumulator, operand.node.name, compared);
       }
       collect(node.left);
       collect(node.right);
@@ -1078,6 +1108,7 @@ function validateBindings(
     stringOpParameters,
     listParameters,
     comparedFields,
+    comparedExpressions,
   } = metadata;
 
   const missing: string[] = [];
@@ -1130,15 +1161,21 @@ function validateBindings(
     validateBindingValue(name, value, stringOpParameters.has(name));
   }
 
-  // A field with its own operand contract (a metadata column) refuses a
-  // bound value exactly as it refuses the same literal, on every backend.
+  // A field with its own operand contract (a metadata column, a date
+  // property) refuses a bound value exactly as it refuses the same literal,
+  // on every backend.
   for (const [name, fields] of comparedFields) {
     const value = readOwnProperty(bindings, name);
     const operands: readonly unknown[] =
       Array.isArray(value) ? (value as readonly unknown[]) : [value];
     for (const field of fields) {
-      for (const operand of operands) assertMetadataOperand(field, operand);
+      for (const operand of operands) assertComparedOperand(field, operand);
     }
+  }
+  for (const [name, expressions] of comparedExpressions) {
+    const value = readOwnProperty(bindings, name);
+    for (const compared of expressions)
+      assertExpressionComparedOperand(compared, value);
   }
 }
 
@@ -1197,9 +1234,9 @@ function matchesElementType(value: unknown, elementType: ValueType): boolean {
       return typeof value === "boolean";
     }
     case "date": {
-      // Either a Date or the ISO text TypeGraph stores. Arbitrary strings are
-      // not parsed here: the literal form does not validate them either, and
-      // guessing which formats PostgreSQL accepts would reject valid input.
+      // Either a Date or a string. Whether the element compares the same way
+      // on every backend is the field's operand contract, which
+      // `assertComparedOperand` applies to every bound element afterwards.
       return value instanceof Date || typeof value === "string";
     }
     // No element cast is emitted for these, so there is no divergence to

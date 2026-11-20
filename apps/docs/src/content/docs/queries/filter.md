@@ -89,13 +89,18 @@ Timestamp operators take a `Date`; the range operators also take an ISO-8601 UTC
 canonical stored form, `YYYY-MM-DDTHH:mm:ss.sssZ` (`new Date(value).toISOString()` produces
 one). Any other string, such as `"2025-01-01T00:00:00Z"`, is refused with `ValidationError`:
 SQLite compares the stored text and PostgreSQL the parsed instant, so a shorter form of the same
-instant would match differently on the two. `$meta.version` takes an integer from -2147483648 to
-2147483647, the range of PostgreSQL's `integer` column, and refuses anything else, such as
-`1.5`, with `ValidationError`. The same checks apply to every element of an `in` / `notIn`
-list, to values bound to a `param()` when a prepared query executes, and to a literal or parameter
-compared with `$meta` in the expression context, so a refused operand never reaches SQL. Edges
-store no version, so `e.$meta.version` is a compile error. The `$` prefix is reserved, so a property your
-schema declares as `version` or `createdAt` stays `d.version` / `d.createdAt`.
+instant would match differently on the two. For the same reason a `Date` or string must fall in the
+years 0001 to 9999: after 9999 a `Date`'s ISO form is the extended `+010000-…` shape, which sorts as
+text before every four-digit year, and PostgreSQL's `timestamptz` cast refuses year 0000, which
+SQLite compares as text. Both are refused with `ValidationError` as well. Date
+properties share this check; see [Date predicates](/queries/predicates#date).
+`$meta.version` takes an integer from -2147483648 to 2147483647, the range of PostgreSQL's
+`integer` column, and refuses anything else, such as `1.5`, with `ValidationError`. The same
+checks apply to every element of an `in` / `notIn` list, to values bound to a `param()` when a
+prepared query executes, and to a literal or parameter compared with `$meta` in the expression
+context, so a refused operand never reaches SQL. Edges store no version, so `e.$meta.version` is
+a compile error. The `$` prefix is reserved, so a property your schema declares as `version` or
+`createdAt` stays `d.version` / `d.createdAt`.
 
 A metadata predicate narrows the rows the query's [temporal mode](/queries/temporal) admits; it never
 widens them. The default `"current"` mode already excludes deleted and ended rows, so

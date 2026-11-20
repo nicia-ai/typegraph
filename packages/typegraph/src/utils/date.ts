@@ -135,14 +135,130 @@ export function canonicalizeDatabaseTimestamp(
   return new Date(milliseconds).toISOString();
 }
 
+const DIGIT_ZERO = 0x30;
+
+/**
+ * The value of the ASCII decimal digits of `value` from `start` to `end`.
+ * Callers pass only positions the pattern has already proved are digits.
+ */
+function digitsAt(value: string, start: number, end: number): number {
+  let result = 0;
+  for (let index = start; index < end; index += 1) {
+    result =
+      result * 10 + ((value.codePointAt(index) ?? DIGIT_ZERO) - DIGIT_ZERO);
+  }
+  return result;
+}
+
+/** Proleptic Gregorian leap year, the calendar `Date` uses for every year. */
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) return 29;
+  return DAYS_IN_MONTH[month - 1] ?? 0;
+}
+
 /**
  * Checks if a string is a canonical UTC ISO 8601 datetime with fixed
  * millisecond width (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+ *
+ * Exactly the strings for which `new Date(value).toISOString() === value`
+ * holds, decided without building a `Date`: the pattern fixes every digit's
+ * position (so the year is 0000–9999, inside `Date`'s range, and
+ * `toISOString()` renders it back in four digits), and the fields must then
+ * name a real instant — month 1–12, a day that month has in that year, hour
+ * 0–23, minute and second 0–59. Any other field value is one `Date` either
+ * refuses or rolls over into a different string. The round trip cost ~20× the
+ * pattern test on every write that validates a timestamp;
+ * `tests/property/canonical-iso-date.test.ts` keeps it as the oracle this is
+ * proven equal to.
  */
 export function isCanonicalIsoDate(value: string): boolean {
+  // The round trip refused every input but a primitive string: its closing
+  // `===` compared the rendered text with the input itself, so a boxed
+  // `String`, or an object whose `toString()` is canonical text, failed it
+  // even though the coercing pattern test passed. Keep that boundary.
+  if (typeof value !== "string") return false;
   if (!CANONICAL_ISO_DATE_PATTERN.test(value)) return false;
-  const date = new Date(value);
-  return !Number.isNaN(date.getTime()) && date.toISOString() === value;
+  const year = digitsAt(value, 0, 4);
+  const month = digitsAt(value, 5, 7);
+  const day = digitsAt(value, 8, 10);
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth(year, month) &&
+    digitsAt(value, 11, 13) <= 23 &&
+    digitsAt(value, 14, 16) <= 59 &&
+    digitsAt(value, 17, 19) <= 59
+  );
+}
+
+/** The prefix of the canonical text PostgreSQL's `timestamptz` cast refuses. */
+const YEAR_ZERO_PREFIX = "0000-";
+
+/**
+ * The canonical UTC text a predicate operand compared against a stored
+ * timestamp compares as, when every backend compares it the same way, or
+ * `undefined` when one would not: the `toISOString()` of a valid `Date`, or a
+ * string that already is canonical ({@link isCanonicalIsoDate}) — in either
+ * case outside year 0000.
+ *
+ * SQLite compares the stored text and PostgreSQL the parsed `timestamptz`
+ * instant. The two agree only when the operand is the same fixed-width UTC
+ * text the store writes, so a short form of a stored instant
+ * (`"2024-01-01T00:00:00Z"`), a date-only or zoneless string, an offset, or a
+ * `Date` whose ISO form uses the six-digit extended year (`+010000-…`, which
+ * sorts before every four-digit year as text) each matched different rows on
+ * the two engines. Year 0000 is canonical text, inside the JavaScript `Date`
+ * contract `isCanonicalIsoDate` keeps, but PostgreSQL's `timestamptz` cast
+ * refuses it (`date/time field value out of range`; ISO year 0 is its
+ * `0001 BC`) while SQLite compares it as text. Every other canonical string,
+ * through `9999-12-31T23:59:59.999Z`, casts. The one decision every timestamp
+ * operand check makes — `$meta` timestamps and date-typed properties alike —
+ * so the surfaces cannot disagree about which operands are comparable.
+ */
+export function canonicalDateOperandText(operand: unknown): string | undefined {
+  const text =
+    operand instanceof Date ?
+      Number.isNaN(operand.getTime()) ?
+        undefined
+      : operand.toISOString()
+    : operand;
+  if (typeof text !== "string" || !isCanonicalIsoDate(text)) return undefined;
+  return text.startsWith(YEAR_ZERO_PREFIX) ? undefined : text;
+}
+
+/**
+ * Whether {@link canonicalDateOperandText} accepts an operand: whether it
+ * compares with a stored timestamp the same way on every backend.
+ */
+export function isCanonicalDateOperand(
+  operand: unknown,
+): operand is Date | string {
+  return canonicalDateOperandText(operand) !== undefined;
+}
+
+/** What {@link isCanonicalDateOperand} accepts, as a refusal names it. */
+export const CANONICAL_DATE_OPERAND_EXPECTATION =
+  "a Date or a canonical UTC ISO-8601 string (YYYY-MM-DDTHH:mm:ss.sssZ) in the years 0001 to 9999";
+
+/**
+ * An operand {@link isCanonicalDateOperand} refused, as an error message
+ * should name it: an invalid `Date`, a `Date` by its ISO form, or any other
+ * value by its type and text.
+ */
+export function describeDateOperand(operand: unknown): string {
+  if (operand instanceof Date) {
+    return Number.isNaN(operand.getTime()) ? "an invalid Date" : (
+        `the Date ${operand.toISOString()}`
+      );
+  }
+  return `${typeof operand} ${String(operand)}`;
 }
 
 /**

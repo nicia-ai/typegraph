@@ -274,12 +274,33 @@ Equality and membership (`eq`, `neq`, `in`, `notIn`) take a `Date`, not a string
 refused when the predicate is built, with `UnsupportedPredicateError`
 (`Expected a date literal for field "…", got string.`); convert it with `new Date(value)`.
 
-The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, which is passed to the
-database as written: PostgreSQL reads it as a `timestamptz` and compares instants (a string without a
-UTC offset, such as `"2024-01-01"`, is read in the session's time zone), while SQLite compares it with
-the stored value as text. A string that is not a canonical UTC ISO-8601 timestamp
-(`YYYY-MM-DDTHH:mm:ss.sssZ`) can therefore match different rows on the two backends. Pass a `Date` or a
-canonical string.
+The range comparisons (`gt`, `gte`, `lt`, `lte`, `between`) also take a string, but only in the
+canonical form the store writes a date property in: UTC ISO-8601 with exactly three fractional
+digits, `YYYY-MM-DDTHH:mm:ss.sssZ` (`new Date(value).toISOString()` produces one). Any other string
+— `"2024-01-01"`, `"2024-01-01T00:00:00Z"`, an offset such as `"+01:00"`, a string with no zone, or an
+impossible date such as `"2024-02-30T00:00:00.000Z"` — is refused when the predicate is built, with
+`UnsupportedPredicateError`. SQLite compares the stored value as text and PostgreSQL as a
+`timestamptz` instant, and the two agree only on canonical text, so a refused string would have matched
+different rows on the two backends. Converting it yourself makes you choose the time zone it names;
+TypeGraph does not guess.
+
+A `Date` or string operand must fall in the years 0001 to 9999. After 9999 a `Date`'s `toISOString()` is
+the extended `+010000-…` form, which sorts as text before every four-digit year. Year 0000 is canonical
+text that SQLite compares, but PostgreSQL's `timestamptz` cast refuses it (`date/time field value out of
+range`), so `gte("0000-01-01T00:00:00.000Z")` failed there. Both are refused the same way.
+The check covers operands, not stored values: a date property stored in year 0000, which `z.date()`
+accepts, is written on every backend, but on PostgreSQL a predicate that casts that row, such as
+`gte(cutoff)`, fails with the same error.
+
+The same check applies to every operator, to each bound of `between`, to each element of an `in` /
+`notIn` list, to a nested date property reached through `get()`, to values bound to a `param()` when a
+prepared query executes, and in the expression context to a literal or parameter compared with any
+date-valued expression, including one a `coalesce` or `when` forwards
+(`expr.gte(expr.coalesce(ctx.d.publishedAt, expr.literal(fallback)), expr.param("from", "date"))`
+checks both `fallback` and `from`), so a refused operand never reaches SQL. An accepted string and a
+`Date` compile as the same kind of operand, so `between` and a list bound to an `in` / `notIn`
+`param()` may mix them. `$meta` timestamps make the same decision (refusing with `ValidationError`);
+see [Metadata](/queries/filter#metadata).
 
 ### Equality
 

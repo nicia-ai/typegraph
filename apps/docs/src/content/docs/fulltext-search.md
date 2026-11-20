@@ -351,7 +351,7 @@ store
     d.$fulltext
       .matches("machine learning", 20, { mode: "websearch" })
       .and(d.published.eq(true))
-      .and(d.publishedAt.gte("2024-01-01"))
+      .and(d.publishedAt.gte("2024-01-01T00:00:00.000Z"))
       .and(d.tenantId.eq(tenant))
   )
   .select((ctx) => ctx.d)

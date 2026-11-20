@@ -4,8 +4,9 @@ import {
   assertPortableScalarValueType,
 } from "./aggregate-value-types";
 import type { FieldRef, QueryAst, ValueType } from "./ast";
-import { assertMetadataOperand } from "./builder/order-by-field";
+import { assertComparedOperand } from "./builder/order-by-field";
 import { resolveNullOrdering } from "./order";
+import { dateComparisonOperandText } from "./predicates";
 
 type DatabaseJsonValue =
   | boolean
@@ -585,17 +586,81 @@ function arithmetic<
 }
 
 /**
- * A literal compared with a metadata column gets the column's operand check
- * (`assertMetadataOperand`), the one a predicate literal and a bound
- * parameter get, so the expression form cannot reach an engine that compares
- * it differently from the other.
+ * @internal A literal or parameter whose value an expression comparison
+ * compares, with the side it is compared against.
  */
-function assertComparedLiteral(
-  field: DatabaseExpression,
-  operand: DatabaseExpression,
+export type ComparedExpressionOperand = Readonly<{
+  compared: DatabaseExpression;
+  operand: DatabaseExpression;
+}>;
+
+/**
+ * The literal and parameter leaves whose value becomes `expression`'s value:
+ * the expression itself when it is one, or a leaf a `coalesce` operand or a
+ * conditional branch forwards. Any other node computes its value, so no leaf
+ * under it is compared as-is.
+ */
+function forwardedValueLeaves(
+  expression: DatabaseExpression,
+): readonly DatabaseExpression[] {
+  const node = expression.node;
+  if (node.kind === "literal" || node.kind === "parameter") return [expression];
+  if (node.kind === "coalesce")
+    return node.operands.flatMap((operand) => forwardedValueLeaves(operand));
+  if (node.kind === "conditional")
+    return [
+      ...forwardedValueLeaves(node.then),
+      ...forwardedValueLeaves(node.otherwise),
+    ];
+  return [];
+}
+
+/**
+ * @internal Every literal and parameter an expression comparison compares,
+ * each with the side it is compared against — a bare operand, or one a
+ * `coalesce` or conditional on either side forwards
+ * (`expr.gte(expr.coalesce(d.publishedAt, expr.literal(fallback)),
+ * expr.param("from", "date"))` compares both `fallback` and `from`). The one
+ * enumeration the build-time literal check and prepared-query binding
+ * validation share, so neither can see a different set of operands.
+ */
+export function comparedExpressionOperands(
+  left: DatabaseExpression,
+  right: DatabaseExpression,
+): readonly ComparedExpressionOperand[] {
+  return [
+    ...forwardedValueLeaves(right).map((operand) => ({
+      compared: left,
+      operand,
+    })),
+    ...forwardedValueLeaves(left).map((operand) => ({
+      compared: right,
+      operand,
+    })),
+  ];
+}
+
+/**
+ * @internal The operand check a value compared with `compared` gets, as a
+ * literal when the comparison is built or as a binding when a prepared query
+ * executes. A bare field reference applies its own contract
+ * (`assertComparedOperand`: a metadata column's, then a date property's); any
+ * other side whose value is a date — `expr.coalesce(d.publishedAt, …)`, a
+ * conditional, an aggregate, a scalar subquery, a parameter — applies the
+ * date contract, decided by the same `isDateComparison` a field's is.
+ */
+export function assertExpressionComparedOperand(
+  compared: DatabaseExpression,
+  operand: unknown,
 ): void {
-  if (field.node.kind === "field" && operand.node.kind === "literal")
-    assertMetadataOperand(field.node.field, operand.node.value);
+  if (compared.node.kind === "field") {
+    assertComparedOperand(compared.node.field, operand);
+    return;
+  }
+  dateComparisonOperandText(
+    { valueType: compared.valueType, description: "a date expression" },
+    operand,
+  );
 }
 
 function comparison<
@@ -609,8 +674,10 @@ function comparison<
 ): DatabaseExpression<NullIfEitherUndefined<Left, Right, boolean>, Scope> {
   const scopeIdentity = resolveScope([left, right]);
   assertSameValueType([left, right]);
-  assertComparedLiteral(left, right);
-  assertComparedLiteral(right, left);
+  for (const { compared, operand } of comparedExpressionOperands(left, right)) {
+    if (operand.node.kind === "literal")
+      assertExpressionComparedOperand(compared, operand.node.value);
+  }
   return createExpression(
     { kind: "comparison", left, operator, right },
     "boolean",
