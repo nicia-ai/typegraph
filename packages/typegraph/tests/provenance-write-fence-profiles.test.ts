@@ -14,6 +14,14 @@
  * PostgreSQL snapshot-isolation cases live in
  * `tests/backends/postgres/provenance-stale-snapshot.test.ts`.
  *
+ * A read-only `holding(tx)` takes the per-graph write lock alone, and under a
+ * `row` fence that lock is an upsert of the fence row. SQLite runs it in a
+ * read-only Store transaction; PostgreSQL rejects it (`25006`), so on a
+ * PostgreSQL row fence the read-only form of `holding(tx)` is unavailable.
+ * Both outcomes are pinned below. Revert check for the PostgreSQL case: skip
+ * the graph lock in the store's read-only `acquireReadFences` branch
+ * (`src/store/store.ts`) and the call answers instead.
+ *
  * `tx.assertUnchangedSince()` shares the evidence judgement
  * (`requireFreshSnapshotAfterGraphLock`) but not the declared-serialization
  * admission: it refuses both profiles, as it did before provenance used it.
@@ -296,7 +304,7 @@ describe("provenance on a SQLite backend declaring a keyed row write fence", () 
     await expect(liveFact(store, FACT.id)).resolves.toBeDefined();
   });
 
-  it("holding(tx) in a read-only transaction still answers (control: read-only reads take no freshness check)", async () => {
+  it("holding(tx) in a read-only transaction still answers: SQLite runs the fence-row upsert in a read-only Store transaction, and read-only reads take no freshness check", async () => {
     const { store, provenance } = await seedRowFence();
 
     const held = await store.transaction(async (tx) => provenance.holding(tx), {
@@ -313,5 +321,38 @@ describe("provenance on a SQLite backend declaring a keyed row write fence", () 
       await assertUnchangedSinceRefusal(seeded),
       "tx.assertUnchangedSince()",
     );
+  });
+});
+
+const POSTGRES_ROW_FENCE: Partial<BackendCapabilities> = {
+  writeFence: { mechanism: "row", drain: "table-lock", conflict: "wait" },
+};
+
+describe("provenance on a PostgreSQL backend declaring a keyed row write fence (PGlite)", () => {
+  it("holding(tx) in a read-only transaction is rejected by PostgreSQL: the graph lock is a fence-row upsert, which a read-only transaction cannot run (25006)", async () => {
+    const { store, provenance, logged } = await seed(() =>
+      createLoggedPostgresBackend(POSTGRES_ROW_FENCE),
+    );
+
+    const before = logged.statements.length;
+    const error = await rejection(
+      store.transaction(async (tx) => provenance.holding(tx), {
+        accessMode: "read_only",
+      }),
+    );
+
+    // The engine's own error, not a typed refusal: PostgreSQL rejects the
+    // fence-row upsert the graph lock is under a row fence.
+    expect((error as { cause?: { code?: unknown } }).cause).toMatchObject({
+      code: "25006",
+    });
+    expect(String(error)).toContain("typegraph_fences");
+    expect(graphRowStatements(logged.statements.slice(before))).toEqual([]);
+    // The same read in a transaction that can write, or with no transaction,
+    // answers.
+    await expect(provenance.holding()).resolves.toEqual([FACT, OTHER_FACT]);
+    await expect(
+      store.transaction(async (tx) => provenance.holding(tx)),
+    ).resolves.toEqual([FACT, OTHER_FACT]);
   });
 });

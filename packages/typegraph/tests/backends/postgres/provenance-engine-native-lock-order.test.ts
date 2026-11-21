@@ -563,6 +563,68 @@ describe.runIf(process.env["POSTGRES_URL"])(
           capability: "graphWriteFence",
         });
       });
+
+      // The ordering the case above claims, made observable: another session
+      // holds the graph lock, and the refusal must still settle without
+      // waiting on it. The control in the same case — a call that does take
+      // the graph lock — is observed blocked on that session, so a refusal
+      // moved below the lock acquisition would show up as "blocked" too.
+      // Revert check: call `lockStoreWriteFence` before
+      // `assertReadSetFenceSupported` in `assertReadSetUnchangedSince`
+      // (`src/store/read-set-fence.ts`) and the refusal is observed blocked.
+      it(
+        "tx.assertUnchangedSince() refuses without waiting on a graph lock another session holds",
+        { timeout: CONTENTION_TIMEOUT_MS },
+        async () => {
+          const { holderStore, contenderStore } =
+            await holderAndContender(driver);
+          const anchor = requireDefined(
+            await contenderStore.lineageRevisionNow(),
+            "the engine-native fixture mints a lineage anchor",
+          );
+          const holdGraphLock = (holdOpen: () => Promise<void>) =>
+            holderStore.transaction(async (tx) => {
+              // A writable holding(tx) takes the schema fence and the graph
+              // write lock, and holds both until the transaction ends.
+              await createRetractionCapability(holderStore, config).holding(tx);
+              await holdOpen();
+            });
+
+          const refused = await raceAgainstHeldTransaction({
+            probe: openProbe(),
+            holderApplication: HOLDER_APPLICATION,
+            contenderApplication: CONTENDER_APPLICATION,
+            holder: holdGraphLock,
+            contender: () =>
+              contenderStore.transaction((tx) =>
+                tx.assertUnchangedSince(anchor, [{ nodeKind: "Fact" }]),
+              ),
+          });
+          const control = await raceAgainstHeldTransaction({
+            probe: openProbe(),
+            holderApplication: HOLDER_APPLICATION,
+            contenderApplication: CONTENDER_APPLICATION,
+            holder: holdGraphLock,
+            contender: () =>
+              contenderStore.transaction((tx) =>
+                createRetractionCapability(contenderStore, config).holding(tx),
+              ),
+          });
+
+          expect(refused.contenderState).toBe("settled");
+          expect(refused.contender.status).toBe("error");
+          expect(
+            refused.contender.status === "error" ?
+              refused.contender.error
+            : undefined,
+          ).toBeInstanceOf(UnsupportedBackendCapabilityError);
+          expect(refused.holder.status).toBe("ok");
+          // Control: the graph lock really is held, and a call that takes it
+          // waits for the holder, then answers.
+          expect(control.contenderState).toBe("blocked");
+          expect(control.contender.status).toBe("ok");
+        },
+      );
     });
   },
 );

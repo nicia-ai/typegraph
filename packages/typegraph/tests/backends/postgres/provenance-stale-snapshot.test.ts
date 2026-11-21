@@ -27,6 +27,13 @@
  * `src/provenance/transition.ts` and session 2's retraction, on a connection
  * whose default isolation is repeatable read, is refused.
  *
+ * On a backend declaring a keyed `row` write fence the acquisition is an
+ * upsert of the fence row, so a stale REPEATABLE READ transaction has two
+ * outcomes, both pinned: the isolation refusal (transaction still usable)
+ * when no other session advanced the fence row since its snapshot, and a
+ * serialization conflict from the upsert itself (`TransactionConflictError`;
+ * the transaction is aborted and must be rolled back) when one did.
+ *
  * Skipped unless `POSTGRES_URL` is set.
  */
 import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
@@ -47,7 +54,11 @@ import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createSqlBackend } from "../../../src/backend/drizzle/engine";
 import type { AnyPgDatabase } from "../../../src/backend/drizzle/execution/postgres-execution";
 import { buildPostgresEngineProfile } from "../../../src/backend/drizzle/postgres";
-import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import type { BackendCapabilities } from "../../../src/backend/types";
+import {
+  TransactionConflictError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors-entry";
 import { createRetractionCapability } from "../../../src/provenance";
 import { recordedRelationsLineage } from "../../../src/store/recorded-capture";
 import type { HistoryStore } from "../../../src/store/store";
@@ -100,6 +111,11 @@ const config = {
   premiseOf: { kind: "premiseOf" },
   derives: { kind: "derives" },
 } as const;
+
+/** The `row` declaration an engine with no advisory or row locks makes. */
+const ROW_FENCE_CAPABILITIES = {
+  writeFence: { mechanism: "row", drain: "table-lock", conflict: "wait" },
+} as const satisfies Partial<BackendCapabilities>;
 
 const sourceA = { kind: "Source", id: "source-a" } as const;
 const sourceB = { kind: "Source", id: "source-b" } as const;
@@ -213,11 +229,14 @@ let graphSequence = 0;
 async function engineNativeStore(
   graph: StaleGraph,
   session: Session,
+  capabilities?: Partial<BackendCapabilities>,
 ): Promise<HistoryStore<StaleGraph>> {
-  const profile = buildPostgresEngineProfile(session.db, { vector: false });
-  const capturingProfile = buildPostgresEngineProfile(session.db, {
-    vector: false,
-  });
+  const options = {
+    vector: false as const,
+    ...(capabilities === undefined ? {} : { capabilities }),
+  };
+  const profile = buildPostgresEngineProfile(session.db, options);
+  const capturingProfile = buildPostgresEngineProfile(session.db, options);
   const [capturingStore] = await createStoreWithSchema(
     graph,
     createSqlBackend(capturingProfile),
@@ -507,6 +526,126 @@ describe.runIf(process.env["POSTGRES_URL"])(
           // the one snapshot, so the answer is that snapshot's, consistently.
           expect(held).toEqual([sharedFact]);
           expect(await writer.holding()).toEqual([]);
+        },
+      );
+
+      it(
+        "on a row write fence, refuses retract(B, tx) on a REPEATABLE READ transaction no other session overtook with the isolation refusal, leaving it usable",
+        { timeout: CONTENTION_TIMEOUT_MS },
+        async () => {
+          graphSequence += 1;
+          const graph = buildGraph(
+            `provenance_stale_snapshot_${graphSequence}`,
+          );
+          const session = openSession(driver);
+          const store = await engineNativeStore(
+            graph,
+            session,
+            ROW_FENCE_CAPABILITIES,
+          );
+          await seed(store);
+          const provenance = capabilityOn(store);
+
+          const outcome = await store.transaction(
+            async (tx) => {
+              await tx.nodes.Fact.getById(sharedFact.id as never);
+              const refusal = await rejectionOf(
+                provenance.retract(sourceB, tx),
+              );
+              const readAfter =
+                (await tx.nodes.Source.getById(sourceA.id as never)) !==
+                undefined;
+              return { refusal, readAfter };
+            },
+            { isolationLevel: "repeatable_read" },
+          );
+
+          expectFreshSnapshotRefusal(
+            outcome.refusal,
+            "provenance.retract(source, tx)",
+          );
+          expect(outcome.readAfter).toBe(true);
+          expect(await provenance.holding()).toEqual([sharedFact]);
+        },
+      );
+
+      // The other outcome on this profile. The row fence's acquisition is an
+      // upsert of the fence row, and the isolation it reports is judged only
+      // once that statement returns. When another session advanced the fence
+      // row after this transaction's snapshot, PostgreSQL fails the upsert
+      // itself with a serialization failure (40001) first: no isolation
+      // refusal is reached, the transaction is aborted, and the caller must
+      // roll back and retry. This pins the behaviour the documentation
+      // states, surfaced as the store's typed, retryable conflict. Revert
+      // check: replace the concurrent `writer.retract(sourceA)` with a no-op
+      // and the call ends with the isolation refusal of the case above
+      // instead, failing every conflict assertion.
+      it(
+        "on a row write fence, fails retract(B, tx) with a serialization conflict when another session advanced the fence row after the snapshot, and the caller must roll back",
+        { timeout: CONTENTION_TIMEOUT_MS },
+        async () => {
+          graphSequence += 1;
+          const graph = buildGraph(
+            `provenance_stale_snapshot_${graphSequence}`,
+          );
+          const staleSession = openSession(driver);
+          const writerSession = openSession(driver);
+          const staleStore = await engineNativeStore(
+            graph,
+            staleSession,
+            ROW_FENCE_CAPABILITIES,
+          );
+          const writerStore = await engineNativeStore(
+            graph,
+            writerSession,
+            ROW_FENCE_CAPABILITIES,
+          );
+          await seed(staleStore);
+          const stale = capabilityOn(staleStore);
+          const writer = capabilityOn(writerStore);
+
+          const snapshotTaken = createGate();
+          const concurrentCommitted = createGate();
+          const inner: { error?: unknown; readAfter?: unknown } = {};
+          const staleTransaction = rejectionOf(
+            staleStore.transaction(
+              async (tx) => {
+                await tx.nodes.Fact.getById(sharedFact.id as never);
+                snapshotTaken.open();
+                await concurrentCommitted.opened;
+                inner.error = await rejectionOf(stale.retract(sourceB, tx));
+                // The transaction is aborted: even a plain read fails, so
+                // the only way on is to roll back.
+                inner.readAfter = await rejectionOf(
+                  tx.nodes.Source.getById(sourceA.id as never),
+                );
+                throw inner.error;
+              },
+              { isolationLevel: "repeatable_read" },
+            ),
+          );
+          const outer = await afterConcurrentCommit(
+            staleTransaction,
+            snapshotTaken,
+            concurrentCommitted,
+            () => writer.retract(sourceA),
+          );
+
+          expect(inner.error).toBeInstanceOf(TransactionConflictError);
+          expect(inner.error).not.toBeInstanceOf(
+            UnsupportedBackendCapabilityError,
+          );
+          expect(inner.readAfter).toBeDefined();
+          expect(outer).toBeInstanceOf(TransactionConflictError);
+          // Nothing of the aborted call committed: only A's retraction did,
+          // and the shared fact still holds via B. Retrying the whole
+          // transaction from the top, at read committed, completes it.
+          expect(await writer.holding()).toEqual([sharedFact]);
+          const retried = await staleStore.transaction(
+            (tx) => stale.retract(sourceB, tx),
+            { isolationLevel: "read_committed" },
+          );
+          expect(retried.died).toEqual([sharedFact]);
         },
       );
 
