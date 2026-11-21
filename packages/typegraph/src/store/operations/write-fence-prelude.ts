@@ -18,14 +18,21 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import {
+  TransactionConflictError,
   TypeGraphError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
 import { lockRecordedGraphWrite } from "../recorded-capture";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { lockSchemaVersionForStoreWrite } from "./write-transaction";
+import {
+  type AdoptedWriterSlotRefusals,
+  lockSchemaVersionForStoreWrite,
+} from "./write-transaction";
 
 const STALE_SCHEMA_VERSION_CODE = "STALE_SCHEMA_VERSION";
+
+/** The capability {@link supportReadWriterSlotRefusals} names when absent. */
+const ADOPTED_WRITER_SLOT_CAPABILITY = "adoptedTransactionWriterSlot";
 
 /** The capability a {@link freshSnapshotUnprovableError} names. */
 const OBSERVED_READ_COMMITTED_ISOLATION_CAPABILITY =
@@ -128,6 +135,10 @@ export type FreshSnapshotAdmission = "evidence" | "serialized-or-evidence";
  *   `caller-serialized` deployment, whose in-process queue runs every write
  *   unit alone and which refuses adopted transactions. No second writer can
  *   commit while such a transaction runs, so there is nothing to observe.
+ *   On an `engine-serialized` engine that holds for an adopted transaction
+ *   only because its callers' fence frame took the writer slot on that
+ *   session before the schema fence ({@link supportReadWriterSlotRefusals});
+ *   a DEFERRED adopted transaction holds no slot until it writes.
  *
  * Every other plan is keyed (`lock`, `row`): other sessions can commit while
  * this one waits for the lock. It is admitted only on the evidence of a keyed
@@ -194,6 +205,37 @@ export function refuseWriterBetweenSnapshotAndGraphLock(
     freshSnapshotError,
     "serialized-or-evidence",
   );
+}
+
+/**
+ * The refusals provenance's support reads raise when their fence frame cannot
+ * take SQLite's writer slot on an adopted session before the first read
+ * (`ensureAdoptedWriterSlot` in `write-transaction.ts`, which owns when and
+ * how the slot is taken).
+ *
+ * A snapshot another connection overtook is a {@link TransactionConflictError}
+ * naming `operation`, with SQLite's `SQLITE_BUSY_SNAPSHOT` as `cause`: the
+ * same error the keyed fence raises for a PostgreSQL snapshot that predates
+ * another decider's commit. SQLite cannot upgrade a stale snapshot in place,
+ * so the caller rolls back and re-runs the whole transaction. A session that
+ * exposes no statement execution cannot take the slot and is refused with an
+ * {@link UnsupportedBackendCapabilityError}.
+ */
+export function supportReadWriterSlotRefusals(
+  operation: string,
+  graphId: string,
+): AdoptedWriterSlotRefusals {
+  return {
+    unsupported: () =>
+      new UnsupportedBackendCapabilityError(
+        operation,
+        ADOPTED_WRITER_SLOT_CAPABILITY,
+        { graphId },
+        "Expose transaction-scoped statement execution on the adopted transaction, or run the work in store.transaction(), which takes the SQLite writer slot before its first read.",
+      ),
+    stale: (cause) =>
+      new TransactionConflictError({ operation, attempts: 1 }, { cause }),
+  };
 }
 
 /**

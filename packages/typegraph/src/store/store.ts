@@ -407,6 +407,7 @@ import { readIdentityParticipants } from "./operations/identity-participation";
 import {
   freshSnapshotUnprovableError,
   refuseWriterBetweenSnapshotAndGraphLock,
+  supportReadWriterSlotRefusals,
 } from "./operations/write-fence-prelude";
 import {
   acquireManagedWriteFences,
@@ -4967,8 +4968,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /**
    * The transaction runtime's write fences for a caller that reads and then
    * decides under them — provenance's retraction transitions, its commit-time
-   * assert and a writable `holding(tx)`: the managed write frame's
-   * schema-version fence and per-graph write lock, then
+   * assert and a writable `holding(tx)`: on an adopted SQLite transaction the
+   * writer slot first (a snapshot another connection overtook is refused with
+   * a `TransactionConflictError` naming `operation`), then the managed write
+   * frame's schema-version fence and per-graph write lock, then
    * `refuseWriterBetweenSnapshotAndGraphLock`: a write fence that serializes
    * writers passes on its declaration alone, and a keyed one must show, from
    * the lock acquisition's own evidence, that every read after it observes
@@ -4984,6 +4987,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const lock = await acquireManagedWriteFences(
       nodeOperationContext,
       txBackend,
+      supportReadWriterSlotRefusals(operation, this.graphId),
     );
     refuseWriterBetweenSnapshotAndGraphLock(
       txBackend,
