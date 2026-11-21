@@ -275,9 +275,13 @@ type SeparatedSetUpdateMeasurement = Readonly<{
   tablePages: number;
 }>;
 
+/** Ids a by-id selection names in the separated distribution. */
+const SEPARATED_IDS_SELECTED = 100;
+
 async function measureSeparatedSetUpdate(
   harness: StaleStatisticsHarness,
   candidates: SeparatedCount,
+  selection: "all" | "idsAndProperty" = "all",
 ): Promise<SeparatedSetUpdateMeasurement> {
   const [store] = await createStoreWithSchema(
     separatedGraph,
@@ -285,20 +289,33 @@ async function measureSeparatedSetUpdate(
     { autoRefreshStatistics: false },
   );
   const collection = store.nodes[separatedKind(candidates)];
+  // The harness prepares its table once, so each selection inserts rows of
+  // its own and the cases stay independent of their order.
+  const idPrefix = selection === "all" ? "separated-fresh" : "separated-by-id";
   await collection.bulkInsert(
     Array.from({ length: candidates }, (_, index) => ({
-      id: `separated-fresh-${index}`,
+      id: `${idPrefix}-${index}`,
       props: { status: "pending" },
     })),
   );
 
   const intercepted = harness.interceptNextNodesUpdate();
+  const selectedIds = Array.from(
+    { length: Math.min(SEPARATED_IDS_SELECTED, candidates) },
+    (_, index) => `${idPrefix}-${index}`,
+  );
   await expect(
-    collection.updateWhere({ all: true, patch: { status: "promoted" } }),
+    selection === "all" ?
+      collection.updateWhere({ all: true, patch: { status: "promoted" } })
+    : collection.updateWhere({
+        where: (node) => node.id.in(selectedIds).and(node.status.eq("pending")),
+        patch: { status: "promoted" },
+      }),
   ).rejects.toThrow();
   const plan = await harness.explainAnalyze(await intercepted);
   const scans = nodesTableScans(plan);
-  const keyed = scans.filter((scan) => isKeyedLookup(scan, candidates));
+  const written = selection === "all" ? candidates : selectedIds.length;
+  const keyed = scans.filter((scan) => isKeyedLookup(scan, written));
   const others = scans.filter((scan) => !keyed.includes(scan));
   return {
     written: plan["Actual Rows"],
@@ -509,6 +526,44 @@ export function registerStaleStatisticsPlanCases(
       });
     },
   );
+
+  // A selection that names ids is estimated from the id list, whatever the
+  // graph's and the kind's frequencies, so it stays keyed in the distribution
+  // where a selection over the whole kind scans the table, and it does so
+  // with a further property predicate beside the ids.
+  it("keeps a selection by ids and a property keyed when the graph and kind are analyzed only apart", async (ctx) => {
+    const active = harness();
+    if (active === undefined) {
+      ctx.skip();
+      return;
+    }
+    const measured = await measureSeparatedSetUpdate(
+      active,
+      4000,
+      "idsAndProperty",
+    );
+
+    expect({
+      written: measured.written,
+      wholeTableScans: measured.otherScans.filter(
+        (scan) => scan.rowsVisited >= measured.tableRows,
+      ).length,
+      everyOtherReadRunsOnce: measured.otherScans.every(
+        (scan) => scan.loops === 1,
+      ),
+      withinRowsVisited:
+        measured.rowsVisited <=
+        MAX_ROWS_VISITED_PER_CANDIDATE * SEPARATED_IDS_SELECTED,
+      withinBuffers:
+        measured.buffers <= MAX_BUFFERS_PER_CANDIDATE * SEPARATED_IDS_SELECTED,
+    }).toEqual({
+      written: SEPARATED_IDS_SELECTED,
+      wholeTableScans: 0,
+      everyOtherReadRunsOnce: true,
+      withinRowsVisited: true,
+      withinBuffers: true,
+    });
+  });
 
   it("writes every candidate in one statement whatever the bind budget", async (ctx) => {
     const active = harness();
