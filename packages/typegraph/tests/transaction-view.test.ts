@@ -15,6 +15,7 @@ import type { SqliteExecutionAdapter } from "../src/backend/drizzle/execution/sq
 import { createSqliteTransactionExecutionView } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createTransactionView } from "../src/backend/drizzle/execution/transaction-view";
 import { TransactionClosedError } from "../src/errors";
+import { requireDefined } from "../src/utils/presence";
 import { createGate } from "./concurrency-utils";
 
 /** Whether `pending` has settled after every queued microtask has run. */
@@ -82,13 +83,47 @@ describe("createTransactionView", () => {
   });
 });
 
+/** Every statement member of the adapter, each called the way a backend calls it. */
+const STATEMENT_MEMBER_CALLS = {
+  execute: (adapter) => adapter.execute(sql`SELECT 1`),
+  executeAtomicBatch: (adapter) =>
+    requireDefined(adapter.executeAtomicBatch)([COMPILED]),
+  executeCompiled: (adapter) =>
+    requireDefined(adapter.executeCompiled)(COMPILED),
+  executeCompiledRun: (adapter) =>
+    requireDefined(adapter.executeCompiledRun)(COMPILED),
+  executePreparedRunBatch: (adapter) =>
+    requireDefined(adapter.executePreparedRunBatch)("SELECT 1", [[]]),
+  executeRun: (adapter) => adapter.executeRun(sql`SELECT 1`),
+  prepare: (adapter) => requireDefined(adapter.prepare)("SELECT 1").execute([]),
+  runExclusive: (adapter) =>
+    requireDefined(adapter.runExclusive)(() => Promise.resolve()),
+} as const satisfies Record<
+  string,
+  (adapter: SqliteExecutionAdapter) => Promise<unknown>
+>;
+
+type StatementMember = keyof typeof STATEMENT_MEMBER_CALLS;
+
+const STATEMENT_MEMBERS = Object.keys(
+  STATEMENT_MEMBER_CALLS,
+) as readonly StatementMember[];
+
+const COMPILED = { sql: "SELECT 1", params: [] };
+
+/**
+ * An adapter whose statement members each stay in flight until that member's
+ * own gate opens, so a drain that forgets one member is caught on that member.
+ */
 function heldAdapter() {
-  const release = createGate();
+  const gates = new Map(
+    STATEMENT_MEMBERS.map((member) => [member, createGate()] as const),
+  );
   const ran: string[] = [];
-  function held(name: string) {
+  function held(member: StatementMember) {
     return async () => {
-      ran.push(name);
-      await release.opened;
+      ran.push(member);
+      await requireDefined(gates.get(member)).opened;
       return [];
     };
   }
@@ -96,7 +131,7 @@ function heldAdapter() {
     clearStatementCache: () => {
       ran.push("clearStatementCache");
     },
-    compile: () => ({ sql: "SELECT 1", params: [] }),
+    compile: () => COMPILED,
     execute: held("execute"),
     executeAtomicBatch: held("executeAtomicBatch"),
     executeCompiled: held("executeCompiled"),
@@ -109,7 +144,8 @@ function heldAdapter() {
     executeRun: async () => {
       await held("executeRun")();
     },
-    prepare: () => ({ execute: held("prepare().execute") }),
+    prepare: () => ({ execute: held("prepare") }),
+    runExclusive: held("runExclusive"),
     profile: {
       isSync: false,
       maxBindParameters: 999,
@@ -118,51 +154,47 @@ function heldAdapter() {
       transactionMode: "drizzle",
     },
   } as unknown as SqliteExecutionAdapter;
+  function release(member: StatementMember): void {
+    requireDefined(gates.get(member)).open();
+  }
   return { adapter, release, ran };
 }
 
-function callEveryStatementMember(
-  adapter: SqliteExecutionAdapter,
-): readonly Promise<unknown>[] {
-  const query = sql`SELECT 1`;
-  const compiled = { sql: "SELECT 1", params: [] };
-  return [
-    adapter.execute(query),
-    adapter.executeAtomicBatch?.([compiled]) ?? Promise.resolve(),
-    adapter.executeCompiled?.(compiled) ?? Promise.resolve(),
-    adapter.executeCompiledRun?.(compiled) ?? Promise.resolve(),
-    adapter.executePreparedRunBatch?.("SELECT 1", [[]]) ?? Promise.resolve(),
-    adapter.executeRun(query),
-    adapter.prepare?.("SELECT 1").execute([]) ?? Promise.resolve(),
-  ];
-}
-
 describe("createSqliteTransactionExecutionView", () => {
-  it("drains every statement member before it closes, then refuses each without running it", async () => {
-    const { adapter, release, ran } = heldAdapter();
-    const view = createSqliteTransactionExecutionView(adapter);
-    const inFlight = callEveryStatementMember(view.adapter);
-    expect(ran).toHaveLength(7);
-    const drained = view.drainAndClose();
-    expect(await hasSettled(drained)).toBe(false);
-    release.open();
-    await drained;
-    await Promise.all(inFlight);
+  it.each(STATEMENT_MEMBERS)(
+    "waits for a held %s before it closes",
+    async (member) => {
+      const { adapter, release, ran } = heldAdapter();
+      const view = createSqliteTransactionExecutionView(adapter);
+      // Every other member is in flight too, and released first: the drain
+      // must still wait on this one alone.
+      const inFlight = STATEMENT_MEMBERS.map((each) =>
+        STATEMENT_MEMBER_CALLS[each](view.adapter),
+      );
+      expect(ran).toEqual(STATEMENT_MEMBERS);
+      const drained = view.drainAndClose();
+      for (const other of STATEMENT_MEMBERS) {
+        if (other !== member) release(other);
+      }
+      expect(await hasSettled(drained)).toBe(false);
+      release(member);
+      await drained;
+      await Promise.all(inFlight);
+    },
+  );
 
-    ran.length = 0;
-    const refused = await Promise.all(
-      callEveryStatementMember(view.adapter).map((pending) =>
-        pending.then(
-          () => "fulfilled",
-          (error: unknown) => error instanceof TransactionClosedError,
-        ),
-      ),
-    );
-    expect({ refused, ran }).toEqual({
-      refused: Array.from({ length: 7 }, () => true),
-      ran: [],
-    });
-  });
+  it.each(STATEMENT_MEMBERS)(
+    "refuses %s after it closes without running it",
+    async (member) => {
+      const { adapter, ran } = heldAdapter();
+      const view = createSqliteTransactionExecutionView(adapter);
+      await view.drainAndClose();
+      await expect(
+        STATEMENT_MEMBER_CALLS[member](view.adapter),
+      ).rejects.toThrow(TransactionClosedError);
+      expect(ran).toEqual([]);
+    },
+  );
 
   it("passes members that touch no connection through after it closes", async () => {
     const { adapter, ran } = heldAdapter();
