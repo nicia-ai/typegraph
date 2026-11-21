@@ -187,6 +187,20 @@ export interface DialectAdapter {
   readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
 
   /**
+   * Gives a text expression the collation TypeGraph declares its key columns
+   * with, so a `DISTINCT`, `GROUP BY` or comparison over a projected id tells
+   * ids apart exactly as the primary key does, whatever collation the
+   * projection carried. SQLite forces `BINARY`: an explicit collation on a
+   * projected column (`id COLLATE NOCASE`) would otherwise decide its
+   * `DISTINCT`. PostgreSQL forces the database's default collation, which is
+   * always deterministic, so its equality is byte equality; unlike the
+   * `COLLATE "C"` of {@link DialectAdapter.binaryText}, it is the collation of
+   * the key indexes themselves, so comparing the result with an indexed key
+   * column stays an index condition.
+   */
+  readonly keyText: (this: void, expression: SqlFragment) => SqlFragment;
+
+  /**
    * Builds the dialect's planner-statistics refresh for a temporary table.
    * Returns undefined when the engine plans temporary tables well enough
    * without an explicit refresh.

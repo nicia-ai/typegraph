@@ -1130,10 +1130,6 @@ export function buildUpdateNodeSet(
     dialect,
   );
   const candidateIds = toDrizzleSql(params.candidateIds, dialect);
-  const candidateIdColumn = toDrizzleSql(
-    portableSql.identifier(params.candidateIdColumn),
-    dialect,
-  );
   const propsColumn = portableSql.identifier(nodes.props.name);
   const expectedPredicates =
     params.operation === "compareAndSet" ?
@@ -1158,12 +1154,24 @@ export function buildUpdateNodeSet(
   const keyGraphId = sql`${keys}.${sql.identifier(SET_KEY_GRAPH_ID)}`;
   const keyKind = sql`${keys}.${sql.identifier(SET_KEY_KIND)}`;
   const keyId = sql`${keys}.${sql.identifier(SET_KEY_ID)}`;
+  // The candidate query may project its ids under any collation (a direct
+  // port caller writes its own SQL), and that collation would decide both
+  // this DISTINCT and the match on the nodes table: SQLite's `NOCASE` would
+  // collapse two ids that differ only by case into one key, and a
+  // case-insensitive PostgreSQL collation would match a non-candidate twin.
+  // The key column's own collation makes both use the primary key's equality.
+  const candidateKeyId = toDrizzleSql(
+    adapter.keyText(
+      portableSql`tg_set_candidates.${portableSql.identifier(params.candidateIdColumn)}`,
+    ),
+    dialect,
+  );
   const keySubquery = sql`
     (
               SELECT DISTINCT
                 CAST(${params.graphId} AS TEXT) AS ${sql.identifier(SET_KEY_GRAPH_ID)},
                 CAST(${params.kind} AS TEXT) AS ${sql.identifier(SET_KEY_KIND)},
-                tg_set_candidates.${candidateIdColumn} AS ${sql.identifier(SET_KEY_ID)}
+                ${candidateKeyId} AS ${sql.identifier(SET_KEY_ID)}
               FROM (${candidateIds}) AS tg_set_candidates
             ) AS ${keys}
   `;

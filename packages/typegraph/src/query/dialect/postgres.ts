@@ -186,6 +186,10 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`${expression} COLLATE "C"`;
   },
 
+  keyText(expression) {
+    return sql`${expression} COLLATE "default"`;
+  },
+
   analyzeTemporaryTable(table) {
     return sql`ANALYZE ${table}`;
   },

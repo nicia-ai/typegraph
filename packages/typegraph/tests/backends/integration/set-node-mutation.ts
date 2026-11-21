@@ -125,6 +125,44 @@ async function installSetUpdatePoison(
   };
 }
 
+/** A PostgreSQL collation under which `Case` and `case` are equal. */
+const CASE_INSENSITIVE_COLLATION = "tg_case_insensitive";
+
+/**
+ * Makes `column` available under a case-insensitive collation: SQLite's
+ * built-in `NOCASE`, or on PostgreSQL a nondeterministic ICU collation this
+ * creates. A direct caller of a set-update port may project its candidate ids
+ * that way; the set update must still tell ids apart as the primary key does.
+ * Returns the collated column and the teardown.
+ */
+async function caseInsensitiveColumn(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl">,
+  column: string,
+): Promise<Readonly<{ collated: string; drop: () => Promise<void> }>> {
+  if (backend.dialect !== "postgres") {
+    return {
+      collated: `${column} COLLATE NOCASE`,
+      drop: () => Promise.resolve(),
+    };
+  }
+  const executeDdl = requireDefined(backend.executeDdl);
+  await executeDdl(
+    `CREATE COLLATION IF NOT EXISTS ${CASE_INSENSITIVE_COLLATION}
+     (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`,
+  );
+  return {
+    collated: `${column} COLLATE ${CASE_INSENSITIVE_COLLATION}`,
+    drop: async () => {
+      await executeDdl(
+        `DROP COLLATION IF EXISTS ${CASE_INSENSITIVE_COLLATION}`,
+      );
+    },
+  };
+}
+
+/** The ids of two nodes that differ only by case. */
+const CASE_TWIN_IDS = ["Case-Twin", "case-twin"] as const;
+
 /**
  * Shared SQLite/PostgreSQL coverage for the storage primitive that the public
  * set-based Store mutation composes with validation and sidecar maintenance.
@@ -1461,6 +1499,131 @@ export function registerSetNodeMutationIntegrationTests(
         stored.map((person) => [person.meta.version, person.isActive]),
       ).toEqual(people.map(() => [1, undefined]));
     });
+
+    it("updates node ids that differ only by case as two rows", async () => {
+      const store = context.getStore();
+      const twins = [];
+      for (const id of CASE_TWIN_IDS) {
+        twins.push(
+          await store.nodes.Person.create({ name: "Case twin" }, { id }),
+        );
+      }
+
+      const { affectedCount } = await store.nodes.Person.updateWhere({
+        where: (person) => person.name.eq("Case twin"),
+        patch: { isActive: true },
+      });
+      const swapped = await store.nodes.Person.compareAndSet(
+        requireDefined(twins[1]).id,
+        {
+          expected: { name: "Case twin" },
+          patch: { age: 7 },
+        },
+      );
+      const stored = await Promise.all(
+        twins.map(async (twin) =>
+          requireDefined(await store.nodes.Person.getById(twin.id)),
+        ),
+      );
+
+      expect({
+        affectedCount,
+        swapped,
+        stored: stored.map((person) => [
+          person.id,
+          person.isActive,
+          person.age,
+          person.meta.version,
+        ]),
+      }).toEqual({
+        affectedCount: 2,
+        swapped: true,
+        stored: [
+          [CASE_TWIN_IDS[0], true, undefined, 2],
+          [CASE_TWIN_IDS[1], true, 7, 3],
+        ],
+      });
+    });
+
+    // The candidate query of a direct port call is the caller's SQL, and may
+    // project its ids under any collation. The set update deduplicates and
+    // matches those ids with the primary key's own equality, so it writes
+    // exactly the rows whose ids the candidates name, byte for byte.
+    describe.for(["updateWhere", "compareAndSet"] as const)(
+      "%s through the backend port with case-insensitively projected candidates",
+      (operation) => {
+        async function writeCaseTwins(
+          candidateIdsWhere: readonly string[],
+        ): Promise<
+          Readonly<{
+            affectedIds: readonly string[];
+            versions: readonly number[];
+          }>
+        > {
+          const store = context.getStore();
+          const backend = context.getBackend();
+          const twins = [];
+          for (const id of CASE_TWIN_IDS) {
+            twins.push(
+              await store.nodes.Person.create({ name: "Case twin" }, { id }),
+            );
+          }
+          const column = await caseInsensitiveColumn(backend, "id");
+          try {
+            const candidateIds = asCompiledSelectSql(sql`
+              SELECT ${sql.raw(column.collated)} AS person_id
+              FROM ${createSqlSchema(backend.tableNames).nodesTable}
+              WHERE graph_id = ${store.graphId}
+                AND kind = 'Person'
+                AND id IN (${sql.join(
+                  candidateIdsWhere.map((id) => sql`${id}`),
+                  sql`, `,
+                )})
+            `);
+            const common = {
+              graphId: store.graphId,
+              kind: "Person",
+              patch: { isActive: true },
+              candidateIds,
+              candidateIdColumn: "person_id",
+            };
+            const result =
+              operation === "compareAndSet" ?
+                await compareAndSetNode(backend, {
+                  ...common,
+                  operation,
+                  expected: { name: { kind: "value", value: "Case twin" } },
+                })
+              : await updateNodeSet(backend, { ...common, operation });
+            const stored = await Promise.all(
+              twins.map(async (twin) =>
+                requireDefined(await store.nodes.Person.getById(twin.id)),
+              ),
+            );
+            return {
+              affectedIds: result.rows.map((row) => row.id).toSorted(),
+              versions: stored.map((person) => person.meta.version),
+            };
+          } finally {
+            await column.drop();
+          }
+        }
+
+        it("writes both ids when both are candidates", async () => {
+          expect(await writeCaseTwins(CASE_TWIN_IDS)).toEqual({
+            affectedIds: [...CASE_TWIN_IDS].toSorted(),
+            versions: [2, 2],
+          });
+        });
+
+        it("writes only the id that is a candidate", async () => {
+          expect(await writeCaseTwins([CASE_TWIN_IDS[0]])).toEqual({
+            affectedIds: [CASE_TWIN_IDS[0]],
+            versions: [2, 1],
+          });
+        });
+      },
+    );
 
     // 61 characters is the longest root alias whose generated `<alias>_id`
     // column PostgreSQL's 63-byte clipping still tells apart from the
