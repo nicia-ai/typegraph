@@ -2133,7 +2133,7 @@ exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases 
 }
 `;
 
-exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node aliases differing only by case / postgres 1`] = `
+exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node aliases differing only by case (known defect: SQL both engines reject) / postgres 1`] = `
 {
   "params": [
     "compile_golden",
@@ -2176,7 +2176,7 @@ exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases 
 }
 `;
 
-exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node aliases differing only by case / sqlite 1`] = `
+exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node aliases differing only by case (known defect: SQL both engines reject) / sqlite 1`] = `
 {
   "params": [
     "compile_golden",

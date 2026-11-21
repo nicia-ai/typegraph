@@ -1372,7 +1372,13 @@ describe("compile-golden: metadata, dates, fragments, recursive outputs, aliases
         ).toMatchSnapshot();
       });
 
-      it(`node aliases differing only by case / ${dialect}`, () => {
+      // Pins a known defect: the builder accepts `person` / `Person`, but
+      // the unquoted identifiers they compile to collide, and both engines
+      // reject the recorded statement (SQLite: duplicate WITH table name;
+      // PostgreSQL: WITH query name specified more than once). A change to
+      // identifier generation is expected to turn this into a typed refusal,
+      // which will show up here as a diff.
+      it(`node aliases differing only by case (known defect: SQL both engines reject) / ${dialect}`, () => {
         expect(
           compileOrRefusal(
             () =>
