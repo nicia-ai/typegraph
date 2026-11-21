@@ -667,7 +667,7 @@ export function describeProjectedField(
 }
 
 /** Describes the value a selectively projected field reads, for a refusal. */
-export function describeSelectiveField(field: SelectiveField): string {
+function describeSelectiveField(field: SelectiveField): string {
   return `${field.isSystemField ? "" : "property "}${field.field} of alias "${field.alias}"`;
 }
 
