@@ -4,6 +4,7 @@ import {
   type DatabaseExpression,
   haveCompatibleCollectionElements,
 } from "../expressions";
+import { sealGeneratedIdentifiers } from "../generated-identifier";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
@@ -11,7 +12,7 @@ import {
   compileDatabaseExpression,
   type DatabaseExpressionCompilerContext,
 } from "./database-expressions";
-import { compileQuery, type CompileQueryOptions } from "./index";
+import { type CompileQueryOptions, compileQueryUnsealed } from "./index";
 import { compileLimitOffsetClauses } from "./limit-offset";
 import { validateRelationAggregation } from "./relation-aggregate-validation";
 import { setOperationKeyword } from "./set-operations";
@@ -167,7 +168,7 @@ function compileDerived(
     relation.projection.map(({ expression }) => expression),
     relation.groupBy,
   );
-  const source = compileRelation(relation.source, dialect);
+  const source = compileRelationUnsealed(relation.source, dialect);
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
@@ -198,7 +199,7 @@ function compileTopPerPartition(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
 ): CompiledSelectSql {
-  const source = compileRelation(relation.source, dialect);
+  const source = compileRelationUnsealed(relation.source, dialect);
   const partition = sql.join(
     relation.partitionBy.map((expression) =>
       compileExpression(expression, dialect, false, orderedAggregates),
@@ -232,7 +233,11 @@ function compileRelationInner(
 ): CompiledSelectSql {
   switch (relation.kind) {
     case "source": {
-      return compileQuery(relation.query, relation.graphId, relation.options);
+      return compileQueryUnsealed(
+        relation.query,
+        relation.graphId,
+        relation.options,
+      );
     }
     case "derived": {
       return compileDerived(relation, dialect, orderedAggregates);
@@ -241,8 +246,8 @@ function compileRelationInner(
       return compileTopPerPartition(relation, dialect, orderedAggregates);
     }
     case "set": {
-      const left = compileRelation(relation.left, dialect);
-      const right = compileRelation(relation.right, dialect);
+      const left = compileRelationUnsealed(relation.left, dialect);
+      const right = compileRelationUnsealed(relation.right, dialect);
       const columns = sql.join(
         relation.columns.map(
           (column) =>
@@ -266,6 +271,14 @@ function compileRelationInner(
 }
 
 export function compileRelation(
+  relation: RelationAst,
+  dialect: DatabaseExpressionCompilerContext["dialect"],
+): CompiledSelectSql {
+  return sealGeneratedIdentifiers(compileRelationUnsealed(relation, dialect));
+}
+
+/** {@link compileRelation} for a relation embedded in a larger relation. */
+function compileRelationUnsealed(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
 ): CompiledSelectSql {

@@ -43,7 +43,10 @@ import { type NodeAccessor } from "../query/builder/types";
 import { validateHybridFusionOptions } from "../query/builder/validation";
 import { type FulltextStrategy } from "../query/dialect/fulltext-strategy";
 import { assertVectorMinScore } from "../query/dialect/vector-strategy";
-import { aliasColumnName } from "../query/generated-identifier";
+import {
+  aliasColumnName,
+  generatedColumnName,
+} from "../query/generated-identifier";
 import { type Predicate } from "../query/predicates";
 import { schemaIntrospectorFor } from "../query/schema-introspector";
 import { sql, type SqlFragment } from "../query/sql-fragment";
@@ -310,7 +313,11 @@ function buildKindCandidates(
       (aliases: Record<string, unknown>) => aliases[SEARCH_CANDIDATE_ALIAS],
     )
     .compile();
-  return sql`SELECT ${sql.identifier(aliasColumnName(SEARCH_CANDIDATE_ALIAS, "id"))} AS node_id FROM (${compiled}) AS tg_search_candidates`;
+  const idColumn = generatedColumnName(
+    compiled,
+    aliasColumnName(SEARCH_CANDIDATE_ALIAS, "id"),
+  );
+  return sql`SELECT ${sql.identifier(idColumn)} AS node_id FROM (${compiled}) AS tg_search_candidates`;
 }
 
 /**

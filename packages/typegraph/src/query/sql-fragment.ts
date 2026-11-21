@@ -252,6 +252,37 @@ export const sql: SqlTag = Object.assign(templateSql, {
   raw: rawSql,
 });
 
+/**
+ * @internal Rewrites the value of every text and identifier chunk. Bound
+ * parameters, named placeholders, and compiler intents are carried over
+ * unchanged; a fragment whose text the rewrite leaves alone is returned as is.
+ */
+export function rewriteSqlText(
+  fragment: SqlFragment,
+  rewrite: (value: string) => string,
+): SqlFragment {
+  const original = getChunks(fragment);
+  const chunks = original.map((chunk): SqlChunk => {
+    switch (chunk.kind) {
+      case "text":
+      case "identifier": {
+        const value = rewrite(chunk.value);
+        if (value === chunk.value) return chunk;
+        return chunk.kind === "text" ? textNode(value) : identifierNode(value);
+      }
+      case "parameter":
+      case "placeholder": {
+        return chunk;
+      }
+      default: {
+        return throwUnsupportedSqlChunk(chunk);
+      }
+    }
+  });
+  const changed = chunks.some((chunk, index) => chunk !== original[index]);
+  return changed ? createFragment(chunks, [fragment]) : fragment;
+}
+
 /** A rendered statement and its ordered bound parameters. */
 export type RenderedSql = Readonly<{
   sql: string;

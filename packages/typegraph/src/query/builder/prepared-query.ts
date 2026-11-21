@@ -62,6 +62,10 @@ import {
   normalizeDatabaseLiteral,
 } from "../expressions";
 import {
+  generatedColumnsOf,
+  restoreGeneratedColumns,
+} from "../generated-identifier";
+import {
   comparedOperandLiteral,
   inSubqueryComparedField,
   isParameterRef,
@@ -687,7 +691,11 @@ export class PreparedQuery<R> {
         template.sql,
         params,
       );
-      return transformPathColumns(rawRows, this.#state, this.#dialect);
+      return transformPathColumns(
+        restoreGeneratedColumns(rawRows, template.generatedColumns),
+        this.#state,
+        this.#dialect,
+      );
     }
 
     const concreteAst = substituteParameters(ast, bindings);
@@ -698,7 +706,11 @@ export class PreparedQuery<R> {
     );
     const rawRows =
       await this.#backend.execute<Record<string, unknown>>(compiled);
-    return transformPathColumns(rawRows, this.#state, this.#dialect);
+    return transformPathColumns(
+      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
+      this.#state,
+      this.#dialect,
+    );
   }
 }
 

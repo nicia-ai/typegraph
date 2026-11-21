@@ -25,6 +25,10 @@ import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
 import { getDialect } from "../dialect";
 import { bindSqlValue } from "../dialect/profile";
 import { type SqlDialect } from "../dialect/types";
+import {
+  type GeneratedColumns,
+  generatedColumnsOf,
+} from "../generated-identifier";
 import { isSqlPlaceholder, type SqlFragment } from "../sql-fragment";
 import { type CompiledSelectSql, isRawExecutable } from "../sql-intent";
 
@@ -33,13 +37,21 @@ import { type CompiledSelectSql, isRawExecutable } from "../sql-intent";
  * parameter list that may still contain unfilled named placeholder objects
  * (the read instant, and any user `param()` refs on a prepared query).
  */
-export type CompiledTemplate = Readonly<{
+type RenderedTemplate = Readonly<{
   sql: string;
   params: readonly unknown[];
 }>;
 
+/**
+ * A {@link RenderedTemplate} plus the physical-to-logical map of its long
+ * generated column names: rows read through `executeRaw` are re-keyed with
+ * it before any decoder sees them.
+ */
+export type CompiledTemplate = RenderedTemplate &
+  Readonly<{ generatedColumns: GeneratedColumns }>;
+
 /** Compiles a TypeGraph `SqlFragment` to `{ sql, params }` without executing. */
-type CompileSqlFunction = (query: SqlFragment) => CompiledTemplate;
+type CompileSqlFunction = (query: SqlFragment) => RenderedTemplate;
 
 /**
  * The receiver-free slice of a backend used to build a template.
@@ -47,7 +59,7 @@ type CompileSqlFunction = (query: SqlFragment) => CompiledTemplate;
 export type SqlCompilerBackend = Readonly<{ compileSql?: CompileSqlFunction }>;
 
 /** Whether a compiled template carries the reserved read-instant placeholder. */
-function templateHasReadInstant(template: CompiledTemplate): boolean {
+function templateHasReadInstant(template: RenderedTemplate): boolean {
   return template.params.some(
     (parameter) =>
       isSqlPlaceholder(parameter) &&
@@ -139,7 +151,7 @@ export function buildReadInstantTemplate(
   if (args.needsReadInstant && !templateHasReadInstant(template)) {
     return undefined;
   }
-  return template;
+  return { ...template, generatedColumns: generatedColumnsOf(compiled) };
 }
 
 /**

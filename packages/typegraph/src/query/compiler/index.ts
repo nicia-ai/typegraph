@@ -74,8 +74,10 @@ import type { DatabaseExpression } from "../expressions";
 import {
   aliasColumnName,
   aliasCteName,
+  aliasTableName,
   generatedIdentifier,
   rawAliasCte,
+  sealGeneratedIdentifiers,
 } from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import {
@@ -106,7 +108,6 @@ import {
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
   LATE_MAT_TOPK_CTE_ALIAS,
-  lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
 } from "./emitter";
 import {
@@ -286,6 +287,19 @@ export function compileQuery(
   graphId: string,
   options: CompileQueryOptions | SqlDialect = "sqlite",
 ): CompiledSelectSql {
+  return sealGeneratedIdentifiers(compileQueryUnsealed(ast, graphId, options));
+}
+
+/**
+ * {@link compileQuery} without allocating physical names for long generated
+ * identifiers: for a query the compiler embeds in a larger statement, which
+ * is sealed once as a whole so every reference across the parts agrees.
+ */
+export function compileQueryUnsealed(
+  ast: QueryAst,
+  graphId: string,
+  options: CompileQueryOptions | SqlDialect = "sqlite",
+): CompiledSelectSql {
   return compileQueryInExpressionContext(ast, graphId, options, {
     aliasScopes: new Map(),
     depth: 0,
@@ -371,7 +385,7 @@ function compileQueryInExpressionContext(
       {}
     : { identityRegisteredKinds: options_.identityRegisteredKinds }),
     compileQuery: (subAst, subGraphId) =>
-      compileQuery(
+      compileQueryUnsealed(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
         subGraphId,
         propagateOptions(options_),
@@ -534,7 +548,7 @@ export function compileSetOperation(
   // the pgvector GUC wrapper.
   const annIndexTypes = new Set<string>();
   const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
-    const compiled = compileQuery(ast, gid, propagateOptions(options_));
+    const compiled = compileQueryUnsealed(ast, gid, propagateOptions(options_));
     for (const indexType of annIndexScanTypes(compiled) ?? []) {
       annIndexTypes.add(indexType);
     }
@@ -550,7 +564,7 @@ export function compileSetOperation(
   if (annIndexTypes.size > 0) {
     markAnnIndexScan(combined, [...annIndexTypes]);
   }
-  return asCompiledSelectSql(combined);
+  return sealGeneratedIdentifiers(asCompiledSelectSql(combined));
 }
 
 /**
@@ -1334,7 +1348,7 @@ function buildLateMaterializedOuterFromClause(
 ): SqlFragment {
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
   const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
-    const physical = sql.raw(lateMaterializedPhysicalAlias(alias));
+    const physical = sql.raw(aliasTableName(alias));
     return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(aliasColumnName(alias, "kind"))} AND ${physical}.id = ${topk}.${sql.raw(aliasColumnName(alias, "id"))}`;
   });
   return joins.length === 0 ?

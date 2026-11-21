@@ -11,7 +11,12 @@ import {
   extractVectorSimilarityPredicates,
 } from "../compiler/predicates";
 import { getDialect } from "../dialect";
-import { aliasColumnName } from "../generated-identifier";
+import {
+  aliasColumnName,
+  bindGeneratedIdentifiers,
+  generatedColumnsOf,
+  restoreGeneratedColumns,
+} from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 
@@ -68,15 +73,21 @@ export async function executeSchemaCheckedRead(
   // An envelope name without that separator cannot collide with data columns.
   const marker = "typegraphschemaversion";
   const dialect = getDialect(backend.dialect);
+  const compiled = input.compile();
+  // The envelope orders by the compiled statement's own columns, so it
+  // spells them with the physical names that statement allocated.
+  const standardOrderBy = buildStandardOrderBy({
+    ast,
+    dialect,
+    collapsedTraversalCteAlias: "checked_rows",
+  });
   const orderBy =
     input.resultOrderBy ??
-    buildStandardOrderBy({
-      ast,
-      dialect,
-      collapsedTraversalCteAlias: "checked_rows",
-    });
+    (standardOrderBy === undefined ? undefined : (
+      bindGeneratedIdentifiers(standardOrderBy, compiled)
+    ));
   const query = asCompiledSelectSql(sql`
-    WITH checked_rows AS (${input.compile()}),
+    WITH checked_rows AS (${compiled}),
     checked_version AS (
       SELECT (SELECT version FROM ${sql.identifier(table)}
         WHERE graph_id = ${graphId} AND is_active = ${dialect.booleanLiteral(true)}) AS version
@@ -85,7 +96,10 @@ export async function executeSchemaCheckedRead(
     FROM checked_version LEFT JOIN checked_rows ON 1 = 1
     ${orderBy ?? sql.raw("")}
   `);
-  const rows = await backend.execute<Record<string, unknown>>(query);
+  const rows = restoreGeneratedColumns(
+    await backend.execute<Record<string, unknown>>(query),
+    generatedColumnsOf(compiled),
+  );
   const rawVersion = rows[0]?.[marker];
   const actual =
     rawVersion === null || rawVersion === undefined ?

@@ -22,6 +22,11 @@ import {
   compileSetOperation,
 } from "../compiler/index";
 import { mapResults } from "../execution";
+import {
+  generatedColumnName,
+  generatedColumnsOf,
+  restoreGeneratedColumns,
+} from "../generated-identifier";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
@@ -321,10 +326,10 @@ export class UnionableQuery<G extends GraphDef, R> {
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
-    return executeOnBackend(
-      backend,
-      recordedAsOfForComposableQuery(ast),
-      template !== undefined && executeRaw !== undefined ?
+    if (template !== undefined && executeRaw !== undefined) {
+      const rows = await executeOnBackend(
+        backend,
+        recordedAsOfForComposableQuery(ast),
         executeRaw<Record<string, unknown>>(
           template.sql,
           fillTemplateParams(
@@ -332,16 +337,23 @@ export class UnionableQuery<G extends GraphDef, R> {
             {},
             this.#config.dialect ?? "sqlite",
           ),
-        )
-      : backend.execute<Record<string, unknown>>(
-          compileSetOperation(
-            ast,
-            this.#config.graphId,
-            this.#compileOptions(),
-          ),
         ),
+        surface,
+      );
+      return restoreGeneratedColumns(rows, template.generatedColumns);
+    }
+    const compiled = compileSetOperation(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    const rows = await executeOnBackend(
+      backend,
+      recordedAsOfForComposableQuery(ast),
+      backend.execute<Record<string, unknown>>(compiled),
       surface,
     );
+    return restoreGeneratedColumns(rows, generatedColumnsOf(compiled));
   }
 
   /** Applies the select-function transformation, if one is attached. */
@@ -424,21 +436,26 @@ export class UnionableQuery<G extends GraphDef, R> {
         "Query contains param() references. Bind prepared queries before batching.",
       );
     }
+    const query = compileSetOperation(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    const generatedColumns = generatedColumnsOf(query);
     return {
-      query: compileSetOperation(
-        ast,
-        this.#config.graphId,
-        this.#compileOptions(),
-      ),
+      query,
       provenance: {
         graphId: this.#config.graphId,
         executionTarget: backendDerivationRoot(
           requireDefined(this.#config.backend),
         ),
       },
-      outputNames: projectionOutputNames(ast),
+      outputNames: projectionOutputNames(ast).map((name) =>
+        generatedColumnName(query, name),
+      ),
       orderBy: [],
-      mapRows: (rows) => this.#mapRows(rows),
+      mapRows: (rows) =>
+        this.#mapRows(restoreGeneratedColumns(rows, generatedColumns)),
     };
   }
 

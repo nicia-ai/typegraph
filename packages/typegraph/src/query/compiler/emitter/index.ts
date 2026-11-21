@@ -37,7 +37,6 @@ export {
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
   LATE_MAT_TOPK_CTE_ALIAS,
-  lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
   type StandardEmitterPredicateIndex,
 } from "./standard-builders";

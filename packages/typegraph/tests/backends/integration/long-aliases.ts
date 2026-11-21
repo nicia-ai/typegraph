@@ -23,6 +23,7 @@ import {
   partOf,
   ValidationError,
 } from "../../../src";
+import { shortenedIdentifier } from "../../../src/query/generated-identifier";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -38,6 +39,44 @@ const SIX_TWO_BYTE_CHARACTERS = "éééééé";
 const SEVEN_TWO_BYTE_CHARACTERS = "ééééééé";
 const BYTE_LIMIT_ALIAS = `a${"b".repeat(49)}`;
 
+/**
+ * The tail that makes `prefix + tail` spell exactly the shortened form of
+ * `longName`: a name that fits in 63 bytes, is valid on its own, and would be
+ * emitted verbatim. Shortening must never hand a longer name the physical
+ * name a fitting one already owns.
+ */
+function shortenedNameTail(prefix: string, longName: string): string {
+  const shortened = shortenedIdentifier(longName);
+  if (shortened === longName || !shortened.startsWith(prefix))
+    throw new Error(`"${longName}" does not shorten under "${prefix}"`);
+  return shortened.slice(prefix.length);
+}
+
+/** A node alias short enough that its long field names shorten under it. */
+const CLASH_ALIAS = "clash_root";
+/**
+ * A field whose `<alias>_<field>` name exceeds 63 bytes. Like the aliases,
+ * runtime-computed field names are typed as a literal label.
+ */
+const CLASH_LONG_FIELD = `long_field_${"x".repeat(60)}` as "clashLongField";
+/** A field whose `<alias>_<field>` name is the shortened form of the long one. */
+const CLASH_SHORT_FIELD = shortenedNameTail(
+  `${CLASH_ALIAS}_`,
+  `${CLASH_ALIAS}_${CLASH_LONG_FIELD}`,
+) as "clashShortField";
+/** A 63-character alias whose `cte_<alias>` name must be shortened. */
+const CLASH_LONG_ALIAS = `a${"b".repeat(61)}c` as "clashLongAlias";
+/** A fitting alias whose `cte_<alias>` is the shortened `cte_<long alias>`. */
+const CTE_SHORT_ALIAS = shortenedNameTail(
+  "cte_",
+  `cte_${CLASH_LONG_ALIAS}`,
+) as "cteShortAlias";
+/** A fitting alias whose `lm_<alias>` is the shortened `lm_<long alias>`. */
+const TABLE_SHORT_ALIAS = shortenedNameTail(
+  "lm_",
+  `lm_${CLASH_LONG_ALIAS}`,
+) as "tableShortAlias";
+
 const LongAliasItem = defineNode("LongAliasItem", {
   schema: z.object({
     name: z.string(),
@@ -48,6 +87,8 @@ const LongAliasItem = defineNode("LongAliasItem", {
     [MULTI_BYTE_FIELD]: z.string(),
     [SIX_TWO_BYTE_CHARACTERS]: z.string().optional(),
     [SEVEN_TWO_BYTE_CHARACTERS]: z.string().optional(),
+    [CLASH_LONG_FIELD]: z.string().optional(),
+    [CLASH_SHORT_FIELD]: z.string().optional(),
   }),
 });
 
@@ -92,6 +133,16 @@ async function createLongAliasStore(context: IntegrationTestContext) {
 }
 
 /**
+ * A store whose traversal `.select()` queries take the selective path, so an
+ * ordered, limited projection reaches late materialization.
+ */
+async function createLateMaterializingStore(context: IntegrationTestContext) {
+  return context.createStore(longAliasGraph, {
+    queryDefaults: { traversalExpansion: "none" },
+  });
+}
+
+/**
  * An alias of exactly `length` characters ending in `last`, so aliases of
  * one length differ only in their last character.
  *
@@ -129,6 +180,8 @@ async function seedItems(store: LongAliasStore): Promise<SeededItems> {
     [MULTI_BYTE_FIELD]: "première",
     [SIX_TWO_BYTE_CHARACTERS]: "six",
     [SEVEN_TWO_BYTE_CHARACTERS]: "seven",
+    [CLASH_LONG_FIELD]: "long-field",
+    [CLASH_SHORT_FIELD]: "short-field",
   });
   const second = await store.nodes.LongAliasItem.create({
     name: "second",
@@ -341,6 +394,123 @@ export function registerLongAliasIntegrationTests(
         ]);
       });
 
+      it("runs a recursive traversal with default outputs inside batchOnce()", async () => {
+        const depthKey = `${otherAlias}_depth` as const;
+        const pathKey = `${otherAlias}_path` as const;
+        const query = store
+          .query()
+          .from("LongAliasItem", alias)
+          .whereNode(alias, (item) => item.name.eq("first"))
+          .traverse("longAliasLink", edgeAlias)
+          .recursive({ depth: true, path: true })
+          .to("LongAliasItem", otherAlias)
+          .select((ctx) => ({
+            to: requireDefined(ctx[otherAlias]).name,
+            depth: ctx[depthKey],
+            path: ctx[pathKey],
+          }));
+
+        const [rows] = await store.batchOnce(() => [query] as const);
+
+        expect(
+          rows.toSorted((left, right) => left.to.localeCompare(right.to)),
+        ).toEqual([
+          { to: "second", depth: 1, path: [items.first.id, items.second.id] },
+          {
+            to: "third",
+            depth: 2,
+            path: [items.first.id, items.second.id, items.third.id],
+          },
+        ]);
+      });
+
+      it("batches a set operation and a cursor page in batchOnce()", async () => {
+        const odd = store
+          .query()
+          .from("LongAliasItem", alias)
+          .whereNode(alias, (item) => item.category.eq("odd"))
+          .select((ctx) => requireDefined(ctx[alias]));
+        const second = store
+          .query()
+          .from("LongAliasItem", alias)
+          .whereNode(alias, (item) => item.name.eq("second"))
+          .select((ctx) => requireDefined(ctx[alias]));
+        const page = store
+          .query()
+          .from("LongAliasItem", alias)
+          .orderBy(alias, "rank", "desc")
+          .select((ctx) => requireDefined(ctx[alias]))
+          .page({ first: 2 });
+
+        const [unioned, firstPage] = await store.batchOnce(
+          () => [odd.union(second), page] as const,
+        );
+
+        expect({
+          unioned: unioned.map((item) => item.name).toSorted(),
+          page: firstPage.data.map((item) => item.name),
+        }).toEqual({
+          unioned: ["first", "second", "third"],
+          page: ["third", "second"],
+        });
+      });
+
+      it("orders whole nodes inside withCheckedReads()", async () => {
+        const activeSchema = await context
+          .getBackend()
+          .getActiveSchema(store.graphId);
+        const version = activeSchema?.version;
+
+        const names = await store.withCheckedReads(version, async (reads) => {
+          const rows = await reads
+            .query()
+            .from("LongAliasItem", alias)
+            .traverse("longAliasLink", edgeAlias)
+            .to("LongAliasItem", otherAlias)
+            .select((ctx) => ({
+              from: requireDefined(ctx[alias]),
+              to: requireDefined(ctx[otherAlias]),
+            }))
+            .orderBy(otherAlias, "rank", "desc")
+            .execute();
+          return rows.map((row) => [row.from.name, row.to.name]);
+        });
+
+        expect(names).toEqual([
+          ["second", "third"],
+          ["first", "second"],
+        ]);
+      });
+
+      it("late-materializes fields of two aliases differing only in the last character", async () => {
+        const lateStore = await createLateMaterializingStore(context);
+        await seedItems(lateStore);
+
+        const rows = await lateStore
+          .query()
+          .from("LongAliasItem", alias)
+          .traverse("longAliasLink", edgeAlias, { expand: "none" })
+          .to("LongAliasItem", otherAlias)
+          .select((ctx) => ({
+            from: requireDefined(ctx[alias]).name,
+            fromCategory: requireDefined(ctx[alias]).category,
+            to: requireDefined(ctx[otherAlias]).name,
+            toSuffix: requireDefined(ctx[otherAlias]).nameSuffix,
+          }))
+          .orderBy(otherAlias, "rank", "desc")
+          .limit(1)
+          .execute();
+
+        expect(rows).toEqual([
+          {
+            from: "second",
+            fromCategory: "even",
+            to: "third",
+            toSuffix: "third-suffix",
+          },
+        ]);
+      });
+
       it("navigates composition through the derived edge alias", async () => {
         const derivedEdgeAlias = `${otherAlias}_edge` as const;
         const rows = await store
@@ -522,6 +692,81 @@ export function registerLongAliasIntegrationTests(
         .execute();
 
       expect(rows).toEqual([{ six: "six", seven: "seven" }]);
+    });
+
+    describe("a fitting name equal to the shortened form of a longer one", () => {
+      it("keeps two fields distinct in one select list", async () => {
+        expect(`${CLASH_ALIAS}_${CLASH_SHORT_FIELD}`).toBe(
+          shortenedIdentifier(`${CLASH_ALIAS}_${CLASH_LONG_FIELD}`),
+        );
+
+        const rows = await store
+          .query()
+          .from("LongAliasItem", CLASH_ALIAS)
+          .whereNode(CLASH_ALIAS, (item) => item.name.eq("first"))
+          .select((ctx) => {
+            const item = requireDefined(ctx[CLASH_ALIAS]);
+            return {
+              long: item[CLASH_LONG_FIELD],
+              short: item[CLASH_SHORT_FIELD],
+            };
+          })
+          .execute();
+
+        expect(rows).toEqual([{ long: "long-field", short: "short-field" }]);
+      });
+
+      it("keeps two traversal CTE names distinct in one statement", async () => {
+        expect(`cte_${CTE_SHORT_ALIAS}`).toBe(
+          shortenedIdentifier(`cte_${CLASH_LONG_ALIAS}`),
+        );
+
+        const rows = await store
+          .query()
+          .from("LongAliasItem", CTE_SHORT_ALIAS)
+          .whereNode(CTE_SHORT_ALIAS, (item) => item.name.eq("first"))
+          .traverse("longAliasLink", "link")
+          .to("LongAliasItem", CLASH_LONG_ALIAS)
+          .select((ctx) => ({
+            from: requireDefined(ctx[CTE_SHORT_ALIAS]).name,
+            to: requireDefined(ctx[CLASH_LONG_ALIAS]).name,
+          }))
+          .execute();
+
+        expect(rows).toEqual([{ from: "first", to: "second" }]);
+      });
+
+      it("keeps two late-materialized table aliases distinct", async () => {
+        expect(`lm_${TABLE_SHORT_ALIAS}`).toBe(
+          shortenedIdentifier(`lm_${CLASH_LONG_ALIAS}`),
+        );
+        const lateStore = await createLateMaterializingStore(context);
+        await seedItems(lateStore);
+
+        const rows = await lateStore
+          .query()
+          .from("LongAliasItem", TABLE_SHORT_ALIAS)
+          .traverse("longAliasLink", "link", { expand: "none" })
+          .to("LongAliasItem", CLASH_LONG_ALIAS)
+          .select((ctx) => ({
+            from: requireDefined(ctx[TABLE_SHORT_ALIAS]).name,
+            fromCategory: requireDefined(ctx[TABLE_SHORT_ALIAS]).category,
+            to: requireDefined(ctx[CLASH_LONG_ALIAS]).name,
+            toSuffix: requireDefined(ctx[CLASH_LONG_ALIAS]).nameSuffix,
+          }))
+          .orderBy(CLASH_LONG_ALIAS, "rank", "desc")
+          .limit(1)
+          .execute();
+
+        expect(rows).toEqual([
+          {
+            from: "second",
+            fromCategory: "even",
+            to: "third",
+            toSuffix: "third-suffix",
+          },
+        ]);
+      });
     });
 
     it("refuses a multi-byte alias with the same error on every backend", () => {

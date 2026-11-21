@@ -56,7 +56,14 @@ import {
   nullToUndefined,
   transformPathColumns,
 } from "../execution";
-import { aliasColumnName, aliasCteName } from "../generated-identifier";
+import {
+  aliasColumnName,
+  aliasCteName,
+  generatedColumnName,
+  generatedColumnsOf,
+  generatedIdentifier,
+  restoreGeneratedColumns,
+} from "../generated-identifier";
 import { parseJsonPointer } from "../json-pointer";
 import { resolveNullOrdering } from "../order";
 import { type CompiledSelectSql } from "../sql-intent";
@@ -583,19 +590,36 @@ export class ExecutableQuery<
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#templateFor(ast, slot);
-    const rawRows = await this.#executeOnBackend(
-      backend,
-      template !== undefined && executeRaw !== undefined ?
+    if (template !== undefined && executeRaw !== undefined) {
+      const rawRows = await this.#executeOnBackend(
+        backend,
         executeRaw<Record<string, unknown>>(
           template.sql,
           fillTemplateParams(template.params, {}, this.#dialect()),
-        )
-      : backend.execute<Record<string, unknown>>(
-          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
         ),
+        surface,
+      );
+      return transformPathColumns(
+        restoreGeneratedColumns(rawRows, template.generatedColumns),
+        this.#state,
+        this.#dialect(),
+      );
+    }
+    const compiled = compileQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    const rawRows = await this.#executeOnBackend(
+      backend,
+      backend.execute<Record<string, unknown>>(compiled),
       surface,
     );
-    return transformPathColumns(rawRows, this.#state, this.#dialect());
+    return transformPathColumns(
+      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
+      this.#state,
+      this.#dialect(),
+    );
   }
 
   /**
@@ -954,37 +978,49 @@ export class ExecutableQuery<
             ],
           },
         };
+    // The recursive compiler emits depth and path columns under their
+    // generated names, the same names result decoding reads them by.
     const recursiveOutputNames = batchAst.traversals.flatMap((traversal) => {
       const variableLength = traversal.variableLength;
       return variableLength === undefined ?
           []
-        : [variableLength.depthAlias, variableLength.pathAlias].filter(
-            (name): name is string => name !== undefined,
-          );
+        : [variableLength.depthAlias, variableLength.pathAlias]
+            .filter((name): name is string => name !== undefined)
+            .map((name) => generatedIdentifier(name));
     });
-    return {
-      query: compileQuery(
-        batchAst,
-        this.#config.graphId,
-        this.#compileOptions(),
+    const query = compileQuery(
+      batchAst,
+      this.#config.graphId,
+      this.#compileOptions(),
+    );
+    const generatedColumns = generatedColumnsOf(query);
+    // The batch wrapper selects these columns by name, so it gets the
+    // physical names the sealed statement allocated; result decoding reads
+    // the rows back under the logical names.
+    const outputNames = [
+      ...ast.projection.fields.map((field) => field.outputName),
+      ...recursiveOutputNames.filter(
+        (name) =>
+          !ast.projection.fields.some((field) => field.outputName === name),
       ),
+    ].map((name) => generatedColumnName(query, name));
+    return {
+      query,
       provenance: {
         graphId: this.#config.graphId,
         executionTarget: backendDerivationRoot(
           requireDefined(this.#config.backend),
         ),
       },
-      outputNames: [
-        ...ast.projection.fields.map((field) => field.outputName),
-        ...recursiveOutputNames.filter(
-          (name) =>
-            !ast.projection.fields.some((field) => field.outputName === name),
-        ),
-      ],
+      outputNames,
       orderBy: batchOrderBy,
       mapRows: (rows) =>
         mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
-          transformPathColumns(rows, this.#state, this.#dialect()),
+          transformPathColumns(
+            restoreGeneratedColumns(rows, generatedColumns),
+            this.#state,
+            this.#dialect(),
+          ),
           this.#state.startAlias,
           this.#state.traversals,
           this.#selectFn,
@@ -1927,6 +1963,10 @@ export class ExecutableQuery<
     const rawRows =
       await this.#requireBackend().execute<Record<string, unknown>>(compiled);
     const dialect = this.#config.dialect ?? "sqlite";
-    return transformPathColumns(rawRows, this.#state, dialect);
+    return transformPathColumns(
+      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
+      this.#state,
+      dialect,
+    );
   }
 }

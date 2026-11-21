@@ -30,7 +30,10 @@ import {
 } from "../../errors";
 import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
-import { aliasColumnName } from "../../query/generated-identifier";
+import {
+  aliasColumnName,
+  generatedColumnName,
+} from "../../query/generated-identifier";
 import { type Predicate } from "../../query/predicates";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import {
@@ -574,7 +577,7 @@ export function createNodeCollection<
         kind,
         params.patch,
         candidateIds,
-        candidateIdColumn,
+        generatedColumnName(candidateIds, candidateIdColumn),
         backend,
         { operation: "compareAndSet", expected: params.expected },
       );
@@ -653,7 +656,7 @@ export function createNodeCollection<
           candidateQuery.compileNodeCandidateIds(readInstant);
         compiledBranches.push(
           asCompiledSelectSql(
-            sql`SELECT ${sql.identifier(selection.idColumn)} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+            sql`SELECT ${sql.identifier(generatedColumnName(compiledCandidateQuery, selection.idColumn))} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
           ),
         );
       }
@@ -722,7 +725,7 @@ export function createNodeCollection<
         branch: CompiledSelectSql,
         index: number,
       ): SqlFragment => sql`
-        SELECT ${sql.identifier(candidateIdColumn)}
+        SELECT ${sql.identifier(generatedColumnName(branch, candidateIdColumn))}
         FROM (${branch}) AS ${sql.identifier(`update_branch_${index}`)}
       `;
       let combinedCandidates = projectCandidateId(

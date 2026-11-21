@@ -876,7 +876,7 @@ describe("Query Compilation to SQL", () => {
   it("bounds CTE column names to 63 bytes and keeps long alias/field pairs distinct", () => {
     // Two 63-char aliases sharing a long prefix: the length-prefixed encoding
     // `__tg_63:<alias>:4:name` overflows PostgreSQL's 63-byte identifier limit
-    // and both encodings collide once truncated. boundPgIdentifier must keep
+    // and both encodings collide once truncated. The generated-identifier owner must keep
     // them distinct (and within the limit) in the SAME compiled SQL.
     const aliasOne =
       "traversal_alias_long_enough_to_overflow_pg_identifier_limit_one";

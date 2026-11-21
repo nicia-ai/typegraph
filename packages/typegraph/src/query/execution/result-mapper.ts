@@ -26,7 +26,11 @@ import type {
 } from "../builder/types";
 import { recursivePathTokenShape } from "../compiler/recursive-path-token";
 import { type SqlDialect } from "../dialect/types";
-import { aliasColumnName, generatedIdentifier } from "../generated-identifier";
+import {
+  aliasColumnName,
+  displayGeneratedIdentifier,
+  generatedIdentifier,
+} from "../generated-identifier";
 
 /**
  * A variable-length traversal's path column, plus whether its tokens carry the
@@ -245,23 +249,23 @@ export function buildSelectableNode(
   const version = row[aliasColumnName(alias, "version")] as number;
   const validFrom = normalizeRowTimestamp(
     row[aliasColumnName(alias, "valid_from")],
-    aliasColumnName(alias, "valid_from"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "valid_from")),
   );
   const validTo = normalizeRowTimestamp(
     row[aliasColumnName(alias, "valid_to")],
-    aliasColumnName(alias, "valid_to"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "valid_to")),
   );
   const createdAt = normalizeRequiredRowTimestamp(
     row[aliasColumnName(alias, "created_at")],
-    aliasColumnName(alias, "created_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "created_at")),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
     row[aliasColumnName(alias, "updated_at")],
-    aliasColumnName(alias, "updated_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "updated_at")),
   );
   const deletedAt = normalizeRowTimestamp(
     row[aliasColumnName(alias, "deleted_at")],
-    aliasColumnName(alias, "deleted_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "deleted_at")),
   );
 
   const result: Record<string, unknown> = {
@@ -329,23 +333,23 @@ function buildSelectableEdge(
   // Normalize null → undefined for optional fields
   const validFrom = normalizeRowTimestamp(
     row[aliasColumnName(alias, "valid_from")],
-    aliasColumnName(alias, "valid_from"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "valid_from")),
   );
   const validTo = normalizeRowTimestamp(
     row[aliasColumnName(alias, "valid_to")],
-    aliasColumnName(alias, "valid_to"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "valid_to")),
   );
   const createdAt = normalizeRequiredRowTimestamp(
     row[aliasColumnName(alias, "created_at")],
-    aliasColumnName(alias, "created_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "created_at")),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
     row[aliasColumnName(alias, "updated_at")],
-    aliasColumnName(alias, "updated_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "updated_at")),
   );
   const deletedAt = normalizeRowTimestamp(
     row[aliasColumnName(alias, "deleted_at")],
-    aliasColumnName(alias, "deleted_at"),
+    displayGeneratedIdentifier(aliasColumnName(alias, "deleted_at")),
   );
 
   const result: Record<string, unknown> = {

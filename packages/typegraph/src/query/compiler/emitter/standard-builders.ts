@@ -1,5 +1,4 @@
 import { UnsupportedPredicateError } from "../../../errors";
-import { boundPgIdentifier } from "../../../utils/identifier";
 import { requireDefined } from "../../../utils/presence";
 import {
   type AggregateExpr,
@@ -22,6 +21,8 @@ import { type DatabaseExpression } from "../../expressions";
 import {
   aliasColumnName,
   aliasCteName,
+  aliasTableName,
+  generatedIdentifier,
   rawAliasColumn,
   rawAliasCte,
 } from "../../generated-identifier";
@@ -98,14 +99,16 @@ const SCOPED_RELEVANCE_NODES_ALIAS = "scoped_relevance_nodes";
  * of what characters alias/field contain.
  *
  * The encoding is unbounded, but PostgreSQL truncates identifiers at 63 bytes,
- * so `boundPgIdentifier` hash-guards long names: two pairs whose encodings share
- * a >63-byte prefix would otherwise collapse onto the same physical column.
- * Short names are returned verbatim, preserving the readable `__tg_...` form.
+ * so the name goes through the generated-identifier owner: two pairs whose
+ * encodings share a >63-byte prefix get distinct physical columns in the
+ * statement. Short names are returned verbatim, preserving the readable
+ * `__tg_...` form.
  */
 function selectivePropsCteColumnName(field: SelectiveField): string {
   const { alias, field: fieldName } = field;
-  const encoded = `__tg_${alias.length}:${alias}:${fieldName.length}:${fieldName}`;
-  return boundPgIdentifier(encoded, `${alias}\0${fieldName}`);
+  return generatedIdentifier(
+    `__tg_${alias.length}:${alias}:${fieldName.length}:${fieldName}`,
+  );
 }
 
 function buildScopedNodeIdsSubquery(nodeAlias: string): SqlFragment {
@@ -954,11 +957,6 @@ export function buildStandardOrderBy(
 
 export const LATE_MAT_TOPK_CTE_ALIAS = "cte_lm_topk";
 const LATE_MAT_SORT_KEY_PREFIX = "__lm_sk";
-const LATE_MAT_PHYSICAL_ALIAS_PREFIX = "lm_";
-
-export function lateMaterializedPhysicalAlias(alias: string): string {
-  return `${LATE_MAT_PHYSICAL_ALIAS_PREFIX}${alias}`;
-}
 
 /** Node aliases in the query: the start alias plus each traversal's node. */
 function lateMaterializedNodeAliases(ast: QueryAst): readonly string[] {
@@ -1068,7 +1066,7 @@ export function buildLateMaterializedOuterProjection(
   dialect: DialectAdapter,
 ): SqlFragment {
   const columns = (ast.selectiveFields ?? []).map((field) => {
-    const physicalAlias = lateMaterializedPhysicalAlias(field.alias);
+    const physicalAlias = aliasTableName(field.alias);
     if (field.isSystemField) {
       const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
       return sql`${compileColumnReference(physicalAlias, dbColumn)} AS ${quoteIdentifier(field.outputName)}`;

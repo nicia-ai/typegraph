@@ -69,3 +69,21 @@ export function shortHash(input: string): string {
   const lo = (h1 >>> 0).toString(16).padStart(8, "0");
   return `${hi}${lo}`.slice(0, 8);
 }
+
+const FNV1A_64_OFFSET_BASIS = 0xcb_f2_9c_e4_84_22_23_25n;
+const FNV1A_64_PRIME = 0x1_00_00_00_01_b3n;
+const UTF8_ENCODER = new TextEncoder();
+
+/**
+ * 64-bit FNV-1a hash of `input`'s UTF-8 bytes, base-36 encoded (at most 13
+ * characters). Wide enough that two distinct generated SQL identifiers
+ * sharing a hash is not a routine event; callers that need uniqueness still
+ * detect and resolve a shared hash rather than relying on the width.
+ */
+export function fnv1a64Base36(input: string): string {
+  let hash = FNV1A_64_OFFSET_BASIS;
+  for (const byte of UTF8_ENCODER.encode(input)) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * FNV1A_64_PRIME);
+  }
+  return hash.toString(36);
+}
