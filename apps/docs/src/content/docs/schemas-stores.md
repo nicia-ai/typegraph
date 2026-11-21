@@ -2294,27 +2294,16 @@ When `store.transaction()` resolves, the transaction committed. A failed stateme
 catches does not change that guarantee. On PostgreSQL, a statement that fails inside a transaction
 (a duplicate id, a constraint violation, a read or a `tx.sql` statement the database refuses)
 aborts the whole transaction whether or not the callback catches the error, and the database
-answers the closing `COMMIT` with a rollback. TypeGraph checks the session before it commits, so
-such a transaction rejects with a `TransactionRolledBackError` whose `cause` is the first engine
-error that aborted it; it never resolves as if it had committed. A `TransactionRolledBackError`
-means the transaction did not commit: nothing the callback wrote was saved. To carry on after an
-expected failure, run the failing statement inside a savepoint (for example a nested
-`tx.sql.transaction(...)`) that rolls back past it: the transaction is then healthy and commits.
-SQLite keeps a transaction usable after a failed statement, so on SQLite the same callback commits
-what it wrote.
-
-Not every rejection means nothing was saved. The `onOperationEnd` and `onBulkOperationEnd` hooks
-run after the `COMMIT` succeeded, so an error one of them throws rejects `store.transaction()`
-with that error although every write of the transaction is saved. Keep those hooks from throwing,
-or treat an error that comes from your own hook as a committed transaction.
-
-Do not end the transaction yourself through `tx.sql` (`ROLLBACK`, `COMMIT`). After a failed
-statement, TypeGraph's check asks the session whether it is still inside a healthy transaction
-block, so a callback that issues `ROLLBACK` after a failure and returns still rejects with
-`TransactionRolledBackError`. The check cannot tell the transaction TypeGraph opened from one the
-callback opened in its place (`ROLLBACK` followed by `BEGIN`), and it only runs after a failed
-statement, so on PostgreSQL a callback that ends the transaction with no statement failing first
-resolves although nothing written before its `ROLLBACK` was saved.
+answers the closing `COMMIT` with a rollback. Right after it opens the transaction, TypeGraph sets
+a marker on the session that lives exactly as long as that transaction (a transaction-local
+setting), and right before its `COMMIT` it reads the marker back. An aborted transaction refuses
+that read, so such a transaction rejects with a `TransactionRolledBackError` whose `cause` is the
+first error the database reported in it; it never resolves as if it had committed. A
+`TransactionRolledBackError` means the transaction did not commit: nothing the callback wrote was
+saved. To carry on after an expected failure, run the failing statement inside a savepoint (for
+example a nested `tx.sql.transaction(...)`) that rolls back past it: the transaction is then
+healthy and commits. SQLite keeps a transaction usable after a failed statement, so on SQLite the
+same callback commits what it wrote.
 
 ```typescript
 try {
@@ -2326,6 +2315,31 @@ try {
   // PostgreSQL: TransactionRolledBackError, cause = the duplicate-key error. Alice was not saved.
 }
 ```
+
+Transaction control through `tx.sql` is not supported inside `store.transaction()`: do not send
+`COMMIT`, `ROLLBACK` or `BEGIN` there (savepoints are fine). On PostgreSQL, TypeGraph detects it:
+a transaction ended that way no longer carries TypeGraph's marker, so TypeGraph does not send its
+own `COMMIT`, which would otherwise close whatever the session is doing now, and rejects with a
+`TransactionOutcomeUnknownError` instead. The outcome is unknown because TypeGraph cannot tell what
+was saved: a native `COMMIT` saved the writes before it, a native `ROLLBACK` discarded them, and a
+statement sent after either ran outside the transaction (on node-postgres and PGlite, statements
+after a native `BEGIN` are rolled back with TypeGraph's own transaction). This error is never
+retried, even under `retry: { attempts }` and even when a serialization failure was caught
+earlier in the callback, because re-running the callback could repeat writes that are already
+committed; check what was saved before running it again. Resetting the marker setting (`RESET
+ALL`, for instance) is reported the same way. On postgres-js, a raw `ROLLBACK TO SAVEPOINT`
+through `tx.sql` recovers the session but not the driver, which rolls back any transaction in
+which a statement failed outside its own savepoint scopes; that transaction rejects with
+`TransactionRolledBackError`. Use `tx.sql.transaction(...)` for savepoints on postgres-js. On
+SQLite, TypeGraph has only the result of its own `COMMIT` to go on: a `COMMIT` after a native
+`COMMIT` or `ROLLBACK` fails with the driver's error, but a transaction the callback opened in
+place of TypeGraph's is not detected.
+
+Not every rejection means nothing was saved. The `onOperationEnd` and `onBulkOperationEnd` hooks
+run after the `COMMIT` succeeded, so an error one of them throws rejects `store.transaction()`
+with that error although every write of the transaction is saved. That rejection is not a
+rollback. Keep those hooks from throwing, or treat an error that comes from your own hook as a
+committed transaction.
 
 #### Read-only transactions
 
@@ -2679,8 +2693,10 @@ driver error as `cause`) instead of the raw error, and `details.attempts` is
 Pass `retry: { attempts }` to have TypeGraph re-run the callback itself, up to
 `attempts` times total, whenever a conflict is detected. A conflict the callback
 catches still rolled the transaction back, so it is detected too: the attempt
-rejects with `TransactionRolledBackError` carrying the conflict as its `cause`,
-and is retried the same way:
+rejects with `TransactionRolledBackError`, and is retried the same way when any
+error the database reported during the attempt was a conflict (`details.conflict`
+is `true`), whichever error is its `cause`. A transaction whose outcome is
+unknown (`TransactionOutcomeUnknownError`) is never retried:
 
 ```typescript
 import { TransactionConflictError } from "@nicia-ai/typegraph";

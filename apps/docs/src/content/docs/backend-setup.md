@@ -1866,7 +1866,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 | Field                                                                      | Meaning                                                                                             |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, and derived `unitOfWork` |
+| `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, derived `unitOfWork`, and the `commitOutcome` evidence a commit is decided on |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
 | `orderedAggregates?` | Ordered scalar and record collection aggregation; absent means unsupported |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
@@ -1982,6 +1982,35 @@ unavailable, the first retried unit `runRetriedUnit` opens is refused with
 unsafe per-unit retries, while interactive backends are unaffected and keep
 retrying (`store.transaction`'s own `retry` option) with no async-context
 support at all.
+
+`execution.commitOutcome?` states what tells the backend that a transaction it
+opened, whose callback returned normally, is still the healthy transaction it
+began, the evidence behind its decision to send `COMMIT`:
+
+- `"session-marker"` (the bundled PostgreSQL backends, every driver): right
+  after `BEGIN` the backend sets a transaction-local setting holding a fresh
+  value, and right before `COMMIT` reads it back on the same session, through
+  the connection's statement queue. Found: the transaction commits. Refused
+  because the transaction is aborted: `TransactionRolledBackError`. Gone:
+  something other than TypeGraph ended the transaction (a `COMMIT`, `ROLLBACK`
+  or `BEGIN` sent through `tx.sql`), and the backend rejects with
+  `TransactionOutcomeUnknownError`, never retried. The marker costs one
+  statement after `BEGIN` and one before `COMMIT`; a Store transaction reads it
+  as soon as the callback returns, before any work of its own, and the read
+  before `COMMIT` is skipped when no statement was sent since. A backend built
+  over a transaction handle opens savepoints rather than transactions and
+  declares no evidence.
+- `"statement-scoped"` (the bundled SQLite backends): a failed statement undoes
+  only itself and leaves the transaction usable, and a transaction the engine
+  ended refuses the closing `COMMIT`, so the `COMMIT`'s own result is the
+  outcome. This evidence cannot tell TypeGraph's transaction from one the
+  callback opened in its place through `tx.sql`.
+
+A custom backend that declares no `commitOutcome` behaves exactly as it always
+has: TypeGraph commits whatever its callback returned on, apart from
+re-checking the session after a failure it caught itself while compensating a
+constraint claim. Declare `"statement-scoped"` only when the engine really
+keeps a transaction usable after any failed statement.
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
