@@ -1,0 +1,1138 @@
+### node.create generated id
+hook start create node:Item <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item <id1> written
+=> ok
+
+### node.create supplied id
+hook start create node:Item item-new
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+
+### node.createFromRecord supplied id
+hook start create node:Item item-new
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+
+### node.create over a tombstone
+hook start create node:Item item-dead
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-dead","{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql COMMIT
+hook end create node:Item item-dead written
+=> ok
+
+### node.create occupied id
+hook start create node:Item item-a
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"dup\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql ROLLBACK
+hook error create node ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+
+### node.create id owned by another kind
+hook start create node:Item other-a
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","other-a","{\"name\":\"cross\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item other-a written
+=> ok
+
+### node.create after a schema bump
+hook start create node:Item item-stale
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-stale","{\"name\":\"stale\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql ROLLBACK
+hook error create node StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+
+### node.create generated id already occupied
+hook start create node:Item item-a
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"collides\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql ROLLBACK
+hook error create node DatabaseOperationError[DATABASE_OPERATION_ERROR]
+=> DatabaseOperationError[DATABASE_OPERATION_ERROR]
+
+### node.create generated id when the statement misses its fence
+hook start create node:Item <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"fence-miss\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item <id1> written
+fault not reached: the next statement misses its schema fence
+=> ok
+
+### node.create of an unregistered kind
+=> KindNotFoundError[KIND_NOT_FOUND]
+
+### node.bulkCreate generated ids
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14) RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### node.bulkCreate generated id already occupied
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14) RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id1>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+
+### node.bulkCreate supplied ids
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14) RETURNING *
+    ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### node.bulkInsert generated ids
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14)
+    ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### node.bulkInsert generated id already occupied
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14)
+    ["<graph1>","Item","item-a","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id1>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+
+### node.bulkInsert supplied ids
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7), ($8, $9, $10, $11, 1, $12, NULL, $13, $14)
+    ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### node.update
+hook start update node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+
+### node.update clearValidTo on a missing row
+hook start update node:Item item-missing
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-missing"]
+sql ROLLBACK
+hook error update node NodeNotFoundError[NODE_NOT_FOUND]
+=> NodeNotFoundError[NODE_NOT_FOUND]
+
+### node.update clearValidTo on a live row
+hook start update node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+
+### node.update after a schema bump
+hook start update node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql ROLLBACK
+hook error update node StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+
+### node.upsertById live row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+hook start update node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+
+### node.upsertById absent row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-new"]
+hook start create node:Item item-new
+sql BEGIN
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $8 AND "typegraph_schema_versions"."version" = $9 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+
+### node.upsertById tombstone
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-dead"]
+hook start update node:Item item-dead
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql COMMIT
+hook end update node:Item item-dead written
+=> ok
+
+### node.upsertById coalesced
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql BEGIN
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql COMMIT
+=> ok
+
+### node.upsertByIdFromRecord live row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+hook start update node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+
+### node.bulkUpsertById with a repeated id
+sql BEGIN
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4, $5)
+    ["<graph1>","Item","item-a","item-new","item-a"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3)
+    ["<graph1>","Item","item-new"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7) RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql COMMIT
+=> ok
+
+### node.bulkUpsertById live and absent ids
+sql BEGIN
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-new"]
+sql SAVEPOINT typegraph_atomic_program
+sql WITH "schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "input_rows" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") AS ( VALUES ( CAST($3 AS text), CAST($4 AS text), CAST($5 AS text), CAST($6 AS jsonb), CAST($7 AS integer), CAST($8 AS timestamp with time zone), CAST(NULL AS timestamp with time zone), CAST($9 AS timestamp with time zone), CAST($10 AS timestamp with time zone) ) ) INSERT INTO "typegraph_nodes" AS "atomic_node_target" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT "input_rows"."graph_id", "input_rows"."kind", "input_rows"."id", "input_rows"."props", "input_rows"."version", "input_rows"."valid_from", "input_rows"."valid_to", "input_rows"."created_at", "input_rows"."updated_at" FROM "input_rows" CROSS JOIN "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO UPDATE SET "props" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN NULL ELSE "excluded"."props" END, "version" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN "atomic_node_target"."version" ELSE "atomic_node_target"."version" + 1 END, "valid_from" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN "atomic_node_target"."valid_from" ELSE "excluded"."valid_from" END, "valid_to" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN "atomic_node_target"."valid_to" ELSE "excluded"."valid_to" END, "deleted_at" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN "atomic_node_target"."deleted_at" ELSE NULL END, "updated_at" = CASE WHEN "atomic_node_target"."deleted_at" IS NULL THEN "atomic_node_target"."updated_at" ELSE "excluded"."updated_at" END RETURNING *
+    ["<graph1>",1,"<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>"]
+sql WITH "schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) UPDATE "typegraph_nodes" SET "props" = CASE "typegraph_nodes"."id" WHEN $3 THEN CAST($4 AS jsonb) ELSE "typegraph_nodes"."props" END, "updated_at" = $5, "version" = "typegraph_nodes"."version" + 1 WHERE "typegraph_nodes"."graph_id" = $6 AND "typegraph_nodes"."kind" = $7 AND "typegraph_nodes"."deleted_at" IS NULL AND "typegraph_nodes"."id" IN ($8) AND ( SELECT COUNT(*) FROM "typegraph_nodes" CROSS JOIN "schema_fence" WHERE "typegraph_nodes"."graph_id" = $9 AND "typegraph_nodes"."kind" = $10 AND "typegraph_nodes"."deleted_at" IS NULL AND (("typegraph_nodes"."id" = $11 AND "typegraph_nodes"."version" = $12)) ) = $13 RETURNING *
+    ["<graph1>",1,"item-a","{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-a",1,1]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, CAST($4 AS jsonb), $5, NULL, NULL, NULL, $6 WHERE NOT EXISTS ( SELECT 1 FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $7 AND "typegraph_schema_versions"."version" = $8 AND "typegraph_schema_versions"."is_active" = TRUE ) OR ( SELECT COUNT(*) FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $9 AND "typegraph_nodes"."deleted_at" IS NULL AND (("typegraph_nodes"."kind" = $10 AND ( ( "typegraph_nodes"."id" = $11 AND "typegraph_nodes"."props" = CAST($12 AS jsonb) AND "typegraph_nodes"."updated_at" = $13 ) ))) ) <> $14
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<graph1>",1,"<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>",1]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, CAST($4 AS jsonb), $5, NULL, NULL, NULL, $6 WHERE NOT EXISTS ( SELECT 1 FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $7 AND "typegraph_schema_versions"."version" = $8 AND "typegraph_schema_versions"."is_active" = TRUE ) OR ( SELECT COUNT(*) FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $9 AND "typegraph_nodes"."deleted_at" IS NULL AND (("typegraph_nodes"."kind" = $10 AND ( ( "typegraph_nodes"."id" = $11 AND "typegraph_nodes"."props" = CAST($12 AS jsonb) AND "typegraph_nodes"."version" = $13 AND "typegraph_nodes"."updated_at" = $14 ) ))) ) <> $15
+    ["<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<graph1>",1,"<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>",1]
+sql SELECT "typegraph_nodes".* FROM "typegraph_nodes" CROSS JOIN "typegraph_schema_versions" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) AND "typegraph_schema_versions"."graph_id" = $4 AND "typegraph_schema_versions"."version" = $5 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>","Item","item-new","<graph1>",1]
+sql SELECT "typegraph_nodes".* FROM "typegraph_nodes" CROSS JOIN "typegraph_schema_versions" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) AND "typegraph_schema_versions"."graph_id" = $4 AND "typegraph_schema_versions"."version" = $5 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>","Item","item-a","<graph1>",1]
+sql RELEASE SAVEPOINT typegraph_atomic_program
+sql COMMIT
+=> ok
+
+### node.bulkReplaceById
+sql BEGIN
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-new"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3)
+    ["<graph1>","Item","item-new"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7) RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3)
+    ["<graph1>","Item","item-a"]
+sql WITH "expected_updates" ("id", "props", "expected_version") AS ( VALUES (CAST($1 AS text), CAST($2 AS jsonb), CAST($3 AS integer)) ), "eligible_updates" ("id") AS ( SELECT "expected_updates"."id" FROM "typegraph_nodes" JOIN "expected_updates" ON "typegraph_nodes"."id" = "expected_updates"."id" AND "typegraph_nodes"."version" = "expected_updates"."expected_version" WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."deleted_at" IS NULL ORDER BY "typegraph_nodes"."id" FOR NO KEY UPDATE ) UPDATE "typegraph_nodes" SET "props" = ( SELECT "expected_updates"."props" FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" ), "updated_at" = $6, "version" = "typegraph_nodes"."version" + 1 WHERE "typegraph_nodes"."graph_id" = $7 AND "typegraph_nodes"."kind" = $8 AND "typegraph_nodes"."deleted_at" IS NULL AND "typegraph_nodes"."id" IN (SELECT "id" FROM "eligible_updates") AND EXISTS ( SELECT 1 FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" AND "expected_updates"."expected_version" = "typegraph_nodes"."version" ) AND (SELECT COUNT(*) FROM "eligible_updates") = $9 RETURNING *
+    ["item-a","{\"name\":\"replaced\"}",1,"<graph1>","Item","<timestamp>","<graph1>","Item",1]
+sql COMMIT
+=> ok
+
+### node.compareAndSet match
+hook bulk-start compareAndSet node:Item
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS NOT MATERIALIZED ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND id = $7 ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND "props" #> ARRAY['name'] = CAST($10 AS jsonb) AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","{\"name\":\"swapped\"}","<timestamp>","\"item-a\""]
+sql COMMIT
+hook bulk-end compareAndSet node:Item affected=1
+=> ok applied
+
+### node.compareAndSet mismatch
+hook bulk-start compareAndSet node:Item
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS NOT MATERIALIZED ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND id = $7 ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND "props" #> ARRAY['name'] = CAST($10 AS jsonb) AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","{\"name\":\"swapped\"}","<timestamp>","\"not-the-name\""]
+sql COMMIT
+hook bulk-end compareAndSet node:Item affected=0
+=> ok rejected
+
+### node.updateWhere
+hook bulk-start updateWhere node:Item
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS NOT MATERIALIZED ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND props #>> ARRAY['name'] = $7 ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","{\"name\":\"set-updated\"}","<timestamp>"]
+sql COMMIT
+hook bulk-end updateWhere node:Item affected=1
+=> ok affected=1
+
+### node.updateWhere matching no row
+hook bulk-start updateWhere node:Item
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS NOT MATERIALIZED ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND props #>> ARRAY['name'] = $7 ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-missing","{\"name\":\"set-updated\"}","<timestamp>"]
+sql COMMIT
+hook bulk-end updateWhere node:Item affected=0
+=> ok affected=0
+
+### node.delete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-c"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql UPDATE "typegraph_nodes" SET "deleted_at" = $1 WHERE "typegraph_nodes"."graph_id" = $2 AND "typegraph_nodes"."kind" = $3 AND "typegraph_nodes"."id" = $4 AND "typegraph_nodes"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","Item","item-c"]
+sql COMMIT
+hook end delete node:Item item-c written
+=> ok
+
+### node.delete missing row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-missing"]
+=> ok
+
+### node.delete when the row is retired after its gate
+fault the next statement reading node item-c retires it once it returns
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-c"]
+sql COMMIT
+hook end delete node:Item item-c unchanged
+=> ok
+
+### node.delete with a live edge
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-a"]
+hook start delete node:Item item-a
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error delete node RestrictedDeleteError[RESTRICTED_DELETE]
+=> RestrictedDeleteError[RESTRICTED_DELETE]
+
+### node.bulkDelete
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-c","item-missing"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql UPDATE "typegraph_nodes" SET "deleted_at" = $1 WHERE "typegraph_nodes"."graph_id" = $2 AND "typegraph_nodes"."kind" = $3 AND "typegraph_nodes"."id" = $4 AND "typegraph_nodes"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","Item","item-c"]
+sql COMMIT
+=> ok
+
+### node.bulkDelete absent rows
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-dead","item-missing"]
+sql COMMIT
+=> ok
+
+### node.hardDelete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-c"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql SELECT graph_id AS "graphId", logical_name AS "logicalName", owner, table_name AS "tableName", signature, materialized_at AS "materializedAt", last_attempted_at AS "lastAttemptedAt", last_error AS "lastError" FROM "typegraph_contribution_materializations" WHERE graph_id IN ($1, $2)
+    ["<graph1>","__typegraph_deployment__"]
+sql DELETE FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."concrete_kind" = $2 AND "typegraph_node_uniques"."node_id" IN ($3)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = $1 AND "node_kind" = $2 AND "node_id" = $3
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_edges" WHERE ( ("typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3) OR ("typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6) )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-c"]
+sql COMMIT
+hook end delete node:Item item-c unknown
+=> ok
+
+### node.bulkHardDelete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-c","item-missing"]
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-c","item-missing"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND ( ("typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" IN ($3)) OR ("typegraph_edges"."to_kind" = $4 AND "typegraph_edges"."to_id" IN ($5)) ) AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","Item","item-c","Item","item-c"]
+sql SELECT graph_id AS "graphId", logical_name AS "logicalName", owner, table_name AS "tableName", signature, materialized_at AS "materializedAt", last_attempted_at AS "lastAttemptedAt", last_error AS "lastError" FROM "typegraph_contribution_materializations" WHERE graph_id IN ($1, $2)
+    ["<graph1>","__typegraph_deployment__"]
+sql DELETE FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."concrete_kind" = $2 AND "typegraph_node_uniques"."node_id" IN ($3)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = $1 AND "node_kind" = $2 AND "node_id" IN ($3)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND ( ("typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" IN ($3)) OR ("typegraph_edges"."to_kind" = $4 AND "typegraph_edges"."to_id" IN ($5)) ) RETURNING "typegraph_edges"."id"
+    ["<graph1>","Item","item-c","Item","item-c"]
+sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) RETURNING "typegraph_nodes"."id"
+    ["<graph1>","Item","item-c"]
+sql COMMIT
+=> ok
+
+### node.bulkHardDelete with a live edge and a tombstone
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-dead"]
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
+    ["<graph1>","Item","item-a","item-dead"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND ( ("typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" IN ($3, $4)) OR ("typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" IN ($6, $7)) ) AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","Item","item-a","item-dead","Item","item-a","item-dead"]
+sql ROLLBACK
+=> RestrictedDeleteError[RESTRICTED_DELETE]
+
+### node.reparent of a kind that is not a part
+=> CompositionConfigurationError[COMPOSITION_NOT_A_PART]
+
+### edge.create generated id
+hook start create edge:link <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create supplied id
+hook start create edge:link link-new
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql COMMIT
+hook end create edge:link link-new written
+=> ok
+
+### edge.create over a tombstone
+hook start create edge:link link-dead
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-a"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+
+### edge.create occupied id
+hook start create edge:link link-live
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+
+### edge.create generated id already occupied
+hook start create edge:link link-live
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"collides\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+
+### edge.create of an unregistered kind
+=> KindNotFoundError[KIND_NOT_FOUND]
+
+### edge.create endpoint of an unregistered kind
+hook start create edge:link <id1>
+sql BEGIN
+sql ROLLBACK
+hook error create edge EndpointError[ENDPOINT_ERROR]
+=> EndpointError[ENDPOINT_ERROR]
+
+### edge.create parallel to a live edge
+hook start create edge:link <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-a","<graph1>","Item","item-b"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create second edge from one source
+hook start create edge:link <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-a","<graph1>","Item","item-c"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create missing endpoint
+hook start create edge:link <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-missing","{\"label\":\"missing\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-missing"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-c","item-missing"]
+sql ROLLBACK
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create tombstoned endpoint
+hook start create edge:link <id1>
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-dead","{\"label\":\"tombstoned\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-dead"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-c","item-dead"]
+sql ROLLBACK
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create after a schema bump
+hook start create edge:link link-stale
+sql BEGIN
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
+    ["<graph1>","link-stale","link","Item","item-c","Item","item-b","{\"label\":\"stale\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql ROLLBACK
+hook error create edge StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+
+### edge.bulkCreate
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11), ($12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20, NULL, $21, $22) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### edge.bulkCreate generated id already occupied
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11), ($12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20, NULL, $21, $22) RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id1>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+
+### edge.bulkInsert
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11), ($12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20, NULL, $21, $22)
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok
+
+### edge.update
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
+sql COMMIT
+hook end update edge:link link-live written
+=> ok
+
+### edge.update clearValidTo on a missing row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-missing"]
+=> EdgeNotFoundError[EDGE_NOT_FOUND]
+
+### edge.update clearValidTo on a live row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "valid_to" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
+sql COMMIT
+hook end update edge:link link-live written
+=> ok
+
+### edge.update after a schema bump
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql ROLLBACK
+hook error update edge StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+
+### edge.bulkUpsertById with a repeated id
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3, $4)
+    ["<graph1>","link-live","link-new","link-live"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
+    ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"first\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"second\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok
+
+### edge.bulkUpsertById live and absent ids
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
+    ["<graph1>","link-live","link-new"]
+sql SAVEPOINT typegraph_atomic_program
+sql WITH "schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "input_rows" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") AS ( VALUES ( CAST($3 AS text), CAST($4 AS text), CAST($5 AS text), CAST($6 AS text), CAST($7 AS text), CAST($8 AS text), CAST($9 AS text), CAST($10 AS jsonb), CAST(NULL AS text), CAST(NULL AS text), CAST($11 AS timestamp with time zone), CAST(NULL AS timestamp with time zone), CAST($12 AS timestamp with time zone), CAST($13 AS timestamp with time zone) ) ), "valid_rows" AS ( SELECT "input_rows".* FROM "input_rows" CROSS JOIN "schema_fence" WHERE EXISTS ( SELECT 1 FROM "typegraph_nodes" AS "from_node" WHERE "from_node"."graph_id" = "input_rows"."graph_id" AND "from_node"."kind" = "input_rows"."from_kind" AND "from_node"."id" = "input_rows"."from_id" AND "from_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node" ) AND EXISTS ( SELECT 1 FROM "typegraph_nodes" AS "to_node" WHERE "to_node"."graph_id" = "input_rows"."graph_id" AND "to_node"."kind" = "input_rows"."to_kind" AND "to_node"."id" = "input_rows"."to_id" AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node" ) ), "invalid_endpoint" AS ( SELECT 1 AS "present" FROM "input_rows" CROSS JOIN "schema_fence" WHERE (SELECT COUNT(*) FROM "valid_rows") <> (SELECT COUNT(*) FROM "input_rows") LIMIT 1 ) INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT "valid_rows"."graph_id", "valid_rows"."id", "valid_rows"."kind", "valid_rows"."from_kind", "valid_rows"."from_id", "valid_rows"."to_kind", "valid_rows"."to_id", "valid_rows"."props", "valid_rows"."match_identity_name", "valid_rows"."match_identity_key", "valid_rows"."valid_from", "valid_rows"."valid_to", "valid_rows"."created_at", "valid_rows"."updated_at" FROM "valid_rows" UNION ALL SELECT "input_rows"."graph_id", CAST(NULL AS text), "input_rows"."kind", "input_rows"."from_kind", "input_rows"."from_id", "input_rows"."to_kind", "input_rows"."to_id", "input_rows"."props", "input_rows"."match_identity_name", "input_rows"."match_identity_key", "input_rows"."valid_from", "input_rows"."valid_to", "input_rows"."created_at", "input_rows"."updated_at" FROM "input_rows" CROSS JOIN "invalid_endpoint" LIMIT (SELECT COUNT(*) FROM "valid_rows") + (SELECT COUNT(*) FROM "invalid_endpoint") RETURNING *
+    ["<graph1>",1,"<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql WITH "schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) UPDATE "typegraph_edges" SET "props" = CASE "typegraph_edges"."id" WHEN $3 THEN CAST($4 AS jsonb) ELSE "typegraph_edges"."props" END, "updated_at" = $5 WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."kind" = $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."id" IN ($8) AND ( SELECT COUNT(*) FROM "typegraph_edges" CROSS JOIN "schema_fence" WHERE "typegraph_edges"."graph_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL AND ( ( "typegraph_edges"."id" = $10 AND "typegraph_edges"."kind" = $11 AND "typegraph_edges"."from_kind" = $12 AND "typegraph_edges"."from_id" = $13 AND "typegraph_edges"."to_kind" = $14 AND "typegraph_edges"."to_id" = $15 AND "typegraph_edges"."updated_at" = $16 AND "typegraph_edges"."props" = CAST($17 AS jsonb) AND "typegraph_edges"."valid_from" = $18 AND "typegraph_edges"."valid_to" IS NULL ) ) ) = $19 RETURNING *
+    ["<graph1>",1,"link-live","{\"label\":\"upserted\"}","<timestamp>","<graph1>","link","link-live","<graph1>","link-live","link","Item","item-a","Item","item-b","<timestamp>","{\"label\":\"live\"}","<timestamp>",1]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, NULL, $3, $4, $5, $6, CAST($7 AS jsonb), NULL, NULL, CAST($8 AS timestamp with time zone), CAST(NULL AS timestamp with time zone), CAST($9 AS timestamp with time zone), CAST($10 AS timestamp with time zone) WHERE NOT EXISTS ( SELECT 1 FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $11 AND "typegraph_schema_versions"."version" = $12 AND "typegraph_schema_versions"."is_active" = TRUE ) OR ( SELECT COUNT(*) FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."deleted_at" IS NULL AND ( ( "typegraph_edges"."id" = $14 AND "typegraph_edges"."kind" = $15 AND "typegraph_edges"."from_kind" = $16 AND "typegraph_edges"."from_id" = $17 AND "typegraph_edges"."to_kind" = $18 AND "typegraph_edges"."to_id" = $19 AND "typegraph_edges"."props" = CAST($20 AS jsonb) AND "typegraph_edges"."updated_at" = $21 ) ) ) <> $22
+    ["<graph1>","link-new","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>",1]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, NULL, $3, $4, $5, $6, CAST($7 AS jsonb), NULL, NULL, CAST($8 AS timestamp with time zone), CAST(NULL AS timestamp with time zone), CAST($9 AS timestamp with time zone), CAST($10 AS timestamp with time zone) WHERE NOT EXISTS ( SELECT 1 FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $11 AND "typegraph_schema_versions"."version" = $12 AND "typegraph_schema_versions"."is_active" = TRUE ) OR ( SELECT COUNT(*) FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."deleted_at" IS NULL AND ( ( "typegraph_edges"."id" = $14 AND "typegraph_edges"."kind" = $15 AND "typegraph_edges"."from_kind" = $16 AND "typegraph_edges"."from_id" = $17 AND "typegraph_edges"."to_kind" = $18 AND "typegraph_edges"."to_id" = $19 AND "typegraph_edges"."props" = CAST($20 AS jsonb) AND "typegraph_edges"."updated_at" = $21 ) ) ) <> $22
+    ["<graph1>","link-live","Item","item-a","Item","item-b","{\"label\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"upserted\"}","<timestamp>",1]
+sql SELECT "typegraph_edges".* FROM "typegraph_edges" CROSS JOIN "typegraph_schema_versions" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2) AND "typegraph_schema_versions"."graph_id" = $3 AND "typegraph_schema_versions"."version" = $4 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>","link-new","<graph1>",1]
+sql SELECT "typegraph_edges".* FROM "typegraph_edges" CROSS JOIN "typegraph_schema_versions" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2) AND "typegraph_schema_versions"."graph_id" = $3 AND "typegraph_schema_versions"."version" = $4 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>","link-live","<graph1>",1]
+sql RELEASE SAVEPOINT typegraph_atomic_program
+sql COMMIT
+=> ok
+
+### edge.delete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql UPDATE "typegraph_edges" SET "deleted_at" = $1 WHERE "typegraph_edges"."graph_id" = $2 AND "typegraph_edges"."id" = $3 AND "typegraph_edges"."kind" = $4 AND "typegraph_edges"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","link-live","link"]
+sql COMMIT
+hook end delete edge:link link-live unknown
+=> ok
+
+### edge.delete when the row is retired after its gate
+fault the next statement reading edge link-live retires it once it returns
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql UPDATE "typegraph_edges" SET "deleted_at" = $1 WHERE "typegraph_edges"."graph_id" = $2 AND "typegraph_edges"."id" = $3 AND "typegraph_edges"."kind" = $4 AND "typegraph_edges"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","link-live","link"]
+sql COMMIT
+hook end delete edge:link link-live unknown
+=> ok
+
+### edge.bulkDelete
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
+    ["<graph1>","link-live","link-dead"]
+sql UPDATE "typegraph_edges" SET "deleted_at" = $1 WHERE "typegraph_edges"."graph_id" = $2 AND "typegraph_edges"."id" IN ($3) AND "typegraph_edges"."kind" = $4 AND "typegraph_edges"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","link-live","link"]
+sql COMMIT
+=> ok
+
+### edge.bulkDelete absent rows
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
+    ["<graph1>","link-dead","link-missing"]
+sql COMMIT
+=> ok
+
+### edge.hardDelete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2 AND "typegraph_edges"."kind" = $3 RETURNING "typegraph_edges"."id"
+    ["<graph1>","link-live","link"]
+sql COMMIT
+hook end delete edge:link link-live unknown
+=> ok
+
+### edge.bulkHardDelete live, tombstoned and absent ids
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3, $4)
+    ["<graph1>","link-live","link-dead","link-missing"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3) AND "typegraph_edges"."kind" = $4 RETURNING "typegraph_edges"."id"
+    ["<graph1>","link-live","link-dead","link"]
+sql COMMIT
+=> ok
+
+### edge.getOrCreateByEndpoints found
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok found
+
+### edge.getOrCreateByEndpoints created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-b"]
+hook start create edge:link <id1>
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH existing AS MATERIALIZED ( SELECT "candidate".*, 0::integer AS write_discriminator FROM "typegraph_edges" AS "candidate" WHERE "candidate"."graph_id" = $1 AND "candidate"."kind" = $2 AND "candidate"."from_kind" = $3 AND "candidate"."from_id" = $4 AND "candidate"."to_kind" = $5 AND "candidate"."to_id" = $6 AND TRUE ORDER BY "candidate"."deleted_at" IS NULL DESC, "candidate"."created_at" DESC, "candidate"."id" DESC LIMIT 1 ), inserted AS ( INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL, $15, NULL, $16, $17 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE NOT EXISTS (SELECT 1 FROM existing) AND "from_node"."graph_id" = $18 AND "from_node"."kind" = $19 AND "from_node"."id" = $20 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $21 AND "to_node"."kind" = $22 AND "to_node"."id" = $23 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *, 1::integer AS write_discriminator ) SELECT * FROM existing UNION ALL SELECT * FROM inserted LIMIT 1
+    ["<graph1>","link","Item","item-c","Item","item-b","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok created
+
+### edge.getOrCreateByEndpoints matchOn label
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+hook start create edge:link <id1>
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH existing AS MATERIALIZED ( SELECT "candidate".*, 0::integer AS write_discriminator FROM "typegraph_edges" AS "candidate" WHERE "candidate"."graph_id" = $1 AND "candidate"."kind" = $2 AND "candidate"."from_kind" = $3 AND "candidate"."from_id" = $4 AND "candidate"."to_kind" = $5 AND "candidate"."to_id" = $6 AND ("candidate"."props" -> $7) = $8::jsonb ORDER BY "candidate"."deleted_at" IS NULL DESC, "candidate"."created_at" DESC, "candidate"."id" DESC LIMIT 1 ), inserted AS ( INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $9, $10, $11, $12, $13, $14, $15, $16, NULL, NULL, $17, NULL, $18, $19 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE NOT EXISTS (SELECT 1 FROM existing) AND "from_node"."graph_id" = $20 AND "from_node"."kind" = $21 AND "from_node"."id" = $22 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $23 AND "to_node"."kind" = $24 AND "to_node"."id" = $25 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *, 1::integer AS write_discriminator ) SELECT * FROM existing UNION ALL SELECT * FROM inserted LIMIT 1
+    ["<graph1>","link","Item","item-a","Item","item-b","label","\"other\"","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"other\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-b"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok created
+
+### edge.bulkGetOrCreateByEndpoints
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $9 AND "typegraph_edges"."kind" IN ($10) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $9 AND "typegraph_edges"."kind" IN ($10) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+=> ok found,created
+
+### edge.bulkGetOrCreateByEndpoints found only
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $5 AND "typegraph_edges"."kind" IN ($6) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","<graph1>","link"]
+=> ok found
+
+### edge.bulkGetOrCreateByEndpoints ifExists update all found unchanged
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $5 AND "typegraph_edges"."kind" IN ($6) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","<graph1>","link"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql COMMIT
+=> ok found
+
+### edge.getOrCreateByEndpoints ifExists update found and changed
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok updated
+
+### edge.getOrCreateByEndpoints ifExists update found and changed coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok updated
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok updated
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+sql COMMIT
+=> ok found
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql COMMIT
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql COMMIT
+=> ok resurrected
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql BEGIN
+sql set transaction read only
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql COMMIT
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql COMMIT
+=> ok resurrected
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."kind" IN ($14) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-a","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
+    ["<graph1>","link-live","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql COMMIT
+=> ok updated,resurrected,created
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh coalescing
+sql BEGIN
+sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
+    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."kind" IN ($14) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-a","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b","item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql COMMIT
+=> ok found,resurrected,created
+
+### store import
+sql BEGIN
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-imported","item-a"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, 1, $5, NULL, $6, $7)
+    ["<graph1>","Item","item-imported","{\"name\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
+    ["<graph1>","link-imported"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11)
+    ["<graph1>","link-imported","link","Item","item-imported","Item","item-b","{\"label\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+sql ANALYZE (SKIP_LOCKED) "typegraph_nodes"
+sql ANALYZE (SKIP_LOCKED) "typegraph_edges"
+sql ANALYZE (SKIP_LOCKED) "typegraph_node_uniques"
+sql ANALYZE (SKIP_LOCKED) "typegraph_node_fulltext"
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_recorded_nodes"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_recorded_edges"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_recorded_clock"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_recorded_identity_assertions"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_identity_assertions"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_identity_closure"]
+sql SELECT c.relname AS table_name FROM pg_catalog.pg_class AS c WHERE c.relname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.pg_table_is_visible(c.oid) LIMIT 1
+    ["typegraph_identity_separation"]
+sql ANALYZE (SKIP_LOCKED) "typegraph_recorded_nodes"
+sql ANALYZE (SKIP_LOCKED) "typegraph_recorded_edges"
+sql ANALYZE (SKIP_LOCKED) "typegraph_recorded_clock"
+sql ANALYZE (SKIP_LOCKED) "typegraph_recorded_identity_assertions"
+sql ANALYZE (SKIP_LOCKED) "typegraph_identity_assertions"
+sql ANALYZE (SKIP_LOCKED) "typegraph_identity_closure"
+sql ANALYZE (SKIP_LOCKED) "typegraph_identity_separation"
+=> ok nodes created=1 skipped=1 edges created=1 skipped=0
+
+### store graph-merge apply
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" IN ($2, $3) ORDER BY "typegraph_nodes"."kind" ASC, "typegraph_nodes"."id" ASC LIMIT $4
+    ["<graph1>","Item","Other",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" IN ($2) ORDER BY "typegraph_edges"."kind" ASC, "typegraph_edges"."id" ASC LIMIT $3
+    ["<graph1>","link",1000]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" IN ($2, $3) ORDER BY "typegraph_nodes"."kind" ASC, "typegraph_nodes"."id" ASC LIMIT $4
+    ["<graph1>","Item","Other",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" IN ($2) ORDER BY "typegraph_edges"."kind" ASC, "typegraph_edges"."id" ASC LIMIT $3
+    ["<graph1>","link",1000]
+sql BEGIN
+sql set transaction isolation level serializable
+sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" IN ($2, $3) ORDER BY "typegraph_nodes"."kind" ASC, "typegraph_nodes"."id" ASC LIMIT $4
+    ["<graph1>","Item","Other",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" IN ($2) ORDER BY "typegraph_edges"."kind" ASC, "typegraph_edges"."id" ASC LIMIT $3
+    ["<graph1>","link",1000]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3)
+    ["<graph1>","Item","item-branched"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
+    ["<graph1>","Item","item-branched"]
+hook start create node:Item item-branched
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-branched","{\"name\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
+    ["<graph1>","<id1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+    ["<graph1>","Item","item-branched","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-branched","{\"label\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql COMMIT
+hook end create node:Item item-branched written
+=> ok merged nodes=1 edges=1

@@ -1,0 +1,228 @@
+### edge.create generated id
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create supplied id
+hook start create edge:link link-new
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create over a tombstone
+hook start create edge:link link-dead
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create occupied id
+hook start create edge:link link-live
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create generated id already occupied
+hook start create edge:link link-live
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create of an unregistered kind
+=> KindNotFoundError[KIND_NOT_FOUND]
+
+### edge.create endpoint of an unregistered kind
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create parallel to a live edge
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create second edge from one source
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create missing endpoint
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create tombstoned endpoint
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create after a schema bump
+hook start create edge:link link-stale
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkCreate
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkCreate generated id already occupied
+fault not reached: the next generated id is the occupied link-live
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkInsert
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.update
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+hook error update edge ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.update clearValidTo on a missing row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-missing"]
+=> EdgeNotFoundError[EDGE_NOT_FOUND]
+
+### edge.update clearValidTo on a live row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+hook error update edge ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.update after a schema bump
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+hook error update edge ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkUpsertById with a repeated id
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?, ?)
+    ["<graph1>","link-live","link-new","link-live"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkUpsertById live and absent ids
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-live","link-new"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.delete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+hook error delete edge ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkDelete
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkDelete absent rows
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.hardDelete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+hook error delete edge ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkHardDelete live, tombstoned and absent ids
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints found
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ok found
+
+### edge.getOrCreateByEndpoints created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-b"]
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints matchOn label
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkGetOrCreateByEndpoints
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?), (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkGetOrCreateByEndpoints found only
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","<graph1>","link"]
+=> ok found
+
+### edge.bulkGetOrCreateByEndpoints ifExists update all found unchanged
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update found and changed
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update found and changed coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh coalescing
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### store import
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### store graph-merge apply
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" IN (?, ?) ORDER BY "typegraph_nodes"."kind" ASC, "typegraph_nodes"."id" ASC LIMIT ?
+    ["<graph1>","Item","Other",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."kind" ASC, "typegraph_edges"."id" ASC LIMIT ?
+    ["<graph1>","link",1000]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" IN (?, ?) ORDER BY "typegraph_nodes"."kind" ASC, "typegraph_nodes"."id" ASC LIMIT ?
+    ["<graph1>","Item","Other",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."kind" ASC, "typegraph_edges"."id" ASC LIMIT ?
+    ["<graph1>","link",1000]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","<id1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+=> MergeError[GRAPH_MERGE_ERROR]
