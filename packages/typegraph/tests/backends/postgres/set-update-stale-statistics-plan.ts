@@ -261,8 +261,7 @@ type SeparatedSetUpdateMeasurement = Readonly<{
   buffers: number;
   rowsVisited: number;
   candidateReadEstimate: number;
-  keyedLookups: number;
-  /** Every other read of the nodes table: its loops and the rows it visited. */
+  /** Every read of the nodes table other than a keyed lookup: its loops and the rows it visited. */
   otherScans: readonly Readonly<{ loops: number; rowsVisited: number }>[];
   /**
    * Rows every node of the plan produced, summed over its loops: the work of
@@ -315,14 +314,13 @@ async function measureSeparatedSetUpdate(
   const plan = await harness.explainAnalyze(await intercepted);
   const scans = nodesTableScans(plan);
   const written = selection === "all" ? candidates : selectedIds.length;
-  const keyed = scans.filter((scan) => isKeyedLookup(scan, written));
-  const others = scans.filter((scan) => !keyed.includes(scan));
+  const keyed = new Set(scans.filter((scan) => isKeyedLookup(scan, written)));
+  const others = scans.filter((scan) => !keyed.has(scan));
   return {
     written: plan["Actual Rows"],
     buffers: plan["Shared Hit Blocks"] + plan["Shared Read Blocks"],
     rowsVisited: scans.reduce((total, scan) => total + rowsVisited(scan), 0),
     candidateReadEstimate: Math.min(...others.map((scan) => scan["Plan Rows"])),
-    keyedLookups: keyed.length,
     rowsProduced: rowsProduced(plan),
     otherScans: others.map((scan) => ({
       loops: scan["Actual Loops"],
@@ -373,6 +371,105 @@ async function measureStaleSetUpdate(
     keyedLookups: keyed.length,
     otherScanLoops: others.map((scan) => scan["Actual Loops"]),
     rowsProduced: rowsProduced(plan),
+  };
+}
+
+/** Candidates of the reused-id case. */
+const REUSED_ID_CANDIDATES = 1000;
+
+/** Other kinds of the reused-id case's graph that hold every candidate's id. */
+const REUSED_ID_KINDS = 100;
+
+/**
+ * Index entries one keyed lookup visits when a candidate's id is also held by
+ * {@link REUSED_ID_KINDS} other kinds of its graph: the `(graph_id, id)` index
+ * returns the id under every kind, and the kind is filtered afterwards.
+ */
+const REUSED_ID_ROWS_PER_LOOKUP = REUSED_ID_KINDS + 1;
+
+/** The reused-id case's write phase, measured. */
+type ReusedIdSetUpdateMeasurement = Readonly<{
+  written: number;
+  /** Per keyed lookup: index used, loops, rows visited. */
+  keyedLookups: readonly Readonly<{
+    index: string;
+    loops: number;
+    rowsVisited: number;
+  }>[];
+  /** Every other read of the nodes table: its loops and the rows it visited. */
+  otherScans: readonly Readonly<{ loops: number; rowsVisited: number }>[];
+  buffers: number;
+  tableRows: number;
+}>;
+
+/**
+ * `updateWhere()` over {@link REUSED_ID_CANDIDATES} fresh candidates whose ids
+ * {@link REUSED_ID_KINDS} other kinds of the same graph also hold, all
+ * inserted after the table was analyzed.
+ */
+async function measureReusedIdSetUpdate(
+  harness: StaleStatisticsHarness,
+): Promise<ReusedIdSetUpdateMeasurement> {
+  const graphId = "stale_statistics_reused_ids";
+  const [store] = await createStoreWithSchema(
+    staleGraph(graphId),
+    harness.createBackend(),
+    { autoRefreshStatistics: false },
+  );
+  const reused = await harness.queryNumber(
+    `WITH inserted AS (
+       INSERT INTO ${NODES_TABLE}
+         (graph_id, kind, id, props, version, created_at, updated_at)
+       SELECT '${graphId}', 'Reused' || kind_index, 'reused-' || id_index,
+              '{}'::jsonb, 1, now(), now()
+       FROM generate_series(1, ${REUSED_ID_KINDS}) AS kind_index,
+            generate_series(0, ${REUSED_ID_CANDIDATES - 1}) AS id_index
+       RETURNING 1
+     )
+     SELECT count(*) FROM inserted`,
+  );
+  expect(reused).toBe(REUSED_ID_KINDS * REUSED_ID_CANDIDATES);
+  // Inserted after the other kinds' rows, each candidate's entry is the last
+  // of its id's entries in the `(graph_id, id)` index. A lookup that stops at
+  // its first match (the join covers the primary key, so PostgreSQL knows at
+  // most one row matches) still reads every other kind's entry before it.
+  await store.nodes.Item.bulkInsert(
+    Array.from({ length: REUSED_ID_CANDIDATES }, (_, index) => ({
+      id: `reused-${index}`,
+      props: { status: "pending" },
+    })),
+  );
+
+  const intercepted = harness.interceptNextNodesUpdate();
+  await expect(
+    store.nodes.Item.updateWhere({
+      where: (item) => item.status.eq("pending"),
+      patch: { status: "promoted" },
+    }),
+  ).rejects.toThrow();
+  const plan = await harness.explainAnalyze(await intercepted);
+  const scans = nodesTableScans(plan);
+  const keyed = scans.filter(
+    (scan) =>
+      (scan["Node Type"] === "Index Scan" ||
+        scan["Node Type"] === "Index Only Scan") &&
+      scan["Actual Loops"] === REUSED_ID_CANDIDATES,
+  );
+  return {
+    written: plan["Actual Rows"],
+    keyedLookups: keyed.map((scan) => ({
+      index: scan["Index Name"] ?? "",
+      loops: scan["Actual Loops"],
+      rowsVisited: rowsVisited(scan),
+    })),
+    otherScans: scans
+      .filter((scan) => !keyed.includes(scan))
+      .map((scan) => ({
+        loops: scan["Actual Loops"],
+        rowsVisited: rowsVisited(scan),
+      })),
+    buffers: plan["Shared Hit Blocks"] + plan["Shared Read Blocks"],
+    tableRows: await harness.queryNumber(`SELECT count(*) FROM ${NODES_TABLE}`),
   };
 }
 
@@ -478,11 +575,11 @@ export function registerStaleStatisticsPlanCases(
   // candidate. Which side of that bound PostgreSQL takes follows its estimate
   // of the candidate count, not the actual count. Here the graph and the kind
   // are each in the statistics but never together, so it multiplies their
-  // frequencies, estimates thousands of candidates, and hashes them against
-  // one sequential scan of the whole table even for a single candidate
-  // (measured on a server and on PGlite). The statement before the key
-  // subquery read only the kind's index range here, three rows per
-  // candidate; pinned so a change to either side is seen.
+  // frequencies and estimates thousands of candidates; measured on a server
+  // and on PGlite, it hashes them against one sequential scan of the whole
+  // table even for a single candidate. The case asserts the bound and the
+  // writes, not that plan: two keyed lookups and no scan would satisfy it
+  // too, and are cheaper.
   it.for(SEPARATED_COUNTS)(
     "writes %i candidates of a graph and kind analyzed only apart within one table scan plus keyed lookups",
     async (candidates, ctx) => {
@@ -497,15 +594,13 @@ export function registerStaleStatisticsPlanCases(
       expect(measured.candidateReadEstimate).toBeGreaterThan(1000);
       expect({
         written: measured.written,
-        // The target row is found by its id once per candidate; the version
-        // its snapshot read comes from the one table scan.
-        keyedLookups: measured.keyedLookups,
         everyOtherReadRunsOnce: measured.otherScans.every(
           (scan) => scan.loops === 1,
         ),
-        wholeTableScans: measured.otherScans.filter(
-          (scan) => scan.rowsVisited >= measured.tableRows,
-        ).length,
+        atMostOneWholeTableScan:
+          measured.otherScans.filter(
+            (scan) => scan.rowsVisited >= measured.tableRows,
+          ).length <= 1,
         withinRowsVisited:
           measured.rowsVisited <=
           measured.tableRows + MAX_ROWS_VISITED_PER_CANDIDATE * candidates,
@@ -517,9 +612,8 @@ export function registerStaleStatisticsPlanCases(
           measured.tablePages + MAX_BUFFERS_PER_CANDIDATE * candidates,
       }).toEqual({
         written: candidates,
-        keyedLookups: 1,
         everyOtherReadRunsOnce: true,
-        wholeTableScans: 1,
+        atMostOneWholeTableScan: true,
         withinRowsVisited: true,
         withinRowsProduced: true,
         withinBuffers: true,
@@ -629,4 +723,36 @@ export function registerStaleStatisticsPlanCases(
       });
     },
   );
+
+  // STATED LIMIT, pinned so a change to it is seen. Registered last: its
+  // 100,000 rows would change the plans of the cases above. The write phase's
+  // constant work per candidate assumes ids are unique within a graph across
+  // kinds, which generated ids are. Both keyed lookups use the `(graph_id,
+  // id)` index and filter the kind afterwards, and they stop at the first
+  // row of the candidate's kind (the join covers the primary key), so an id
+  // that K other kinds of the graph hold ahead of the candidate costs up to K
+  // more index entries in each lookup. Measured on a server and on PGlite.
+  it("visits every kind's entry of an id reused across kinds of the graph (stated limit)", async (ctx) => {
+    const active = harness();
+    if (active === undefined) {
+      ctx.skip();
+      return;
+    }
+    const measured = await measureReusedIdSetUpdate(active);
+
+    const lookup = {
+      index: `${NODES_TABLE}_id_idx`,
+      loops: REUSED_ID_CANDIDATES,
+      rowsVisited: REUSED_ID_ROWS_PER_LOOKUP * REUSED_ID_CANDIDATES,
+    };
+    expect({
+      written: measured.written,
+      keyedLookups: measured.keyedLookups,
+      otherScanLoops: measured.otherScans.map((scan) => scan.loops),
+    }).toEqual({
+      written: REUSED_ID_CANDIDATES,
+      keyedLookups: [lookup, lookup],
+      otherScanLoops: [1],
+    });
+  });
 }

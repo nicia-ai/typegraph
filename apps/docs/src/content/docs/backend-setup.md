@@ -627,9 +627,11 @@ about one row.
 The write phase of `updateWhere()` and `compareAndSet()` reaches the nodes table
 only through the selected rows' keys. It reads the candidates once and never
 rescans them, so whatever the statistics say it is bounded by one scan of the
-nodes table plus a constant amount of work per candidate. One call never grows
-faster than linearly in its candidates. Which side of that bound PostgreSQL
-takes follows its estimate of the candidate count, not the actual count:
+nodes table plus a constant amount of work per candidate, as long as each
+candidate's id is unique within its graph across kinds. Generated ids are. An
+id that other kinds of the same graph also hold costs more, as described
+below. Which side of that bound PostgreSQL takes follows its estimate of the
+candidate count, not the actual count:
 
 - When the graph is new to the statistics, the estimate is about one row and
   each candidate is looked up by its id: three rows visited and about 29
@@ -660,6 +662,18 @@ candidate against 1,000,000 analyzed rows on a server, so a loop of small
 `updateWhere()` calls there pays one table scan per call. A selection by id is
 estimated at one row whatever the graph and kind, so `compareAndSet()` and an
 `updateWhere()` by id stay keyed in this state (two or three rows visited).
+
+The per-candidate work assumes ids that are unique within a graph. Each keyed
+lookup reads the `(graph_id, id)` index and checks the kind afterwards,
+stopping at the first row of the candidate's kind. An id that K other kinds of
+the same graph also hold can cost up to K more index entries in each of the
+two lookups, which happens when you supply your own ids and reuse them across
+kinds. In a test with 1,000 fresh candidates whose ids 100 other kinds of the
+graph also held, inserted before the candidates, the two lookups visited
+202,000 index entries (101 per candidate each) and the statement used 333,415
+buffers, against about 29,000 for unique ids. It is still linear in the
+candidates for a given K. The statement of earlier releases had not finished
+after 12 minutes on a server in the same state.
 
 Candidate selection is an ordinary query, and it depends on the estimate too.
 Selecting a single id from a fresh kind can read the kind's un-analyzed rows

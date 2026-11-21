@@ -1119,7 +1119,9 @@ const SET_KEY_ID = "tg_set_key_id";
  * nodes table then has no range for stale statistics to shrink, and every
  * alternative to keyed lookups has to scan the whole table once. The write
  * phase is therefore bounded by one table scan plus constant work per
- * candidate, and never rescans. Which side PostgreSQL takes follows its
+ * candidate, and never rescans, while ids are unique within a graph across
+ * kinds: a lookup by `(graph_id, id)` checks the kind afterwards, so an id
+ * that K other kinds of the graph hold can cost K more index entries. Which side PostgreSQL takes follows its
  * estimate of the candidate count: estimated small, each candidate is looked
  * up by `(graph_id, id)` or the primary key; estimated large — as when the
  * graph and the kind are each in the statistics but never together, so their
