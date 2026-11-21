@@ -142,6 +142,7 @@ export function createIntegrationTestSuite<
       | undefined;
 
     const context = {
+      lane: name,
       getStore: () => {
         if (store === undefined) {
           throw new Error(

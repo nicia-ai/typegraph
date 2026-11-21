@@ -27,24 +27,39 @@
  *    attached to w1 (`cm-cp2`); `MxIdentityPart` ip1 attached to w1 through
  *    `mxIdentityMember`, labelled `m` (`im-ip1`). `MxWhole` w1, w2, w3 live,
  *    `wdead` tombstoned.
+ *
+ * Three more composition kinds carry no seed rows; the refusal-matrix cases
+ * that need them write their own: `mxNest` (reflexive `MxSection` →
+ * `MxSection`, `oneActive`), `mxChapterNest` (reflexive `MxChapter` →
+ * `MxChapter`, `oneActive`, durable identity on `label`) and `mxHolds`
+ * (`hasPart(MxHolder, MxHeld)`: the part is the TARGET, `oneActive`, and
+ * the holder takes source `one`).
  */
-import { it, type TestContext } from "vitest";
 import { z } from "zod";
 
 import {
   asNodeId,
+  CardinalityError,
   defineEdge,
   defineGraph,
   defineNode,
   type GraphBackend,
+  hasPart,
   partOf,
 } from "../../../src";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
-import { type SqlDialect } from "../../../src/query/dialect/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { type EdgeClaimRow, readEdgeClaimRows } from "../../edge-claim-rows";
-import { type InspectableStore } from "./test-context";
+import {
+  type DefectScope,
+  expectObservation,
+  type LaneFacets,
+} from "../../helpers/known-defect";
+import {
+  type InspectableStore,
+  type IntegrationTestContext,
+} from "./test-context";
 
 const EDGE_PROPS = z.object({
   label: z.string(),
@@ -56,6 +71,10 @@ const MxWhole = defineNode("MxWhole", { schema: z.object({}) });
 const MxPart = defineNode("MxPart", { schema: z.object({}) });
 const MxCappedPart = defineNode("MxCappedPart", { schema: z.object({}) });
 const MxIdentityPart = defineNode("MxIdentityPart", { schema: z.object({}) });
+const MxSection = defineNode("MxSection", { schema: z.object({}) });
+const MxChapter = defineNode("MxChapter", { schema: z.object({}) });
+const MxHolder = defineNode("MxHolder", { schema: z.object({}) });
+const MxHeld = defineNode("MxHeld", { schema: z.object({}) });
 
 const mxAxes = defineEdge("mxAxes", { schema: EDGE_PROPS });
 const mxSource = defineEdge("mxSource", { schema: EDGE_PROPS });
@@ -67,6 +86,9 @@ const mxIdentityTarget = defineEdge("mxIdentityTarget", { schema: EDGE_PROPS });
 const mxMember = defineEdge("mxMember", { schema: EDGE_PROPS });
 const mxCappedMember = defineEdge("mxCappedMember", { schema: EDGE_PROPS });
 const mxIdentityMember = defineEdge("mxIdentityMember", { schema: EDGE_PROPS });
+const mxNest = defineEdge("mxNest", { schema: EDGE_PROPS });
+const mxChapterNest = defineEdge("mxChapterNest", { schema: EDGE_PROPS });
+const mxHolds = defineEdge("mxHolds", { schema: EDGE_PROPS });
 
 const LABEL_IDENTITY = { name: "mx-label", fields: ["label"] } as const;
 
@@ -79,6 +101,10 @@ export function buildEdgeCreatePathGraph(id: string) {
       MxPart: { type: MxPart },
       MxCappedPart: { type: MxCappedPart },
       MxIdentityPart: { type: MxIdentityPart },
+      MxSection: { type: MxSection },
+      MxChapter: { type: MxChapter },
+      MxHolder: { type: MxHolder },
+      MxHeld: { type: MxHeld },
     },
     edges: {
       mxAxes: {
@@ -143,11 +169,34 @@ export function buildEdgeCreatePathGraph(id: string) {
         cardinality: "oneActive",
         matchIdentity: LABEL_IDENTITY,
       },
+      mxNest: {
+        type: mxNest,
+        from: [MxSection],
+        to: [MxSection],
+        cardinality: "oneActive",
+      },
+      mxChapterNest: {
+        type: mxChapterNest,
+        from: [MxChapter],
+        to: [MxChapter],
+        cardinality: "oneActive",
+        matchIdentity: LABEL_IDENTITY,
+      },
+      mxHolds: {
+        type: mxHolds,
+        from: [MxHolder],
+        to: [MxHeld],
+        cardinality: "one",
+        targetCardinality: "oneActive",
+      },
     },
     ontology: [
       partOf(MxPart, MxWhole, { via: mxMember }),
       partOf(MxCappedPart, MxWhole, { via: mxCappedMember }),
       partOf(MxIdentityPart, MxWhole, { via: mxIdentityMember }),
+      partOf(MxSection, MxSection, { via: mxNest, partSide: "from" }),
+      partOf(MxChapter, MxChapter, { via: mxChapterNest, partSide: "from" }),
+      hasPart(MxHolder, MxHeld, { via: mxHolds }),
     ],
   });
 }
@@ -193,7 +242,7 @@ export const PART = {
 
 /** Seeds the rows the module comment lists, in one transaction. */
 export async function seedEdgeCreatePathGraph(
-  store: EdgeCreatePathStore,
+  store: Pick<EdgeCreatePathStore, "transaction">,
 ): Promise<void> {
   await store.transaction(async (tx) => {
     for (const id of ["a", "b", "c", "d", "dead"]) {
@@ -385,26 +434,28 @@ async function readSentinel(
   return rows.length === 1 ? "kept" : "lost";
 }
 
-/** The rows `after` holds that `before` did not, per relation. */
+/** Rows a write is expected to add, per relation. */
 export type EdgeCreatePathDelta = Readonly<{
   edges: readonly string[];
   claims: readonly string[];
 }>;
 
-function addedRows(
-  previous: readonly string[],
-  next: readonly string[],
-): readonly string[] {
-  return next.filter((row) => !previous.includes(row));
-}
+const NO_ROWS: EdgeCreatePathDelta = { edges: [], claims: [] };
 
-function stateDelta(
-  before: EdgeCreatePathState,
-  after: EdgeCreatePathState,
-): EdgeCreatePathDelta {
+/**
+ * The COMPLETE state a write should leave: `baseline` plus exactly the rows
+ * `added` names. A case compares it whole against the state read afterwards,
+ * so a write that removes or rewrites a row it had no business touching — an
+ * incumbent edge, an incumbent's claim — fails as surely as one that leaves
+ * a row behind.
+ */
+function stateAfter(
+  baseline: EdgeCreatePathState,
+  added: EdgeCreatePathDelta,
+): EdgeCreatePathState {
   return {
-    edges: addedRows(before.edges, after.edges),
-    claims: addedRows(before.claims, after.claims),
+    edges: [...baseline.edges, ...added.edges].toSorted(),
+    claims: [...baseline.claims, ...added.claims].toSorted(),
   };
 }
 
@@ -434,8 +485,20 @@ function issuePaths(error: Error): string | undefined {
 }
 
 /**
+ * A `CardinalityError`'s direction and the incumbent it names, so a source
+ * refusal and a target refusal — one class, one code — stay apart, and so
+ * does a refusal naming the wrong holder.
+ */
+function cardinalityDetails(error: Error): string | undefined {
+  if (!(error instanceof CardinalityError)) return undefined;
+  const incumbent = error.details.incumbentEdgeId ?? "<none>";
+  return `${error.details.direction} incumbent=${incumbent}`;
+}
+
+/**
  * How a write settled: `ok` (with a get-or-create's `action`), or the
- * refusal's class name and, when it carries one, its code.
+ * refusal's class name and, when it carries one, its code, followed by the
+ * validation issue paths or the cardinality direction and incumbent.
  */
 async function settle(write: () => Promise<unknown>): Promise<string> {
   try {
@@ -453,7 +516,9 @@ async function settle(write: () => Promise<unknown>): Promise<string> {
       code === undefined ?
         error.constructor.name
       : `${error.constructor.name}[${code}]`;
-    return paths === undefined ? name : `${name} at ${paths}`;
+    const cardinality = cardinalityDetails(error);
+    if (paths !== undefined) return `${name} at ${paths}`;
+    return cardinality === undefined ? name : `${name} ${cardinality}`;
   }
 }
 
@@ -463,35 +528,52 @@ export const CASE_RECEIVERS = ["root", "transaction"] as const;
 export type CaseReceiver = (typeof CASE_RECEIVERS)[number];
 
 /**
- * How one create settled and what it left: the error (or `ok`), and inside
- * `store.transaction` how the transaction settled and whether the sentinel
- * it wrote first survived; then the edge and claim rows added, read from
- * outside.
+ * How one create settled and what the graph holds afterwards: the error (or
+ * `ok`), inside `store.transaction` how the transaction settled and whether
+ * the sentinel it wrote first survived, and the complete edge and claim
+ * state read from outside.
  */
 export type CreateOutcome = Readonly<{
   error: string;
   commit?: string;
   sentinel?: "kept" | "lost";
-  delta: EdgeCreatePathDelta;
+  state: EdgeCreatePathState;
 }>;
 
-/** The delta a refused create should leave: none. */
-const NO_DELTA: EdgeCreatePathDelta = { edges: [], claims: [] };
+/** An outcome, and the state the graph held before the create. */
+export type CreateObservation = Readonly<{
+  baseline: EdgeCreatePathState;
+  outcome: CreateOutcome;
+}>;
 
 /**
- * The outcome a case expects on `receiver`: `error` and `delta` (none by
- * default), and inside `store.transaction` a commit that succeeds with the
- * sentinel kept — a caught refusal must not cost the transaction its other
- * work.
+ * How a case expects a create to settle: `error`, the rows it adds (none by
+ * default), and inside `store.transaction` how the commit settles (`ok` by
+ * default) and whether the sentinel survives (`kept` by default) — a caught
+ * refusal must not cost the transaction its other work. At the root, `commit`
+ * and `sentinel` do not apply and are ignored.
  */
-export function expectedOutcome(
+export type ExpectedCreate = Readonly<{
+  error: string;
+  added?: EdgeCreatePathDelta;
+  commit?: string;
+  sentinel?: "kept" | "lost";
+}>;
+
+function expectedOutcome(
   receiver: CaseReceiver,
-  expected: Readonly<{ error: string; delta?: EdgeCreatePathDelta }>,
+  baseline: EdgeCreatePathState,
+  expected: ExpectedCreate,
 ): CreateOutcome {
-  const delta = expected.delta ?? NO_DELTA;
+  const state = stateAfter(baseline, expected.added ?? NO_ROWS);
   return receiver === "root" ?
-      { error: expected.error, delta }
-    : { error: expected.error, commit: "ok", sentinel: "kept", delta };
+      { error: expected.error, state }
+    : {
+        error: expected.error,
+        commit: expected.commit ?? "ok",
+        sentinel: expected.sentinel ?? "kept",
+        state,
+      };
 }
 
 type CaseStore = Pick<EdgeCreatePathStore, "nodes" | "edges" | "transaction">;
@@ -499,8 +581,8 @@ type CaseStore = Pick<EdgeCreatePathStore, "nodes" | "edges" | "transaction">;
 /**
  * Runs `write` on `receiver` of `store` and reads, through `lane` — the
  * lane's own backend, never the store under test — what the graph holds
- * afterwards. Inside `store.transaction` the case first writes the sentinel
- * node, catches the write's error, and lets the transaction commit.
+ * before and afterwards. Inside `store.transaction` the case first writes the
+ * sentinel node, catches the write's error, and lets the transaction commit.
  */
 export async function observeCreate(
   lane: Pick<GraphBackend, "execute" | "tableNames">,
@@ -508,12 +590,12 @@ export async function observeCreate(
   store: CaseStore,
   receiver: CaseReceiver,
   write: (surface: EdgeCreatePathSurface) => Promise<unknown>,
-): Promise<CreateOutcome> {
-  const before = await readEdgeCreatePathState(lane, graphId);
+): Promise<CreateObservation> {
+  const baseline = await readEdgeCreatePathState(lane, graphId);
   if (receiver === "root") {
     const error = await settle(() => write(store));
-    const after = await readEdgeCreatePathState(lane, graphId);
-    return { error, delta: stateDelta(before, after) };
+    const state = await readEdgeCreatePathState(lane, graphId);
+    return { baseline, outcome: { error, state } };
   }
   let error = "not reached";
   const commit = await settle(() =>
@@ -522,85 +604,70 @@ export async function observeCreate(
       error = await settle(() => write(tx));
     }),
   );
-  const after = await readEdgeCreatePathState(lane, graphId);
+  const state = await readEdgeCreatePathState(lane, graphId);
   return {
-    error,
-    commit,
-    sentinel: await readSentinel(lane, graphId),
-    delta: stateDelta(before, after),
+    baseline,
+    outcome: {
+      error,
+      commit,
+      sentinel: await readSentinel(lane, graphId),
+      state,
+    },
   };
 }
 
 /**
- * A defect a case is known to hit: on which lanes (by dialect; every lane
- * when omitted) and receivers (both when omitted), under which label — an
- * issue number, or the design note's `D<n>`.
+ * A defect a create case is known to hit: the issue or design-note label,
+ * the lanes it affects (facets `lane`, `dialect`, `receiver`; see
+ * {@link caseLane}), and how the create settles there today.
  */
-export type KnownFailure = Readonly<{
+export type CreateDefect = Readonly<{
   label: string;
-  dialects?: readonly SqlDialect[];
-  receivers?: readonly CaseReceiver[];
+  on: DefectScope;
+  today: ExpectedCreate;
 }>;
 
-function knownFailureApplies(
-  failure: KnownFailure,
-  dialect: SqlDialect,
+/**
+ * The facets a create case's lane is named by: the integration lane's name
+ * (`SQLite`, `libsql`, `PGlite`, `PostgreSQL`, `PostgreSQL (postgres-js)`),
+ * its dialect, and the receiver.
+ */
+export function caseLane(
+  context: Pick<IntegrationTestContext, "lane" | "getBackend">,
   receiver: CaseReceiver,
-): boolean {
-  return (
-    (failure.dialects?.includes(dialect) ?? true) &&
-    (failure.receivers?.includes(receiver) ?? true)
-  );
+): LaneFacets {
+  return {
+    lane: context.lane,
+    dialect: context.getBackend().dialect,
+    receiver,
+  };
 }
 
 /**
- * Registers one case on one receiver as a plain test on the lanes no known
- * failure applies to, and, per known failure, as an `it.fails` test on the
- * lanes it applies to. Both bodies assert the CORRECT outcome; the plain one
- * also asserts `characterize` (a dispatch log, say), which a known failure
- * leaves out so that it fails only for the defect it names. The lane is
- * known only once the suite's backend exists, so each test skips itself on
- * the lanes it does not cover.
+ * Asserts a create's outcome through {@link expectObservation}: on a lane a
+ * defect covers, exactly its today value; elsewhere, `correct`. Both are
+ * stated as additions to the observed baseline and compared as the complete
+ * state.
  */
-export function registerOutcomeCase(
-  context: Readonly<{ getBackend: () => Readonly<{ dialect: SqlDialect }> }>,
+export function expectCreateOutcome(
   params: Readonly<{
-    title: string;
+    lane: LaneFacets;
     receiver: CaseReceiver;
-    knownFailures: readonly KnownFailure[];
-    assertCorrect: () => Promise<void>;
-    characterize?: () => void;
+    observation: CreateObservation;
+    correct: ExpectedCreate;
+    defects?: readonly CreateDefect[];
   }>,
 ): void {
-  const { title, receiver, knownFailures } = params;
-  const failing = (dialect: SqlDialect): readonly KnownFailure[] =>
-    knownFailures.filter((failure) =>
-      knownFailureApplies(failure, dialect, receiver),
-    );
-  it.for([title])("%s", async (_title, testContext: TestContext) => {
-    if (failing(context.getBackend().dialect).length > 0) {
-      testContext.skip("a known failure covers this lane");
-    }
-    await params.assertCorrect();
-    params.characterize?.();
+  const { lane, receiver, observation } = params;
+  const { baseline } = observation;
+  expectObservation({
+    lane,
+    observed: observation.outcome,
+    correct: expectedOutcome(receiver, baseline, params.correct),
+    defects: (params.defects ?? []).map((defect) => ({
+      label: defect.label,
+      on: defect.on,
+      today: expectedOutcome(receiver, baseline, defect.today),
+    })),
   });
-  const failureTitles = new Map(
-    knownFailures.map((failure) => [
-      `[known failure ${failure.label}] ${title}`,
-      failure,
-    ]),
-  );
-  it.fails.for([...failureTitles.keys()])(
-    "%s",
-    async (failureTitle, testContext: TestContext) => {
-      const failure = failureTitles.get(failureTitle);
-      if (
-        failure === undefined ||
-        !failing(context.getBackend().dialect).includes(failure)
-      ) {
-        testContext.skip("this known failure does not cover this lane");
-      }
-      await params.assertCorrect();
-    },
-  );
 }

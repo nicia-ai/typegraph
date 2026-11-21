@@ -21,18 +21,20 @@
  *    dispatch are the edge-create path golden's declining receivers
  *    (`tests/edge-create-path-golden-*-declining.test.ts`);
  *  - the typed result or error;
- *  - the edge and claim rows the graph holds afterwards, read from outside
- *    through the lane's own backend.
+ *  - the complete edge and claim state the graph holds afterwards, read from
+ *    outside through the lane's own backend.
  *
  * Each case runs at the root and inside `store.transaction()` with the error
  * caught and the transaction left to commit. The decorated backend is a
  * derived root, so the bundled-root autocommit path is out of this harness's
  * reach: every root dispatch below runs on a store-opened transaction.
  *
- * Outcomes that leave a refused create's rows behind, or that make the
- * winning error depend on which dimension a port declined, are known
- * failures: they assert the correct outcome under `it.fails` with the design
- * note's label (`D2`, `D3`, `D6`).
+ * The dispatch log is an ordinary assertion on every lane. Outcomes that
+ * leave a refused create's rows behind, or that make the winning error
+ * depend on which dimension a port declined, are known defects: the case
+ * states the correct outcome and, with the design note's label (`D2`, `D3`,
+ * `D6`), the exact outcome main produces today on the lanes it affects
+ * (`tests/helpers/known-defect.ts`).
  */
 import { describe, expect, it } from "vitest";
 
@@ -45,6 +47,7 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import { type SqlDialect } from "../../../src/query/dialect/types";
+import { serializeSchema } from "../../../src/schema/serializer";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   decline,
@@ -55,23 +58,36 @@ import {
 import {
   buildEdgeCreatePathGraph,
   CASE_RECEIVERS,
+  caseLane,
   type CaseReceiver,
+  type CreateDefect,
   type EdgeCreatePathDelta,
   type EdgeCreatePathSurface,
-  expectedOutcome,
+  expectCreateOutcome,
+  type ExpectedCreate,
   ITEM,
-  type KnownFailure,
   nextEdgeCreatePathGraphId,
   observeCreate,
   readEdgeCreatePathState,
-  registerOutcomeCase,
   seedEdgeCreatePathGraph,
 } from "./edge-create-path-fixture";
 import { type IntegrationTestContext } from "./test-context";
 
 const ENDPOINT = "EndpointNotFoundError[ENDPOINT_NOT_FOUND]";
-const CARDINALITY = "CardinalityError[CARDINALITY_ERROR]";
 const DURABLE_COMMAND_REFUSED = "ConfigurationError[CONFIGURATION_ERROR]";
+/**
+ * The schema write fence's refusal of a stale store. (`SchemaChangedError`
+ * is the checked-read refusal; no write path raises it.)
+ */
+const STALE_SCHEMA = "StaleVersionError[STALE_SCHEMA_VERSION]";
+
+/** A cardinality refusal on `direction`, naming `incumbent` as the holder. */
+function cardinality(
+  direction: "source" | "target",
+  incumbent: string,
+): string {
+  return `CardinalityError[CARDINALITY_ERROR] ${direction} incumbent=${incumbent}`;
+}
 
 /** The created `mxSource` c->d `new` and its source claim. */
 const SOURCE_EDGE_NEW: EdgeCreatePathDelta = {
@@ -111,9 +127,13 @@ function fusedFence(receiver: CaseReceiver): string {
  * `store.transaction` the claim commits — on every lane once a port declines
  * the claim, not only on SQLite.
  */
-const D2_CLAIM_RESIDUE: KnownFailure = {
+const D2_CLAIM_RESIDUE: CreateDefect = {
   label: "D2",
-  receivers: ["transaction"],
+  on: { receiver: ["transaction"] },
+  today: {
+    error: ENDPOINT,
+    added: { edges: [], claims: ['one:mxSource ["MxItem","c"] -> new'] },
+  },
 };
 
 /**
@@ -121,45 +141,11 @@ const D2_CLAIM_RESIDUE: KnownFailure = {
  * makes the claim refuse first, while declining `endpointPredicate` reports
  * the endpoint: the precedence follows the port's support, on every lane.
  */
-const D3_PORT_DECIDES_PRECEDENCE: KnownFailure = { label: "D3" };
-
-/**
- * D6: a durable create claims its cardinality only after the converge
- * command wrote its row. When that claim is refused and the caller catches
- * the error inside `store.transaction`, the row commits without its claim.
- */
-const D6_ROW_BEFORE_CLAIM: KnownFailure = {
-  label: "D6",
-  receivers: ["transaction"],
+const D3_PORT_DECIDES_PRECEDENCE: CreateDefect = {
+  label: "D3",
+  on: {},
+  today: { error: cardinality("source", "s-ab") },
 };
-
-type PerDialect<T> = Readonly<{ sqlite: T; postgres: T }>;
-
-type DeclineCase = Readonly<{
-  name: string;
-  script: (graphId: string) => DispatchScript;
-  run: (surface: EdgeCreatePathSurface) => Promise<unknown>;
-  error: string;
-  delta?: EdgeCreatePathDelta;
-  /**
-   * The dispatch log on every lane, or per dialect where they differ, given
-   * the schema-fence marker a root plan carries ({@link fusedFence}).
-   */
-  dispatches: (
-    fence: string,
-  ) => readonly string[] | PerDialect<readonly string[]>;
-  /** Scripted steps the Store never gave a dispatch to consume. */
-  unconsumed?: readonly string[] | PerDialect<readonly string[]>;
-  knownFailures?: readonly KnownFailure[];
-}>;
-
-function createSource(
-  from: (typeof ITEM)[keyof typeof ITEM],
-  to: (typeof ITEM)[keyof typeof ITEM],
-) {
-  return (surface: EdgeCreatePathSurface) =>
-    surface.edges.mxSource.create(from, to, { label: "x" }, { id: "new" });
-}
 
 /**
  * Plants, on the dispatch's own session, a live `mxIdentitySource` edge
@@ -204,13 +190,88 @@ const INTRUDER: EdgeCreatePathDelta = {
   claims: ['one:mxIdentitySource ["MxItem","c"] -> intruder'],
 };
 
+/**
+ * D6: a durable create claims its cardinality only after the converge
+ * command wrote its row. When that claim is refused and the caller catches
+ * the error inside `store.transaction`, the row commits without its claim,
+ * beside the plant.
+ */
+const D6_ROW_BEFORE_CLAIM: CreateDefect = {
+  label: "D6",
+  on: { receiver: ["transaction"] },
+  today: {
+    error: cardinality("source", "intruder"),
+    added: {
+      edges: [...INTRUDER.edges, "mxIdentitySource:new c->d live"],
+      claims: INTRUDER.claims,
+    },
+  },
+};
+
+type PerDialect<T> = Readonly<{ sqlite: T; postgres: T }>;
+type PerReceiver<T> = Readonly<{ root: T; transaction: T }>;
+
+type DeclineCase = Readonly<{
+  name: string;
+  script: (graphId: string) => DispatchScript;
+  /**
+   * Runs after the declining store is built and before the create: the
+   * stale-store case commits a newer schema version behind its back here.
+   */
+  prepare?: (context: IntegrationTestContext, graphId: string) => Promise<void>;
+  run: (surface: EdgeCreatePathSurface) => Promise<unknown>;
+  /** The outcome the Store should reach, on every receiver or per receiver. */
+  correct: ExpectedCreate | PerReceiver<ExpectedCreate>;
+  /**
+   * The dispatch log on every lane, or per dialect where they differ, given
+   * the schema-fence marker a root plan carries ({@link fusedFence}).
+   */
+  dispatches: (
+    fence: string,
+    receiver: CaseReceiver,
+  ) => readonly string[] | PerDialect<readonly string[]>;
+  /** Scripted steps the Store never gave a dispatch to consume. */
+  unconsumed?: (
+    receiver: CaseReceiver,
+  ) => readonly string[] | PerDialect<readonly string[]>;
+  defects?: readonly CreateDefect[];
+}>;
+
+function createSource(
+  from: (typeof ITEM)[keyof typeof ITEM],
+  to: (typeof ITEM)[keyof typeof ITEM],
+) {
+  return (surface: EdgeCreatePathSurface) =>
+    surface.edges.mxSource.create(from, to, { label: "x" }, { id: "new" });
+}
+
+/**
+ * Commits the next schema version of `graphId` straight to the lane, so a
+ * store built before it is stale: its next write must fail on the schema
+ * fence and leave nothing behind.
+ */
+async function commitNewerSchemaVersion(
+  context: IntegrationTestContext,
+  graphId: string,
+): Promise<void> {
+  const lane = context.getBackend();
+  const active = requireDefined(await lane.getActiveSchema(graphId));
+  const next = active.version + 1;
+  await lane.commitSchemaVersion({
+    graphId,
+    expected: { kind: "active", version: active.version },
+    version: next,
+    schemaHash: `edge-create-decline-stale-${next}`,
+    schemaDoc: serializeSchema(buildEdgeCreatePathGraph(graphId), next),
+  });
+}
+
 const DECLINE_CASES: readonly DeclineCase[] = [
   {
     name: "one axis, cardinalityClaim declined: the session claims, then retries without the claim",
     script: () => ({ "edge.create": [decline("cardinalityClaim")] }),
     run: createSource(ITEM.c, ITEM.d),
-    error: "ok",
-    delta: SOURCE_EDGE_NEW,
+    correct: { error: "ok", added: SOURCE_EDGE_NEW },
     dispatches: () => [
       create(1, "declined cardinalityClaim"),
       create(0, "created"),
@@ -225,8 +286,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
       ],
     }),
     run: createSource(ITEM.c, ITEM.d),
-    error: "ok",
-    delta: SOURCE_EDGE_NEW,
+    correct: { error: "ok", added: SOURCE_EDGE_NEW },
     dispatches: () => [
       create(1, "declined cardinalityClaim"),
       create(0, "declined endpointPredicate"),
@@ -236,42 +296,40 @@ const DECLINE_CASES: readonly DeclineCase[] = [
     name: "one axis, cardinalityClaim declined, dead target on a free axis",
     script: () => ({ "edge.create": [decline("cardinalityClaim")] }),
     run: createSource(ITEM.c, ITEM.dead),
-    error: ENDPOINT,
+    correct: { error: ENDPOINT },
     dispatches: () => [
       create(1, "declined cardinalityClaim"),
       create(0, "rejected"),
     ],
-    knownFailures: [D2_CLAIM_RESIDUE],
+    defects: [D2_CLAIM_RESIDUE],
   },
   {
     name: "one axis, cardinalityClaim declined, dead target on a taken source axis",
     script: () => ({ "edge.create": [decline("cardinalityClaim")] }),
     run: createSource(ITEM.a, ITEM.dead),
-    error: ENDPOINT,
+    correct: { error: ENDPOINT },
     dispatches: () => [create(1, "declined cardinalityClaim")],
-    knownFailures: [D3_PORT_DECIDES_PRECEDENCE],
+    defects: [D3_PORT_DECIDES_PRECEDENCE],
   },
   {
     name: "one axis, endpointPredicate declined, free axis",
     script: () => ({ "edge.create": [decline("endpointPredicate")] }),
     run: createSource(ITEM.c, ITEM.d),
-    error: "ok",
-    delta: SOURCE_EDGE_NEW,
+    correct: { error: "ok", added: SOURCE_EDGE_NEW },
     dispatches: () => [create(1, "declined endpointPredicate")],
   },
   {
     name: "one axis, endpointPredicate declined, dead target on a taken source axis",
     script: () => ({ "edge.create": [decline("endpointPredicate")] }),
     run: createSource(ITEM.a, ITEM.dead),
-    error: ENDPOINT,
+    correct: { error: ENDPOINT },
     dispatches: () => [create(1, "declined endpointPredicate")],
   },
   {
     name: "one axis, schemaFence declined although the plan carries no schema fence",
     script: () => ({ "edge.create": [decline("schemaFence")] }),
     run: createSource(ITEM.c, ITEM.d),
-    error: "ok",
-    delta: SOURCE_EDGE_NEW,
+    correct: { error: "ok", added: SOURCE_EDGE_NEW },
     dispatches: () => [create(1, "declined schemaFence")],
   },
   {
@@ -284,9 +342,59 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "x" },
         { id: "new" },
       ),
-    error: "ok",
-    delta: { edges: ["mxPlain:new c->d live"], claims: [] },
+    correct: {
+      error: "ok",
+      added: { edges: ["mxPlain:new c->d live"], claims: [] },
+    },
     dispatches: (fence) => [create(0, "declined schemaFence", fence)],
+  },
+  {
+    name: "unconstrained, nothing declined, on a store a newer schema version made stale (control: the fused fence refuses)",
+    script: () => ({}),
+    prepare: commitNewerSchemaVersion,
+    run: (surface) =>
+      surface.edges.mxPlain.create(
+        ITEM.c,
+        ITEM.d,
+        { label: "x" },
+        { id: "new" },
+      ),
+    correct: {
+      root: { error: STALE_SCHEMA },
+      transaction: {
+        error: "not reached",
+        commit: STALE_SCHEMA,
+        sentinel: "lost",
+      },
+    },
+    dispatches: (fence, receiver) =>
+      receiver === "root" ? [create(0, "rejected", fence)] : [],
+  },
+  {
+    name: "unconstrained, schemaFence declined, on a store a newer schema version made stale",
+    script: () => ({ "edge.create": [decline("schemaFence")] }),
+    prepare: commitNewerSchemaVersion,
+    run: (surface) =>
+      surface.edges.mxPlain.create(
+        ITEM.c,
+        ITEM.d,
+        { label: "x" },
+        { id: "new" },
+      ),
+    // At the root the fused fence is declined, so only the portable fence
+    // the Store must fall back to can refuse the write. A caller's
+    // transaction takes the portable fence when it opens, before any write.
+    correct: {
+      root: { error: STALE_SCHEMA },
+      transaction: {
+        error: "not reached",
+        commit: STALE_SCHEMA,
+        sentinel: "lost",
+      },
+    },
+    dispatches: (fence, receiver) =>
+      receiver === "root" ? [create(0, "declined schemaFence", fence)] : [],
+    unconsumed: (receiver) => (receiver === "root" ? [] : ["edge.create #0"]),
   },
   {
     name: "unconstrained, endpointPredicate declined, dead target",
@@ -298,7 +406,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "x" },
         { id: "new" },
       ),
-    error: ENDPOINT,
+    correct: { error: ENDPOINT },
     dispatches: (fence) => [create(0, "declined endpointPredicate", fence)],
   },
   {
@@ -311,16 +419,18 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "x" },
         { id: "new" },
       ),
-    error: "ok",
-    delta: {
-      edges: ["mxBoth:new c->d live"],
-      claims: [
-        'one:mxBoth ["MxItem","c"] -> new',
-        'to:one:mxBoth ["MxItem","d"] -> new',
-      ],
+    correct: {
+      error: "ok",
+      added: {
+        edges: ["mxBoth:new c->d live"],
+        claims: [
+          'one:mxBoth ["MxItem","c"] -> new',
+          'to:one:mxBoth ["MxItem","d"] -> new',
+        ],
+      },
     },
     dispatches: () => [],
-    unconsumed: ["edge.create #0"],
+    unconsumed: () => ["edge.create #0"],
   },
   {
     name: "dynamic get-or-create, convergence declined",
@@ -329,8 +439,10 @@ const DECLINE_CASES: readonly DeclineCase[] = [
       surface.edges.mxPlain.getOrCreateByEndpoints(ITEM.c, ITEM.d, {
         label: "x",
       }),
-    error: "ok:created",
-    delta: { edges: ["mxPlain:<generated> c->d live"], claims: [] },
+    correct: {
+      error: "ok:created",
+      added: { edges: ["mxPlain:<generated> c->d live"], claims: [] },
+    },
     // The SQLite drivers' write lock carries no command coordination, so the
     // Store answers a dynamic convergence `unsupported` itself and never
     // dispatches it (D4).
@@ -341,7 +453,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         create(0, "created"),
       ],
     }),
-    unconsumed: { sqlite: ["edge.converge-create #0"], postgres: [] },
+    unconsumed: () => ({ sqlite: ["edge.converge-create #0"], postgres: [] }),
   },
   {
     name: "dynamic get-or-create, endpointPredicate declined, dead target",
@@ -350,7 +462,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
       surface.edges.mxPlain.getOrCreateByEndpoints(ITEM.c, ITEM.dead, {
         label: "x",
       }),
-    error: ENDPOINT,
+    correct: { error: ENDPOINT },
     dispatches: () => ({
       sqlite: [create(0, "rejected")],
       postgres: [
@@ -358,7 +470,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         create(0, "rejected"),
       ],
     }),
-    unconsumed: { sqlite: ["edge.converge-create #0"], postgres: [] },
+    unconsumed: () => ({ sqlite: ["edge.converge-create #0"], postgres: [] }),
   },
   {
     name: "durable create, convergence declined",
@@ -370,7 +482,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "bc" },
         { id: "new" },
       ),
-    error: DURABLE_COMMAND_REFUSED,
+    correct: { error: DURABLE_COMMAND_REFUSED },
     dispatches: (fence) => [converge("durable", "declined convergence", fence)],
   },
   {
@@ -383,7 +495,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "bc" },
         { id: "new" },
       ),
-    error: DURABLE_COMMAND_REFUSED,
+    correct: { error: DURABLE_COMMAND_REFUSED },
     dispatches: (fence) => [
       converge("durable", "declined endpointPredicate", fence),
     ],
@@ -395,7 +507,7 @@ const DECLINE_CASES: readonly DeclineCase[] = [
       surface.edges.mxIdentity.getOrCreateByEndpoints(ITEM.b, ITEM.c, {
         label: "bc",
       }),
-    error: DURABLE_COMMAND_REFUSED,
+    correct: { error: DURABLE_COMMAND_REFUSED },
     dispatches: (fence) => [converge("durable", "declined convergence", fence)],
   },
   {
@@ -412,26 +524,27 @@ const DECLINE_CASES: readonly DeclineCase[] = [
         { label: "cd" },
         { id: "new" },
       ),
-    error: CARDINALITY,
+    // The plant runs inside the attempt: a root attempt's rollback discards
+    // it, while a caught refusal inside `store.transaction` lets it commit —
+    // and only it.
+    correct: {
+      root: { error: cardinality("source", "intruder") },
+      transaction: {
+        error: cardinality("source", "intruder"),
+        added: INTRUDER,
+      },
+    },
     // A constrained kind takes the portable schema fence: no plan carries it.
     dispatches: () => [converge("durable", "planted, then created")],
-    knownFailures: [D6_ROW_BEFORE_CLAIM],
+    defects: [D6_ROW_BEFORE_CLAIM],
   },
 ];
 
-/**
- * The rows a case should leave. The D6 plant runs inside the attempt: a
- * root attempt's rollback discards it, while a caught refusal inside
- * `store.transaction` lets it commit — and only it.
- */
-function expectedDelta(
-  declineCase: DeclineCase,
+function forReceiver(
+  value: ExpectedCreate | PerReceiver<ExpectedCreate>,
   receiver: CaseReceiver,
-): EdgeCreatePathDelta | undefined {
-  const plants = declineCase.knownFailures?.includes(D6_ROW_BEFORE_CLAIM);
-  return plants === true && receiver === "transaction" ?
-      INTRUDER
-    : declineCase.delta;
+): ExpectedCreate {
+  return "root" in value ? value[receiver] : value;
 }
 
 function forDialect(
@@ -443,62 +556,50 @@ function forDialect(
     );
 }
 
-type DispatchObservation = Readonly<{
-  dispatches: readonly string[];
-  unconsumed: readonly string[];
-}>;
-
 export function registerEdgeCreateDeclineIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("edge create decline harness", () => {
     describe.each(CASE_RECEIVERS)("%s", (receiver) => {
       for (const declineCase of DECLINE_CASES) {
-        let observed: DispatchObservation | undefined;
-        registerOutcomeCase(context, {
-          title: declineCase.name,
-          receiver,
-          knownFailures: declineCase.knownFailures ?? [],
-          assertCorrect: async () => {
-            const graphId = nextEdgeCreatePathGraphId("edge_create_decline");
-            const graph = buildEdgeCreatePathGraph(graphId);
-            const lane = context.getBackend();
-            await seedEdgeCreatePathGraph(await context.createStore(graph));
-            const scripted = scriptedPolicy(declineCase.script(graphId));
-            const declining = decliningCommandBackend(lane, scripted.policy);
-            const [store] = await createStoreWithSchema(
-              graph,
-              declining.backend,
-            );
-            const outcome = await observeCreate(
-              lane,
-              graphId,
-              store,
-              receiver,
-              declineCase.run,
-            );
-            observed = {
-              dispatches: declining.dispatches,
-              unconsumed: scripted.unconsumed(),
-            };
-            const delta = expectedDelta(declineCase, receiver);
-            expect(outcome).toEqual(
-              expectedOutcome(receiver, {
-                error: declineCase.error,
-                ...(delta === undefined ? {} : { delta }),
-              }),
-            );
-          },
-          characterize: () => {
-            const dialect = context.getBackend().dialect;
-            expect(observed).toEqual({
-              dispatches: forDialect(
-                declineCase.dispatches(fusedFence(receiver)),
-                dialect,
-              ),
-              unconsumed: forDialect(declineCase.unconsumed ?? [], dialect),
-            });
-          },
+        it.for([declineCase.name])("%s", async () => {
+          const graphId = nextEdgeCreatePathGraphId("edge_create_decline");
+          const graph = buildEdgeCreatePathGraph(graphId);
+          const lane = context.getBackend();
+          await seedEdgeCreatePathGraph(await context.createStore(graph));
+          const scripted = scriptedPolicy(declineCase.script(graphId));
+          const declining = decliningCommandBackend(lane, scripted.policy);
+          const [store] = await createStoreWithSchema(graph, declining.backend);
+          await declineCase.prepare?.(context, graphId);
+          const observation = await observeCreate(
+            lane,
+            graphId,
+            store,
+            receiver,
+            declineCase.run,
+          );
+          expect({
+            dispatches: declining.dispatches,
+            unconsumed: scripted.unconsumed(),
+          }).toEqual({
+            dispatches: forDialect(
+              declineCase.dispatches(fusedFence(receiver), receiver),
+              lane.dialect,
+            ),
+            unconsumed: forDialect(
+              declineCase.unconsumed?.(receiver) ?? [],
+              lane.dialect,
+            ),
+          });
+          expectCreateOutcome({
+            lane: caseLane(context, receiver),
+            receiver,
+            observation,
+            correct: forReceiver(declineCase.correct, receiver),
+            ...(declineCase.defects === undefined ?
+              {}
+            : { defects: declineCase.defects }),
+          });
         });
       }
     });

@@ -88,6 +88,14 @@ export function refuseUnsupportedSerializedBackendCapabilities(
 }
 
 export type IntegrationTestContext = Readonly<{
+  /**
+   * The lane's display name, as its registration passes it to
+   * `createIntegrationTestSuite` (`SQLite`, `libsql`, `PGlite`,
+   * `PostgreSQL`, `PostgreSQL (postgres-js)`). For a test whose observation
+   * genuinely differs between two lanes of one dialect — a driver that
+   * reports a server's answer differently — and names the lane it pins.
+   */
+  lane: string;
   getStore: () => IntegrationStore;
   /**
    * A backend over a SERIALIZED connection for the current lane — one every
