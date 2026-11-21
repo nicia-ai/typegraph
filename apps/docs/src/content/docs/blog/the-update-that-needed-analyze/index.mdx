@@ -229,7 +229,7 @@ For an `updateWhere()` over a whole kind in that state:
 
 | Analyzed rows | Candidates | Before: rows visited | After: rows visited | Before |  After |
 | ------------: | ---------: | -------------------: | ------------------: | -----: | -----: |
-|        50,000 |          1 |                    3 |              50,003 |  <1 ms |  12 ms |
+|        50,000 |          1 |                    3 |              50,003 |   0 ms |  12 ms |
 |        50,000 |      4,000 |               12,000 |              62,101 | 288 ms | 208 ms |
 |     1,000,000 |          1 |                    3 |           1,000,003 |   1 ms | 367 ms |
 |     1,000,000 |      4,000 |               12,000 |           1,012,101 | 269 ms | 546 ms |
