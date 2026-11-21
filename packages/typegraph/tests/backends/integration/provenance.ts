@@ -2455,8 +2455,12 @@ export function registerProvenanceIntegrationTests(
 
     const CALLBACK_FAILURE = "callback failed after its writes";
 
+    // The ordinary-node-write row is a control, not a pin of the verbs: it
+    // calls no retraction verb and passes without them, pinning issue #930's
+    // current adopted-callback behaviour so the retraction row is read
+    // against it. Only the retraction row needs `retract(source, tx)`.
     describe.each([
-      ["an ordinary node write", false],
+      ["an ordinary node write (control: #930's current behaviour)", false],
       ["a retraction", true],
     ] as const)(
       "withRecordedTransaction whose callback rejects after %s, caught and committed by the native caller",

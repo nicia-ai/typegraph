@@ -19,7 +19,7 @@
  * must come from the graph lock's own isolation evidence, before any support
  * read, and leave the transaction usable.
  *
- * Revert checks: drop `requireFreshSnapshotAfterGraphLock` from the store's
+ * Revert checks: drop `refuseWriterBetweenSnapshotAndGraphLock` from the store's
  * `#acquireFreshSnapshotWriteFences` (`src/store/store.ts`) and the retraction
  * case commits with the shared fact still live, and `assertHolds` and
  * `holding(tx)` answer from the stale snapshot. Drop `OWN_TRANSACTION_OPTIONS`
@@ -51,7 +51,7 @@ import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
 import { createRetractionCapability } from "../../../src/provenance";
 import { recordedRelationsLineage } from "../../../src/store/recorded-capture";
 import type { HistoryStore } from "../../../src/store/store";
-import { createGate } from "../../concurrency-utils";
+import { createGate, type Gate } from "../../concurrency-utils";
 import { attachEngineNativeRecordedTime } from "../../engine-native-recorded-time-fixture";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
@@ -338,10 +338,43 @@ async function callOnStaleSnapshot(
     },
     { isolationLevel: "repeatable_read" },
   );
-  await snapshotTaken.opened;
-  await concurrent(writerProvenance);
+  const outcome = await afterConcurrentCommit(
+    staleTransaction,
+    snapshotTaken,
+    concurrentCommitted,
+    () => concurrent(writerProvenance),
+  );
+  return { outcome, observer: writerProvenance };
+}
+
+/**
+ * Runs `concurrent` once the reader has taken its snapshot (or has already
+ * settled), then opens `concurrentCommitted` whether `concurrent` succeeded or
+ * not, and settles the reader before reporting either failure. A failing
+ * writer therefore never leaves the reader parked on the gate with its
+ * connection checked out, which would stall teardown and hide the failure.
+ */
+async function afterConcurrentCommit<T>(
+  reader: Promise<T>,
+  snapshotTaken: Gate,
+  concurrentCommitted: Gate,
+  concurrent: () => Promise<unknown>,
+): Promise<T> {
+  const readerSettled = reader.then(
+    () => "settled" as const,
+    () => "settled" as const,
+  );
+  const writer = await rejectionOf(
+    (async () => {
+      await Promise.race([snapshotTaken.opened, readerSettled]);
+      await concurrent();
+    })(),
+  );
   concurrentCommitted.open();
-  return { outcome: await staleTransaction, observer: writerProvenance };
+  const [readerOutcome] = await Promise.allSettled([reader]);
+  if (writer !== undefined) throw writer;
+  if (readerOutcome.status === "rejected") throw readerOutcome.reason;
+  return readerOutcome.value;
 }
 
 function capabilityOn(store: HistoryStore<StaleGraph>) {
@@ -437,7 +470,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       );
 
       it(
-        "answers holding(tx) in a read-only REPEATABLE READ transaction from its one snapshot",
+        "control, passes without the freshness check: answers holding(tx) in a read-only REPEATABLE READ transaction from its one snapshot, so the check must not reach read-only transactions",
         { timeout: CONTENTION_TIMEOUT_MS },
         async () => {
           graphSequence += 1;
@@ -463,13 +496,16 @@ describe.runIf(process.env["POSTGRES_URL"])(
             },
             { isolationLevel: "repeatable_read", accessMode: "read_only" },
           );
-          await snapshotTaken.opened;
-          await writer.retractMany([sourceA, sourceB]);
-          concurrentCommitted.open();
+          const held = await afterConcurrentCommit(
+            read,
+            snapshotTaken,
+            concurrentCommitted,
+            () => writer.retractMany([sourceA, sourceB]),
+          );
 
           // A read-only transaction decides no write: its statements share
           // the one snapshot, so the answer is that snapshot's, consistently.
-          expect(await read).toEqual([sharedFact]);
+          expect(held).toEqual([sharedFact]);
           expect(await writer.holding()).toEqual([]);
         },
       );
