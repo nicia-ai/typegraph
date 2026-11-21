@@ -370,9 +370,42 @@ function algorithmExpansionCapture(
 ): Readonly<{ backend: GraphBackend; captured: SqlFragment[] }> {
   const { backend, captured } = algorithmStatementCapture(
     dialect,
-    (_, index) => (index === 1 ? [{ id: "person-1", kind: "Person" }] : []),
+    (statement) =>
+      isReachableSeedLookup(statement) ?
+        [{ id: "person-1", kind: "Person" }]
+      : [],
   );
   return { backend: disableTransactions(backend), captured };
+}
+
+/**
+ * Whether `statement` is the seed lookup a `reachable` call runs before it
+ * expands: the root's (id, kind) read from the node relation. Matched by
+ * shape, not by position: a recorded read sends the revision-origin probe
+ * first, so a positional match answers the probe's slot and hands the seed
+ * lookup an empty result, which ends traversal before any expansion
+ * statement is built.
+ */
+function isReachableSeedLookup(statement: string): boolean {
+  return statement.startsWith("SELECT n.id, n.kind FROM ");
+}
+
+/**
+ * Asserts that `captured` holds a `reachable` expansion round (the working
+ * set joined to the edge relation), so a fixture that stops traversal at
+ * the seed cannot be snapshotted as if it pinned the expansion.
+ */
+function expectReachableExpansionCaptured(
+  captured: readonly SqlFragment[],
+  dialect: Dialect,
+): void {
+  expect(
+    captured.some((fragment) =>
+      toSqlWithParams(fragment, dialect).sql.includes(
+        "FROM (SELECT w.node_id AS source_id",
+      ),
+    ),
+  ).toBe(true);
 }
 
 function algorithmStatementCapture(
@@ -1490,6 +1523,7 @@ describe("compile-golden: store statement builders", () => {
               ...(variant.asOf === undefined ? {} : { asOf: variant.asOf }),
             });
           }
+          expectReachableExpansionCaptured(captured, dialect);
           expect(
             captured.map((fragment) => toSqlWithParams(fragment, dialect)),
           ).toMatchSnapshot();
@@ -1513,6 +1547,7 @@ describe("compile-golden: store statement builders", () => {
           maxHops: 1,
           direction: "both",
         });
+        expectReachableExpansionCaptured(captured, dialect);
         expect(
           captured.map((fragment) => toSqlWithParams(fragment, dialect)),
         ).toMatchSnapshot();
@@ -1619,13 +1654,7 @@ describe("compile-golden: store statement builders", () => {
         expect(reached.map((node) => node.id).toSorted()).toEqual(
           [alice.id, bob.id].toSorted(),
         );
-        expect(
-          captured.some((fragment) =>
-            toSqlWithParams(fragment, "sqlite").sql.includes(
-              "FROM (SELECT w.node_id AS source_id",
-            ),
-          ),
-        ).toBe(true);
+        expectReachableExpansionCaptured(captured, "sqlite");
         expect(
           capturedAlgorithmStatements(captured, "sqlite"),
         ).toMatchSnapshot();

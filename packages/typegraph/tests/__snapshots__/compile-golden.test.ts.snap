@@ -24840,6 +24840,44 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       WHERE graph_id = $1
     ",
   },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      "2025-03-01T00:00:00.000Z",
+      "2025-03-01T00:00:00.000Z",
+      7,
+      7,
+      "compile_golden_algorithms",
+      "2025-03-01T00:00:00.000Z",
+      "2025-03-01T00:00:00.000Z",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES ($1, $2)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = $3 WHERE TRUE AND e.kind = $4 AND (e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= $5) AND (e.valid_to IS NULL OR e.valid_to > $6)) AND e.recorded_from <= $7 AND $8 < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = $9 AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= $10) AND (n.valid_to IS NULL OR n.valid_to > $11)) AND n.recorded_from <= $12 AND $13 < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
 ]
 `;
 
@@ -24865,6 +24903,44 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       7,
     ],
     "sql": "SELECT n.id, n.kind FROM "typegraph_recorded_nodes" n WHERE n.graph_id = ? AND n.id IN (?) AND (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)) AND n.recorded_from <= ? AND ? < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      "2025-03-01T00:00:00.000Z",
+      "2025-03-01T00:00:00.000Z",
+      7,
+      7,
+      "compile_golden_algorithms",
+      "2025-03-01T00:00:00.000Z",
+      "2025-03-01T00:00:00.000Z",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES (?, ?)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE TRUE AND e.kind = ? AND (e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) AND e.recorded_from <= ? AND ? < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = ? AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)) AND n.recorded_from <= ? AND ? < n.recorded_to",
   },
   {
     "params": [
@@ -24968,6 +25044,44 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       WHERE graph_id = $1
     ",
   },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      "2025-06-01T00:00:00.000Z",
+      "2025-06-01T00:00:00.000Z",
+      7,
+      7,
+      "compile_golden_algorithms",
+      "2025-06-01T00:00:00.000Z",
+      "2025-06-01T00:00:00.000Z",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES ($1, $2)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = $3 WHERE TRUE AND e.kind = $4 AND (e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= $5) AND (e.valid_to IS NULL OR e.valid_to > $6)) AND e.recorded_from <= $7 AND $8 < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = $9 AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= $10) AND (n.valid_to IS NULL OR n.valid_to > $11)) AND n.recorded_from <= $12 AND $13 < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
 ]
 `;
 
@@ -24993,6 +25107,44 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       7,
     ],
     "sql": "SELECT n.id, n.kind FROM "typegraph_recorded_nodes" n WHERE n.graph_id = ? AND n.id IN (?) AND (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)) AND n.recorded_from <= ? AND ? < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      "2025-06-01T00:00:00.000Z",
+      "2025-06-01T00:00:00.000Z",
+      7,
+      7,
+      "compile_golden_algorithms",
+      "2025-06-01T00:00:00.000Z",
+      "2025-06-01T00:00:00.000Z",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES (?, ?)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE TRUE AND e.kind = ? AND (e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?)) AND e.recorded_from <= ? AND ? < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = ? AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)) AND n.recorded_from <= ? AND ? < n.recorded_to",
   },
   {
     "params": [
@@ -25152,6 +25304,40 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       WHERE graph_id = $1
     ",
   },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      7,
+      7,
+      "compile_golden_algorithms",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES ($1, $2)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = $3 WHERE TRUE AND e.kind = $4 AND (e.deleted_at IS NULL) AND e.recorded_from <= $5 AND $6 < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = $7 AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL) AND n.recorded_from <= $8 AND $9 < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
 ]
 `;
 
@@ -25175,6 +25361,40 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       7,
     ],
     "sql": "SELECT n.id, n.kind FROM "typegraph_recorded_nodes" n WHERE n.graph_id = ? AND n.id IN (?) AND (n.deleted_at IS NULL) AND n.recorded_from <= ? AND ? < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      7,
+      7,
+      "compile_golden_algorithms",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES (?, ?)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE TRUE AND e.kind = ? AND (e.deleted_at IS NULL) AND e.recorded_from <= ? AND ? < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = ? AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (n.deleted_at IS NULL) AND n.recorded_from <= ? AND ? < n.recorded_to",
   },
   {
     "params": [
@@ -25264,6 +25484,40 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       WHERE graph_id = $1
     ",
   },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      7,
+      7,
+      "compile_golden_algorithms",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES ($1, $2)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = $3 WHERE TRUE AND e.kind = $4 AND (1=1) AND e.recorded_from <= $5 AND $6 < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = $7 AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (1=1) AND n.recorded_from <= $8 AND $9 < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = $1
+    ",
+  },
 ]
 `;
 
@@ -25287,6 +25541,40 @@ exports[`compile-golden: store statement builders > algorithm expansion (store.a
       7,
     ],
     "sql": "SELECT n.id, n.kind FROM "typegraph_recorded_nodes" n WHERE n.graph_id = ? AND n.id IN (?) AND (1=1) AND n.recorded_from <= ? AND ? < n.recorded_to",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "compile_golden_algorithms",
+    ],
+    "sql": "
+      SELECT origin
+      FROM "typegraph_revision_origins"
+      WHERE graph_id = ?
+    ",
+  },
+  {
+    "params": [
+      "person-1",
+      "Person",
+      "compile_golden_algorithms",
+      "knows",
+      7,
+      7,
+      "compile_golden_algorithms",
+      7,
+      7,
+    ],
+    "sql": "WITH working_set(node_id, node_kind) AS (VALUES (?, ?)) SELECT expanded.source_id, expanded.source_kind, n.id AS target_id, n.kind AS target_kind FROM (SELECT w.node_id AS source_id, w.node_kind AS source_kind, e.to_id AS target_id, e.to_kind AS target_kind FROM working_set w JOIN "typegraph_recorded_edges" e ON e.from_id = w.node_id AND e.from_kind = w.node_kind AND e.graph_id = ? WHERE TRUE AND e.kind = ? AND (1=1) AND e.recorded_from <= ? AND ? < e.recorded_to) expanded JOIN "typegraph_recorded_nodes" n ON n.graph_id = ? AND n.id = expanded.target_id AND n.kind = expanded.target_kind WHERE (1=1) AND n.recorded_from <= ? AND ? < n.recorded_to",
   },
   {
     "params": [
