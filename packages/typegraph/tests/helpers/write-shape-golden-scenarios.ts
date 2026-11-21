@@ -25,8 +25,9 @@
  *    root declaring no interactive transactions (the SQLite drivers: PGlite
  *    always runs interactive transactions) — over libSQL, the batch tier
  *    whose every store-owned unit is one atomic `batch()`;
- *  - writes: every node and edge collection write method (the coverage test
- *    below holds the list to `NODE_WRITE_NAMES` / `EDGE_WRITE_NAMES`); the
+ *  - writes: every node and edge collection write method (each driver file
+ *    ends with a coverage check that the methods its traces actually called
+ *    include every name in `NODE_WRITE_NAMES` / `EDGE_WRITE_NAMES`); the
  *    get-or-create `ifExists: "update"` converge and update branches, each
  *    with and without `coalesceUnchangedUpserts`; the collisions a fused
  *    statement must diagnose (occupied id, tombstoned id, id owned by another
@@ -1737,9 +1738,53 @@ const RECEIVERS: readonly Receiver[] = [
   },
 ];
 
-/** The collection method a write exercises: its name up to the first space. */
-function collectionMethod(write: CollectionWrite): string {
-  return write.name.split(" ", 1)[0] ?? write.name;
+/**
+ * The collection methods traced writes called, as `node.<method>` and
+ * `edge.<method>`: recorded at the call, so a write named after a method it
+ * never reaches, or a write the matrix never runs, adds nothing.
+ */
+type InvokedMethods = Set<string>;
+
+/**
+ * `collections` (a surface's `nodes` or `edges`), recording each collection
+ * method called through it into `invoked`. The real collection receives the
+ * call unchanged, as its own `this`.
+ */
+function recordingCollections<C extends object>(
+  collections: C,
+  entity: "node" | "edge",
+  invoked: InvokedMethods,
+): C {
+  return new Proxy(collections, {
+    get(target, kind) {
+      const collection: unknown = Reflect.get(target, kind);
+      if (typeof collection !== "object" || collection === null) {
+        return collection;
+      }
+      return new Proxy(collection, {
+        get(collectionTarget, member) {
+          const value: unknown = Reflect.get(collectionTarget, member);
+          if (typeof member !== "string" || typeof value !== "function") {
+            return value;
+          }
+          return (...args: unknown[]): unknown => {
+            invoked.add(`${entity}.${member}`);
+            return Reflect.apply(value, collectionTarget, args);
+          };
+        },
+      });
+    },
+  });
+}
+
+function recordingSurface(
+  surface: WriteSurface,
+  invoked: InvokedMethods,
+): WriteSurface {
+  return {
+    nodes: recordingCollections(surface.nodes, "node", invoked),
+    edges: recordingCollections(surface.edges, "edge", invoked),
+  };
 }
 
 // ============================================================
@@ -1941,6 +1986,7 @@ async function traceReceiver(
   engine: WriteShapeEngine,
   shape: StoreShape,
   receiver: Receiver,
+  invoked: InvokedMethods,
 ): Promise<string> {
   const results: TraceResult[] = [];
   const writes = shape.entities.flatMap((entity) => COLLECTION_WRITES[entity]);
@@ -1962,7 +2008,11 @@ async function traceReceiver(
         ...(write.fault === undefined ? {} : { fault: write.fault }),
         bind: (opened) =>
           Promise.resolve(async () =>
-            summaryOf(await opened.write((surface) => write.run(surface))),
+            summaryOf(
+              await opened.write((surface) =>
+                write.run(recordingSurface(surface, invoked)),
+              ),
+            ),
           ),
       }),
     );
@@ -2007,56 +2057,83 @@ async function traceReceiverFile(
   driver: WriteShapeDriver,
   shape: StoreShape,
   receiver: Receiver,
+  invoked: InvokedMethods,
 ): Promise<string> {
   const engine = await openWriteShapeEngine(driver);
   try {
-    return await traceReceiver(engine, shape, receiver);
+    return await traceReceiver(engine, shape, receiver, invoked);
   } finally {
     await engine.close();
   }
 }
 
+/** The (store shape, receiver) golden files `driver` runs. */
+function receiverFiles(
+  driver: WriteShapeDriver,
+): readonly Readonly<{ shape: StoreShape; receiver: Receiver }>[] {
+  return STORE_SHAPES.flatMap((shape) =>
+    RECEIVERS.filter(
+      (receiver) =>
+        receiver.drivers.includes(driver) &&
+        (receiver.appliesTo?.(shape) ?? true),
+    ).map((receiver) => ({ shape, receiver })),
+  );
+}
+
+function receiverFileName(shape: StoreShape, receiver: Receiver): string {
+  return `${shape.name}.${receiver.name}`;
+}
+
 /**
- * Registers one driver's golden files, and the coverage check, in the
- * calling test file. That file must mock `nanoid` with {@link traceIds}.
+ * Registers one driver's golden files, then the coverage check over the
+ * methods those files' traces invoked, in the calling test file. That file
+ * must mock `nanoid` with {@link traceIds}.
  */
 export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
+  const invoked: InvokedMethods = new Set();
+  const traced = new Set<string>();
+  const files = receiverFiles(driver);
+
   describe(`write-shape golden [${driver}]`, () => {
-    registerDriverGoldens(driver);
+    describe.each(STORE_SHAPES)("$name store", (shape) => {
+      it.each(
+        files
+          .filter((file) => file.shape === shape)
+          .map((file) => file.receiver),
+      )(
+        "$name receiver",
+        async (receiver) => {
+          const golden = await traceReceiverFile(
+            driver,
+            shape,
+            receiver,
+            invoked,
+          );
+          traced.add(receiverFileName(shape, receiver));
+          await expect(golden).toMatchFileSnapshot(
+            `./__snapshots__/write-shape-golden/${driver}/${shape.name}.${receiver.name}.txt`,
+          );
+        },
+        RECEIVER_FILE_BUDGET_MS,
+      );
+    });
   });
-  describe("write-shape golden coverage", () => {
-    it("traces every node and edge collection write method", () => {
-      const traced = new Set(
-        Object.values(COLLECTION_WRITES)
-          .flat()
-          .map((write) => collectionMethod(write)),
+
+  // Declared last, so it runs after every golden file above has traced.
+  describe(`write-shape golden coverage [${driver}]`, () => {
+    it("invoked every node and edge collection write method", () => {
+      // The check reads what this file's traces called, so it needs all of
+      // them: run the whole file, not a `-t` subset that includes this test.
+      expect([...traced].toSorted()).toEqual(
+        files
+          .map(({ shape, receiver }) => receiverFileName(shape, receiver))
+          .toSorted(),
       );
       const surface = [
         ...NODE_WRITE_NAMES.map((name) => `node.${name}`),
         ...EDGE_WRITE_NAMES.map((name) => `edge.${name}`),
       ];
-      expect(surface.filter((method) => !traced.has(method))).toEqual([]);
+      expect(surface.filter((method) => !invoked.has(method))).toEqual([]);
     });
-  });
-}
-
-function registerDriverGoldens(driver: WriteShapeDriver): void {
-  const receivers = RECEIVERS.filter((receiver) =>
-    receiver.drivers.includes(driver),
-  );
-
-  describe.each(STORE_SHAPES)("$name store", (shape) => {
-    it.each(
-      receivers.filter((receiver) => receiver.appliesTo?.(shape) ?? true),
-    )(
-      "$name receiver",
-      async (receiver) => {
-        const golden = await traceReceiverFile(driver, shape, receiver);
-        await expect(golden).toMatchFileSnapshot(
-          `./__snapshots__/write-shape-golden/${driver}/${shape.name}.${receiver.name}.txt`,
-        );
-      },
-      RECEIVER_FILE_BUDGET_MS,
-    );
   });
 }
