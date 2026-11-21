@@ -153,8 +153,9 @@ function claimRowKey(entry: UniquenessClaimEntry): string {
 }
 
 /**
- * Whether two proposals in one set are competing — one writes a row the other
- * reads.
+ * Whether two proposals in one set that share a claim row ({@link claimRowKey})
+ * are competing — one writes a row the other reads. Proposals on different
+ * rows never compete, so callers compare only within one row.
  *
  * Reachability in EITHER direction, not axis equality: after the axis fold a
  * `kind`-scoped constraint writes under the writer's own kind while a
@@ -164,11 +165,13 @@ function claimRowKey(entry: UniquenessClaimEntry): string {
  * and inside one set neither row is persisted yet — which is the whole reason
  * this test exists rather than leaving it to the relation.
  */
-function claimsCompete(left: ProposedClaim, right: ProposedClaim): boolean {
+function sameRowClaimsCompete(
+  left: ProposedClaim,
+  right: ProposedClaim,
+): boolean {
   return (
-    claimRowKey(left.entry) === claimRowKey(right.entry) &&
-    (right.probeKinds.includes(left.entry.axis) ||
-      left.probeKinds.includes(right.entry.axis))
+    right.probeKinds.includes(left.entry.axis) ||
+    left.probeKinds.includes(right.entry.axis)
   );
 }
 
@@ -203,6 +206,12 @@ function proposedClaims(
   upserts: readonly ResolvedNodeUpsert[],
 ): readonly ProposedClaim[] {
   const accepted: ProposedClaim[] = [];
+  // Accepted proposals by claim row, in acceptance order. Only proposals that
+  // share a row can compete (`sameRowClaimsCompete`), so a proposal is compared with
+  // its own row's bucket instead of every earlier proposal — the set's
+  // validation stays linear in its size — and the bucket's order makes the
+  // reported incumbent the earliest competitor, as a scan of `accepted` would.
+  const acceptedByRow = new Map<string, ProposedClaim[]>();
   for (const upsert of upserts) {
     const owner: ClaimOwner = {
       concreteKind: upsert.kind,
@@ -227,14 +236,18 @@ function proposedClaims(
           ctx.registry,
         ),
       };
-      const incumbent = accepted.find(
+      const rowKey = claimRowKey(entry);
+      const sameRow = acceptedByRow.get(rowKey) ?? [];
+      const incumbent = sameRow.find(
         (candidate) =>
           !isSameClaimOwner(candidate.owner, proposal.owner) &&
-          claimsCompete(candidate, proposal),
+          sameRowClaimsCompete(candidate, proposal),
       );
       if (incumbent !== undefined) {
         throw proposedClaimRefusal(incumbent, proposal);
       }
+      sameRow.push(proposal);
+      acceptedByRow.set(rowKey, sameRow);
       accepted.push(proposal);
     }
   }

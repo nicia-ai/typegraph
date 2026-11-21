@@ -44,6 +44,7 @@ import {
   sqlNull,
   type Tables,
 } from "./shared";
+import { statementRelationNames } from "./statement-relation-names";
 
 const INITIAL_NODE_VERSION = 1;
 const NODE_VERSION_INCREMENT = 1;
@@ -1084,9 +1085,49 @@ function buildNodeExpectationPredicate(
 }
 
 /**
+ * The relations the set update introduces, by preferred name (see
+ * {@link buildUpdateNodeSet}). They are resolved per schema through
+ * {@link statementRelationNames}, so a configured table carrying one of these
+ * names is never shadowed.
+ */
+const SET_KEYS = "tg_set_keys";
+const SET_SELECTED = "tg_set_selected";
+const SET_CANDIDATES = "tg_set_candidates";
+const SET_RELATIONS = [SET_KEYS, SET_SELECTED, SET_CANDIDATES] as const;
+
+/** The column aliases of the set update's key CTE. */
+const SET_KEY_GRAPH_ID = "tg_set_key_graph_id";
+const SET_KEY_KIND = "tg_set_key_kind";
+const SET_KEY_ID = "tg_set_key_id";
+
+/**
  * Builds one set-based update over candidate ids selected by the shared query
- * compiler. The outer graph/kind/live-row predicates are deliberate write
- * fences and must not be delegated solely to the candidate subquery.
+ * compiler. It is one statement on purpose: the candidates are read in the
+ * same snapshot the UPDATE writes from, so the rows selected are the rows
+ * written, and a direct call on an autocommit connection is as atomic as one
+ * inside a transaction.
+ *
+ * The graph/kind fences are written as columns of the key subquery, not as
+ * constant predicates on the nodes table. A constant `graph_id = ? AND
+ * kind = ?` on the nodes table lets PostgreSQL estimate that range from its
+ * column statistics, and statistics taken before a bulk load put a large
+ * fresh kind at one row: the planner then drives a nested loop from that range
+ * and rescans the candidates once per row, which is quadratic (a version
+ * join made it cubic). Carried through a `DISTINCT` subquery — which the
+ * planner does not flatten, so it cannot fold the constants back onto the
+ * nodes table — the same fences reach the nodes table only as join keys. The
+ * nodes table then has no range for stale statistics to shrink, and every
+ * alternative to keyed lookups has to scan the whole table once. The write
+ * phase is therefore bounded by one table scan plus constant work per
+ * candidate, and never rescans, while ids are unique within a graph across
+ * kinds: a lookup by `(graph_id, id)` checks the kind afterwards, so an id
+ * that K other kinds of the graph hold can cost K more index entries. Which side PostgreSQL takes follows its
+ * estimate of the candidate count: estimated small, each candidate is looked
+ * up by `(graph_id, id)` or the primary key; estimated large — as when the
+ * graph and the kind are each in the statistics but never together, so their
+ * frequencies are multiplied — the keys are hashed against one sequential
+ * scan, even for one actual candidate. The fences themselves are unchanged: a
+ * row is written only when its graph, kind and id equal a key's.
  */
 export function buildUpdateNodeSet(
   tables: Tables,
@@ -1102,11 +1143,6 @@ export function buildUpdateNodeSet(
       params.patch,
       params.unsetProperties ?? [],
     ),
-    dialect,
-  );
-  const candidateIds = toDrizzleSql(params.candidateIds, dialect);
-  const candidateIdColumn = toDrizzleSql(
-    portableSql.identifier(params.candidateIdColumn),
     dialect,
   );
   const propsColumn = portableSql.identifier(nodes.props.name);
@@ -1129,6 +1165,43 @@ export function buildUpdateNodeSet(
       sql.empty()
     : sql` AND ${sql.join(expectedPredicates, sql` AND `)}`;
 
+  const relationNames = statementRelationNames(tables, SET_RELATIONS);
+  const selected = relationNames[SET_SELECTED];
+  // Resolved names are plain lowercase identifiers, emitted unquoted as the
+  // candidates alias always was.
+  const candidates = portableSql.raw(relationNames[SET_CANDIDATES]);
+  const keys = sql.identifier(relationNames[SET_KEYS]);
+  const keyGraphId = sql`${keys}.${sql.identifier(SET_KEY_GRAPH_ID)}`;
+  const keyKind = sql`${keys}.${sql.identifier(SET_KEY_KIND)}`;
+  const keyId = sql`${keys}.${sql.identifier(SET_KEY_ID)}`;
+  // The candidate query may project its ids under any collation (a direct
+  // port caller writes its own SQL), and that collation would decide both
+  // this DISTINCT and the match on the nodes table: SQLite's `NOCASE` would
+  // collapse two ids that differ only by case into one key, and a
+  // case-insensitive PostgreSQL collation would match a non-candidate twin.
+  // The key column's own collation makes both use the primary key's equality.
+  const candidateKeyId = adapter.keyText(
+    portableSql`${candidates}.${portableSql.identifier(params.candidateIdColumn)}`,
+  );
+  // The keys are a CTE so that the candidate query is evaluated once on every
+  // engine: SQLite codes the version-keyed row-value IN below twice (once to
+  // walk the primary key, once to test the whole row value) and would run an
+  // inlined candidate query once per coding. PostgreSQL inlines the CTE as the
+  // subquery it is, so its plan is unchanged.
+  const keysCte = toDrizzleSql(
+    adapter.singleEvaluationCte(
+      portableSql.identifier(relationNames[SET_KEYS]),
+      portableSql`
+              SELECT DISTINCT
+                CAST(${params.graphId} AS TEXT) AS ${portableSql.identifier(SET_KEY_GRAPH_ID)},
+                CAST(${params.kind} AS TEXT) AS ${portableSql.identifier(SET_KEY_KIND)},
+                ${candidateKeyId} AS ${portableSql.identifier(SET_KEY_ID)}
+              FROM (${params.candidateIds}) AS ${candidates}
+            `,
+    ),
+    dialect,
+  );
+
   // The candidate query is evaluated once, against the statement's snapshot,
   // and yields only ids. Under PostgreSQL READ COMMITTED a target row a
   // concurrent writer changes and commits while this UPDATE waits for its lock
@@ -1138,40 +1211,41 @@ export function buildUpdateNodeSet(
   // a patch selected from the row's previous state. Pairing each candidate id
   // with the version the snapshot held makes the write conditional on the row
   // being exactly the one the selectors chose: every row write bumps
-  // `version` (a tombstone is fenced by `deleted_at IS NULL` above), so a row
+  // `version` (a tombstone is fenced by `deleted_at IS NULL` below), so a row
   // changed since the snapshot is skipped and absent from the after-images.
+  // The re-check follows the row's own version chain, so a row deleted and
+  // re-created under the same id — whose version starts again and can equal
+  // the snapshot's — is a different row and is never written either.
   //
   // `compareAndSet` keeps the id match. Its candidate query selects by id,
   // which a concurrent write cannot falsify, and its guard is the `expected`
   // predicates above, which the outer UPDATE re-checks on the target row, so a
   // concurrent change to an unrelated property must not fail it.
-  const selected = "tg_set_selected";
   const candidateMatch =
     params.operation === "compareAndSet" ?
       sql`
-        ${nodes.id} IN (
-                SELECT ${candidateIdColumn}
-                FROM (${candidateIds}) AS tg_set_candidates
+        (${nodes.graphId}, ${nodes.kind}, ${nodes.id}) IN (
+                SELECT ${keyGraphId}, ${keyKind}, ${keyId}
+                FROM ${keys}
               )
       `
     : sql`
-      (${nodes.id}, ${nodes.version}) IN (
-              SELECT ${qualifiedColumn(selected, nodes.id)}, ${qualifiedColumn(selected, nodes.version)}
-              FROM (${candidateIds}) AS tg_set_candidates
+      (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${nodes.version}) IN (
+              SELECT ${qualifiedColumn(selected, nodes.graphId)}, ${qualifiedColumn(selected, nodes.kind)}, ${qualifiedColumn(selected, nodes.id)}, ${qualifiedColumn(selected, nodes.version)}
+              FROM ${keys}
               JOIN ${nodes} AS ${sql.identifier(selected)}
-                ON ${qualifiedColumn(selected, nodes.graphId)} = ${params.graphId}
-               AND ${qualifiedColumn(selected, nodes.kind)} = ${params.kind}
-               AND ${qualifiedColumn(selected, nodes.id)} = tg_set_candidates.${candidateIdColumn}
+                ON ${qualifiedColumn(selected, nodes.graphId)} = ${keyGraphId}
+               AND ${qualifiedColumn(selected, nodes.kind)} = ${keyKind}
+               AND ${qualifiedColumn(selected, nodes.id)} = ${keyId}
             )
     `;
   return sql`
+    ${keysCte}
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${patchedProps},
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},
         ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + 1
-    WHERE ${nodes.graphId} = ${params.graphId}
-      AND ${nodes.kind} = ${params.kind}
-      AND ${nodes.deletedAt} IS NULL
+    WHERE ${nodes.deletedAt} IS NULL
       ${expectedPredicate}
       AND ${candidateMatch}
     RETURNING *

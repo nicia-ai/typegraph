@@ -1,4 +1,5 @@
 import type { GraphBackend, GraphDef } from "../../../src";
+import type { PostgresTableNames } from "../../../src/backend/drizzle/schema/postgres";
 import type {
   AdapterBackend,
   BundledBackendCapabilityOverrides,
@@ -48,7 +49,19 @@ export type SerializedBackendHandle = Readonly<{
 export type SerializedBackendOverrides = Readonly<{
   capabilities?: BundledBackendCapabilityOverrides;
   schemaProvisioning?: "dml-only" | "transactional";
+  /**
+   * Physical table names for the backend, patched over the defaults and
+   * forwarded into the lane's own table factory. The lane does not create
+   * the tables: the caller runs `bootstrapTables()` and, on a lane whose
+   * serialized backend shares the suite's database, drops them afterwards.
+   */
+  tableNames?: SerializedBackendTableNames;
 }>;
+
+/** The table-name patch a serialized backend may be built over. */
+export type SerializedBackendTableNames = Readonly<
+  Partial<Record<keyof PostgresTableNames, string>>
+>;
 
 /**
  * THE one refusal a lane whose `createSerializedBackend` has no

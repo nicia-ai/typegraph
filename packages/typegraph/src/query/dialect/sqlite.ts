@@ -178,6 +178,14 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return expression;
   },
 
+  keyText(expression) {
+    return sql`${expression} COLLATE BINARY`;
+  },
+
+  singleEvaluationCte(name, body) {
+    return sql`WITH ${name} AS MATERIALIZED (${body})`;
+  },
+
   analyzeTemporaryTable(): undefined {
     return;
   },

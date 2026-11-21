@@ -1132,13 +1132,31 @@ history, and revision state in the same transaction. If any row or sidecar is
 invalid, the whole update rolls back. Backends without transactional set-write
 and batched sidecar support reject the operation before writing.
 
-The selectors are evaluated once, against the statement's snapshot, and the
-write applies only to a row whose stored version is still the one that snapshot
-selected. Under PostgreSQL `READ COMMITTED`, a row that another transaction
-changes and commits after that snapshot (while this update waits for its row
-lock) is skipped rather than patched on the strength of its previous state, and
-`affectedCount` does not count it. Re-run `updateWhere()` to apply the patch to
-rows that still match.
+The selectors are evaluated once, against the snapshot of the one statement
+that also writes, and the write applies only to a row whose stored version is
+still the one that snapshot selected. Under PostgreSQL `READ COMMITTED`, a row
+that another transaction changes and commits after that snapshot (while this
+update waits for its row lock) is skipped rather than patched on the strength
+of its previous state, and `affectedCount` does not count it. The same holds
+for a row deleted and re-created under the same id, even though the new row's
+version starts again at the one the snapshot read: it is a different row, and
+it is written only when it already matched the selectors in that snapshot.
+Re-run `updateWhere()` to apply the patch to rows that still match.
+
+The statement evaluates its candidate query once on every backend and reaches
+the stored rows only through the selected keys, so its write phase never
+rescans: it costs at most one scan of the nodes table plus constant work per
+candidate, however stale PostgreSQL's planner statistics are. That matters
+after a bulk load into a large shared table, which can leave PostgreSQL
+believing the kind holds almost no rows. Whether PostgreSQL looks the keys up
+or scans the table still follows those statistics, and in some states it scans
+the whole table even for one candidate. Selecting the candidates is an ordinary
+query too: under stale statistics, selecting one row by id can still read every
+un-analyzed row of the kind, so a loop of single-row updates over a freshly
+loaded kind slows as the kind grows until the table is analyzed (see
+[stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
+Because the update is one statement, a backend's `updateNodeSet` called
+directly on an autocommit connection is as atomic as one inside a transaction.
 
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:

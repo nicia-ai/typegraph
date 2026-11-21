@@ -1,4 +1,10 @@
-import { getTableName, type SQL, sql, type SQLWrapper } from "drizzle-orm";
+import {
+  getTableName,
+  type SQL,
+  sql,
+  type SQLWrapper,
+  type Table,
+} from "drizzle-orm";
 
 import { getDialect } from "../../../query/dialect";
 import type { SqlFragment } from "../../../query/sql-fragment";
@@ -9,6 +15,21 @@ import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
 export type Tables = SqliteTables | PostgresTables;
+
+/**
+ * Every relation name the backend's configured schema owns: each Drizzle
+ * table's physical name plus the fulltext relation, which Drizzle cannot
+ * model. Per-field vector tables are not listed: their names always end in a
+ * hash suffix (`vectorPhysicalName`), so no fixed statement name can equal one.
+ */
+export function configuredRelationNames(tables: Tables): readonly string[] {
+  const relations: readonly (Table | string)[] = Object.values<Table | string>(
+    tables,
+  );
+  return relations.map((relation) =>
+    typeof relation === "string" ? relation : getTableName(relation),
+  );
+}
 
 /**
  * A row-lock clause for the trailing locking position of a `SELECT`. `of`

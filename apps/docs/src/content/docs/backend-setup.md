@@ -580,8 +580,9 @@ const store = createStore(graph, backend, { autoRefreshStatistics: false });
 ```
 
 Bulk writes inside a `store.transaction(...)` block never auto-refresh —
-statistics collected mid-transaction cannot see the uncommitted rows —
-so refresh manually after the transaction commits. The same applies to
+`refreshStatistics()` runs on the store's own connection, which cannot see
+the transaction's uncommitted rows — so refresh manually after the
+transaction commits. The same applies to
 loops of small `bulkCreate` batches that never individually reach the
 threshold, and to backend-level batch inserts — the loop example below
 covers that pattern.
@@ -613,6 +614,100 @@ failures stay visible through the existing caller warning or rejection. If you
 need to bypass the API for an unusual deployment (for example issuing `ANALYZE`
 over a separate admin connection), call `backend.execute()` with raw SQL as the
 escape hatch.
+
+#### Stale statistics on a large shared table (PostgreSQL)
+
+PostgreSQL's autovacuum re-analyzes a table only after changes reach
+`autovacuum_analyze_threshold` + `autovacuum_analyze_scale_factor` × its row
+count (50 rows + 10% by default). On a nodes table shared by many graphs, a load
+of tens of thousands of nodes of one kind can stay below that trigger
+indefinitely, and until it is crossed the planner estimates the new kind at
+about one row.
+
+The write phase of `updateWhere()` and `compareAndSet()` reaches the nodes table
+only through the selected rows' keys. It reads the candidates once and never
+rescans them, so whatever the statistics say it is bounded by one scan of the
+nodes table plus a constant amount of work per candidate, as long as each
+candidate's id is unique within its graph across kinds. Generated ids are. An
+id that other kinds of the same graph also hold costs more, as described
+below. Which side of that bound PostgreSQL takes follows its estimate of the
+candidate count, not the actual count:
+
+- When the graph is new to the statistics, the estimate is about one row and
+  each candidate is looked up by its id: three rows visited and about 29
+  buffers per candidate, from 1,000 to 20,000 candidates. The statement of
+  earlier releases visited 167 million rows for 1,000 candidates in this state.
+- When the graph and the kind are each in the statistics but never together
+  (rows of the graph under other kinds, rows of the kind in other graphs),
+  PostgreSQL multiplies their frequencies and estimates thousands of
+  candidates. It then hashes the candidates against one sequential scan of the
+  whole table, even for a single candidate, at every table size measured. The
+  statement of earlier releases read only the kind's index range in this state
+  and was cheaper in every case:
+
+| Analyzed rows | Candidates | Earlier: rows visited | Earlier: buffers | Now: rows visited | Now: buffers |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 50,000 | 1 | 3 | 12 | 50,003 | 704 |
+| 50,000 | 4,000 | 12,000 | 100,874 | 62,101 | 101,558 |
+| 50,000 | 20,000 | 60,000 | 504,184 | 114,101 | 504,984 |
+| 1,000,000 | 1 | 3 | 14 | 1,000,003 | 13,905 |
+| 1,000,000 | 4,000 | 12,000 | 105,418 | 1,012,101 | 119,342 |
+| 1,000,000 | 20,000 | 60,000 | 526,778 | 1,064,101 | 540,627 |
+
+The figures are for an `updateWhere()` over the whole kind, and are the same on
+a server and on PGlite. Above a few thousand candidates the row writes dominate both
+statements' buffers. Below that, a call over a few rows of such a kind reads
+the whole table until the table is analyzed: 367 ms instead of 1 ms for one
+candidate against 1,000,000 analyzed rows on a server, so a loop of small
+`updateWhere()` calls there pays one table scan per call. A selection by id is
+estimated at one row whatever the graph and kind, so `compareAndSet()` and an
+`updateWhere()` by id stay keyed in this state (two or three rows visited).
+
+The per-candidate work assumes ids that are unique within a graph. Each keyed
+lookup reads the `(graph_id, id)` index and checks the kind afterwards,
+stopping at the first row of the candidate's kind. An id that K other kinds of
+the same graph also hold can cost up to K more index entries in each of the
+two lookups, which happens when you supply your own ids and reuse them across
+kinds. In a test with 1,000 fresh candidates whose ids 100 other kinds of the
+graph also held, inserted before the candidates, the two lookups visited
+202,000 index entries (101 per candidate each) and the statement used 333,415
+buffers, against about 29,000 for unique ids. It is still linear in the
+candidates for a given K. The statement of earlier releases had not finished
+after 12 minutes on a server in the same state.
+
+Candidate selection is an ordinary query, and it depends on the estimate too.
+Selecting a single id from a fresh kind can read the kind's un-analyzed rows
+through an index on `graph_id` and filter the id. In
+a test with 50,000 analyzed rows of other graphs, `compareAndSet()` and an
+`updateWhere()` by id each filtered out 3,999 rows to select one of 4,000 fresh
+rows. A loop of single-row mutations over a fresh kind is therefore quadratic,
+like other per-row loops over it.
+
+A point lookup by id can likewise pick any index that starts with
+`(graph_id, kind)` and filter every row of the kind. In a benchmark with 300,000 analyzed rows of other graphs, one
+primary-key `UPDATE` took 6.5 ms instead of 0.06 ms against 40,000
+un-analyzed rows of the kind. Per-row work therefore slows as the kind grows:
+500 transactions of 20 creates plus 20 edges each went from 15 ms to 18 ms per
+batch, and stayed at about 11 ms when the tables were analyzed every 1,000
+rows.
+
+`ANALYZE` samples a bounded number of rows, so its cost does not grow with the
+table: about 0.4 s for `typegraph_nodes` and 0.65 s for `typegraph_edges`,
+both at 300,000 and at 1,000,000 rows. After a large load, call
+`store.refreshStatistics()`. To have autovacuum keep up with a steady stream of
+committed writes instead, give the TypeGraph tables a size-independent
+trigger:
+
+```sql
+ALTER TABLE typegraph_nodes SET (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = 10000);
+ALTER TABLE typegraph_edges SET (autovacuum_analyze_scale_factor = 0, autovacuum_analyze_threshold = 10000);
+```
+
+Autovacuum sees only committed rows and wakes every `autovacuum_naptime`
+(one minute by default), so this does not help the remainder of the
+transaction that is doing the load. TypeGraph does not set these parameters
+itself. The right threshold depends on the write rate, and the setting
+outlives the migration that would apply it.
 
 ### pgbouncer / transaction-pool mode
 

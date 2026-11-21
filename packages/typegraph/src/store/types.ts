@@ -766,8 +766,10 @@ export type BaseStoreOptions = Readonly<{
    * the store runs `refreshStatistics()` after the write commits.
    * Pass a number to change the threshold, or `false` to disable.
    * Bulk writes inside a caller-provided transaction never
-   * auto-refresh (statistics cannot see uncommitted rows); refresh
-   * manually after commit. `importGraph` handles its own refresh.
+   * auto-refresh: `refreshStatistics()` runs on the store's own connection,
+   * which cannot see the transaction's uncommitted rows, and an ANALYZE on
+   * the transaction's connection would hold its table lock until commit.
+   * Refresh manually after commit. `importGraph` handles its own refresh.
    */
   autoRefreshStatistics?: false | number;
   /**

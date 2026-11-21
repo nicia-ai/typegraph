@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -19,11 +20,19 @@ import { rowPropsToObject } from "../../../src/backend/types";
 import type { QueryAst } from "../../../src/query/ast";
 import { compileQuery } from "../../../src/query/compiler";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledSelectSql,
+} from "../../../src/query/sql-intent";
 import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write-pipeline";
 import { compareAndSetAbsent } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
-import { type IntegrationTestContext } from "./test-context";
+import {
+  type IntegrationTestContext,
+  type SerializedBackendTableNames,
+} from "./test-context";
 
 function compileCandidateIds(
   graphId: string,
@@ -59,6 +68,182 @@ async function compareAndSetNode(
 ) {
   return requireDefined(backend.compareAndSetNode)(params);
 }
+
+/** The messages of `error` and every cause beneath it. */
+function errorMessages(error: unknown): readonly string[] {
+  if (!(error instanceof Error)) return [];
+  return [error.message, ...errorMessages(error.cause)];
+}
+
+/**
+ * The row, counted from one, at which {@link installSetUpdatePoison} fails:
+ * past the first statement of any split of a set update over
+ * {@link AUTOCOMMIT_ROWS} keys at a bind budget of ten, which held three keys
+ * of a version-keyed write and six of an id-keyed one.
+ */
+const POISONED_ROW = 10;
+
+/** The rows the autocommit case writes. */
+const AUTOCOMMIT_ROWS = 12;
+
+/**
+ * Installs a trigger that fails the {@link POISONED_ROW}th node row any
+ * UPDATE touches in `graphId`, counting across statements — so a set update
+ * that writes its keys in several statements fails in a later one, after the
+ * earlier ones ran. The count lives in a sequence on PostgreSQL (outside any
+ * transaction) and in a counter table on SQLite. Returns the teardown.
+ */
+async function installSetUpdatePoison(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl" | "tableNames">,
+  graphId: string,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const graphLiteral = `'${graphId.replaceAll("'", "''")}'`;
+  const message = "'poisoned set update'";
+  if (backend.dialect === "postgres") {
+    await executeDdl(`CREATE SEQUENCE tg_poison_seq`);
+    await executeDdl(
+      `CREATE FUNCTION tg_poison_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF nextval('tg_poison_seq') = ${POISONED_ROW} THEN
+           RAISE EXCEPTION ${message};
+         END IF;
+         RETURN NEW;
+       END $$`,
+    );
+    await executeDdl(
+      `CREATE TRIGGER tg_poison BEFORE UPDATE ON ${nodesTable}
+       FOR EACH ROW WHEN (OLD.graph_id = ${graphLiteral})
+       EXECUTE FUNCTION tg_poison_fn()`,
+    );
+    return async () => {
+      await executeDdl(`DROP TRIGGER tg_poison ON ${nodesTable}`);
+      await executeDdl(`DROP FUNCTION tg_poison_fn()`);
+      await executeDdl(`DROP SEQUENCE tg_poison_seq`);
+    };
+  }
+  await executeDdl(`CREATE TABLE tg_poison_counter (n INTEGER NOT NULL)`);
+  await executeDdl(`INSERT INTO tg_poison_counter (n) VALUES (0)`);
+  await executeDdl(
+    `CREATE TRIGGER tg_poison BEFORE UPDATE ON ${nodesTable}
+     WHEN OLD.graph_id = ${graphLiteral}
+     BEGIN
+       UPDATE tg_poison_counter SET n = n + 1;
+       SELECT RAISE(ABORT, ${message})
+       WHERE (SELECT n FROM tg_poison_counter) = ${POISONED_ROW};
+     END`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER tg_poison`);
+    await executeDdl(`DROP TABLE tg_poison_counter`);
+  };
+}
+
+/** Rows a randomly picking candidate query chooses one of. */
+const RANDOM_PICK_ROWS = 32;
+
+/** Set updates run with a randomly picking candidate query. */
+const RANDOM_PICK_CALLS = 8;
+
+/** A PostgreSQL collation under which `Case` and `case` are equal. */
+const CASE_INSENSITIVE_COLLATION = "tg_case_insensitive";
+
+/**
+ * Makes `column` available under a case-insensitive collation: SQLite's
+ * built-in `NOCASE`, or on PostgreSQL a nondeterministic ICU collation this
+ * creates. A direct caller of a set-update port may project its candidate ids
+ * that way; the set update must still tell ids apart as the primary key does.
+ *
+ * An engine can accept the collation and still not apply it: PGlite takes the
+ * DDL, yet compares the twins as different. A case that projects through such
+ * a collation is byte-exact already and passes with the set update's key
+ * normalization removed, so `equatesTwins` reports what the engine actually
+ * decides for {@link CASE_TWIN_IDS} under the collation.
+ * Returns the collated column, that verdict, and the teardown.
+ */
+async function caseInsensitiveColumn(
+  backend: Pick<GraphBackend, "dialect" | "execute" | "executeDdl">,
+  column: string,
+): Promise<
+  Readonly<{
+    collated: string;
+    equatesTwins: boolean;
+    drop: () => Promise<void>;
+  }>
+> {
+  const isPostgres = backend.dialect === "postgres";
+  const collation = isPostgres ? CASE_INSENSITIVE_COLLATION : "NOCASE";
+  const executeDdl = requireDefined(backend.executeDdl);
+  if (isPostgres) {
+    await executeDdl(
+      `CREATE COLLATION IF NOT EXISTS ${CASE_INSENSITIVE_COLLATION}
+       (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`,
+    );
+  }
+  const [upper, lower] = CASE_TWIN_IDS;
+  const [verdict] = await backend.execute<{ twins_equal: unknown }>(
+    asCompiledRowsSql(sql`
+      SELECT CASE
+        WHEN ${sql.raw(`'${upper}' COLLATE ${collation} = '${lower}'`)}
+        THEN 1 ELSE 0
+      END AS twins_equal
+    `),
+  );
+  return {
+    collated: `${column} COLLATE ${collation}`,
+    equatesTwins: Number(verdict?.twins_equal) === 1,
+    drop: async () => {
+      if (isPostgres) {
+        await executeDdl(
+          `DROP COLLATION IF EXISTS ${CASE_INSENSITIVE_COLLATION}`,
+        );
+      }
+    },
+  };
+}
+
+/**
+ * The relations the set update introduces under their preferred names. A
+ * configured table carrying one of them must not be shadowed by it.
+ */
+const SET_UPDATE_RELATION_NAMES = [
+  "tg_set_keys",
+  "tg_set_selected",
+  "tg_set_candidates",
+] as const;
+
+const ShadowItem = defineNode("ShadowItem", {
+  schema: z.object({ name: z.string(), flagged: z.boolean().optional() }),
+});
+
+const shadowGraph = defineGraph({
+  id: "set_update_relation_shadowing",
+  nodes: { ShadowItem: { type: ShadowItem } },
+  edges: {},
+});
+
+/**
+ * A complete set of table names private to one case: the nodes table is
+ * `nodes`, and every other table is `<nodes>_<n>`, so one of them takes the
+ * first alternative a clashing statement name would fall back to.
+ */
+function shadowingTableNames(
+  backend: Pick<GraphBackend, "tableNames">,
+  nodes: string,
+): SerializedBackendTableNames {
+  return Object.fromEntries(
+    Object.entries(requireDefined(backend.tableNames)).flatMap(
+      ([key, name], index) =>
+        typeof name === "string" ?
+          [[key, key === "nodes" ? nodes : `${nodes}_${index}`]]
+        : [],
+    ),
+  );
+}
+
+/** The ids of two nodes that differ only by case. */
+const CASE_TWIN_IDS = ["Case-Twin", "case-twin"] as const;
 
 /**
  * Shared SQLite/PostgreSQL coverage for the storage primitive that the public
@@ -1341,6 +1526,298 @@ export function registerSetNodeMutationIntegrationTests(
       });
     });
 
+    // Both operations, because a set update split into a key read and keyed
+    // UPDATE chunks may choose that path for one and not the other: an earlier
+    // revision chunked compareAndSet always but updateWhere only when its
+    // candidates projected a version, so an updateWhere-only case took the
+    // atomic fallback there and passed, while compareAndSet committed the six
+    // rows of its first chunk (as did updateWhere with a projected version,
+    // nine rows in three chunks). A backend that splits exactly the id-only
+    // updateWhere sent here into a key read and three-key UPDATEs fails this
+    // case on every driver, the first three chunks committed.
+    it.for(["updateWhere", "compareAndSet"] as const)(
+      "commits none of a direct %s that fails partway on an autocommit connection",
+      async (operation) => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        // On PostgreSQL a tiny bind budget is what would split a write of the
+        // keys into several statements; the set update must stay one
+        // statement whatever the budget. SQLite's
+        // serialized handle is a separate database, so its own connection is
+        // used there; it has no construction-time budget to shrink.
+        const direct =
+          backend.dialect === "postgres" ?
+            await context.createSerializedBackend({
+              capabilities: { maxBindParameters: 10 },
+            })
+          : { backend, close: () => Promise.resolve() };
+        const people = [];
+        for (let index = 0; index < AUTOCOMMIT_ROWS; index += 1) {
+          people.push(
+            await store.nodes.Person.create({ name: `Autocommit ${index}` }),
+          );
+        }
+        const removePoison = await installSetUpdatePoison(
+          direct.backend,
+          store.graphId,
+        );
+        try {
+          const common = {
+            graphId: store.graphId,
+            kind: "Person",
+            patch: { isActive: true },
+            candidateIds: asCompiledSelectSql(sql`
+              SELECT id AS person_id
+              FROM ${createSqlSchema(backend.tableNames).nodesTable}
+              WHERE graph_id = ${store.graphId} AND kind = 'Person'
+            `),
+            candidateIdColumn: "person_id",
+          };
+          const failure = await (
+            operation === "compareAndSet" ?
+              compareAndSetNode(direct.backend, {
+                ...common,
+                operation,
+                expected: { isActive: { kind: "absent" } },
+              })
+            : updateNodeSet(direct.backend, { ...common, operation })).catch(
+            (error: unknown) => error,
+          );
+          // Drivers wrap the trigger's error; it is the cause of what surfaces.
+          expect(errorMessages(failure).join("\n")).toContain(
+            "poisoned set update",
+          );
+        } finally {
+          await removePoison();
+          await direct.close();
+        }
+        const stored = await Promise.all(
+          people.map(async (person) =>
+            requireDefined(await store.nodes.Person.getById(person.id)),
+          ),
+        );
+
+        expect(
+          stored.map((person) => [person.meta.version, person.isActive]),
+        ).toEqual(people.map(() => [1, undefined]));
+      },
+    );
+
+    // The candidate query picks one of RANDOM_PICK_ROWS rows at random, so a
+    // second evaluation picks another row with probability 31/32. A set update
+    // that evaluates it twice (SQLite coded the version-keyed row-value IN
+    // once to walk the primary key and once to test the row, each running the
+    // candidate query) writes a row only when both picks agree: one write in
+    // all RANDOM_PICK_CALLS calls has probability 2^-40. Evaluated once, every
+    // call writes exactly the row it picked.
+    it.for(["updateWhere", "compareAndSet"] as const)(
+      "evaluates a direct %s's candidate query once",
+      async (operation) => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        for (let index = 0; index < RANDOM_PICK_ROWS; index += 1) {
+          await store.nodes.Person.create({ name: "Random pick" });
+        }
+        const common = {
+          graphId: store.graphId,
+          kind: "Person",
+          patch: { isActive: true },
+          candidateIds: asCompiledSelectSql(sql`
+            SELECT id AS person_id
+            FROM ${createSqlSchema(backend.tableNames).nodesTable}
+            WHERE graph_id = ${store.graphId}
+              AND kind = 'Person'
+              AND deleted_at IS NULL
+            ORDER BY random()
+            LIMIT 1
+          `),
+          candidateIdColumn: "person_id",
+        };
+        const affected = [];
+        for (let call = 0; call < RANDOM_PICK_CALLS; call += 1) {
+          const result =
+            operation === "compareAndSet" ?
+              await compareAndSetNode(backend, {
+                ...common,
+                operation,
+                expected: { name: { kind: "value", value: "Random pick" } },
+              })
+            : await updateNodeSet(backend, { ...common, operation });
+          affected.push(result.affectedCount);
+        }
+
+        expect(affected).toEqual(
+          Array.from({ length: RANDOM_PICK_CALLS }, () => 1),
+        );
+      },
+    );
+
+    it("updates node ids that differ only by case as two rows", async () => {
+      const store = context.getStore();
+      const twins = [];
+      for (const id of CASE_TWIN_IDS) {
+        twins.push(
+          await store.nodes.Person.create({ name: "Case twin" }, { id }),
+        );
+      }
+
+      const { affectedCount } = await store.nodes.Person.updateWhere({
+        where: (person) => person.name.eq("Case twin"),
+        patch: { isActive: true },
+      });
+      const swapped = await store.nodes.Person.compareAndSet(
+        requireDefined(twins[1]).id,
+        {
+          expected: { name: "Case twin" },
+          patch: { age: 7 },
+        },
+      );
+      const stored = await Promise.all(
+        twins.map(async (twin) =>
+          requireDefined(await store.nodes.Person.getById(twin.id)),
+        ),
+      );
+
+      expect({
+        affectedCount,
+        swapped,
+        stored: stored.map((person) => [
+          person.id,
+          person.isActive,
+          person.age,
+          person.meta.version,
+        ]),
+      }).toEqual({
+        affectedCount: 2,
+        swapped: true,
+        stored: [
+          [CASE_TWIN_IDS[0], true, undefined, 2],
+          [CASE_TWIN_IDS[1], true, 7, 3],
+        ],
+      });
+    });
+
+    // The candidate query of a direct port call is the caller's SQL, and may
+    // project its ids under any collation. The set update deduplicates and
+    // matches those ids with the primary key's own equality, so it writes
+    // exactly the rows whose ids the candidates name, byte for byte.
+    describe.for(["updateWhere", "compareAndSet"] as const)(
+      "%s through the backend port with case-insensitively projected candidates",
+      (operation) => {
+        async function writeCaseTwins(
+          skip: (note: string) => void,
+          candidateIdsWhere: readonly string[],
+        ): Promise<
+          Readonly<{
+            affectedIds: readonly string[];
+            versions: readonly number[];
+          }>
+        > {
+          const store = context.getStore();
+          const backend = context.getBackend();
+          const twins = [];
+          for (const id of CASE_TWIN_IDS) {
+            twins.push(
+              await store.nodes.Person.create({ name: "Case twin" }, { id }),
+            );
+          }
+          const column = await caseInsensitiveColumn(backend, "id");
+          try {
+            // Not equated, the twins would pass this case with the set
+            // update's key normalization removed: it is skipped, so the lane
+            // does not count it as coverage.
+            if (!column.equatesTwins) {
+              skip(
+                "this engine's case-insensitive collation does not equate the twins",
+              );
+            }
+            const candidateIds = asCompiledSelectSql(sql`
+              SELECT ${sql.raw(column.collated)} AS person_id
+              FROM ${createSqlSchema(backend.tableNames).nodesTable}
+              WHERE graph_id = ${store.graphId}
+                AND kind = 'Person'
+                AND id IN (${sql.join(
+                  candidateIdsWhere.map((id) => sql`${id}`),
+                  sql`, `,
+                )})
+            `);
+            const common = {
+              graphId: store.graphId,
+              kind: "Person",
+              patch: { isActive: true },
+              candidateIds,
+              candidateIdColumn: "person_id",
+            };
+            const result =
+              operation === "compareAndSet" ?
+                await compareAndSetNode(backend, {
+                  ...common,
+                  operation,
+                  expected: { name: { kind: "value", value: "Case twin" } },
+                })
+              : await updateNodeSet(backend, { ...common, operation });
+            const stored = await Promise.all(
+              twins.map(async (twin) =>
+                requireDefined(await store.nodes.Person.getById(twin.id)),
+              ),
+            );
+            return {
+              affectedIds: result.rows.map((row) => row.id).toSorted(),
+              versions: stored.map((person) => person.meta.version),
+            };
+          } finally {
+            await column.drop();
+          }
+        }
+
+        it("writes both ids when both are candidates", async ({ skip }) => {
+          expect(await writeCaseTwins(skip, CASE_TWIN_IDS)).toEqual({
+            affectedIds: [...CASE_TWIN_IDS].toSorted(),
+            versions: [2, 2],
+          });
+        });
+
+        it("writes only the id that is a candidate", async ({ skip }) => {
+          expect(await writeCaseTwins(skip, [CASE_TWIN_IDS[0]])).toEqual({
+            affectedIds: [CASE_TWIN_IDS[0]],
+            versions: [2, 1],
+          });
+        });
+      },
+    );
+
+    // 61 characters is the longest root alias whose generated `<alias>_id`
+    // column PostgreSQL's 63-byte clipping still tells apart from the
+    // alias's other generated columns (`…_i` is unique; at 62 every column
+    // clips to `…_`). The set update must add no generated candidate column
+    // that collides sooner — a projected `<alias>_version` clips to `…_v`,
+    // the same name as `valid_from` and `valid_to`.
+    it("updates through candidates whose root alias is 61 characters long", async () => {
+      const store = context.getStore();
+      const alias = `a${"b".repeat(60)}`;
+      const person = await store.nodes.Person.create({ name: "Long alias" });
+      const candidates = store
+        .query()
+        .from("Person", alias)
+        .whereNode(alias, (candidate) => candidate.id.eq(person.id))
+        .select((ctx) => requireDefined(ctx[alias]).id);
+
+      const { affectedCount } = await store.nodes.Person.updateWhere({
+        candidates,
+        patch: { isActive: true },
+      });
+      const stored = requireDefined(
+        await store.nodes.Person.getById(person.id),
+      );
+
+      expect(alias).toHaveLength(61);
+      expect({
+        affectedCount,
+        isActive: stored.isActive,
+        version: stored.meta.version,
+      }).toEqual({ affectedCount: 1, isActive: true, version: 2 });
+    });
+
     it("never resurrects tombstoned candidates", async () => {
       const store = context.getStore();
       const backend = context.getBackend();
@@ -1412,6 +1889,71 @@ export function registerSetNodeMutationIntegrationTests(
         store.asOfRecorded(afterUpdate).nodes.Person.getById(bob.id),
       ).resolves.toHaveProperty("isActive", true);
     });
+
+    describe.for(SET_UPDATE_RELATION_NAMES)(
+      "with the nodes table named %s",
+      (nodesTable) => {
+        it("updateWhere and compareAndSet write exactly the selected rows", async () => {
+          const tableNames = shadowingTableNames(
+            context.getBackend(),
+            nodesTable,
+          );
+          const serialized = await context.createSerializedBackend({
+            tableNames,
+          });
+          const { backend } = serialized;
+          try {
+            expect(requireDefined(backend.tableNames).nodes).toBe(nodesTable);
+            await requireDefined(backend.bootstrapTables)();
+            const [store] = await createStoreWithSchema(shadowGraph, backend);
+            const items = [];
+            for (const name of ["match", "match", "other", "other"]) {
+              items.push(await store.nodes.ShadowItem.create({ name }));
+            }
+
+            const { affectedCount } = await store.nodes.ShadowItem.updateWhere({
+              where: (item) => item.name.eq("match"),
+              patch: { flagged: true },
+            });
+            const swapped = await store.nodes.ShadowItem.compareAndSet(
+              requireDefined(items[2]).id,
+              { expected: { name: "other" }, patch: { flagged: true } },
+            );
+            const stored = await Promise.all(
+              items.map(async (item) =>
+                requireDefined(await store.nodes.ShadowItem.getById(item.id)),
+              ),
+            );
+
+            expect({
+              affectedCount,
+              swapped,
+              stored: stored.map((item) => [item.flagged, item.meta.version]),
+            }).toEqual({
+              affectedCount: 2,
+              swapped: true,
+              stored: [
+                [true, 2],
+                [true, 2],
+                [true, 2],
+                [undefined, 1],
+              ],
+            });
+          } finally {
+            // The PostgreSQL lanes' serialized backends share the suite's
+            // database, so the case's own tables are dropped with it.
+            if (backend.dialect === "postgres") {
+              await requireDefined(backend.executeDdl)(
+                `DROP TABLE IF EXISTS ${Object.values(tableNames)
+                  .map((name) => `"${name}"`)
+                  .join(", ")} CASCADE`,
+              );
+            }
+            await serialized.close();
+          }
+        });
+      },
+    );
 
     it("rejects an empty patch before executing SQL", async () => {
       const store = context.getStore();

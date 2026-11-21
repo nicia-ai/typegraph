@@ -19,6 +19,7 @@ import { type PGlite } from "@electric-sql/pglite";
 import { getTableName, is, Table } from "drizzle-orm";
 
 import type { AnyPgTransaction } from "../../../src/backend/drizzle/execution";
+import type { PostgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import {
   createPostgresBackend,
   tables as defaultTables,
@@ -67,6 +68,7 @@ export type SharedPgliteEngine = Readonly<{
   makeBackend: (
     capabilities?: BundledBackendCapabilityOverrides,
     schemaProvisioning?: "dml-only" | "transactional",
+    tables?: PostgresTables,
   ) => AdapterBackend<AnyPgTransaction>;
   /** TRUNCATE all managed metadata/data tables — default per-test isolation. */
   resetData: () => Promise<void>;
@@ -96,10 +98,11 @@ export async function setupSharedPgliteEngine(): Promise<SharedPgliteEngine> {
 
   return {
     client,
-    makeBackend: (capabilities, schemaProvisioning) =>
+    makeBackend: (capabilities, schemaProvisioning, tables) =>
       createPostgresBackend(db, {
         ...(capabilities === undefined ? {} : { capabilities }),
         schemaProvisioning: schemaProvisioning ?? "dml-only",
+        ...(tables === undefined ? {} : { tables }),
       }),
     resetData: async () => {
       await client.exec(TRUNCATE_MANAGED_SQL);

@@ -5,6 +5,7 @@
  * slice builds its backends the same way; each slice file states only which
  * part of the suite it runs.
  */
+import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
 import { createTestDatabase } from "../../test-utils";
@@ -31,6 +32,9 @@ export function registerSqliteIntegrationLane(
           refuseUnsupportedSerializedBackendCapabilities(LANE_NAME, overrides);
           const { backend } = createLocalSqliteBackend({
             schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+            ...(overrides?.tableNames === undefined ?
+              {}
+            : { tables: createSqliteTables(overrides.tableNames) }),
           });
           return Promise.resolve({ backend, close: () => backend.close() });
         },
