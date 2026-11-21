@@ -115,6 +115,10 @@ beforeAll(async () => {
         client.release();
       }
     },
+    queryNumber: async (text) => {
+      const result = await candidate.query<object>(text);
+      return Number(Object.values(requireDefined(result.rows[0]))[0]);
+    },
   };
 });
 

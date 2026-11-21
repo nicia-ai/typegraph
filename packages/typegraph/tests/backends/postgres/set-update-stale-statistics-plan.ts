@@ -3,10 +3,14 @@
  * server PostgreSQL (`set-update-stale-statistics-plan.test.ts`) and PGlite
  * (`pglite-set-update-stale-statistics-plan.test.ts`).
  *
- * The nodes table is analyzed while it holds only other graphs' rows, and the
- * candidates are inserted afterwards — the state a bulk load into a large
- * shared table leaves behind, because one import never reaches autovacuum's
- * analyze threshold. PostgreSQL then estimates the fresh kind at one row.
+ * The nodes table is analyzed before the candidates are inserted — the state a
+ * bulk load into a large shared table leaves behind, because one import never
+ * reaches autovacuum's analyze threshold. It holds two distributions. Most
+ * cases select a graph the statistics have never seen, so PostgreSQL estimates
+ * the fresh kind at about one row. The separated cases select a graph and a
+ * kind that the statistics hold separately but never together, so PostgreSQL
+ * multiplies their frequencies and estimates thousands of candidates whatever
+ * the actual count.
  *
  * Each case captures the UPDATE that `updateWhere()` or `compareAndSet()`
  * sends, refusing it in the driver before it runs, and replays it under
@@ -29,6 +33,27 @@ import { requireDefined } from "../../../src/utils/presence";
 /** Rows of other graphs the planner has statistics for. */
 const PREFILL_ROWS = 50_000;
 
+/**
+ * The graph of the separated cases. The analyzed table holds
+ * {@link SEPARATED_ROWS} rows of it under other kinds, and as many rows of
+ * other graphs under the kinds those cases write.
+ */
+const SEPARATED_GRAPH = "stale_statistics_separated";
+
+/** Analyzed rows on each side of the separated distribution. */
+const SEPARATED_ROWS = 20_000;
+
+/** Candidate counts the separated cases measure, one kind each. */
+const SEPARATED_COUNTS = [1, 4000] as const;
+
+type SeparatedCount = (typeof SEPARATED_COUNTS)[number];
+
+function separatedKind<C extends SeparatedCount>(
+  candidates: C,
+): `Separated${C}` {
+  return `Separated${candidates}`;
+}
+
 /** Candidate counts each harness measures. */
 const CANDIDATE_COUNTS = [1000, 4000] as const;
 
@@ -45,6 +70,15 @@ const MAX_BUFFERS_PER_CANDIDATE = 60;
  * candidate read and one in each of the two keyed lookups.
  */
 const MAX_ROWS_VISITED_PER_CANDIDATE = 4;
+
+/**
+ * Rows the plan's nodes may produce per candidate, summed over every node
+ * and loop: the candidate read, the key subquery, the joins and the lookups
+ * each pass a candidate on once. Measured at 11 on a server and on
+ * PGlite. A join that rescans a materialized input once per candidate, which
+ * the scans alone do not show, produces that input's size per candidate.
+ */
+const MAX_PLAN_ROWS_PER_CANDIDATE = 16;
 
 export type RecordedStatement = Readonly<{
   text: string;
@@ -66,6 +100,8 @@ export type StaleStatisticsHarness = Readonly<{
   interceptNextNodesUpdate: () => Promise<RecordedStatement>;
   /** `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` in a rolled-back transaction. */
   explainAnalyze: (statement: RecordedStatement) => Promise<PlanNode>;
+  /** The number in the first column of the first row `text` returns. */
+  queryNumber: (text: string) => Promise<number>;
 }>;
 
 export type PlanNode = Readonly<{
@@ -102,8 +138,9 @@ export function isNodesUpdate(text: string): boolean {
 }
 
 /**
- * Loads {@link PREFILL_ROWS} rows of other graphs and analyzes the table, so
- * every later insert is invisible to the planner's statistics.
+ * Loads {@link PREFILL_ROWS} rows of other graphs and both sides of the
+ * separated distribution, and analyzes the table, so every later insert is
+ * invisible to the planner's statistics.
  */
 export async function prepareStaleNodesTable(
   run: (text: string) => Promise<unknown>,
@@ -115,6 +152,24 @@ export async function prepareStaleNodesTable(
      SELECT 'other_graph_' || (i % 7), 'Kind' || (i % 5), 'prefill-' || i,
             '{}'::jsonb, 1, now(), now()
      FROM generate_series(1, ${PREFILL_ROWS}) AS i`,
+  );
+  await run(
+    `INSERT INTO ${NODES_TABLE}
+       (graph_id, kind, id, props, version, created_at, updated_at)
+     SELECT '${SEPARATED_GRAPH}', 'Other' || (i % 5), 'separated-graph-' || i,
+            '{}'::jsonb, 1, now(), now()
+     FROM generate_series(1, ${SEPARATED_ROWS}) AS i`,
+  );
+  const separatedKinds = SEPARATED_COUNTS.map(
+    (candidates) => `'${separatedKind(candidates)}'`,
+  ).join(", ");
+  await run(
+    `INSERT INTO ${NODES_TABLE}
+       (graph_id, kind, id, props, version, created_at, updated_at)
+     SELECT 'other_graph_' || (i % 7),
+            (ARRAY[${separatedKinds}])[1 + i % ${SEPARATED_COUNTS.length}],
+            'separated-kind-' || i, '{}'::jsonb, 1, now(), now()
+     FROM generate_series(1, ${SEPARATED_ROWS}) AS i`,
   );
   await run(`ANALYZE ${NODES_TABLE}`);
 }
@@ -141,6 +196,13 @@ function isKeyedLookup(scan: PlanNode, candidates: number): boolean {
     (scan["Index Cond"] ?? "").includes("(id = ") &&
     scan["Actual Loops"] === candidates &&
     scan["Actual Rows"] <= 1
+  );
+}
+
+function rowsProduced(plan: PlanNode): number {
+  return planNodes(plan).reduce(
+    (total, node) => total + node["Actual Rows"] * node["Actual Loops"],
+    0,
   );
 }
 
@@ -174,7 +236,87 @@ type StaleSetUpdateMeasurement = Readonly<{
   keyedLookups: number;
   /** `Actual Loops` of every other scan of the nodes table. */
   otherScanLoops: readonly number[];
+  /** See {@link SeparatedSetUpdateMeasurement.rowsProduced}. */
+  rowsProduced: number;
 }>;
+
+const separatedSchema = z.object({ status: z.string() });
+
+const separatedGraph = defineGraph({
+  id: SEPARATED_GRAPH,
+  nodes: {
+    [separatedKind(1)]: {
+      type: defineNode(separatedKind(1), { schema: separatedSchema }),
+    },
+    [separatedKind(4000)]: {
+      type: defineNode(separatedKind(4000), { schema: separatedSchema }),
+    },
+  },
+  edges: {},
+});
+
+/** One separated-distribution `updateWhere({ all: true })`, measured. */
+type SeparatedSetUpdateMeasurement = Readonly<{
+  written: number;
+  buffers: number;
+  rowsVisited: number;
+  candidateReadEstimate: number;
+  keyedLookups: number;
+  /** Every other read of the nodes table: its loops and the rows it visited. */
+  otherScans: readonly Readonly<{ loops: number; rowsVisited: number }>[];
+  /**
+   * Rows every node of the plan produced, summed over its loops: the work of
+   * joins, sorts and rescanned materializations as well as of the scans.
+   */
+  rowsProduced: number;
+  /** Rows in the nodes table, the candidates included. */
+  tableRows: number;
+  /** Heap pages of the nodes table. */
+  tablePages: number;
+}>;
+
+async function measureSeparatedSetUpdate(
+  harness: StaleStatisticsHarness,
+  candidates: SeparatedCount,
+): Promise<SeparatedSetUpdateMeasurement> {
+  const [store] = await createStoreWithSchema(
+    separatedGraph,
+    harness.createBackend(),
+    { autoRefreshStatistics: false },
+  );
+  const collection = store.nodes[separatedKind(candidates)];
+  await collection.bulkInsert(
+    Array.from({ length: candidates }, (_, index) => ({
+      id: `separated-fresh-${index}`,
+      props: { status: "pending" },
+    })),
+  );
+
+  const intercepted = harness.interceptNextNodesUpdate();
+  await expect(
+    collection.updateWhere({ all: true, patch: { status: "promoted" } }),
+  ).rejects.toThrow();
+  const plan = await harness.explainAnalyze(await intercepted);
+  const scans = nodesTableScans(plan);
+  const keyed = scans.filter((scan) => isKeyedLookup(scan, candidates));
+  const others = scans.filter((scan) => !keyed.includes(scan));
+  return {
+    written: plan["Actual Rows"],
+    buffers: plan["Shared Hit Blocks"] + plan["Shared Read Blocks"],
+    rowsVisited: scans.reduce((total, scan) => total + rowsVisited(scan), 0),
+    candidateReadEstimate: Math.min(...others.map((scan) => scan["Plan Rows"])),
+    keyedLookups: keyed.length,
+    rowsProduced: rowsProduced(plan),
+    otherScans: others.map((scan) => ({
+      loops: scan["Actual Loops"],
+      rowsVisited: rowsVisited(scan),
+    })),
+    tableRows: await harness.queryNumber(`SELECT count(*) FROM ${NODES_TABLE}`),
+    tablePages: await harness.queryNumber(
+      `SELECT pg_relation_size('${NODES_TABLE}') / current_setting('block_size')::int`,
+    ),
+  };
+}
 
 async function measureStaleSetUpdate(
   harness: StaleStatisticsHarness,
@@ -213,6 +355,7 @@ async function measureStaleSetUpdate(
     ),
     keyedLookups: keyed.length,
     otherScanLoops: others.map((scan) => scan["Actual Loops"]),
+    rowsProduced: rowsProduced(plan),
   };
 }
 
@@ -297,6 +440,8 @@ export function registerStaleStatisticsPlanCases(
         otherScanLoops: measured.otherScanLoops,
         withinRowsVisited:
           measured.rowsVisited <= MAX_ROWS_VISITED_PER_CANDIDATE * candidates,
+        withinRowsProduced:
+          measured.rowsProduced <= MAX_PLAN_ROWS_PER_CANDIDATE * candidates,
         withinBuffers:
           measured.buffers <= MAX_BUFFERS_PER_CANDIDATE * candidates,
       }).toEqual({
@@ -304,6 +449,62 @@ export function registerStaleStatisticsPlanCases(
         keyedLookups: 2,
         otherScanLoops: [1],
         withinRowsVisited: true,
+        withinRowsProduced: true,
+        withinBuffers: true,
+      });
+    },
+  );
+
+  // The bound the write phase keeps whatever the statistics say: every read
+  // of the nodes table other than the keyed lookups runs once, so the plan
+  // visits at most one scan of the table plus a constant number of rows per
+  // candidate. Which side of that bound PostgreSQL takes follows its estimate
+  // of the candidate count, not the actual count. Here the graph and the kind
+  // are each in the statistics but never together, so it multiplies their
+  // frequencies, estimates thousands of candidates, and hashes them against
+  // one sequential scan of the whole table even for a single candidate
+  // (measured on a server and on PGlite). The statement before the key
+  // subquery read only the kind's index range here, three rows per
+  // candidate; pinned so a change to either side is seen.
+  it.for(SEPARATED_COUNTS)(
+    "writes %i candidates of a graph and kind analyzed only apart within one table scan plus keyed lookups",
+    async (candidates, ctx) => {
+      const active = harness();
+      if (active === undefined) {
+        ctx.skip();
+        return;
+      }
+      const measured = await measureSeparatedSetUpdate(active, candidates);
+
+      // The planner multiplies the graph's and the kind's frequencies.
+      expect(measured.candidateReadEstimate).toBeGreaterThan(1000);
+      expect({
+        written: measured.written,
+        // The target row is found by its id once per candidate; the version
+        // its snapshot read comes from the one table scan.
+        keyedLookups: measured.keyedLookups,
+        everyOtherReadRunsOnce: measured.otherScans.every(
+          (scan) => scan.loops === 1,
+        ),
+        wholeTableScans: measured.otherScans.filter(
+          (scan) => scan.rowsVisited >= measured.tableRows,
+        ).length,
+        withinRowsVisited:
+          measured.rowsVisited <=
+          measured.tableRows + MAX_ROWS_VISITED_PER_CANDIDATE * candidates,
+        withinRowsProduced:
+          measured.rowsProduced <=
+          measured.tableRows + MAX_PLAN_ROWS_PER_CANDIDATE * candidates,
+        withinBuffers:
+          measured.buffers <=
+          measured.tablePages + MAX_BUFFERS_PER_CANDIDATE * candidates,
+      }).toEqual({
+        written: candidates,
+        keyedLookups: 1,
+        everyOtherReadRunsOnce: true,
+        wholeTableScans: 1,
+        withinRowsVisited: true,
+        withinRowsProduced: true,
         withinBuffers: true,
       });
     },

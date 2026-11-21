@@ -91,6 +91,10 @@ beforeAll(async () => {
         await run("ROLLBACK");
       }
     },
+    queryNumber: async (text) => {
+      const result = await run<object>(text);
+      return Number(Object.values(requireDefined(result.rows[0]))[0]);
+    },
   };
 });
 
