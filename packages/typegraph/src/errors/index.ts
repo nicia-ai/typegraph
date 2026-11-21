@@ -1908,6 +1908,46 @@ export class TransactionConflictError extends TypeGraphError {
   }
 }
 
+/**
+ * Details for TransactionRolledBackError.
+ */
+export type TransactionRolledBackErrorDetails = Readonly<{
+  dialect: "postgres";
+}>;
+
+/**
+ * Thrown when a transaction TypeGraph opened ended without committing although
+ * its callback returned normally.
+ *
+ * On PostgreSQL, a statement that fails inside a transaction aborts the whole
+ * transaction even when the callback catches the error: every later statement
+ * is refused, and the database answers the closing `COMMIT` with a rollback.
+ * TypeGraph checks the session before it commits and rejects with this error
+ * instead of reporting success. Nothing the transaction wrote was saved.
+ * `cause` is the engine error that aborted the transaction.
+ */
+export class TransactionRolledBackError extends TypeGraphError {
+  declare readonly details: TransactionRolledBackErrorDetails;
+
+  constructor(
+    details: TransactionRolledBackErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      "Transaction rolled back: a statement failed inside it and aborted the transaction, so nothing it wrote was saved",
+      "TRANSACTION_ROLLED_BACK",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "A database error inside a PostgreSQL transaction ends it, even when the callback catches the error. Let the error propagate, or run the failing statement inside a savepoint and roll back to it before continuing; then re-run the transaction.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionRolledBackError";
+  }
+}
+
 /** One node or edge row a read-set fence names, as `{ kind, id }`. */
 export type ReadSetChangedKey = Readonly<{ kind: string; id: string }>;
 

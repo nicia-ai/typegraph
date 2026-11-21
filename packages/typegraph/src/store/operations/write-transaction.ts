@@ -77,6 +77,7 @@ import {
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
 import { engineSerializedWriterSlotStatement } from "../../backend/sqlite-writer-slot";
+import { resolveTransactionCommitCheck } from "../../backend/transaction-commit-check";
 import {
   type GraphBackend,
   runOptionallyInTransaction,
@@ -493,7 +494,16 @@ export async function withWriteTransactionSession<T>(
     const result = await (fenceEvidence === "reusable" ?
       withTransactionSchemaFenceLease(ctx, target, fn)
     : fn());
-    if (session.aborted !== undefined) {
+    // Before any write of the Store's own (the revision-clock advance below, a
+    // capture flush, a pre-commit hook) reaches the session: the backend that
+    // will COMMIT decides from its session whether the database has already
+    // aborted this transaction, and rejects with TransactionRolledBackError if
+    // so. A backend that registers no such check keeps the narrower probe
+    // below, armed only by a caught claim-compensation failure.
+    const commitCheck = resolveTransactionCommitCheck(target);
+    if (commitCheck !== undefined) {
+      await commitCheck();
+    } else if (session.aborted !== undefined) {
       // A caller with tx.sql may have rolled back a native savepoint after
       // catching the error. Check the pinned session itself: 25P02 means the
       // transaction is still doomed, while a successful read proves recovery.

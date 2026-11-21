@@ -1503,6 +1503,20 @@ export type TransactionConflictErrorDetails = Readonly<{
 }>;
 
 // @public
+export class TransactionRolledBackError extends TypeGraphError {
+    constructor(details: TransactionRolledBackErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionRolledBackErrorDetails;
+}
+
+// @public
+export type TransactionRolledBackErrorDetails = Readonly<{
+    dialect: "postgres";
+}>;
+
+// @public
 export class TrustedImportError extends TypeGraphError {
     constructor(message: string, reason: TrustedImportErrorReason, details?: Readonly<Record<string, unknown>>, options?: Readonly<{
         cause?: unknown;
