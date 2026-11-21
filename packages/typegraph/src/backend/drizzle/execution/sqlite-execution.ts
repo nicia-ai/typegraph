@@ -816,33 +816,36 @@ export function createSqliteTransactionExecutionView(
   adapter: SqliteExecutionAdapter,
 ): SqliteTransactionExecutionView {
   const view = createTransactionView();
-  const members: Record<string, unknown> = {};
-  for (const [key, role] of Object.entries(SQLITE_ADAPTER_MEMBER_ROLES)) {
-    const member: unknown = adapter[key as keyof SqliteExecutionAdapter];
-    if (member === undefined) continue;
-    if (role === "local" || typeof member !== "function") {
-      members[key] = member;
-      continue;
+  function viewMember(
+    role: (typeof SQLITE_ADAPTER_MEMBER_ROLES)[keyof SqliteExecutionAdapter],
+    member: unknown,
+  ): unknown {
+    if (role === "local" || typeof member !== "function") return member;
+    if (role === "statement") {
+      return (...args: readonly unknown[]) =>
+        view.admit(
+          () => Reflect.apply(member, adapter, args) as Promise<unknown>,
+        );
     }
-    members[key] =
-      role === "statement" ?
-        (...args: readonly unknown[]) =>
-          view.admit(
-            () => Reflect.apply(member, adapter, args) as Promise<unknown>,
-          )
-      : (sqlText: string): PreparedSqlStatement => {
-          const statement = Reflect.apply(member, adapter, [
-            sqlText,
-          ]) as PreparedSqlStatement;
-          return {
-            execute<TRow>(params: readonly unknown[]) {
-              return view.admit(() => statement.execute<TRow>(params));
-            },
-          };
-        };
+    return (sqlText: string): PreparedSqlStatement => {
+      const statement = Reflect.apply(member, adapter, [
+        sqlText,
+      ]) as PreparedSqlStatement;
+      return {
+        execute<TRow>(params: readonly unknown[]) {
+          return view.admit(() => statement.execute<TRow>(params));
+        },
+      };
+    };
   }
+  const members = Object.fromEntries(
+    Object.entries(SQLITE_ADAPTER_MEMBER_ROLES).flatMap(([key, role]) => {
+      const member: unknown = adapter[key as keyof SqliteExecutionAdapter];
+      return member === undefined ? [] : [[key, viewMember(role, member)]];
+    }),
+  );
   return {
-    adapter: members as SqliteExecutionAdapter,
+    adapter: members as unknown as SqliteExecutionAdapter,
     drainAndClose: view.drainAndClose,
   };
 }
