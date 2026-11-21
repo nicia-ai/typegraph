@@ -2073,87 +2073,13 @@ exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases 
 
 exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node and edge aliases differing only by case / postgres 1`] = `
 {
-  "params": [
-    "compile_golden",
-    "Person",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "compile_golden",
-    "Person",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "knows",
-    "Person",
-    "Person",
-  ],
-  "sql": "WITH 
-    cte_k AS NOT MATERIALIZED (
-      SELECT id AS k_id, kind AS k_kind, props AS k_props, version AS k_version, valid_from AS k_valid_from, valid_to AS k_valid_to, created_at AS k_created_at, updated_at AS k_updated_at, deleted_at AS k_deleted_at
-      FROM "typegraph_nodes"
-      WHERE graph_id = $1 AND kind = $2 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $3) AND (valid_to IS NULL OR valid_to > $4)
-    )
-  , 
-      cte_friend AS NOT MATERIALIZED (
-        
-      SELECT cte_k.*, e.id AS K_id, e.kind AS K_kind, e.from_id AS K_from_id, e.to_id AS K_to_id, e.props AS K_props, e.valid_from AS K_valid_from, e.valid_to AS K_valid_to, e.created_at AS K_created_at, e.updated_at AS K_updated_at, e.deleted_at AS K_deleted_at, n.id AS friend_id, n.kind AS friend_kind, n.props AS friend_props, n.version AS friend_version, n.valid_from AS friend_valid_from, n.valid_to AS friend_valid_to, n.created_at AS friend_created_at, n.updated_at AS friend_updated_at, n.deleted_at AS friend_deleted_at
-      FROM cte_k
-      
-      JOIN "typegraph_edges" e ON 
-      cte_k.k_id = e.from_id
-      AND cte_k.k_kind = e.from_kind
-    
-      JOIN "typegraph_nodes" n ON n.graph_id = e.graph_id
-        AND n.id = e.to_id
-        AND n.kind = e.to_kind
-      WHERE e.graph_id = $5 AND n.kind = $6 AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= $7) AND (e.valid_to IS NULL OR e.valid_to > $8) AND n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= $9) AND (n.valid_to IS NULL OR n.valid_to > $10) AND e.kind = $11 AND e.to_kind = $12 AND e.from_kind = $13
-    
-      )
-     SELECT cte_friend.k_id AS "k_id", cte_friend.k_kind AS "k_kind", cte_friend.k_props AS "k_props", cte_friend.k_version AS "k_version", cte_friend.k_valid_from AS "k_valid_from", cte_friend.k_valid_to AS "k_valid_to", cte_friend.k_created_at AS "k_created_at", cte_friend.k_updated_at AS "k_updated_at", cte_friend.k_deleted_at AS "k_deleted_at", cte_friend.K_id AS "K_id", cte_friend.K_kind AS "K_kind", cte_friend.K_from_id AS "K_from_id", cte_friend.K_to_id AS "K_to_id", cte_friend.K_props AS "K_props", cte_friend.K_valid_from AS "K_valid_from", cte_friend.K_valid_to AS "K_valid_to", cte_friend.K_created_at AS "K_created_at", cte_friend.K_updated_at AS "K_updated_at", cte_friend.K_deleted_at AS "K_deleted_at", cte_friend.friend_id AS "friend_id", cte_friend.friend_kind AS "friend_kind", cte_friend.friend_props AS "friend_props", cte_friend.friend_version AS "friend_version", cte_friend.friend_valid_from AS "friend_valid_from", cte_friend.friend_valid_to AS "friend_valid_to", cte_friend.friend_created_at AS "friend_created_at", cte_friend.friend_updated_at AS "friend_updated_at", cte_friend.friend_deleted_at AS "friend_deleted_at" FROM cte_friend",
+  "refused": "ValidationError: Query refused before any SQL was sent: "k_id" (column id of alias "k") and "K_id" (column id of alias "K") collide in the columns of cte_friend, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.",
 }
 `;
 
 exports[`compile-golden: metadata, dates, fragments, recursive outputs, aliases > long and case-differing aliases (pinned as they behave today) > node and edge aliases differing only by case / sqlite 1`] = `
 {
-  "params": [
-    "compile_golden",
-    "Person",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "compile_golden",
-    "Person",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "2026-01-01T00:00:00.000Z",
-    "knows",
-    "Person",
-    "Person",
-  ],
-  "sql": "WITH 
-    cte_k AS (
-      SELECT id AS k_id, kind AS k_kind, props AS k_props, version AS k_version, valid_from AS k_valid_from, valid_to AS k_valid_to, created_at AS k_created_at, updated_at AS k_updated_at, deleted_at AS k_deleted_at
-      FROM "typegraph_nodes"
-      WHERE graph_id = ? AND kind = ? AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)
-    )
-  , 
-      cte_friend AS (
-        
-      SELECT cte_k.*, e.id AS K_id, e.kind AS K_kind, e.from_id AS K_from_id, e.to_id AS K_to_id, e.props AS K_props, e.valid_from AS K_valid_from, e.valid_to AS K_valid_to, e.created_at AS K_created_at, e.updated_at AS K_updated_at, e.deleted_at AS K_deleted_at, n.id AS friend_id, n.kind AS friend_kind, n.props AS friend_props, n.version AS friend_version, n.valid_from AS friend_valid_from, n.valid_to AS friend_valid_to, n.created_at AS friend_created_at, n.updated_at AS friend_updated_at, n.deleted_at AS friend_deleted_at
-      FROM cte_k
-      
-      JOIN "typegraph_edges" e ON 
-      cte_k.k_id = e.from_id
-      AND cte_k.k_kind = e.from_kind
-    
-      JOIN "typegraph_nodes" n ON n.graph_id = e.graph_id
-        AND n.id = e.to_id
-        AND n.kind = e.to_kind
-      WHERE e.graph_id = ? AND n.kind = ? AND e.deleted_at IS NULL AND (e.valid_from IS NULL OR e.valid_from <= ?) AND (e.valid_to IS NULL OR e.valid_to > ?) AND n.deleted_at IS NULL AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?) AND e.kind = ? AND e.to_kind = ? AND e.from_kind = ?
-    
-      )
-     SELECT cte_friend.k_id AS "k_id", cte_friend.k_kind AS "k_kind", cte_friend.k_props AS "k_props", cte_friend.k_version AS "k_version", cte_friend.k_valid_from AS "k_valid_from", cte_friend.k_valid_to AS "k_valid_to", cte_friend.k_created_at AS "k_created_at", cte_friend.k_updated_at AS "k_updated_at", cte_friend.k_deleted_at AS "k_deleted_at", cte_friend.K_id AS "K_id", cte_friend.K_kind AS "K_kind", cte_friend.K_from_id AS "K_from_id", cte_friend.K_to_id AS "K_to_id", cte_friend.K_props AS "K_props", cte_friend.K_valid_from AS "K_valid_from", cte_friend.K_valid_to AS "K_valid_to", cte_friend.K_created_at AS "K_created_at", cte_friend.K_updated_at AS "K_updated_at", cte_friend.K_deleted_at AS "K_deleted_at", cte_friend.friend_id AS "friend_id", cte_friend.friend_kind AS "friend_kind", cte_friend.friend_props AS "friend_props", cte_friend.friend_version AS "friend_version", cte_friend.friend_valid_from AS "friend_valid_from", cte_friend.friend_valid_to AS "friend_valid_to", cte_friend.friend_created_at AS "friend_created_at", cte_friend.friend_updated_at AS "friend_updated_at", cte_friend.friend_deleted_at AS "friend_deleted_at" FROM cte_friend",
+  "refused": "ValidationError: Query refused before any SQL was sent: "k_id" (column id of alias "k") and "K_id" (column id of alias "K") collide in the columns of cte_friend, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.",
 }
 `;
 

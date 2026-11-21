@@ -3,7 +3,7 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
-import { compileNameCheckedQuery, compileQuery } from "../compiler";
+import { compileNameCheckedQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
@@ -241,10 +241,12 @@ export class ExecutableProjectionQuery<
     this.#assertBound(ast);
     const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
     return {
-      query: compileQuery(
+      // batchOnce() embeds the statement as a CTE and reads its columns by name.
+      query: compileNameCheckedQuery(
         envelope,
         this.#config.graphId,
         buildCompileOptions(this.#config),
+        "wrapped",
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -318,20 +320,15 @@ export class ExecutableProjectionQuery<
     }
     const concreteAst =
       bindings === undefined ? ast : bindQueryParameters(ast, bindings);
-    const compiled = compileQuery(
-      concreteAst,
+    // The checked read selects `projected.*` from this statement and reads
+    // every column back by name.
+    const { ast: envelope, orderBy } = buildProjectionEnvelope(concreteAst);
+    const ordered = compileNameCheckedQuery(
+      orderBy.length === 0 ? concreteAst : envelope,
       this.#config.graphId,
       buildCompileOptions(this.#config),
+      "wrapped",
     );
-    const { ast: envelope, orderBy } = buildProjectionEnvelope(concreteAst);
-    const ordered =
-      orderBy.length === 0 ?
-        compiled
-      : compileQuery(
-          envelope,
-          this.#config.graphId,
-          buildCompileOptions(this.#config),
-        );
     const resultOrderBy =
       orderBy.length === 0 ?
         sql.empty()

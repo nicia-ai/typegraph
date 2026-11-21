@@ -79,7 +79,6 @@ import {
   markAnnIndexScan,
 } from "../sql-intent";
 import {
-  aliasColumnName,
   aliasCountColumnName,
   aliasCountCteName,
   aliasCteName,
@@ -109,6 +108,7 @@ import {
   describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
   lateMaterializedProjectedNodeAliases,
+  referenceOuterClauseColumns,
 } from "./emitter";
 import {
   type ExpressionAliasScope,
@@ -151,6 +151,7 @@ import {
   declareAliasColumn,
   declareFixedCte,
   declareResultColumn,
+  referenceAliasColumn,
   refuseConflictingSqlNames,
   type SqlNameUsage,
   type SqlStatementNames,
@@ -320,20 +321,6 @@ export function compileNameCheckedQuery(
   const { compiled, names } = compileQueryWithSqlNames(ast, graphId, options);
   if (names !== undefined) refuseConflictingSqlNames(names, usage);
   return compiled;
-}
-
-/**
- * Refuses a query whose generated SQL names collide, without returning its
- * SQL: the check `.compile()` and `.prepare()` run for the statement
- * `.execute()` would send first when that differs from the one they emit.
- */
-export function assertQuerySqlNames(
-  ast: QueryAst,
-  graphId: string,
-  options: CompileQueryOptions | SqlDialect,
-  usage: SqlNameUsage,
-): void {
-  compileNameCheckedQuery(ast, graphId, options, usage);
 }
 
 /**
@@ -597,7 +584,14 @@ export function compileSetOperation(
   // the pgvector GUC wrapper.
   const annIndexTypes = new Set<string>();
   const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
-    const compiled = compileQuery(ast, gid, propagateOptions(options_));
+    // The compound statement names each operand's columns positionally, but
+    // its ORDER BY and every caller read them back by name.
+    const compiled = compileNameCheckedQuery(
+      ast,
+      gid,
+      propagateOptions(options_),
+      "wrapped",
+    );
     for (const indexType of annIndexScanTypes(compiled) ?? []) {
       annIndexTypes.add(indexType);
     }
@@ -1151,7 +1145,9 @@ function compileCountAggregateFastPath(
         return sql`${value} AS ${quoteIdentifier(declareResultColumn(names, projectedField.outputName, describeProjectedField(projectedField)))}`;
       }
 
-      const projectedCountColumn = resolveCountColumn(source);
+      const projectedCountColumn = countColumns.reference(
+        resolveCountColumn(source),
+      );
       const countValue = sql`${sql.raw(countCteAlias)}.${sql.raw(projectedCountColumn)}`;
       const aggregateValue =
         traversal.optional ? sql`COALESCE(${countValue}, 0)` : countValue;
@@ -1161,6 +1157,14 @@ function compileCountAggregateFastPath(
     sql`, `,
   );
 
+  // The count CTE reads the previous alias's id and kind from its CTE and the
+  // outer join reads them from both relations; the outer clauses read
+  // their fields from the start CTE.
+  for (const relation of [previousCteName, countCteAlias]) {
+    referenceAliasColumn(names, relation, previousAlias, "id");
+    referenceAliasColumn(names, relation, previousAlias, "kind");
+  }
+  referenceOuterClauseColumns({ ast, includeProjection: true, names });
   const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
   const fromClause = sql`
     FROM ${sql.raw(startCteName)}
@@ -1432,11 +1436,24 @@ function buildLateMaterializedOuterFromClause(
   ast: QueryAst,
   graphId: string,
   ctx: PredicateCompilerContext,
+  names: SqlStatementNames,
 ): SqlFragment {
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
   const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
     const physical = sql.raw(lateMaterializedPhysicalAlias(alias));
-    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(aliasColumnName(alias, "kind"))} AND ${physical}.id = ${topk}.${sql.raw(aliasColumnName(alias, "id"))}`;
+    const kindColumn = referenceAliasColumn(
+      names,
+      LATE_MAT_TOPK_CTE_ALIAS,
+      alias,
+      "kind",
+    );
+    const idColumn = referenceAliasColumn(
+      names,
+      LATE_MAT_TOPK_CTE_ALIAS,
+      alias,
+      "id",
+    );
+    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(kindColumn)} AND ${physical}.id = ${topk}.${sql.raw(idColumn)}`;
   });
   return joins.length === 0 ?
       sql`FROM ${topk}`
@@ -1488,6 +1505,7 @@ function compileLateMaterializedQuery(
         ...(collapsedTraversalCteAlias === undefined ?
           {}
         : { collapsedTraversalCteAlias }),
+        names,
       }),
       limit,
       offset,
@@ -1497,34 +1515,23 @@ function compileLateMaterializedQuery(
     }),
   );
 
+  // The candidate CTEs and the top-K relation read the lean statement's
+  // ordering and result-predicate columns; the outer SELECT reads the
+  // re-joined node table, not a candidate CTE.
+  referenceOuterClauseColumns({
+    ast: leanAst,
+    collapsedTraversalCteAlias,
+    includeProjection: false,
+    names,
+  });
   const orderBy = buildLateMaterializedOuterOrderBy(ast);
   return emitStandardQuerySql({
     ctes,
-    fromClause: buildLateMaterializedOuterFromClause(ast, graphId, ctx),
+    fromClause: buildLateMaterializedOuterFromClause(ast, graphId, ctx, names),
     ...(orderBy === undefined ? {} : { orderBy }),
     logicalPlan: stripLimitOffsetFromPlan(logicalPlan),
     projection: buildLateMaterializedOuterProjection(ast, dialect, names),
   });
-}
-
-/**
- * The alias columns a standard statement reads by name, which decides whether
- * two CTE columns that meet under PostgreSQL's clipping or case folding matter
- * (see `sql-name-registry.ts`). It is the column-pruning read set — whatever
- * the projection, ordering, grouping and predicates read — plus every node
- * alias's kind, which the traversal and relevance joins read alongside its id.
- */
-function standardStatementColumnReads(
-  ast: QueryAst,
-): ReadonlyMap<string, ReadonlySet<string>> {
-  const reads = new Map(collectRequiredColumnsByAlias(ast));
-  for (const alias of [
-    ast.start.alias,
-    ...ast.traversals.map((traversal) => traversal.nodeAlias),
-  ]) {
-    reads.set(alias, new Set([...(reads.get(alias) ?? []), "id", "kind"]));
-  }
-  return reads;
 }
 
 /**
@@ -1644,7 +1651,6 @@ function compileStandardQueryWithCteStrategy(
     traversalCteLimit,
     vectorPredicate,
   } = runStandardQueryPassPipeline(ast, graphId, ctx);
-  names.recordColumnReads(standardStatementColumnReads(ast));
 
   if (temporalFilterPass === undefined) {
     throw new CompilerInvariantError(
@@ -1718,6 +1724,7 @@ function compileStandardQueryWithCteStrategy(
       buildStandardEmbeddingsCte({
         ctx,
         graphId,
+        names,
         nodeKinds,
         vectorPredicate,
       }),
@@ -1731,6 +1738,7 @@ function compileStandardQueryWithCteStrategy(
     ctes.push(
       buildStandardFulltextCte({
         ctx,
+        names,
         fulltextPredicate,
         graphId,
         nodeKinds,
@@ -1757,8 +1765,15 @@ function compileStandardQueryWithCteStrategy(
     ...(collapsedTraversalCteAlias === undefined ?
       {}
     : { collapsedTraversalCteAlias }),
+    names,
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
     ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
+  });
+  referenceOuterClauseColumns({
+    ast,
+    collapsedTraversalCteAlias,
+    includeProjection: true,
+    names,
   });
   const where = buildStandardResultWhere({ ast, ctx });
   const groupBy = buildStandardGroupBy({ ast, dialect });

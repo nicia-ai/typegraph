@@ -3,18 +3,19 @@
  *
  * The standard emitter registers every name it declares, per scope, together
  * with the logical value the name stands for (an alias's CTE, one column of an
- * alias, one result column). A name is checked against the other names of its
- * scope under the strictest comparison a supported engine applies:
+ * alias, one result column), and records every place it refers to a name in a
+ * scope. A name is checked against the other names of its scope under the
+ * strictest comparison a supported engine applies:
  *
  * - PostgreSQL clips every identifier to its first 63 bytes.
  * - PostgreSQL folds unquoted names to lower case, and SQLite compares
- *   relation and column names without regard to ASCII case, quoted or not.
- *   WITH-list names and CTE columns are referenced by name inside the
- *   statement, so they are compared case-insensitively.
+ *   relation, column and output-alias names without regard to ASCII case,
+ *   quoted or not. A name SQL refers to inside the statement is therefore
+ *   compared case-insensitively.
  * - Result columns are read back by their exact name (both engines return a
- *   quoted alias as written), so they are compared case-sensitively; a result
- *   column the library decodes by name must also fit in 63 bytes, or
- *   PostgreSQL returns it under a clipped key.
+ *   quoted alias as written), so they are compared case-sensitively unless SQL
+ *   also refers to them; a result column the library decodes by name must also
+ *   fit in 63 bytes, or PostgreSQL returns it under a clipped key.
  *
  * Two different values that meet under that comparison make a statement that
  * fails, or silently returns the wrong value, on at least one engine; the
@@ -45,14 +46,14 @@ const TEXT_ENCODER = new TextEncoder();
  *   whether or not anything reads them, and they are compared
  *   case-insensitively.
  * - `"column"`: the columns of one WITH relation, compared case-insensitively.
- *   Two that meet matter only when the statement reads one of them by name:
- *   both engines accept duplicate columns that a `SELECT *` merely carries.
- * - `"result"`: the outermost SELECT list, read back by exact spelling.
+ *   Two that meet matter only when the statement refers to that name in that
+ *   relation: both engines accept duplicate columns that nothing names.
+ * - `"result"`: the outermost SELECT list. Two names with the same exact
+ *   spelling always collide (the row comes back keyed by name); two that meet
+ *   only without regard to case collide when SQL refers to that name (an
+ *   `ORDER BY` of an output alias, or a statement that wraps this one).
  */
 type SqlNameComparison = "relation" | "column" | "result";
-
-/** The alias column a CTE column carries, for deciding whether it is read. */
-type SqlColumnRead = Readonly<{ alias: string; column: string }>;
 
 type SqlNameEntry = Readonly<{
   /** The logical value this name stands for; equal identities never collide. */
@@ -60,25 +61,28 @@ type SqlNameEntry = Readonly<{
   /** Human-readable description of the value, used in the refusal message. */
   description: string;
   name: string;
-  /**
-   * The alias column this name carries. Absent for a column every statement
-   * that declares it also reads (sort keys, counts, extracted properties).
-   */
-  readAs?: SqlColumnRead | undefined;
 }>;
 
 /** One scope's registrations: a WITH list, one CTE's columns, or the result columns. */
 export type SqlNameScope = Readonly<{
   label: string;
   /** Registers `name` as the SQL name of the value `identity`. */
-  register: (
-    name: string,
-    identity: string,
-    description?: string,
-    readAs?: SqlColumnRead,
-  ) => void;
+  register: (name: string, identity: string, description?: string) => void;
   /** Adds every name `source` holds, as a `SELECT source.*` does. */
   inherit: (source: SqlNameScope) => void;
+  /**
+   * Records that the statement refers to `name` in this scope by name, and
+   * returns it. The emitter calls it where it writes the reference.
+   */
+  reference: (name: string) => string;
+  /**
+   * Records that the statement refers to every name of this scope, as a
+   * `SELECT *` over the relation does: SQLite renames a duplicate column it
+   * returns, so the row no longer carries it under its own name.
+   */
+  referenceEvery: () => void;
+  /** Whether the statement refers to `name`, or to a name that meets it, here. */
+  isReferenced: (name: string) => boolean;
   entries: () => readonly SqlNameEntry[];
 }>;
 
@@ -90,16 +94,6 @@ export type SqlStatementNames = Readonly<{
   relationColumns: (relationName: string) => SqlNameScope;
   /** The statement's outermost SELECT list. */
   results: SqlNameScope;
-  /**
-   * Records which alias columns the statement reads by name: the compiler's
-   * column-pruning read set, or `"every column"` when the statement reads
-   * whole CTE rows (`SELECT *`). Until recorded, every column counts as read.
-   */
-  recordColumnReads: (
-    reads: ReadonlyMap<string, ReadonlySet<string>> | "every column",
-  ) => void;
-  /** Whether the statement reads the column an entry names. */
-  isRead: (entry: SqlNameEntry) => boolean;
   scopes: () => readonly Readonly<{
     comparison: SqlNameComparison;
     scope: SqlNameScope;
@@ -107,16 +101,39 @@ export type SqlStatementNames = Readonly<{
 }>;
 
 /**
- * Whether the caller decodes the statement's result columns by name
- * (`"decoded"`), or embeds the statement in SQL that reads them itself
- * (`"embedded"`, e.g. a set-update candidate whose id column is read inside the
- * UPDATE, where PostgreSQL clips the reference and the declaration alike).
+ * How the caller uses the statement's result columns:
+ *
+ * - `"decoded"`: it reads each result column back by its exact name.
+ * - `"embedded"`: it embeds the statement in SQL that names none of them
+ *   (`count()`/`exists()`), or only one that PostgreSQL clips at the reference
+ *   and the declaration alike (a set-update candidate's id column); only
+ *   collisions refuse it, not a name's length.
+ * - `"wrapped"`: it embeds the statement in SQL that refers to its result
+ *   columns by name and then reads them back (relations, checked reads,
+ *   `batchOnce()`, set operations), so result names are also compared without
+ *   regard to letter case.
  */
-export type SqlNameUsage = "decoded" | "embedded";
+export type SqlNameUsage = "decoded" | "embedded" | "wrapped";
+
+/** The name an engine resolves `name` to where SQL refers to it. */
+function referenceKey(name: string): string {
+  return foldAsciiCase(truncateToBytes(name, MAX_PG_IDENTIFIER_LENGTH));
+}
+
+/** The name a row comes back under, after PostgreSQL clips it. */
+function resultKey(name: string): string {
+  return truncateToBytes(name, MAX_PG_IDENTIFIER_LENGTH);
+}
+
+function foldAsciiCase(name: string): string {
+  return name.replaceAll(/[A-Z]/gu, (letter) => letter.toLowerCase());
+}
 
 function createSqlNameScope(label: string): SqlNameScope {
   const entries: SqlNameEntry[] = [];
   const seen = new Set<string>();
+  const referencedKeys = new Set<string>();
+  let everyNameReferenced = false;
   function add(entry: SqlNameEntry): void {
     const key = `${entry.identity}\u0000${entry.name}`;
     if (seen.has(key)) return;
@@ -125,16 +142,21 @@ function createSqlNameScope(label: string): SqlNameScope {
   }
   return {
     label,
-    register(name, identity, description, readAs) {
-      add({
-        identity,
-        description: description ?? identity,
-        name,
-        ...(readAs === undefined ? {} : { readAs }),
-      });
+    register(name, identity, description) {
+      add({ identity, description: description ?? identity, name });
     },
     inherit(source) {
       for (const entry of source.entries()) add(entry);
+    },
+    reference(name) {
+      referencedKeys.add(referenceKey(name));
+      return name;
+    },
+    referenceEvery() {
+      everyNameReferenced = true;
+    },
+    isReferenced(name) {
+      return everyNameReferenced || referencedKeys.has(referenceKey(name));
     },
     entries: () => entries,
   };
@@ -145,20 +167,8 @@ export function createSqlStatementNames(): SqlStatementNames {
   const relations = createSqlNameScope("the WITH list");
   const results = createSqlNameScope("the result columns");
   const relationColumns = new Map<string, SqlNameScope>();
-  let columnReads: ReadonlyMap<string, ReadonlySet<string>> | "every column" =
-    "every column";
   return {
     relations,
-    recordColumnReads(reads) {
-      columnReads = reads;
-    },
-    isRead(entry) {
-      if (entry.readAs === undefined || columnReads === "every column")
-        return true;
-      return (
-        columnReads.get(entry.readAs.alias)?.has(entry.readAs.column) ?? false
-      );
-    },
     relationColumns(relationName) {
       const existing = relationColumns.get(relationName);
       if (existing !== undefined) return existing;
@@ -220,9 +230,23 @@ export function declareAliasColumn(
     name,
     `column\u0000${alias}\u0000${column}`,
     `column ${column} of alias "${alias}"`,
-    { alias, column },
   );
   return name;
+}
+
+/**
+ * Records a by-name reference to one physical column of an alias in the
+ * columns of `relationName`, and returns the column's name.
+ */
+export function referenceAliasColumn(
+  names: SqlStatementNames,
+  relationName: string,
+  alias: string,
+  column: string,
+): string {
+  return names
+    .relationColumns(relationName)
+    .reference(aliasColumnName(alias, column));
 }
 
 /** Declares the CTE column that carries one selectively extracted props field. */
@@ -260,16 +284,6 @@ export function exceedsSqlIdentifierLimit(name: string): boolean {
   return TEXT_ENCODER.encode(name).byteLength > MAX_PG_IDENTIFIER_LENGTH;
 }
 
-/** The name an engine resolves `name` to under one scope's comparison. */
-function comparisonKey(name: string, comparison: SqlNameComparison): string {
-  const clipped = truncateToBytes(name, MAX_PG_IDENTIFIER_LENGTH);
-  return comparison === "result" ? clipped : foldAsciiCase(clipped);
-}
-
-function foldAsciiCase(name: string): string {
-  return name.replaceAll(/[A-Z]/gu, (letter) => letter.toLowerCase());
-}
-
 /** The issue that refuses a result column the library would read back under a clipped name. */
 export function sqlIdentifierTooLongIssue(
   name: string,
@@ -282,6 +296,47 @@ export function sqlIdentifierTooLongIssue(
   };
 }
 
+function collisionIssue(
+  scope: SqlNameScope,
+  earlier: SqlNameEntry,
+  entry: SqlNameEntry,
+  explanation: string,
+): ValidationIssue {
+  return {
+    path: scope.label,
+    code: SQL_IDENTIFIER_COLLISION_CODE,
+    message: `"${earlier.name}" (${earlier.description}) and "${entry.name}" (${entry.description}) collide in ${scope.label}${explanation}.`,
+  };
+}
+
+const CASE_FOLDED_EXPLANATION =
+  ", which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case";
+
+/**
+ * Every pair of different values in one scope whose names meet under `key`,
+ * as long as `matters` holds for the shared name; reports each later entry
+ * once, against the first entry it meets.
+ */
+function findMeetingPairs(
+  scope: SqlNameScope,
+  key: (name: string) => string,
+  matters: (name: string) => boolean,
+): readonly Readonly<{ earlier: SqlNameEntry; entry: SqlNameEntry }>[] {
+  const pairs: { earlier: SqlNameEntry; entry: SqlNameEntry }[] = [];
+  const firstByKey = new Map<string, SqlNameEntry>();
+  for (const entry of scope.entries()) {
+    const entryKey = key(entry.name);
+    const earlier = firstByKey.get(entryKey);
+    if (earlier === undefined) {
+      firstByKey.set(entryKey, entry);
+      continue;
+    }
+    if (earlier.identity === entry.identity || !matters(entry.name)) continue;
+    pairs.push({ earlier, entry });
+  }
+  return pairs;
+}
+
 /** Every collision and over-long decoded name among a statement's registered names. */
 export function findSqlNameIssues(
   names: SqlStatementNames,
@@ -289,33 +344,66 @@ export function findSqlNameIssues(
 ): readonly ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   for (const { comparison, scope } of names.scopes()) {
-    const byKey = new Map<string, SqlNameEntry>();
-    for (const entry of scope.entries()) {
-      if (
-        comparison === "result" &&
-        usage === "decoded" &&
-        exceedsSqlIdentifierLimit(entry.name)
-      ) {
-        issues.push(sqlIdentifierTooLongIssue(entry.name, entry.description));
+    switch (comparison) {
+      case "relation": {
+        for (const { earlier, entry } of findMeetingPairs(
+          scope,
+          referenceKey,
+          () => true,
+        ))
+          issues.push(
+            collisionIssue(scope, earlier, entry, CASE_FOLDED_EXPLANATION),
+          );
+        break;
       }
-      const key = comparisonKey(entry.name, comparison);
-      const earlier = byKey.get(key);
-      if (earlier === undefined) {
-        byKey.set(key, entry);
-        continue;
+      case "column": {
+        for (const { earlier, entry } of findMeetingPairs(
+          scope,
+          referenceKey,
+          (name) => scope.isReferenced(name),
+        ))
+          issues.push(
+            collisionIssue(scope, earlier, entry, CASE_FOLDED_EXPLANATION),
+          );
+        break;
       }
-      if (earlier.identity === entry.identity) continue;
-      if (
-        comparison === "column" &&
-        !names.isRead(earlier) &&
-        !names.isRead(entry)
-      )
-        continue;
-      issues.push({
-        path: scope.label,
-        code: SQL_IDENTIFIER_COLLISION_CODE,
-        message: `"${earlier.name}" (${earlier.description}) and "${entry.name}" (${entry.description}) collide in ${scope.label}${comparison === "result" ? " once PostgreSQL clips them to 63 bytes" : ", which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case"}.`,
-      });
+      case "result": {
+        if (usage !== "embedded") {
+          for (const entry of scope.entries()) {
+            if (exceedsSqlIdentifierLimit(entry.name))
+              issues.push(
+                sqlIdentifierTooLongIssue(entry.name, entry.description),
+              );
+          }
+        }
+        const exact = findMeetingPairs(scope, resultKey, () => true);
+        for (const { earlier, entry } of exact)
+          issues.push(
+            collisionIssue(
+              scope,
+              earlier,
+              entry,
+              " once PostgreSQL clips them to 63 bytes",
+            ),
+          );
+        const reported = new Set(exact.map(({ entry }) => entry));
+        for (const { earlier, entry } of findMeetingPairs(
+          scope,
+          referenceKey,
+          (name) => usage === "wrapped" || scope.isReferenced(name),
+        )) {
+          if (reported.has(entry)) continue;
+          issues.push(
+            collisionIssue(
+              scope,
+              earlier,
+              entry,
+              ", which SQL refers to by name and the engines compare without regard to letter case",
+            ),
+          );
+        }
+        break;
+      }
     }
   }
   return issues;
@@ -331,7 +419,7 @@ export function sqlNameRefusal(
     { issues },
     {
       suggestion:
-        "Use aliases that differ in more than letter case and within their first 50 characters, keep selected keys and aliases short enough that every result column fits in 63 bytes, and avoid selecting two values whose generated names meet (for example a property `edge_id` of alias `p` and the id of alias `p_edge`).",
+        "Use aliases and output keys that differ in more than letter case and within their first 50 characters, keep selected keys and aliases short enough that every result column fits in 63 bytes, and avoid selecting two values whose generated names meet (for example a property `edge_id` of alias `p` and the id of alias `p_edge`).",
     },
   );
 }

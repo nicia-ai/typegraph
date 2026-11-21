@@ -27,9 +27,7 @@ import {
   type SortDirection,
 } from "../ast";
 import {
-  assertQuerySqlNames,
   compileNameCheckedQuery,
-  compileQuery,
   type CompileQueryOptions,
 } from "../compiler/index";
 import {
@@ -386,24 +384,12 @@ export class ExecutableQuery<
     // Emits a directly-runnable statement with the read instant as a literal
     // (a backend may execute the result directly), so this is not the
     // reusable placeholder template execute() caches — see #templateFor.
+    // The full projection is what this returns, so it is the statement whose
+    // generated SQL names must not collide (see sql-name-registry.ts) — even
+    // when execute() would send a selective statement that does not collide.
     const ast = this.toAst();
-    this.#assertExecuteSqlNames(ast);
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
-  }
-
-  /**
-   * Refuses the query when the statement `execute()` would send first has
-   * generated SQL names that collide (see `sql-name-registry.ts`). That
-   * statement — the selective-field statement when the selector reads only
-   * fields, the full projection otherwise — decides for `compile()`,
-   * `toSQL()` and `prepare()` too, so all four agree on the same query
-   * even though `compile()` emits the full projection. A later fallback from
-   * the selective statement to the full one is checked again when it runs.
-   */
-  #assertExecuteSqlNames(baseAst: QueryAst): void {
-    const selectiveFields = this.#getSelectiveFieldsForExecute();
-    assertQuerySqlNames(
-      selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields },
+    return compileNameCheckedQuery(
+      ast,
       this.#config.graphId,
       this.#compileOptions(),
       "decoded",
@@ -512,16 +498,16 @@ export class ExecutableQuery<
     // caches its own reusable placeholder template (built lazily on first
     // execute), so this validation compile is safe to discard — it only exists
     // to surface a structural error at prepare() time rather than first use.
-    // The statement execute() sends first also decides whether the query's
-    // generated SQL names collide (see #assertExecuteSqlNames).
+    // The prepared query runs the selective statement and falls back to the
+    // full one, so both must be free of colliding generated SQL names.
     const compileOptions = this.#compileOptions();
-    compileNameCheckedQuery(
-      ast,
-      this.#config.graphId,
-      compileOptions,
-      "decoded",
-    );
-    compileQuery(unoptimizedAst, this.#config.graphId, compileOptions);
+    for (const statementAst of [ast, unoptimizedAst])
+      compileNameCheckedQuery(
+        statementAst,
+        this.#config.graphId,
+        compileOptions,
+        "decoded",
+      );
 
     return new PreparedQuery({
       ast,
@@ -754,8 +740,7 @@ export class ExecutableQuery<
         ast,
         graphId: this.#config.graphId,
         expectedVersion: expectedSchemaVersion,
-        compile: () =>
-          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+        compile: () => this.#compileCheckedRead(ast),
       }),
       "recorded-checked-query",
     );
@@ -764,6 +749,19 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+    );
+  }
+
+  /**
+   * Compiles the statement a checked read wraps: its rows are selected through
+   * `checked_rows.*` and read back by name.
+   */
+  #compileCheckedRead(ast: QueryAst): CompiledSelectSql {
+    return compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+      "wrapped",
     );
   }
 
@@ -800,8 +798,7 @@ export class ExecutableQuery<
         ast,
         graphId: this.#config.graphId,
         expectedVersion: checked.value,
-        compile: () =>
-          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+        compile: () => this.#compileCheckedRead(ast),
       });
       return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
         rows,
@@ -1003,10 +1000,12 @@ export class ExecutableQuery<
           );
     });
     return {
-      query: compileQuery(
+      // batchOnce() embeds the statement as a CTE and reads its columns by name.
+      query: compileNameCheckedQuery(
         batchAst,
         this.#config.graphId,
         this.#compileOptions(),
+        "wrapped",
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -1959,10 +1958,11 @@ export class ExecutableQuery<
     };
 
     // Compile and execute
-    const compiled = compileQuery(
+    const compiled = compileNameCheckedQuery(
       modifiedAst,
       this.#config.graphId,
       this.#compileOptions(),
+      "decoded",
     );
     const rawRows =
       await this.#requireBackend().execute<Record<string, unknown>>(compiled);

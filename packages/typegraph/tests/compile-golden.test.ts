@@ -1394,6 +1394,10 @@ describe("compile-golden: metadata, dates, fragments, recursive outputs, aliases
         ).toMatchSnapshot();
       });
 
+      // `compile()` returns the full projection, which reads both `k_id` and
+      // `K_id` from `cte_friend` (SQLite: the node id in place of the edge id;
+      // PostgreSQL: ambiguous column), so it is refused even though
+      // `execute()` sends an ids-only statement that does not collide.
       it(`node and edge aliases differing only by case / ${dialect}`, () => {
         expect(
           compileOrRefusal(

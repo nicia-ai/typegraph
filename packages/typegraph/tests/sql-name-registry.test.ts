@@ -57,15 +57,30 @@ describe("SQL name registry comparison", () => {
     ).toEqual([SQL_IDENTIFIER_COLLISION_CODE, SQL_IDENTIFIER_COLLISION_CODE]);
   });
 
-  it("counts a CTE column collision only when the statement reads one of the columns", () => {
+  it("counts a CTE column collision only when the statement refers to that name in that CTE", () => {
     const names = createSqlStatementNames();
     const columns = names.relationColumns("cte_p");
     const alias = "x".repeat(57);
     declareAliasColumn(columns, alias, "valid_from");
     declareAliasColumn(columns, alias, "valid_to");
-    names.recordColumnReads(new Map([[alias, new Set(["id"])]]));
+    declareAliasColumn(columns, alias, "id");
+    columns.reference(`${alias}_id`);
+    // A reference to the same name in another relation does not count here.
+    names.relationColumns("cte_q").reference(`${alias}_valid_to`);
     expect(findSqlNameIssues(names, "decoded")).toEqual([]);
-    names.recordColumnReads(new Map([[alias, new Set(["valid_to"])]]));
+    columns.reference(`${alias}_valid_to`);
+    expect(
+      findSqlNameIssues(names, "decoded").map((issue) => issue.code),
+    ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
+  });
+
+  it("counts every column collision in a CTE the statement reads with SELECT *", () => {
+    const names = createSqlStatementNames();
+    const columns = names.relationColumns("cte_friend");
+    declareAliasColumn(columns, "k", "id");
+    declareAliasColumn(columns, "K", "id");
+    expect(findSqlNameIssues(names, "decoded")).toEqual([]);
+    columns.referenceEvery();
     expect(
       findSqlNameIssues(names, "decoded").map((issue) => issue.code),
     ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
@@ -81,6 +96,20 @@ describe("SQL name registry comparison", () => {
     ).toEqual([SQL_IDENTIFIER_TOO_LONG_CODE]);
     expect(findSqlNameIssues(names, "embedded")).toEqual([]);
   });
+
+  it("compares result columns without regard to case where SQL refers to them by name", () => {
+    const referenced = createSqlStatementNames();
+    declareResultColumn(referenced, "total", "the minimum");
+    declareResultColumn(referenced, "Total", "the maximum");
+    expect(findSqlNameIssues(referenced, "decoded")).toEqual([]);
+    expect(
+      findSqlNameIssues(referenced, "wrapped").map((issue) => issue.code),
+    ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
+    referenced.results.reference("Total");
+    expect(
+      findSqlNameIssues(referenced, "decoded").map((issue) => issue.code),
+    ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
+  });
 });
 
 // ============================================================
@@ -89,9 +118,21 @@ describe("SQL name registry comparison", () => {
 
 /**
  * Aliases start with `q` and one more letter so their derived names are easy to
- * find in SQL text: `cte_qa`, `qa_id`, `cte_qb_counts`, `qe_count`, …
+ * find in SQL text: `cte_qa`, `qa_id`, `cte_qb_counts`, `qe_count`, and the
+ * selectively extracted property columns `__tg_<len>:<alias>:<len>:<field>`.
  */
-const ALIAS_DERIVED_NAME = /\b(?:cte_q[a-z]\w*|q[a-z]_\w+)\b/gu;
+const ALIAS_DERIVED_NAME =
+  /\b(?:cte_q[a-z]\w*|q[a-z]_\w+)\b|__tg_\d+:q[a-z]\w*:\d+:[^"\s]+/gu;
+
+/** The selectively extracted property columns in SQL text. */
+const SELECTIVE_PROPS_NAME = /__tg_\d+:q[a-z]\w*:\d+:[^"\s]+/gu;
+
+/**
+ * A column the statement names through one of its WITH relations:
+ * `cte_qa.qa_id`, `cte_qb."__tg_2:qb:4:name"`, `cte_lm_topk.qa_kind`.
+ */
+const QUALIFIED_COLUMN =
+  /\b(cte_q[a-z]\w*|cte_lm_topk)\.(?:"([^"]+)"|([A-Za-z_]\w*))/gu;
 
 function selective(
   alias: string,
@@ -181,6 +222,27 @@ const WALK_DOMAIN: readonly Readonly<{ label: string; ast: QueryAst }>[] = [
       .project((ctx) => ({ friend: ctx.qb.name }))
       .toAst(),
   },
+  {
+    label: "a selective ordering",
+    ast: {
+      ...traversal()
+        .orderBy("qb", "name")
+        .select((ctx) => ({ a: ctx.qa.id, b: ctx.qb.name }))
+        .toAst(),
+      selectiveFields: [
+        selective("qa", "id", true),
+        selective("qb", "name", false),
+      ],
+    },
+  },
+  {
+    label: "an aggregate ordered by an output key",
+    ast: traversal()
+      .groupBy("qa", "name")
+      .aggregate({ name: field("qa", "name"), friends: count("qb") })
+      .orderBy("friends", "desc")
+      .toAst(),
+  },
 ];
 
 describe("identifier walk over the standard emitter", () => {
@@ -205,6 +267,40 @@ describe("identifier walk over the standard emitter", () => {
         expect([...emitted].filter((name) => !registered.has(name))).toEqual(
           [],
         );
+      });
+
+      it(`declares each extracted property column in a CTE and records every by-name column reference in the relation it reads: ${label} / ${dialect}`, () => {
+        const { compiled, names } = compileQueryWithSqlNames(
+          ast,
+          graph.id,
+          dialect,
+        );
+        const statementNames = requireDefined(names);
+        const text = toSqlWithParams(compiled, dialect).sql;
+        const declaredInCtes = new Set(
+          statementNames
+            .scopes()
+            .filter(({ comparison }) => comparison === "column")
+            .flatMap(({ scope }) => scope.entries().map((entry) => entry.name)),
+        );
+        expect(
+          [...new Set(text.match(SELECTIVE_PROPS_NAME))].filter(
+            (name) => !declaredInCtes.has(name),
+          ),
+        ).toEqual([]);
+        const unrecorded = [...text.matchAll(QUALIFIED_COLUMN)]
+          .map((match) => ({
+            relation: requireDefined(match[1]),
+            column: requireDefined(match[2] ?? match[3]),
+          }))
+          .filter(({ relation, column }) => {
+            const scope = statementNames.relationColumns(relation);
+            return (
+              !scope.entries().some((entry) => entry.name === column) ||
+              !scope.isReferenced(column)
+            );
+          });
+        expect(unrecorded).toEqual([]);
       });
     }
   }

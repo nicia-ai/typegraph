@@ -41,3 +41,4 @@ export {
   lateMaterializedProjectedNodeAliases,
   type StandardEmitterPredicateIndex,
 } from "./standard-builders";
+export { referenceOuterClauseColumns } from "./standard-name-references";
