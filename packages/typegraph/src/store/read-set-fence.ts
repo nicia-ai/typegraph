@@ -139,6 +139,7 @@ export async function assertReadSetUnchangedSince<G extends GraphDef>(
         ASSERT_UNCHANGED_SINCE_OPERATION,
         graphId,
         isolation,
+        "evidence",
       ),
     staleSchemaError: (cause) => cause,
   });

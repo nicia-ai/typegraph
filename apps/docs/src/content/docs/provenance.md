@@ -264,10 +264,22 @@ transaction usable. History capture owned by TypeGraph already requires read
 committed for every write transaction; the check matters for a backend with
 engine-native recorded time, which accepts other isolation levels. A verb
 called without a transaction opens its own at read committed, whatever the
-server's default. SQLite has one writer and begins every write transaction by
-taking it (`BEGIN IMMEDIATE`), before the transaction's first read, so no
-other writer can commit after that transaction's snapshot, and nothing is
-refused.
+server's default.
+
+Whether the check applies follows from the backend's declared write fence
+(`capabilities.writeFence`), not from its dialect:
+
+| Write fence | Can another writer commit after your snapshot, before the lock? | What is required |
+| --- | --- | --- |
+| `engine-serialized` (SQLite's default) | No: the write transaction takes the engine's single writer slot (`BEGIN IMMEDIATE`) before its first read | Nothing |
+| `caller-serialized` | No: the deployment runs every write unit alone, and adopted transactions are refused | Nothing |
+| `advisory` (PostgreSQL's default) | Yes, at a snapshot isolation level | Read committed, observed on the lock statement |
+| `row` | Yes, unless the session reads per statement | Read committed, observed on the fence-row statement; a fence that cannot report its session's isolation is refused, as the store already refuses an edge-acyclicity probe on it |
+
+The verbs, `assertHolds` and `holding(tx)` share this rule.
+`tx.assertUnchangedSince()` and a merge plan applied in your transaction keep
+their own, stricter rule: they also refuse a `caller-serialized` fence, which
+yields no lock evidence to judge.
 
 A second argument that is not a transaction context at all is refused with
 `ConfigurationError` (`PROVENANCE_TRANSACTION_ARGUMENT_INVALID`), naming what
@@ -441,9 +453,9 @@ reads in its own transaction.
   is consistent but can predate writes committed before the lock was granted;
   a read-only transaction decides no write, so it is not refused. In a
   read-only transaction, use `holding(tx)` rather than `assertHolds`.
-- In a transaction that can write, `holding(tx)` and `assertHolds` on
-  PostgreSQL need read committed isolation, observed on the lock statement, as
-  the retraction verbs do; see
+- In a transaction that can write, `holding(tx)` and `assertHolds` on a keyed
+  write fence (PostgreSQL's default) need read committed isolation, observed on
+  the lock statement, as the retraction verbs do; see
   [Retracting inside your own transaction](#retracting-inside-your-own-transaction).
 - A `SELECT`-only role reads the believed set with `holding()`, or with
   `holding(tx)` in a transaction opened read-only.
