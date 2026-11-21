@@ -370,11 +370,11 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   graph: G;
   graphId: string;
   /**
-   * The context belongs to `store.transaction(fn, { accessMode: "read_only" })`.
-   * Operations that would take a write lock there refuse up front instead
-   * (`refuseReadOnlyTransactionWrite`).
+   * Whether the context belongs to a read-only transaction, asked at the
+   * write (`transactionReadOnlyAccess`). Operations that would take a write
+   * lock there refuse up front instead (`refuseReadOnlyTransactionWrite`).
    */
-  readOnlyTransaction: boolean;
+  isReadOnlyTransaction: () => boolean;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -7389,7 +7389,7 @@ export async function executeNodeDeletePlan<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<NodeDeletePlan | undefined> {
-  if (ctx.readOnlyTransaction) {
+  if (ctx.isReadOnlyTransaction()) {
     refuseReadOnlyTransactionWrite(
       `tx.nodes.${kind}.planDelete()`,
       ctx.graphId,

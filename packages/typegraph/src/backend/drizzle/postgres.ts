@@ -151,6 +151,7 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import { bindBackendToNativeTransaction } from "../read-only-session";
 import {
   RECORDED_ANCHOR_RETENTION_COLUMN,
   recordedAnchorAdoptionTimeoutBudget,
@@ -1134,10 +1135,14 @@ export function createPostgresTransactionBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
-  return markAllocationBound(
+  const backend = markAllocationBound(
     createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
     options,
   );
+  // A Store over this backend writes inside the caller's transaction, so it
+  // inherits that transaction's read-only fact (`read-only-session.ts`).
+  bindBackendToNativeTransaction(backend, tx);
+  return backend;
 }
 
 /** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */
@@ -2718,9 +2723,11 @@ function buildPostgresEngineProfileInternal(
                 // checked first, since a failed read would abort the caller's
                 // transaction rather than refuse it.
                 assertBaseSchemaVersionCurrent(
-                  (await privilegedBackend.tableExists(
-                    getTableName(tables.baseSchemaVersions),
-                  )) ?
+                  (
+                    (await privilegedBackend.tableExists(
+                      getTableName(tables.baseSchemaVersions),
+                    ))
+                  ) ?
                     await readBaseSchemaVersion(externalTx)
                   : undefined,
                 );

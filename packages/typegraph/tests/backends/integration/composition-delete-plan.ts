@@ -428,7 +428,7 @@ export function registerCompositionDeletePlanIntegrationTests(
       );
       const tag = await store.nodes.DpTag.create({ name: "t" });
 
-      // MUTATION CHECK: drop the `ctx.readOnlyTransaction` refusal from
+      // MUTATION CHECK: drop the `ctx.isReadOnlyTransaction()` refusal from
       // `executeNodeDeletePlan` (src/store/operations/node-operations.ts):
       // SQLite then answers a plan, and server PostgreSQL rejects the whole's
       // fence-row advance with a raw read-only driver error that also aborts
