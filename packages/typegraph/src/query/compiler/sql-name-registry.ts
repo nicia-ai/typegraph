@@ -74,8 +74,8 @@ export type SqlNameScope = Readonly<{
   register: (
     name: string,
     identity: string,
-    description?: string  ,
-    readAs?: SqlColumnRead  ,
+    description?: string,
+    readAs?: SqlColumnRead,
   ) => void;
   /** Adds every name `source` holds, as a `SELECT source.*` does. */
   inherit: (source: SqlNameScope) => void;
