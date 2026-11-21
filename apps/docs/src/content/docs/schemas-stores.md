@@ -1143,17 +1143,20 @@ version starts again at the one the snapshot read: it is a different row, and
 it is written only when it already matched the selectors in that snapshot.
 Re-run `updateWhere()` to apply the patch to rows that still match.
 
-The statement reads its candidates once and looks each selected row up by its
-key, so its write phase does not depend on the database's planner statistics.
-That matters after a bulk load into a large shared table, which can leave
-PostgreSQL believing the kind holds almost no rows. Selecting the candidates is
-an ordinary query, though: under those statistics, selecting one row by id can
-still read every un-analyzed row of the kind, so a loop of single-row updates
-over a freshly loaded kind slows as the kind grows until the table is analyzed
-(see [stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
-Because the update is one
-statement, a backend's `updateNodeSet` called directly on an autocommit
-connection is as atomic as one inside a transaction.
+The statement evaluates its candidate query once on every backend and reaches
+the stored rows only through the selected keys, so its write phase never
+rescans: it costs at most one scan of the nodes table plus constant work per
+candidate, however stale PostgreSQL's planner statistics are. That matters
+after a bulk load into a large shared table, which can leave PostgreSQL
+believing the kind holds almost no rows. Whether PostgreSQL looks the keys up
+or scans the table still follows those statistics, and in some states it scans
+the whole table even for one candidate. Selecting the candidates is an ordinary
+query too: under stale statistics, selecting one row by id can still read every
+un-analyzed row of the kind, so a loop of single-row updates over a freshly
+loaded kind slows as the kind grows until the table is analyzed (see
+[stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
+Because the update is one statement, a backend's `updateNodeSet` called
+directly on an autocommit connection is as atomic as one inside a transaction.
 
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:

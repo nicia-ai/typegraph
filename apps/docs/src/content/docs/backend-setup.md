@@ -625,11 +625,45 @@ indefinitely, and until it is crossed the planner estimates the new kind at
 about one row.
 
 The write phase of `updateWhere()` and `compareAndSet()` reaches the nodes table
-only through the selected rows' keys, so its plan does not depend on that
-estimate. A batch reads its candidates once, so one call over many rows stays
-linear in the rows. Candidate selection is still an ordinary query, though, and
-it does depend on the estimate. Selecting a single id from a fresh kind can read
-the kind's un-analyzed rows through an index on `graph_id` and filter the id. In
+only through the selected rows' keys. It reads the candidates once and never
+rescans them, so whatever the statistics say it is bounded by one scan of the
+nodes table plus a constant amount of work per candidate. One call never grows
+faster than linearly in its candidates. Which side of that bound PostgreSQL
+takes follows its estimate of the candidate count, not the actual count:
+
+- When the graph is new to the statistics, the estimate is about one row and
+  each candidate is looked up by its id: three rows visited and about 29
+  buffers per candidate, from 1,000 to 20,000 candidates. The statement of
+  earlier releases visited 167 million rows for 1,000 candidates in this state.
+- When the graph and the kind are each in the statistics but never together
+  (rows of the graph under other kinds, rows of the kind in other graphs),
+  PostgreSQL multiplies their frequencies and estimates thousands of
+  candidates. It then hashes the candidates against one sequential scan of the
+  whole table, even for a single candidate, at every table size measured. The
+  statement of earlier releases read only the kind's index range in this state
+  and was cheaper in every case:
+
+| Analyzed rows | Candidates | Earlier: rows visited | Earlier: buffers | Now: rows visited | Now: buffers |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 50,000 | 1 | 3 | 12 | 50,003 | 704 |
+| 50,000 | 4,000 | 12,000 | 100,874 | 62,101 | 101,558 |
+| 50,000 | 20,000 | 60,000 | 504,184 | 114,101 | 504,984 |
+| 1,000,000 | 1 | 3 | 14 | 1,000,003 | 13,905 |
+| 1,000,000 | 4,000 | 12,000 | 105,418 | 1,012,101 | 119,342 |
+| 1,000,000 | 20,000 | 60,000 | 526,778 | 1,064,101 | 540,627 |
+
+The figures are for an `updateWhere()` over the whole kind, and are the same on
+a server and on PGlite. Above a few thousand candidates the row writes dominate both
+statements' buffers. Below that, a call over a few rows of such a kind reads
+the whole table until the table is analyzed: 367 ms instead of 1 ms for one
+candidate against 1,000,000 analyzed rows on a server, so a loop of small
+`updateWhere()` calls there pays one table scan per call. A selection by id is
+estimated at one row whatever the graph and kind, so `compareAndSet()` and an
+`updateWhere()` by id stay keyed in this state (two or three rows visited).
+
+Candidate selection is an ordinary query, and it depends on the estimate too.
+Selecting a single id from a fresh kind can read the kind's un-analyzed rows
+through an index on `graph_id` and filter the id. In
 a test with 50,000 analyzed rows of other graphs, `compareAndSet()` and an
 `updateWhere()` by id each filtered out 3,999 rows to select one of 4,000 fresh
 rows. A loop of single-row mutations over a fresh kind is therefore quadratic,
