@@ -69,6 +69,13 @@ async function openStore() {
   return { other, owner, ownerDb, ownerStatements, store };
 }
 
+/**
+ * The zero-row write that takes the SQLite writer slot. On a stale DEFERRED
+ * snapshot it fails, so a write whose proof precedes every read runs this one
+ * statement and nothing else.
+ */
+const WRITER_SLOT_PROBE = `UPDATE "${getTableName(tables.nodes)}" SET graph_id = graph_id WHERE 0`;
+
 function commitUnrelatedRow(other: Database.Database): void {
   const stamp = "2026-01-01T00:00:00.000Z";
   other
@@ -82,11 +89,12 @@ function commitUnrelatedRow(other: Database.Database): void {
 
 describe("constrained writes in adopted SQLite transactions", () => {
   it("refuses a stale DEFERRED snapshot before its constraint probe", async () => {
-    const { other, owner, ownerDb, store } = await openStore();
+    const { other, owner, ownerDb, ownerStatements, store } = await openStore();
     owner.exec("BEGIN");
     const transactionStore = store.withTransaction(ownerDb);
     await transactionStore.nodes.Person.find();
     commitUnrelatedRow(other);
+    ownerStatements.length = 0;
 
     const refusal = await transactionStore.nodes.Company.create(
       { name: "Safe company" },
@@ -95,7 +103,48 @@ describe("constrained writes in adopted SQLite transactions", () => {
       (created): unknown => created,
       (error: unknown) => error,
     );
+    const createStatements = [...ownerStatements];
 
+    // The writer-slot attempt is the write's first statement: no schema-fence
+    // or constraint read ran on the stale snapshot before it.
+    expect(createStatements).toEqual([WRITER_SLOT_PROBE]);
+    expect(refusal).toBeInstanceOf(ConfigurationError);
+    expect((refusal as ConfigurationError).details).toMatchObject({
+      code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",
+      graphId: graph.id,
+    });
+    expect((refusal as ConfigurationError).suggestion).toContain(
+      "BEGIN IMMEDIATE",
+    );
+  });
+
+  it("refuses a stale DEFERRED snapshot in withRecordedTransaction before its constraint probe", async () => {
+    const { other, owner, ownerDb, ownerStatements, store } = await openStore();
+    owner.exec("BEGIN");
+    let createStatements: readonly string[] | undefined;
+
+    const refusal = await store
+      .withRecordedTransaction(ownerDb, async (tx) => {
+        await tx.nodes.Person.find();
+        commitUnrelatedRow(other);
+        ownerStatements.length = 0;
+        try {
+          await tx.nodes.Company.create(
+            { name: "Safe company" },
+            { id: "company" },
+          );
+        } finally {
+          createStatements = [...ownerStatements];
+        }
+      })
+      .then(
+        (outcome): unknown => outcome,
+        (error: unknown) => error,
+      );
+
+    // The writer-slot attempt is the write's first statement: no schema-fence
+    // or constraint read ran on the stale snapshot before it.
+    expect(createStatements).toEqual([WRITER_SLOT_PROBE]);
     expect(refusal).toBeInstanceOf(ConfigurationError);
     expect((refusal as ConfigurationError).details).toMatchObject({
       code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",

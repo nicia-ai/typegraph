@@ -713,7 +713,10 @@
     "tests/write-pipeline-ratchet.test.ts": 16538,
     "tests/write-plan-fence-refusal.test.ts": 159,
     "tests/write-plan-fence-threading.test.ts": 148,
-    "tests/write-plan-statement-order.test.ts": 713
+    "tests/write-plan-statement-order.test.ts": 713,
+    "tests/write-shape-golden-libsql.test.ts": 43166,
+    "tests/write-shape-golden-pglite.test.ts": 106937,
+    "tests/write-shape-golden-sqlite.test.ts": 21354
   },
   "postgres": {
     "tests/backends/l2-score-scale-parity.test.ts": 1762,

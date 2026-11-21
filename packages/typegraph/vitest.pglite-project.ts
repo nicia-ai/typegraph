@@ -67,6 +67,7 @@ export const PGLITE_TEST_FILES = [
   "tests/transaction-retry.test.ts",
   "tests/write-plan-fence-threading.test.ts",
   "tests/write-plan-statement-order.test.ts",
+  "tests/write-shape-golden-pglite.test.ts",
 ] as const;
 
 export const PGLITE_GLOBS = [
