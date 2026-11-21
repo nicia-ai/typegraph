@@ -106,6 +106,34 @@ describe("constrained writes in adopted SQLite transactions", () => {
     );
   });
 
+  it("refuses a stale DEFERRED snapshot in withRecordedTransaction before its constraint probe", async () => {
+    const { other, owner, ownerDb, store } = await openStore();
+    owner.exec("BEGIN");
+
+    const refusal = await store
+      .withRecordedTransaction(ownerDb, async (tx) => {
+        await tx.nodes.Person.find();
+        commitUnrelatedRow(other);
+        await tx.nodes.Company.create(
+          { name: "Safe company" },
+          { id: "company" },
+        );
+      })
+      .then(
+        (outcome): unknown => outcome,
+        (error: unknown) => error,
+      );
+
+    expect(refusal).toBeInstanceOf(ConfigurationError);
+    expect((refusal as ConfigurationError).details).toMatchObject({
+      code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",
+      graphId: graph.id,
+    });
+    expect((refusal as ConfigurationError).suggestion).toContain(
+      "BEGIN IMMEDIATE",
+    );
+  });
+
   it("runs normally when the adopted frame already owns the writer slot", async () => {
     const { owner, ownerDb, store } = await openStore();
     owner.exec("BEGIN IMMEDIATE");
