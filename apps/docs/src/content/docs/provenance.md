@@ -340,6 +340,33 @@ reads in its own transaction.
   no longer the active one they throw `StaleVersionError`, even when the call
   would have changed nothing or would have reported a missing source.
 - Reacquiring a lock the transaction already holds reuses it.
+
+Three limits apply to `assertHolds(tx)` and to `holding(tx)` in a read-write
+transaction. Each is tracked for a fix:
+
+- **A snapshot isolation level on PostgreSQL with engine-native recorded
+  time.** Holding the graph lock excludes concurrent writers but does not make
+  a `REPEATABLE READ` or `SERIALIZABLE` transaction see what an earlier lock
+  holder committed after its snapshot. A transaction whose snapshot predates
+  another session's committed `retract` can therefore assert or read against
+  support that is already gone. Run these calls at read committed there.
+  TypeGraph-owned history capture already refuses a snapshot isolation level
+  when the transaction opens, so it is not affected.
+- **An adopted SQLite transaction begun as deferred.** A transaction passed to
+  `withTransaction`, `withRecordedTransaction` or `withEvolvedTransaction`
+  that has only read so far holds no writer slot, and in WAL mode another
+  connection can commit after its snapshot. Begin the native transaction with
+  `BEGIN IMMEDIATE`. A transaction `store.transaction()` opens takes the
+  writer slot itself.
+- **Lock order with engine-native recorded time on PostgreSQL.** There an
+  ordinary write takes row locks without the graph lock, so "before or after
+  your first write" above holds only under TypeGraph-owned capture. With
+  engine-native recorded time, make the lock-taking call first in the
+  transaction, or expect that a concurrent retraction can deadlock with it:
+  PostgreSQL aborts one side, which surfaces as a retryable
+  `TransactionConflictError`. An ordinary write that adds a justification is
+  also not excluded by a concurrent retraction on that profile
+  ([#933](https://github.com/nicia-ai/typegraph/issues/933)).
 - `assertHolds` reads only what is behind the named facts, not the whole
   provenance graph, so its cost follows the size of their derivations.
 
