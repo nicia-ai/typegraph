@@ -11,7 +11,7 @@ const PGLITE_BOOT_MARKERS = [
   /\bcreateRecordedPostgresStore\(/u,
   /\bcreateTransactionFaultInjector\(/u,
   /\bcreateNeonHttpBatchEngineHarness\(/u,
-  /\bopenWriteShapeEngine\(/u,
+  /\bregisterWriteShapeGoldenFile\("pglite"\)/u,
 ] as const;
 
 function discoverRootPgliteSuites(): readonly string[] {

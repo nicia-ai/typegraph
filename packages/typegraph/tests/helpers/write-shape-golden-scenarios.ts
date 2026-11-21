@@ -69,13 +69,17 @@
  * timestamps to `<timestamp>`. A receiver whose store refuses to open for
  * every write renders that refusal once.
  *
+ * Each driver's goldens run from a test file of their own,
+ * `tests/write-shape-golden-<driver>.test.ts`, which mocks `nanoid` with
+ * {@link traceIds} and calls {@link registerWriteShapeGoldenFile}; one file
+ * per driver lets the shard split place each driver's minutes on its own.
  * Snapshots live in `tests/__snapshots__/write-shape-golden/<driver>/`, one
  * file per (store shape, receiver). Regenerate them — after an intended
  * behavior change, or on a new base — from `packages/typegraph` with:
  *
- *     pnpm test tests/write-shape-golden.test.ts -u
+ *     pnpm exec vitest run tests/write-shape-golden-*.test.ts -u
  */
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -90,31 +94,32 @@ import {
   partOf,
   type Store,
   type StoreOptions,
-} from "../src";
-import { deriveBackend } from "../src/backend/derive-backend";
-import { recordedInstantRevision } from "../src/core";
-import { branch } from "../src/graph-merge/branch";
-import { merge } from "../src/graph-merge/merge";
-import { unwrap } from "../src/graph-merge/result";
-import { asBranchId } from "../src/graph-merge/types";
+} from "../../src";
+import { deriveBackend } from "../../src/backend/derive-backend";
+import { recordedInstantRevision } from "../../src/core";
+import { branch } from "../../src/graph-merge/branch";
+import { merge } from "../../src/graph-merge/merge";
+import { unwrap } from "../../src/graph-merge/result";
+import { asBranchId } from "../../src/graph-merge/types";
 import {
   type GraphData,
   importGraph,
   ImportOptionsSchema,
-} from "../src/interchange";
-import { createRetractionCapability } from "../src/provenance";
-import { createSqlSchema } from "../src/query/compiler/schema";
+} from "../../src/interchange";
+import { createRetractionCapability } from "../../src/provenance";
+import { createSqlSchema } from "../../src/query/compiler/schema";
 import {
   EDGE_WRITE_NAMES,
   NODE_WRITE_NAMES,
-} from "../src/store/collection-surface";
-import { readRecordedClock } from "../src/store/recorded-capture";
+} from "../../src/store/collection-surface";
+import { readRecordedClock } from "../../src/store/recorded-capture";
 import {
   type HeterogeneousNodeUpsertInput,
   type HistoryStore,
   type RecordedReadStore,
-} from "../src/store-entry";
-import { err, ok, type Result } from "../src/utils/result";
+} from "../../src/store-entry";
+import { err, ok, type Result } from "../../src/utils/result";
+import { createTestBackend } from "../test-utils";
 import {
   describeError,
   openWriteShapeEngine,
@@ -122,40 +127,8 @@ import {
   WRITE_SHAPE_DRIVERS,
   type WriteShapeDriver,
   type WriteShapeEngine,
-} from "./helpers/write-shape-recorder";
-import { createTestBackend } from "./test-utils";
-
-const traceIds = vi.hoisted(() => {
-  let namespace = "t00000000";
-  let issued = 0;
-  let occupied: string | undefined;
-  return {
-    /** Restarts id minting in a namespace owned by one trace. */
-    begin(traceNamespace: string): void {
-      namespace = traceNamespace;
-      issued = 0;
-      occupied = undefined;
-    },
-    /** Makes the next mint hand out `id`, an id a seed row already holds. */
-    occupyNextMint(id: string): void {
-      occupied = id;
-    },
-    /** The occupied id `occupyNextMint` armed and no mint has handed out. */
-    pendingOccupiedMint(): string | undefined {
-      return occupied;
-    },
-    next(): string {
-      if (occupied !== undefined) {
-        const id = occupied;
-        occupied = undefined;
-        return id;
-      }
-      issued += 1;
-      return `${namespace}n${String(issued).padStart(4, "0")}`;
-    },
-  };
-});
-vi.mock("nanoid", () => ({ nanoid: () => traceIds.next() }));
+} from "./write-shape-recorder";
+import { traceIds } from "./write-shape-trace-ids";
 
 const GENERATED_ID_PATTERN = /\bt[0-9a-f]{8}n\d{4}\b/gu;
 
@@ -2043,22 +2016,31 @@ async function traceReceiverFile(
   }
 }
 
-describe("write-shape golden coverage", () => {
-  it("traces every node and edge collection write method", () => {
-    const traced = new Set(
-      Object.values(COLLECTION_WRITES)
-        .flat()
-        .map((write) => collectionMethod(write)),
-    );
-    const surface = [
-      ...NODE_WRITE_NAMES.map((name) => `node.${name}`),
-      ...EDGE_WRITE_NAMES.map((name) => `edge.${name}`),
-    ];
-    expect(surface.filter((method) => !traced.has(method))).toEqual([]);
+/**
+ * Registers one driver's golden files, and the coverage check, in the
+ * calling test file. That file must mock `nanoid` with {@link traceIds}.
+ */
+export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
+  describe(`write-shape golden [${driver}]`, () => {
+    registerDriverGoldens(driver);
   });
-});
+  describe("write-shape golden coverage", () => {
+    it("traces every node and edge collection write method", () => {
+      const traced = new Set(
+        Object.values(COLLECTION_WRITES)
+          .flat()
+          .map((write) => collectionMethod(write)),
+      );
+      const surface = [
+        ...NODE_WRITE_NAMES.map((name) => `node.${name}`),
+        ...EDGE_WRITE_NAMES.map((name) => `edge.${name}`),
+      ];
+      expect(surface.filter((method) => !traced.has(method))).toEqual([]);
+    });
+  });
+}
 
-describe.each(WRITE_SHAPE_DRIVERS)("write-shape golden [%s]", (driver) => {
+function registerDriverGoldens(driver: WriteShapeDriver): void {
   const receivers = RECEIVERS.filter((receiver) =>
     receiver.drivers.includes(driver),
   );
@@ -2077,4 +2059,4 @@ describe.each(WRITE_SHAPE_DRIVERS)("write-shape golden [%s]", (driver) => {
       RECEIVER_FILE_BUDGET_MS,
     );
   });
-});
+}
