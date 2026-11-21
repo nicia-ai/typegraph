@@ -164,7 +164,7 @@ function observeClient(client: object, record: FailureRecorder): object {
  * the transaction body, before anything binds to the transaction's client.
  * Returns `undefined` when the transaction exposes no inspectable client.
  */
-export function observePostgresTransaction(
+function observePostgresTransaction(
   transaction: AnyPgTransaction,
 ): ObservedPostgresTransaction | undefined {
   const connection = getPinnedPostgresTransactionConnection(transaction);

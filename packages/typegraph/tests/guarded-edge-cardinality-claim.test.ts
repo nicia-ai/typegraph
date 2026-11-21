@@ -7,6 +7,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  TransactionRolledBackError,
 } from "../src";
 import { claimsVerdict } from "../src/backend/capabilities/resolve";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
@@ -543,7 +544,7 @@ describe("guarded edge cardinality claim", () => {
         id: "duplicate-edge-id",
       },
     );
-    await fixture.backend.transaction(async (transaction) => {
+    const transaction = fixture.backend.transaction(async (transaction) => {
       const fused = transaction.commands.execute;
       await expect(
         fused(
@@ -573,9 +574,14 @@ describe("guarded edge cardinality claim", () => {
           graphCommandExecutionContext("transaction"),
         ),
       ).rejects.toBeDefined();
-      // The duplicate is caught inside the caller's transaction, which then
-      // commits. SQL statement atomicity must still roll back its new claim.
+      // The duplicate is caught inside the caller's transaction. On
+      // PostgreSQL the failed statement aborted that transaction, so it
+      // rejects rather than reporting a commit; either way SQL statement
+      // atomicity must leave the incumbent claim as the only one.
     });
+    await expect(transaction).rejects.toBeInstanceOf(
+      TransactionRolledBackError,
+    );
 
     expect(await fixture.store.edges.one.find()).toHaveLength(1);
     expect(await readClaimRows(fixture.backend)).toEqual([
