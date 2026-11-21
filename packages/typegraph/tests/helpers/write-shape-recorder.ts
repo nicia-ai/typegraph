@@ -52,6 +52,7 @@ import {
 import type Database from "better-sqlite3";
 
 import { type GraphBackend, TypeGraphError } from "../../src";
+import { TRANSACTION_MARKER_SETTING } from "../../src/backend/drizzle/execution/postgres-commit-outcome";
 import { detectLibsqlTransactionMode } from "../../src/backend/drizzle/libsql-client";
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
@@ -879,8 +880,18 @@ function collapseWhitespace(text: string): string {
   return text.replaceAll(/\s+/gu, " ").trim();
 }
 
+/**
+ * The commit-outcome marker binds a fresh nonce after its setting name in
+ * every transaction TypeGraph opens on PostgreSQL; it renders as one token.
+ */
+function stableMarkerParams(params: readonly unknown[]): readonly unknown[] {
+  return params.length === 2 && params[0] === TRANSACTION_MARKER_SETTING ?
+      [TRANSACTION_MARKER_SETTING, "<marker nonce>"]
+    : params;
+}
+
 function renderParams(params: readonly unknown[]): string {
-  return JSON.stringify(params, (_key, value: unknown) => {
+  return JSON.stringify(stableMarkerParams(params), (_key, value: unknown) => {
     if (typeof value === "bigint") return `${value}n`;
     if (value === undefined) return "<undefined>";
     if (value instanceof Uint8Array) return `<bytes:${value.byteLength}>`;

@@ -61,7 +61,6 @@ import {
   TransactionRolledBackError,
 } from "../../../errors";
 import { sql } from "../../../query/sql-fragment";
-import { generateId } from "../../../utils/id";
 import {
   carriesEngineSqlState,
   isPostgresFailedTransactionError,
@@ -287,7 +286,9 @@ async function plantMarker(
     createPostgresExecutionAdapter(transaction),
     getPinnedPostgresTransactionConnection(transaction) ?? transaction,
   );
-  const nonce = generateId();
+  // Not drawn from the entity id generator: the marker must neither consume
+  // nor depend on the ids a transaction's writes are given.
+  const nonce = globalThis.crypto.randomUUID();
   await session.execute(plantMarkerStatement(nonce));
   // The statement count at the last read that found the marker; a check
   // with nothing sent since has nothing new to learn from the session.
