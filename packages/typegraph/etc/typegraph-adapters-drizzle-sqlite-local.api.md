@@ -6016,15 +6016,7 @@ const SQL_FRAGMENT_BRAND: unique symbol;
 const SQL_PLACEHOLDER_BRAND: unique symbol;
 
 // @public
-type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk | SqlDeferredIdentifierChunk;
-
-// @public
-type SqlDeferredIdentifierChunk = Readonly<{
-    kind: "deferred-identifier";
-    key: string;
-    spelling: string;
-    quoted: boolean;
-}>;
+type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
 
 // @public
 type SqlDialect = "sqlite" | "postgres";
@@ -6040,6 +6032,10 @@ type SqlFragment = Readonly<{
 type SqlIdentifierChunk = Readonly<{
     kind: "identifier";
     value: string;
+    deferred?: Readonly<{
+        key: string;
+        quoted: boolean;
+    }>;
 }>;
 
 // @public (undocumented)

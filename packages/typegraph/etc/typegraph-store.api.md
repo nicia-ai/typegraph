@@ -6825,18 +6825,10 @@ const SQL_PLACEHOLDER_BRAND: unique symbol;
 export type SqlAvailability = "available" | "history" | "revisionTracking" | "unavailable";
 
 // @public
-type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk | SqlDeferredIdentifierChunk;
+type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
 
 // @public (undocumented)
 type SqlCompilationBackend = Pick<GraphBackend, "compileSql">;
-
-// @public
-type SqlDeferredIdentifierChunk = Readonly<{
-    kind: "deferred-identifier";
-    key: string;
-    spelling: string;
-    quoted: boolean;
-}>;
 
 // @public
 type SqlDialect = "sqlite" | "postgres";
@@ -6852,6 +6844,10 @@ type SqlFragment = Readonly<{
 type SqlIdentifierChunk = Readonly<{
     kind: "identifier";
     value: string;
+    deferred?: Readonly<{
+        key: string;
+        quoted: boolean;
+    }>;
 }>;
 
 // @public (undocumented)

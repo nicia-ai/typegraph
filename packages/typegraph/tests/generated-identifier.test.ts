@@ -4,7 +4,7 @@
  *
  * PostgreSQL clips identifiers to 63 bytes. Every name the query layer builds
  * from caller text passes through the owner as a structured name — identified
- * by its components, written into a statement as a deferred-identifier chunk —
+ * by its components, written into a statement as a deferred identifier chunk —
  * and each statement allocates physical names once, from those chunks alone:
  * a name that fits keeps its spelling unless an earlier name holds it, and
  * every other name takes a hashed name nothing else in the statement holds. A

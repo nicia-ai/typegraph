@@ -19,9 +19,9 @@
  * Naming happens in two steps, so that uniqueness is guaranteed rather than
  * assumed:
  *
- * 1. The compiler writes each generated name into a statement as a
- *    deferred-identifier chunk ({@link bareName}, {@link quotedName}): a
- *    distinct node of the SQL fragment, never text. Caller text — field names,
+ * 1. The compiler writes each generated name into a statement as a deferred
+ *    identifier chunk ({@link bareName}, {@link quotedName}): an identifier
+ *    node of the SQL fragment carrying the name's identity, never text. Caller text — field names,
  *    JSON paths, literals, output keys — lives in other chunks and is never
  *    read or rewritten by naming, whatever characters it contains.
  * 2. {@link sealGeneratedIdentifiers} allocates PHYSICAL names for one whole
@@ -49,10 +49,10 @@ import { truncateToBytes } from "../utils/identifier";
 import {
   deferredIdentifiersOf,
   deferredIdentifierSql,
+  type DeferredSqlIdentifierChunk,
   identifierNamesOf,
   resolveDeferredIdentifiers,
   sql,
-  type SqlDeferredIdentifierChunk,
   type SqlFragment,
 } from "./sql-fragment";
 
@@ -238,17 +238,17 @@ const SEALED_ALLOCATIONS = new WeakMap<SqlFragment, Allocation>();
 
 /** Distinct generated names of a statement, by key, in order of first use. */
 function distinctNames(
-  chunks: readonly SqlDeferredIdentifierChunk[],
+  chunks: readonly DeferredSqlIdentifierChunk[],
 ): ReadonlyMap<string, string> {
   const spellings = new Map<string, string>();
   for (const chunk of chunks) {
-    const known = spellings.get(chunk.key);
+    const known = spellings.get(chunk.deferred.key);
     if (known === undefined) {
-      spellings.set(chunk.key, chunk.spelling);
-    } else if (known !== chunk.spelling) {
+      spellings.set(chunk.deferred.key, chunk.value);
+    } else if (known !== chunk.value) {
       throw new CompilerInvariantError(
         "One generated SQL identifier was written with two spellings",
-        { spellings: [known, chunk.spelling] },
+        { spellings: [known, chunk.value] },
       );
     }
   }
@@ -314,7 +314,7 @@ export function sealGeneratedIdentifiers<Statement extends SqlFragment>(
   if (SEALED_ALLOCATIONS.has(statement)) return statement;
   const allocation = allocate(statement);
   const sealed = resolveDeferredIdentifiers(statement, (chunk) =>
-    physicalNameIn(allocation, chunk.key),
+    physicalNameIn(allocation, chunk.deferred.key),
   );
   SEALED_ALLOCATIONS.set(sealed, allocation);
   return sealed as Statement;
@@ -363,7 +363,7 @@ export function bindGeneratedIdentifiers<Fragment extends SqlFragment>(
 ): Fragment {
   const allocation = allocationOf(statement);
   return resolveDeferredIdentifiers(wrapper, (chunk) =>
-    physicalNameIn(allocation, chunk.key),
+    physicalNameIn(allocation, chunk.deferred.key),
   ) as Fragment;
 }
 

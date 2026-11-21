@@ -119,6 +119,8 @@ export function toDrizzleSql(
         return drizzleSql.raw(chunk.value);
       }
       case "identifier": {
+        if (chunk.deferred !== undefined)
+          return throwUnresolvedDeferredIdentifier(chunk);
         // Drizzle's schema builders treat Name chunks as bare index-column
         // references and omit dialect quoting. Preserve the portable IR's
         // identifier semantics by handing the adapter an already-quoted,
@@ -130,9 +132,6 @@ export function toDrizzleSql(
       }
       case "placeholder": {
         return drizzleSql.placeholder(chunk.value.name);
-      }
-      case "deferred-identifier": {
-        return throwUnresolvedDeferredIdentifier(chunk);
       }
       default: {
         return throwUnsupportedSqlChunk(chunk);
