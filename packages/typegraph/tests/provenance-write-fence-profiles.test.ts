@@ -124,8 +124,22 @@ async function seed(create: () => Promise<LoggedBackend>) {
     store,
     source,
     otherSource,
+    logged,
     provenance: createRetractionCapability(store, config),
   };
+}
+
+/**
+ * The statements among `statements` that touch a graph row: the node and edge
+ * tables. A refusal may take the fences it judges (the schema-version row and
+ * the graph's fence row) but must read no row a decision depends on.
+ */
+function graphRowStatements(
+  statements: readonly Readonly<{ query: string }>[],
+): readonly string[] {
+  return statements
+    .map((statement) => statement.query)
+    .filter((query) => /"typegraph_(?:nodes|edges)"/u.test(query));
 }
 
 type Seeded = Awaited<ReturnType<typeof seed>>;
@@ -224,22 +238,60 @@ describe("provenance on a SQLite backend declaring a keyed row write fence", () 
     await expect(liveFact(store, FACT.id)).resolves.toBeDefined();
   });
 
+  // Load-bearing: no graph row is read before the refusal. Revert check:
+  // read the source row before `acquireCapabilityWriteLocks` in
+  // `transitionInTransaction` (`src/provenance/transition.ts`) and
+  // `retractGraphReads` records it.
   it("refuses retract(source, tx), assertHolds(tx) and holding(tx) in a caller's transaction before any read, leaving it usable", async () => {
-    const { store, source, provenance } = await seedRowFence();
+    const { store, source, provenance, logged } = await seedRowFence();
+
+    /** The refusal `work` raised, and the graph-row statements it issued. */
+    async function refusalAndGraphReads(work: () => Promise<unknown>) {
+      const before = logged.statements.length;
+      const refusal = await rejection(work());
+      return {
+        refusal,
+        graphReads: graphRowStatements(logged.statements.slice(before)),
+      };
+    }
 
     const outcome = await store.transaction(async (tx) => {
-      const retract = await rejection(provenance.retract(source, tx));
-      const assertHolds = await rejection(provenance.assertHolds(tx, [FACT]));
-      const holding = await rejection(provenance.holding(tx));
+      const retract = await refusalAndGraphReads(() =>
+        provenance.retract(source, tx),
+      );
+      const assertHolds = await refusalAndGraphReads(() =>
+        provenance.assertHolds(tx, [FACT]),
+      );
+      const holding = await refusalAndGraphReads(() => provenance.holding(tx));
+      const controlStart = logged.statements.length;
       const stillUsable = await tx.nodes.Fact.getById(
         asNodeId<typeof Fact>(FACT.id),
       );
-      return { retract, assertHolds, holding, stillUsable };
+      return {
+        retract,
+        assertHolds,
+        holding,
+        stillUsable,
+        controlGraphReads: graphRowStatements(
+          logged.statements.slice(controlStart),
+        ),
+      };
     });
 
-    expectFreshnessRefusal(outcome.retract, "provenance.retract(source, tx)");
-    expectFreshnessRefusal(outcome.assertHolds, "provenance.assertHolds()");
-    expectFreshnessRefusal(outcome.holding, "provenance.holding(tx)");
+    expectFreshnessRefusal(
+      outcome.retract.refusal,
+      "provenance.retract(source, tx)",
+    );
+    expectFreshnessRefusal(
+      outcome.assertHolds.refusal,
+      "provenance.assertHolds()",
+    );
+    expectFreshnessRefusal(outcome.holding.refusal, "provenance.holding(tx)");
+    expect(outcome.retract.graphReads).toEqual([]);
+    expect(outcome.assertHolds.graphReads).toEqual([]);
+    expect(outcome.holding.graphReads).toEqual([]);
+    // Control: the log sees a graph-row read in this transaction.
+    expect(outcome.controlGraphReads).not.toEqual([]);
     expect(outcome.stillUsable).toMatchObject({ id: FACT.id });
     await expect(liveFact(store, FACT.id)).resolves.toBeDefined();
   });

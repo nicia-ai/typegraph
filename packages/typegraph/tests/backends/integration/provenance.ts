@@ -2053,42 +2053,85 @@ export function registerProvenanceIntegrationTests(
       expect(reopened.receipt.writes.total).toBe(2);
     });
 
+    // Load-bearing: each refusal precedes every statement on the foreign
+    // transaction. Revert check: move `resolveScope(tx, request.operation)`
+    // in `runTransition` (`src/provenance/transition.ts`) after a read of
+    // the source row on `transactionBackend(tx)` and `issued` records it.
     it("refuses another store's or graph's transaction and one kept past its callback, before any statement", async () => {
-      const store = await createHistoryStore(context);
+      const recorded = recordTransactionCalls(context.getBackend());
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
       const provenance = await seedCallerWorld(store);
-      const otherStore = await createHistoryStore(context);
-      const otherGraphStore = await context.createHistoryStore(
+      const [otherStore] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
+      const [otherGraphStore] = await createAdapterStoreWithSchema(
         identityProvenanceGraph,
+        recorded.backend,
+        { history: true },
       );
       const retained = await store.transaction((tx) => Promise.resolve(tx));
 
-      expectNotOwned(
-        await captureRejection(
-          otherStore.transaction((tx) => provenance.retract(dropSource, tx)),
+      /** The refusal `work` raised, and the calls it made on any transaction. */
+      async function refusalAndIssued(work: () => Promise<unknown>) {
+        const before = recorded.calls.length;
+        const refusal = await captureRejection(work());
+        return { refusal, issued: recorded.calls.slice(before) };
+      }
+
+      const otherStoreOutcome = await otherStore.transaction(async (tx) => {
+        const outcome = await refusalAndIssued(() =>
+          provenance.retract(dropSource, tx),
+        );
+        // Control: the recorder sees this transaction's statements.
+        const controlStart = recorded.calls.length;
+        await tx.nodes.Source.getById(asNodeId<typeof Source>(dropSource.id));
+        return {
+          ...outcome,
+          controlIssued: recorded.calls.length - controlStart,
+        };
+      });
+      const otherGraphOutcome = await otherGraphStore.transaction((tx) =>
+        refusalAndIssued(() =>
+          provenance.retractMany(
+            [dropSource],
+            tx as unknown as CallerTransaction,
+          ),
         ),
+      );
+      const retainedSingle = await refusalAndIssued(() =>
+        provenance.unRetract(dropSource, retained),
+      );
+      const retainedMany = await refusalAndIssued(() =>
+        provenance.unRetractMany([dropSource], retained),
+      );
+
+      expectNotOwned(
+        otherStoreOutcome.refusal,
         "provenance.retract(source, tx)",
       );
       expectNotOwned(
-        await captureRejection(
-          otherGraphStore.transaction((tx) =>
-            provenance.retractMany(
-              [dropSource],
-              tx as unknown as CallerTransaction,
-            ),
-          ),
-        ),
+        otherGraphOutcome.refusal,
         "provenance.retractMany(sources, tx)",
       );
       expectNotOwned(
-        await captureRejection(provenance.unRetract(dropSource, retained)),
+        retainedSingle.refusal,
         "provenance.unRetract(source, tx)",
       );
       expectNotOwned(
-        await captureRejection(
-          provenance.unRetractMany([dropSource], retained),
-        ),
+        retainedMany.refusal,
         "provenance.unRetractMany(sources, tx)",
       );
+      expect(otherStoreOutcome.issued).toEqual([]);
+      expect(otherGraphOutcome.issued).toEqual([]);
+      expect(retainedSingle.issued).toEqual([]);
+      expect(retainedMany.issued).toEqual([]);
+      expect(otherStoreOutcome.controlIssued).toBeGreaterThan(0);
       await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
     });
 
