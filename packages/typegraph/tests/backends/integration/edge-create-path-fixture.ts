@@ -533,7 +533,7 @@ export type CaseReceiver = (typeof CASE_RECEIVERS)[number];
  * the sentinel it wrote first survived, and the complete edge and claim
  * state read from outside.
  */
-export type CreateOutcome = Readonly<{
+type CreateOutcome = Readonly<{
   error: string;
   commit?: string;
   sentinel?: "kept" | "lost";
