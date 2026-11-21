@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+A SQLite transaction's backend now stops issuing statements when its transaction ends, as PostgreSQL's already did. On better-sqlite3 (and every other driver on the manual `BEGIN`/`COMMIT` path), a call or deferred read still running or kept when `store.transaction()` ended used to keep running on the connection: the rest of a write orphaned by a rejected `Promise.all` landed after `ROLLBACK` and reported success, a late write ran inside the next transaction and was rolled back with it, and a prepared query or `stream()` iterator kept past the callback read a later transaction's uncommitted rows. Every SQLite transaction TypeGraph opens (owned, manual, Durable Object storage, and schema-write transactions) now lets statements already running finish before `COMMIT`/`ROLLBACK` and refuses every later one with `TransactionClosedError`, the error PostgreSQL gives; libSQL's late statements now get that same typed error instead of the driver's own. Each transaction, and each retried attempt, gets a fresh view. Adopted transactions (`withTransaction`, `adoptTransaction`) are unchanged: the caller ends them.

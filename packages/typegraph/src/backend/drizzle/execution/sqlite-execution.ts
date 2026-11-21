@@ -11,6 +11,7 @@ import {
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
+import { createTransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -154,6 +155,13 @@ export type SqliteExecutionAdapter = Readonly<
      * `db.run()` when absent.
      */
     executeCompiledRun?: (compiledQuery: CompiledSqlQuery) => Promise<void>;
+    /**
+     * Executes a statement that returns no rows: through the prepared-statement
+     * cache when `executeCompiledRun` is present, else through Drizzle's
+     * `db.run()`. Every row-less statement a backend issues goes through here,
+     * so a transaction view (`createSqliteTransactionExecutionView`) sees it.
+     */
+    executeRun: (query: ExecutableSql) => Promise<void>;
     /** Rebinds one cached non-reader statement for every parameter row. */
     executePreparedRunBatch?: (
       sqlText: string,
@@ -725,6 +733,9 @@ export function createSqliteExecutionAdapter(
       },
       executeCompiled,
       executeCompiledRun,
+      executeRun(query: ExecutableSql): Promise<void> {
+        return executeCompiledRun(compile(query));
+      },
       executePreparedRunBatch,
       ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
       prepare(sqlText: string): PreparedSqlStatement {
@@ -750,7 +761,88 @@ export function createSqliteExecutionAdapter(
         isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
       );
     },
+    async executeRun(query: ExecutableSql): Promise<void> {
+      // Unconditional `await`: Drizzle returns SQLiteRaw thenables
+      // (drizzle-team/drizzle-orm#2275).
+      await db.run(
+        isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
+      );
+    },
     ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     profile,
+  };
+}
+
+/**
+ * How a transaction view treats each member of a {@link SqliteExecutionAdapter}.
+ * A `Record` over every key, so a member added to the adapter cannot reach a
+ * transaction view unclassified: `statement` members run SQL and are admitted
+ * through the view, `prepare` hands out statements whose execution is
+ * admitted, `local` members touch no connection.
+ */
+const SQLITE_ADAPTER_MEMBER_ROLES = {
+  clearStatementCache: "local",
+  compile: "local",
+  execute: "statement",
+  executeAtomicBatch: "statement",
+  executeCompiled: "statement",
+  executeCompiledRun: "statement",
+  executePreparedRunBatch: "statement",
+  executeRun: "statement",
+  prepare: "prepare",
+  profile: "local",
+  runExclusive: "statement",
+  serializationFailure: "local",
+} as const satisfies Record<
+  keyof SqliteExecutionAdapter,
+  "local" | "prepare" | "statement"
+>;
+
+/** A transaction's execution adapter and the hook that ends its view. */
+export type SqliteTransactionExecutionView = Readonly<{
+  adapter: SqliteExecutionAdapter;
+  /** Ends the view: see `TransactionView.drainAndClose` in `./transaction-view`. */
+  drainAndClose: () => Promise<void>;
+}>;
+
+/**
+ * Wraps `adapter` in a fresh {@link TransactionView} for one transaction: every
+ * statement it runs is admitted through the view, so once the transaction's
+ * runner calls `drainAndClose` (before COMMIT / ROLLBACK) a late statement is
+ * refused instead of running outside the transaction that issued it. The
+ * runner's own frame statements go through the unwrapped adapter.
+ */
+export function createSqliteTransactionExecutionView(
+  adapter: SqliteExecutionAdapter,
+): SqliteTransactionExecutionView {
+  const view = createTransactionView();
+  const members: Record<string, unknown> = {};
+  for (const [key, role] of Object.entries(SQLITE_ADAPTER_MEMBER_ROLES)) {
+    const member: unknown = adapter[key as keyof SqliteExecutionAdapter];
+    if (member === undefined) continue;
+    if (role === "local" || typeof member !== "function") {
+      members[key] = member;
+      continue;
+    }
+    members[key] =
+      role === "statement" ?
+        (...args: readonly unknown[]) =>
+          view.admit(
+            () => Reflect.apply(member, adapter, args) as Promise<unknown>,
+          )
+      : (sqlText: string): PreparedSqlStatement => {
+          const statement = Reflect.apply(member, adapter, [
+            sqlText,
+          ]) as PreparedSqlStatement;
+          return {
+            execute<TRow>(params: readonly unknown[]) {
+              return view.admit(() => statement.execute<TRow>(params));
+            },
+          };
+        };
+  }
+  return {
+    adapter: members as SqliteExecutionAdapter,
+    drainAndClose: view.drainAndClose,
   };
 }

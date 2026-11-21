@@ -68,7 +68,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
+import { sql as portableSql } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   type CompiledRowsSql,
@@ -147,6 +147,7 @@ import {
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
+  createSqliteTransactionExecutionView,
   getDurableObjectStorageClient,
   isBetterSqlite3Client,
   isBunSqliteClient,
@@ -822,7 +823,6 @@ function createSqliteOperationBackend(
 ): InternalOperationBackend {
   const {
     capabilities,
-    db,
     executionAdapter,
     atomicSqlProgramExecutor,
     operationStrategy,
@@ -844,7 +844,6 @@ function createSqliteOperationBackend(
   // drizzle's session on every call. Async drivers (remote libsql, D1)
   // have no statement cache and keep the drizzle fallback.
   const compiledExecute = executionAdapter.executeCompiled;
-  const compiledRun = executionAdapter.executeCompiledRun;
 
   function execGet<T>(query: ExecutableSql): Promise<T | undefined> {
     // Fallback uses db.all()[0], not db.get(): drizzle-team/drizzle-orm#1049
@@ -874,15 +873,9 @@ function createSqliteOperationBackend(
   }
 
   function execRun(query: ExecutableSql): Promise<void> {
-    return runWithSerializedQueue(serializedQueue, async () => {
-      if (compiledRun === undefined) {
-        await db.run(
-          isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
-        );
-        return;
-      }
-      await compiledRun(executionAdapter.compile(query));
-    });
+    return runWithSerializedQueue(serializedQueue, async () =>
+      executionAdapter.executeRun(query),
+    );
   }
 
   const batchConfig = computeSqliteBatchChunkSizes(
@@ -2045,7 +2038,7 @@ export function buildSqliteEngineProfile(
         return runWithSerializedQueue(serializedQueue, async () => {
           // Write-lock is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
-          const txBackend = createTransactionBackend({
+          const bound = createTransactionBackend({
             capabilities,
             db,
             executionAdapter,
@@ -2062,7 +2055,7 @@ export function buildSqliteEngineProfile(
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
           try {
-            const result = await fn(txBackend);
+            const result = await runInTransactionView(bound, fn);
             await runFrameStatement(sql`COMMIT`);
             return result;
           } catch (error) {
@@ -2080,23 +2073,25 @@ export function buildSqliteEngineProfile(
         // `transaction()` do-sqlite branch). Schema-version commits remain
         // data-only; administrative removal cleanup may use the target's
         // transaction-scoped DDL primitive.
-        return runDoSqliteStorageTransaction(async () => {
-          const txBackend = createTransactionBackend({
-            capabilities,
-            db,
-            operationStrategy,
-            profileHints: { isSync },
-            tableNames,
-            fulltextStrategy,
-            vectorStrategy,
-            contributionMaterializer: ctx.contributionMaterializer,
-            fenceTarget,
-            lineage: provisioning.lineage,
-            recordedTime: provisioning.recordedTime,
-            isFirstParty,
-          });
-          return fn(txBackend);
-        });
+        return runDoSqliteStorageTransaction(async () =>
+          runInTransactionView(
+            createTransactionBackend({
+              capabilities,
+              db,
+              operationStrategy,
+              profileHints: { isSync },
+              tableNames,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              fenceTarget,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+            }),
+            fn,
+          ),
+        );
       }
 
       // transactionMode === "drizzle". Drizzle's sqlite-core transaction
@@ -2107,23 +2102,24 @@ export function buildSqliteEngineProfile(
         serializedQueue,
         async () =>
           db.transaction(
-            async (tx) => {
-              const txBackend = createTransactionBackend({
-                capabilities,
-                db: tx,
-                operationStrategy,
-                profileHints: { isSync },
-                tableNames,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                fenceTarget,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-              return fn(txBackend);
-            },
+            async (tx) =>
+              runInTransactionView(
+                createTransactionBackend({
+                  capabilities,
+                  db: tx,
+                  operationStrategy,
+                  profileHints: { isSync },
+                  tableNames,
+                  fulltextStrategy,
+                  vectorStrategy,
+                  contributionMaterializer: ctx.contributionMaterializer,
+                  fenceTarget,
+                  lineage: provisioning.lineage,
+                  recordedTime: provisioning.recordedTime,
+                  isFirstParty,
+                }),
+                fn,
+              ),
             { behavior: "immediate" },
           ) as Promise<T>,
       );
@@ -2141,8 +2137,11 @@ export function buildSqliteEngineProfile(
     function bindTransactionBackend(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
-    ): TransactionBackend {
-      const txBackend = createTransactionBackend({
+    ): Readonly<{
+      backend: TransactionBackend;
+      drainAndClose: () => Promise<void>;
+    }> {
+      const { backend: txBackend, drainAndClose } = createTransactionBackend({
         capabilities,
         db: tx,
         operationStrategy,
@@ -2156,16 +2155,40 @@ export function buildSqliteEngineProfile(
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
       });
-      return gateFulltext(
-        txBackend,
-        ctx.contributionMaterializer.assertInitialized,
-        ctx.contributionMaterializer.refuseUnavailableFulltext,
+      return {
+        backend: gateFulltext(
+          txBackend,
+          ctx.contributionMaterializer.assertInitialized,
+          ctx.contributionMaterializer.refuseUnavailableFulltext,
+        ),
+        drainAndClose,
+      };
+    }
+
+    /**
+     * Runs `fn` on a backend bound to a transaction TypeGraph opened, and ends
+     * that backend's view when `fn` settles — before the runner's COMMIT /
+     * ROLLBACK. See {@link runInTransactionView}.
+     */
+    async function runOnOwnedTransaction<T>(
+      tx: AnySqliteDatabase,
+      fn: (backend: TransactionBackend) => Promise<T>,
+    ): Promise<T> {
+      const { backend, drainAndClose } = bindTransactionBackend(
+        tx,
+        isFirstParty,
       );
+      try {
+        return await fn(markSchemaFencedInsertEligibleUnderFence(backend, fencePlan));
+      } finally {
+        await drainAndClose();
+      }
     }
 
     function bindPrivilegedTransactionBackend(
       tx: AnySqliteDatabase,
     ): InternalOperationBackend {
+      // Adopted: the caller ends this transaction, so its view is never closed.
       return createTransactionBackend({
         capabilities,
         db: tx,
@@ -2179,7 +2202,7 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: false,
-      });
+      }).backend;
     }
 
     return {
@@ -2228,7 +2251,7 @@ export function buildSqliteEngineProfile(
               // composes and Drizzle's `db.transaction()` (which for those
               // libsql clients abandons the client's connection — fatal for
               // `:memory:`) must be avoided.
-              const txBackend = createTransactionBackend({
+              const bound = createTransactionBackend({
                 capabilities,
                 db,
                 executionAdapter,
@@ -2253,16 +2276,22 @@ export function buildSqliteEngineProfile(
               );
 
               try {
-                const result = await fn(
-                  markSchemaFencedInsertEligibleUnderFence(
-                    gateFulltext(
-                      txBackend,
-                      ctx.contributionMaterializer.assertInitialized,
-                      ctx.contributionMaterializer.refuseUnavailableFulltext,
+                // The view is ended before COMMIT and before ROLLBACK, both
+                // of which run on this same outer connection: a statement the
+                // callback left running settles first, and a later one is
+                // refused rather than landing after the frame closed.
+                const result = await runInTransactionView(bound, (txBackend) =>
+                  fn(
+                    markSchemaFencedInsertEligibleUnderFence(
+                      gateFulltext(
+                        txBackend,
+                        ctx.contributionMaterializer.assertInitialized,
+                        ctx.contributionMaterializer.refuseUnavailableFulltext,
+                      ),
+                      fencePlan,
                     ),
-                    fencePlan,
+                    db,
                   ),
-                  db,
                 );
                 await runFrameStatement(sql`COMMIT`);
                 return result;
@@ -2275,13 +2304,7 @@ export function buildSqliteEngineProfile(
 
           if (transactionMode === "do-sqlite") {
             return runDoSqliteStorageTransaction(async () =>
-              fn(
-                markSchemaFencedInsertEligibleUnderFence(
-                  bindTransactionBackend(db, isFirstParty),
-                  fencePlan,
-                ),
-                db,
-              ),
+              runOnOwnedTransaction(db, (txBackend) => fn(txBackend, db)),
             );
           }
 
@@ -2292,13 +2315,7 @@ export function buildSqliteEngineProfile(
             async () =>
               db.transaction(
                 async (tx) =>
-                  fn(
-                    markSchemaFencedInsertEligibleUnderFence(
-                      bindTransactionBackend(tx, isFirstParty),
-                      fencePlan,
-                    ),
-                    tx,
-                  ),
+                  runOnOwnedTransaction(tx, (txBackend) => fn(txBackend, tx)),
                 {
                   behavior:
                     options?.accessMode === "read_only" || temporaryWrites ?
@@ -2337,7 +2354,8 @@ export function buildSqliteEngineProfile(
           // the caller opened this transaction, its lifetime is not one
           // TypeGraph has audited, and it must not qualify for the
           // dialect-derivation fallback or the lazy schema-fence lease.
-          return bindTransactionBackend(externalTx, false);
+          // Its view is never closed: the caller ends this transaction.
+          return bindTransactionBackend(externalTx, false).backend;
         },
 
         ...(supportsSchemaWriteAdoption ?
@@ -2653,14 +2671,47 @@ export function buildSqliteEngineProfile(
   return registerFirstPartyProfile(profile);
 }
 
+/**
+ * A transaction-scoped backend plus the hook that ends its view of the
+ * connection. Every runner TypeGraph owns awaits `drainAndClose` before it
+ * issues COMMIT / ROLLBACK (or lets the driver issue them); an adopted
+ * transaction never calls it, because its caller ends the transaction.
+ */
+type BoundTransactionBackend = Readonly<{
+  backend: InternalOperationBackend;
+  drainAndClose: () => Promise<void>;
+}>;
+
+/**
+ * Runs `fn` on a bound transaction backend and ends the backend's view once
+ * `fn` settles, whichever way: statements `fn` left running settle first, and
+ * any issued afterwards are refused, so nothing reaches the connection after
+ * this transaction's COMMIT / ROLLBACK.
+ */
+async function runInTransactionView<T>(
+  bound: BoundTransactionBackend,
+  fn: (backend: InternalOperationBackend) => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn(bound.backend);
+  } finally {
+    await bound.drainAndClose();
+  }
+}
+
 function createTransactionBackend(
   options: CreateSqliteTransactionBackendOptions,
-): InternalOperationBackend {
-  const txExecutionAdapter =
+): BoundTransactionBackend {
+  // A fresh view per transaction (and per retried attempt): the runner closes
+  // it at the boundary, and a later transaction on the same connection gets
+  // its own.
+  const view = createSqliteTransactionExecutionView(
     options.executionAdapter ??
-    createSqliteExecutionAdapter(options.db, {
-      profileHints: options.profileHints,
-    });
+      createSqliteExecutionAdapter(options.db, {
+        profileHints: options.profileHints,
+      }),
+  );
+  const txExecutionAdapter = view.adapter;
 
   // The transaction-scoped backend shares the outer backend's
   // contribution materializer: the per-field vector table is provisioned
@@ -2682,7 +2733,11 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
-  return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  return {
+    backend:
+      options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend,
+    drainAndClose: view.drainAndClose,
+  };
 }
 
 // Re-export schema utilities
