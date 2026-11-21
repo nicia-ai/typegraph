@@ -2290,17 +2290,31 @@ await store.transaction(async (tx) => {
 });
 ```
 
-When `store.transaction()` resolves, the transaction committed. When it rejects, it did not:
-nothing the callback wrote was saved. That holds even for an error the callback catches. On
-PostgreSQL, a statement that fails inside a transaction (a duplicate id, a constraint violation, a
-read or a `tx.sql` statement the database refuses) aborts the whole transaction whether or not the
-callback catches the error, and the database answers the closing `COMMIT` with a rollback.
-TypeGraph checks the session before it commits, so such a transaction rejects with a
-`TransactionRolledBackError` whose `cause` is the engine error that aborted it; it never resolves
-as if it had committed. To carry on after an expected failure, run the failing statement inside a
-savepoint (for example a nested `tx.sql.transaction(...)`) that rolls back past it: the
-transaction is then healthy and commits. SQLite keeps a transaction usable after a failed
-statement, so on SQLite the same callback commits what it wrote.
+When `store.transaction()` resolves, the transaction committed. A failed statement the callback
+catches does not change that guarantee. On PostgreSQL, a statement that fails inside a transaction
+(a duplicate id, a constraint violation, a read or a `tx.sql` statement the database refuses)
+aborts the whole transaction whether or not the callback catches the error, and the database
+answers the closing `COMMIT` with a rollback. TypeGraph checks the session before it commits, so
+such a transaction rejects with a `TransactionRolledBackError` whose `cause` is the first engine
+error that aborted it; it never resolves as if it had committed. A `TransactionRolledBackError`
+means the transaction did not commit: nothing the callback wrote was saved. To carry on after an
+expected failure, run the failing statement inside a savepoint (for example a nested
+`tx.sql.transaction(...)`) that rolls back past it: the transaction is then healthy and commits.
+SQLite keeps a transaction usable after a failed statement, so on SQLite the same callback commits
+what it wrote.
+
+Not every rejection means nothing was saved. The `onOperationEnd` and `onBulkOperationEnd` hooks
+run after the `COMMIT` succeeded, so an error one of them throws rejects `store.transaction()`
+with that error although every write of the transaction is saved. Keep those hooks from throwing,
+or treat an error that comes from your own hook as a committed transaction.
+
+Do not end the transaction yourself through `tx.sql` (`ROLLBACK`, `COMMIT`). After a failed
+statement, TypeGraph's check asks the session whether it is still inside a healthy transaction
+block, so a callback that issues `ROLLBACK` after a failure and returns still rejects with
+`TransactionRolledBackError`. The check cannot tell the transaction TypeGraph opened from one the
+callback opened in its place (`ROLLBACK` followed by `BEGIN`), and it only runs after a failed
+statement, so on PostgreSQL a callback that ends the transaction with no statement failing first
+resolves although nothing written before its `ROLLBACK` was saved.
 
 ```typescript
 try {

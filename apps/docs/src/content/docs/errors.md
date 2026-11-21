@@ -2379,8 +2379,8 @@ inside a transaction aborts the whole transaction, including when the callback
 catches the error: every later statement is refused, and the database answers
 the closing `COMMIT` with a rollback. TypeGraph checks the session before it
 commits and rejects with this error instead of reporting success. Nothing the
-transaction wrote was saved, and `cause` is the engine error that aborted it
-(for example a unique violation, `23505`).
+transaction wrote was saved, and `cause` is the first engine error, the one
+that aborted it (for example a unique violation, `23505`).
 
 ```typescript
 try {
