@@ -41,6 +41,7 @@ import {
   defineNode,
   searchable,
 } from "../../src";
+import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { type GraphBackend } from "../../src/backend/types";
 import { TypeGraphError } from "../../src/errors";
@@ -285,13 +286,21 @@ const writeOpArb: fc.Arbitrary<WriteOp> = fc.oneof(
       b: refArb,
       windowed: fc.boolean(),
     }),
-    weight: 5,
+    // Heaviest: a class canonical only depends on history once one class
+    // has absorbed another and then meets a third.
+    weight: 8,
   },
-  fc.record({
-    type: fc.constant("bulkAssert" as const),
-    relation: relationArb,
-    pairs: fc.array(fc.tuple(refArb, refArb), { minLength: 1, maxLength: 3 }),
-  }),
+  {
+    arbitrary: fc.record({
+      type: fc.constant("bulkAssert" as const),
+      relation: relationArb,
+      pairs: fc.array(fc.tuple(refArb, refArb), {
+        minLength: 1,
+        maxLength: 3,
+      }),
+    }),
+    weight: 2,
+  },
   {
     arbitrary: fc.record({
       type: fc.constant("retract" as const),
@@ -898,6 +907,20 @@ const LANES: readonly Lane[] = [
     open: async () => {
       const local = await createLocalPgliteBackend({ vector: false });
       return { backend: local.backend, close: () => local.backend.close() };
+    },
+  },
+  {
+    // The root backend over the same database: fused command paths write
+    // the derived rows here, by a route the store-mediated lane never takes.
+    name: "PGlite root (fused-capable)",
+    runs: propertyRuns({ ci: 15, local: 40 }),
+    shared: true,
+    open: async () => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      return {
+        backend: createPostgresBackend(local.db, { vector: false }),
+        close: () => local.backend.close(),
+      };
     },
   },
 ];
