@@ -622,11 +622,21 @@ PostgreSQL's autovacuum re-analyzes a table only after changes reach
 count (50 rows + 10% by default). On a nodes table shared by many graphs, a load
 of tens of thousands of nodes of one kind can stay below that trigger
 indefinitely, and until it is crossed the planner estimates the new kind at
-about one row. `updateWhere()` and `compareAndSet()` reach the nodes table only
-through the selected rows' keys, so their plans do not depend on that estimate.
-A point lookup by id, however, can then
-pick any index that starts with `(graph_id, kind)` and filter every row of the
-kind. In a benchmark with 300,000 analyzed rows of other graphs, one
+about one row.
+
+The write phase of `updateWhere()` and `compareAndSet()` reaches the nodes table
+only through the selected rows' keys, so its plan does not depend on that
+estimate. A batch reads its candidates once, so one call over many rows stays
+linear in the rows. Candidate selection is still an ordinary query, though, and
+it does depend on the estimate. Selecting a single id from a fresh kind can read
+the kind's un-analyzed rows through an index on `graph_id` and filter the id. In
+a test with 50,000 analyzed rows of other graphs, `compareAndSet()` and an
+`updateWhere()` by id each filtered out 3,999 rows to select one of 4,000 fresh
+rows. A loop of single-row mutations over a fresh kind is therefore quadratic,
+like other per-row loops over it.
+
+A point lookup by id can likewise pick any index that starts with
+`(graph_id, kind)` and filter every row of the kind. In a benchmark with 300,000 analyzed rows of other graphs, one
 primary-key `UPDATE` took 6.5 ms instead of 0.06 ms against 40,000
 un-analyzed rows of the kind. Per-row work therefore slows as the kind grows:
 500 transactions of 20 creates plus 20 edges each went from 15 ms to 18 ms per

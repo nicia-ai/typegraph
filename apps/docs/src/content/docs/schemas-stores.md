@@ -1143,10 +1143,15 @@ version starts again at the one the snapshot read: it is a different row, and
 it is written only when it already matched the selectors in that snapshot.
 Re-run `updateWhere()` to apply the patch to rows that still match.
 
-The statement looks each selected row up by its key, so its cost is linear in
-the number of matching rows whatever the database's planner statistics say.
+The statement reads its candidates once and looks each selected row up by its
+key, so its write phase does not depend on the database's planner statistics.
 That matters after a bulk load into a large shared table, which can leave
-PostgreSQL believing the kind holds almost no rows. Because the update is one
+PostgreSQL believing the kind holds almost no rows. Selecting the candidates is
+an ordinary query, though: under those statistics, selecting one row by id can
+still read every un-analyzed row of the kind, so a loop of single-row updates
+over a freshly loaded kind slows as the kind grows until the table is analyzed
+(see [stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
+Because the update is one
 statement, a backend's `updateNodeSet` called directly on an autocommit
 connection is as atomic as one inside a transaction.
 

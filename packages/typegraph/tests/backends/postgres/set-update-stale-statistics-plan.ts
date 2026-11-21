@@ -8,10 +8,11 @@
  * shared table leaves behind, because one import never reaches autovacuum's
  * analyze threshold. PostgreSQL then estimates the fresh kind at one row.
  *
- * Each case captures the UPDATE that `updateWhere()` sends, refusing it in the
- * driver before it runs, and replays it under `EXPLAIN (ANALYZE, BUFFERS)` in
- * a rolled-back transaction: the plan measured is the plan of the statement
- * the store sent, executed against the rows it would have written.
+ * Each case captures the UPDATE that `updateWhere()` or `compareAndSet()`
+ * sends, refusing it in the driver before it runs, and replays it under
+ * `EXPLAIN (ANALYZE, BUFFERS)` in a rolled-back transaction: the plan
+ * measured is the plan of the statement the store sent, executed against the
+ * rows it would have written.
  */
 import { expect, it } from "vitest";
 import { z } from "zod";
@@ -215,6 +216,61 @@ async function measureStaleSetUpdate(
   };
 }
 
+/** Fresh rows of the kind the point-mutation case selects one id from. */
+const POINT_MUTATION_FRESH_ROWS = 4000;
+
+/** The candidate read and write-phase lookups of one stale point mutation. */
+type StalePointMutationMeasurement = Readonly<{
+  written: number;
+  keyedLookups: number;
+  /** Rows each other scan of the nodes table returned and filtered out. */
+  otherScans: readonly Readonly<{ rows: number; removed: number }>[];
+}>;
+
+async function measureStalePointMutation(
+  harness: StaleStatisticsHarness,
+  operation: "compareAndSet" | "updateWhere",
+): Promise<StalePointMutationMeasurement> {
+  const graph = staleGraph(`stale_statistics_point_${operation}`);
+  const [store] = await createStoreWithSchema(graph, harness.createBackend(), {
+    autoRefreshStatistics: false,
+  });
+  const target = await store.nodes.Item.create({ status: "pending" });
+  await store.nodes.Item.bulkInsert(
+    Array.from({ length: POINT_MUTATION_FRESH_ROWS - 1 }, (_, index) => ({
+      id: `point-${index}`,
+      props: { status: "pending" },
+    })),
+  );
+  const targetId = target.id;
+
+  const intercepted = harness.interceptNextNodesUpdate();
+  await expect(
+    operation === "compareAndSet" ?
+      store.nodes.Item.compareAndSet(targetId, {
+        expected: { status: "pending" },
+        patch: { status: "promoted" },
+      })
+    : store.nodes.Item.updateWhere({
+        where: (item) => item.id.eq(targetId),
+        patch: { status: "promoted" },
+      }),
+  ).rejects.toThrow();
+  const plan = await harness.explainAnalyze(await intercepted);
+  const scans = nodesTableScans(plan);
+  const keyed = scans.filter((scan) => isKeyedLookup(scan, 1));
+  return {
+    written: plan["Actual Rows"],
+    keyedLookups: keyed.length,
+    otherScans: scans
+      .filter((scan) => !keyed.includes(scan))
+      .map((scan) => ({
+        rows: scan["Actual Rows"],
+        removed: scan["Rows Removed by Filter"] ?? 0,
+      })),
+  };
+}
+
 /** Registers the shared cases against `harness()`, resolved per test. */
 export function registerStaleStatisticsPlanCases(
   harness: () => StaleStatisticsHarness | undefined,
@@ -286,4 +342,35 @@ export function registerStaleStatisticsPlanCases(
       bindBudget,
     );
   });
+
+  // KNOWN LIMITATION, pinned so a change to it is seen. Only the write phase
+  // is keyed. A point mutation's candidate query is the compiler's
+  // `graph_id = ? AND kind = ? AND id = ?` read, and with the fresh kind
+  // estimated at one row PostgreSQL reads it through the `graph_id` index
+  // (measured on a server and on PGlite) and filters the id: one row
+  // selected, every other un-analyzed row of the kind filtered out. One call
+  // is linear in the kind; a loop of them is quadratic, like the import
+  // update, bulkReparent and merge-apply loops measured by
+  // `bench:stale-statistics`. Keying the candidate read means changing how
+  // the shared compiler emits an id predicate for every query, which is left
+  // to that sibling work.
+  it.for(["compareAndSet", "updateWhere"] as const)(
+    "%s of one id still scans the fresh kind to select it (known limitation)",
+    async (operation, ctx) => {
+      const active = harness();
+      if (active === undefined) {
+        ctx.skip();
+        return;
+      }
+      const measured = await measureStalePointMutation(active, operation);
+
+      expect(measured).toEqual({
+        written: 1,
+        // The write finds the target, and for updateWhere the version its
+        // snapshot read, by the id.
+        keyedLookups: operation === "updateWhere" ? 2 : 1,
+        otherScans: [{ rows: 1, removed: POINT_MUTATION_FRESH_ROWS - 1 }],
+      });
+    },
+  );
 }
