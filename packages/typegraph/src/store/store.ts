@@ -63,6 +63,12 @@ import {
   heterogeneousNodeUpsertBatchBindParameterCount,
   heterogeneousNodeUpsertBatchFitsBindBudget,
 } from "../backend/heterogeneous-node-upsert-batch";
+import {
+  backendNativeTransaction,
+  backendOwnWriteReadOnlyAccess,
+  runWithReadOnlySession,
+  transactionReadOnlyAccess,
+} from "../backend/read-only-session";
 import { installRevisionChangesJournal } from "../backend/revision-journal";
 import {
   createEdgeRowMapper,
@@ -511,6 +517,8 @@ import {
   createTransactionReceiptRecorder,
   type TransactionReceiptRecorder,
   type TransactionWriteAccess,
+  wrapEdgeCollections,
+  wrapNodeCollections,
   wrapTransactionCollections,
   wrapTransactionIdentity,
 } from "./transaction-receipt";
@@ -1903,7 +1911,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     const existing = IDENTITY_FACADES.get(this);
     if (existing !== undefined) return existing as IdentityFacade<G>;
-    const facade = createIdentityFacade(this.#identityContext(this.#backend));
+    const ownFacade = createIdentityFacade(
+      this.#identityContext(this.#backend),
+    );
+    const gate = this.#ownWriteGate();
+    const facade =
+      gate === undefined ? ownFacade : (
+        wrapTransactionIdentity(ownFacade, gate, "store")
+      );
     IDENTITY_FACADES.set(this, facade);
     return facade;
   }
@@ -2508,7 +2523,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get nodes(): GraphNodeCollections<G> {
     if (this.#nodeCollections === undefined) {
-      this.#nodeCollections = createNodeCollectionsProxy(
+      const nodes = createNodeCollectionsProxy(
         this.#graph,
         this.graphId,
         this.#registry,
@@ -2516,6 +2531,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#batchPointRead,
         this.#nodeOperations,
       );
+      const gate = this.#ownWriteGate();
+      this.#nodeCollections =
+        gate === undefined ? nodes : wrapNodeCollections(nodes, gate, "store");
     }
 
     return this.#nodeCollections;
@@ -2539,7 +2557,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get edges(): GraphEdgeCollections<G> {
     if (this.#edgeCollections === undefined) {
-      this.#edgeCollections = createEdgeCollectionsProxy(
+      const edges = createEdgeCollectionsProxy(
         this.#graph,
         this.graphId,
         this.#registry,
@@ -2548,9 +2566,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#endpointSetRead,
         this.#edgeOperations,
       );
+      const gate = this.#ownWriteGate();
+      this.#edgeCollections =
+        gate === undefined ? edges : wrapEdgeCollections(edges, gate, "store");
     }
 
     return this.#edgeCollections;
+  }
+
+  /**
+   * The write gate of this Store's own collections and identity facade when
+   * its backend runs inside a caller's native transaction
+   * (`createPostgresTransactionBackend`): it refuses every write while that
+   * transaction is one TypeGraph opened read-only, with the refusal a
+   * transaction context raises. The recorder's counts are never read.
+   * `undefined` for a Store over a database, whose writes open their own
+   * transactions.
+   */
+  #ownWriteGate(): TransactionReceiptRecorder | undefined {
+    const isReadOnly = backendOwnWriteReadOnlyAccess(this.#backend);
+    return isReadOnly === undefined ? undefined : (
+        createTransactionReceiptRecorder({ graphId: this.graphId, isReadOnly })
+      );
   }
 
   // === Graph Algorithms ===
@@ -4510,11 +4547,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const { retry, ...backendOptions } = options ?? {};
     // THE read-only fact of this transaction: the receipt recorder's write
     // gate refuses every write the context offers with it, and the context's
-    // fence and preview paths read the same value.
-    const writeAccess: TransactionWriteAccess =
-      backendOptions.accessMode === "read_only" ?
-        { readOnly: true, graphId: this.graphId }
-      : { readOnly: false };
+    // fence and preview paths ask the same question. Read-only when this
+    // transaction was opened with `accessMode: "read_only"`, or when it runs
+    // inside one that was: a Store over `createPostgresTransactionBackend(tx.sql)`
+    // opens its own transactions as savepoints of that transaction. The
+    // attempt's own handle is known once the backend hands it over, so `run`
+    // binds it.
+    const requestedReadOnly = backendOptions.accessMode === "read_only";
+    let attemptReadOnly = transactionReadOnlyAccess(
+      [backendNativeTransaction(this.#backend)],
+      requestedReadOnly,
+    );
+    const writeAccess: TransactionWriteAccess = {
+      graphId: this.graphId,
+      isReadOnly: () => attemptReadOnly(),
+    };
     const attempts = retry?.attempts ?? 1;
 
     // #134/#135: no gate here. The backend's transaction() wraps the
@@ -4577,7 +4624,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         : backendOptions,
       );
       try {
-        const run = async (
+        const runOnSession = async (
           txBackend: TransactionBackend,
           nativeTransaction: TNativeTransaction | undefined,
         ): Promise<T> => {
@@ -4631,7 +4678,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 receiptRecorder,
                 runBulkHooks,
                 frame.attempt,
-                writeAccess.readOnly,
+                writeAccess.isReadOnly,
                 receiptRequested,
               ),
               async (activeContext) => {
@@ -4678,6 +4725,24 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               await this.#engineRecordedFlushInstants(txBackend);
           }
           return output;
+        };
+        // Binds this attempt's read-only question to the native session the
+        // backend handed it and, for a transaction opened read-only, marks
+        // that session for the callback's lifetime so every context adopted
+        // over `tx.sql` asks the same question (`read-only-session.ts`).
+        const run = (
+          txBackend: TransactionBackend,
+          nativeTransaction: TNativeTransaction | undefined,
+        ): Promise<T> => {
+          attemptReadOnly = transactionReadOnlyAccess(
+            [nativeTransaction, backendNativeTransaction(this.#backend)],
+            requestedReadOnly,
+          );
+          return requestedReadOnly ?
+              runWithReadOnlySession(nativeTransaction, () =>
+                runOnSession(txBackend, nativeTransaction),
+              )
+            : runOnSession(txBackend, nativeTransaction);
         };
         const result =
           this.#captureEnabled || this.#adapterBackend === undefined ?
@@ -4837,8 +4902,37 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     // The caller already owns the boundary, so `externalTx` *is* the
     // bound handle — surface it as `tx.sql` for symmetry with the
-    // graph-owned `transaction()` path.
-    return this.#buildTransactionContext(adopt(externalTx), externalTx);
+    // graph-owned `transaction()` path. The recorder carries no receipt
+    // anyone reads; it is the write gate, which refuses every write while
+    // `externalTx` runs on the session of a transaction TypeGraph opened
+    // read-only (`transactionReadOnlyAccess`).
+    const txBackend = adopt(externalTx);
+    const writeAccess = this.#adoptedWriteAccess(externalTx);
+    return this.#buildTransactionContext(
+      txBackend,
+      externalTx,
+      this.#immediateHookRunner(txBackend),
+      createTransactionReceiptRecorder(writeAccess),
+      this.#immediateBulkHookRunner(txBackend),
+      1,
+      writeAccess.isReadOnly,
+      false,
+    );
+  }
+
+  /**
+   * The write access of a context adopted over `externalTx`: read-only exactly
+   * while that handle's native session carries a transaction TypeGraph opened
+   * with `accessMode: "read_only"`.
+   */
+  #adoptedWriteAccess(externalTx: TNativeTransaction): TransactionWriteAccess {
+    return {
+      graphId: this.graphId,
+      isReadOnly: transactionReadOnlyAccess([
+        externalTx,
+        backendNativeTransaction(this.#backend),
+      ]),
+    };
   }
 
   /**
@@ -4934,6 +5028,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    // A history store takes the schema fence and the per-graph write lock
+    // before the callback runs, which a read-only transaction cannot hold.
+    // Refused here, before the first of those statements, exactly as a write
+    // in the transaction that opened `externalTx` read-only is.
+    if (
+      this.#captureEnabled &&
+      this.#adoptedWriteAccess(externalTx).isReadOnly()
+    ) {
+      refuseReadOnlyTransactionWrite(
+        "store.withRecordedTransaction()",
+        this.graphId,
+        'Remove accessMode: "read_only" from the store.transaction that opened this handle: a history store fences its writes before the callback runs.',
+      );
+    }
     return withAdoptedTransactionScope(externalTx, () =>
       this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
     );
@@ -4979,7 +5087,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#captureEnabled) {
       await lockRecordedGraphWrite(scope.backend, this.graphId);
     }
-    const receiptRecorder = createTransactionReceiptRecorder();
+    // The write gate refuses every write while `externalTx` runs on the
+    // session of a transaction TypeGraph opened read-only.
+    const writeAccess = this.#adoptedWriteAccess(externalTx);
+    const receiptRecorder = createTransactionReceiptRecorder(writeAccess);
     // See the matching comment at the other engine-native receipt site
     // (`runAttempt` above): the witness observes real per-member mutations
     // on the adopted session, not write intents, so a delete of a missing
@@ -5014,6 +5125,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       externalTx,
       undefined,
       receiptRecorder,
+      undefined,
+      1,
+      writeAccess.isReadOnly,
     );
     if (originalStore !== undefined) {
       bindEvolvedTransactionStore(context, originalStore, this);
@@ -5419,8 +5533,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
-    // The transaction was opened with `accessMode: "read_only"`.
-    readOnly = false,
+    // Whether the context's transaction is read-only, asked at each write:
+    // the `isReadOnly` of the `TransactionWriteAccess` its receipt recorder
+    // gates on (`transactionReadOnlyAccess` owns the answer).
+    isReadOnly: () => boolean = () => false,
     measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
     if (receiptRecorder !== undefined) {
@@ -5444,7 +5560,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         runBulkHooks,
         attempt,
         receiptRecorders,
-        readOnly,
+        isReadOnly,
       );
       const nodeOperations: NodeOperations = {
         ...this.#buildNodeOperations(nodeOperationContext),
@@ -5479,7 +5595,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               txBackend,
             ),
           acquireWriteFences: async (refusal) => {
-            if (readOnly) {
+            if (isReadOnly()) {
               refuseReadOnlyTransactionWrite(
                 refusal.operation,
                 this.graphId,
@@ -5489,7 +5605,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             await acquireManagedWriteFences(nodeOperationContext, txBackend);
           },
           acquireReadFences: async () => {
-            if (readOnly) {
+            if (isReadOnly()) {
               await lockRecordedGraphWrite(txBackend, this.graphId);
               return;
             }
@@ -5552,7 +5668,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         scopes: readonly ReadSetScope<G>[],
       ) =>
         assertReadSetUnchangedSince(
-          this.#readSetFenceContext(readOnly),
+          this.#readSetFenceContext(isReadOnly()),
           txBackend,
           anchor,
           scopes,
@@ -5565,7 +5681,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...(this.#captureEnabled || this.#engineNativeHistory ?
         {
           requestRecordedRevision: (): void => {
-            if (readOnly) {
+            if (isReadOnly()) {
               refuseReadOnlyTransactionWrite(
                 "tx.requestRecordedRevision()",
                 this.graphId,
@@ -5960,6 +6076,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend,
       "withEvolvedTransaction",
     );
+    // Every plan takes the schema fence before the callback, and a changing
+    // plan commits a schema version: neither belongs in a transaction
+    // TypeGraph opened read-only. Refused before the first statement.
+    if (this.#adoptedWriteAccess(externalTx).isReadOnly()) {
+      refuseReadOnlyTransactionWrite(
+        "store.withEvolvedTransaction()",
+        this.graphId,
+        'Remove accessMode: "read_only" from the store.transaction that opened this handle: an evolved transaction fences and commits the schema.',
+      );
+    }
     return withAdoptedTransactionScope(
       externalTx,
       () => this.#applyEvolvedTransaction(externalTx, plan, fn, options),
@@ -7743,13 +7869,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
     attempt = 1,
     receiptRecorders: readonly TransactionReceiptRecorder[] = [],
-    readOnlyTransaction = false,
+    isReadOnlyTransaction: () => boolean = () => false,
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
       graph: this.#graph,
       graphId: this.graphId,
-      readOnlyTransaction,
+      isReadOnlyTransaction,
       schemaVersion: this.#schemaMetadata.schemaVersion,
       historyEnabled: this.#captureEnabled,
       revisionTrackingEnabled: this.#revisionTrackingEnabled,

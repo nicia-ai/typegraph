@@ -345,7 +345,7 @@ export function registerTransactionSessionHazardTests(
 ): void {
   describe("transaction session hazards", () => {
     describe("a re-adopted binding of a read-only transaction", () => {
-      knownFailingOn(context, ["better-sqlite3", "libsql"])(
+      knownFailingOn(context, [])(
         "cannot write through store.withTransaction(tx.sql)",
         async () => {
           const graph = buildGraph();
@@ -354,8 +354,9 @@ export function registerTransactionSessionHazardTests(
             context.getBackend(),
           );
           let aliasWrite: Status | undefined;
-          // PostgreSQL refuses the alias's statement itself, and postgres-js
-          // then rejects the transaction too: its outcome is not the question.
+          // The store refuses the alias's write before any statement, on
+          // every driver (the read-only-transaction-writes suite pins the
+          // exact refusal); the transaction's own outcome is not the question.
           await statusOf(
             store.transaction(
               async (tx) => {

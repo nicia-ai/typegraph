@@ -18,6 +18,8 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
@@ -27,8 +29,13 @@ import {
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
-import { type TransactionBackend } from "../../../src/backend/types";
+import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
+import {
+  type AdapterBackend,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { branch } from "../../../src/graph-merge/branch";
 import { MergeError } from "../../../src/graph-merge/errors";
 import {
@@ -36,11 +43,13 @@ import {
   planMerge,
 } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { exportGraph, importGraph } from "../../../src/interchange";
 import type {
   EDGE_WRITE_NAMES,
   IDENTITY_WRITE_NAMES,
   NODE_WRITE_NAMES,
 } from "../../../src/store/collection-surface";
+import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -254,6 +263,90 @@ const CASES: readonly Case[] = [
   },
 ];
 
+/** `target`, reporting the name of every backend member called through it. */
+function instrumentTransactionTarget(
+  target: TransactionBackend,
+  record: (key: string) => void,
+): TransactionBackend {
+  const overrides: Record<string, unknown> = {};
+  for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
+    const member: unknown = (target as unknown as Record<string, unknown>)[key];
+    if (typeof member !== "function") continue;
+    overrides[key] = (...args: unknown[]) => {
+      record(key);
+      return (member as (...a: unknown[]) => unknown).apply(target, args);
+    };
+  }
+  return deriveBackend(target, overrides as never);
+}
+
+/**
+ * `backend`, with every backend member of a transaction it adopts counted in
+ * `calls` while `counting` is on.
+ */
+function countingAdoptionBackend(backend: AdapterBackend<unknown>): Readonly<{
+  backend: AdapterBackend<unknown>;
+  calls: string[];
+  setCounting: (on: boolean) => void;
+}> {
+  const calls: string[] = [];
+  let counting = false;
+  return {
+    backend: deriveBackend(backend, {
+      adoptTransaction: (externalTransaction) =>
+        instrumentTransactionTarget(
+          backend.adoptTransaction(externalTransaction),
+          (key) => {
+            if (counting) calls.push(key);
+          },
+        ),
+    }),
+    calls,
+    setCounting: (on) => {
+      counting = on;
+    },
+  };
+}
+
+/** The native handle a transaction context exposes as `tx.sql`. */
+function nativeHandle(tx: object): unknown {
+  return requireDefined((tx as Readonly<{ sql?: unknown }>).sql);
+}
+
+type AdoptingStore = Readonly<{
+  withTransaction: (externalTx: unknown) => unknown;
+  withRecordedTransaction: (
+    externalTx: unknown,
+    fn: (tx: unknown) => Promise<void>,
+  ) => Promise<unknown>;
+}>;
+
+type Adoption = Readonly<{
+  entry: string;
+  run: (
+    store: AdoptingStore,
+    externalTx: unknown,
+    body: (adopted: TransactionSurface) => Promise<void>,
+  ) => Promise<void>;
+}>;
+
+/** Every way a store builds a write context over a caller's native handle. */
+const ADOPTIONS: readonly Adoption[] = [
+  {
+    entry: "store.withTransaction(tx.sql)",
+    run: (store, externalTx, body) =>
+      body(store.withTransaction(externalTx) as TransactionSurface),
+  },
+  {
+    entry: "store.withRecordedTransaction(tx.sql, fn)",
+    run: async (store, externalTx, body) => {
+      await store.withRecordedTransaction(externalTx, (adopted) =>
+        body(adopted as TransactionSurface),
+      );
+    },
+  },
+];
+
 /**
  * `backend`, with every backend member a transaction target exposes counted
  * in `calls` while `counting` is on.
@@ -265,20 +358,10 @@ function countingBackend(backend: GraphBackend): Readonly<{
 }> {
   const calls: string[] = [];
   let counting = false;
-  function instrument(target: TransactionBackend): TransactionBackend {
-    const overrides: Record<string, unknown> = {};
-    for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
-      const member: unknown = (target as unknown as Record<string, unknown>)[
-        key
-      ];
-      if (typeof member !== "function") continue;
-      overrides[key] = (...args: unknown[]) => {
-        if (counting) calls.push(key);
-        return (member as (...a: unknown[]) => unknown).apply(target, args);
-      };
-    }
-    return deriveBackend(target, overrides as never);
-  }
+  const instrument = (target: TransactionBackend): TransactionBackend =>
+    instrumentTransactionTarget(target, (key) => {
+      if (counting) calls.push(key);
+    });
   return {
     backend: deriveBackend(backend, {
       transaction: (fn, options) =>
@@ -455,4 +538,276 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
     // MUTATION CHECK: drop the `transactionAssertWritable` call from
     // `applyMergePlanInTransaction` — the apply is not refused.
   });
+
+  describe("writes through a context adopted over a read-only transaction's native handle", () => {
+    // `tx.sql` of `store.transaction(fn, { accessMode: "read_only" })`, handed
+    // back to the store, builds a NEW context. The read-only fact is bound to
+    // the handle's native session, so that context refuses exactly as the
+    // original does, before any statement, on every backend.
+    for (const adoption of ADOPTIONS) {
+      it(`refuses every write entry point through ${adoption.entry} before any backend call, and the transaction stays usable`, async () => {
+        const graph = buildGraph(nextGraphId());
+        const counted = countingAdoptionBackend(context.getBackend());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          counted.backend,
+        );
+        await seed(store);
+        const before = await graphState(store);
+
+        for (const { operation, invoke } of CASES) {
+          let refusal: unknown;
+          const committed = await store.transaction(
+            async (tx) => {
+              await adoption.run(store, nativeHandle(tx), async (adopted) => {
+                counted.setCounting(true);
+                refusal = await rejectionOf(invoke(adopted));
+                counted.setCounting(false);
+              });
+              // Still usable: on PostgreSQL an engine-rejected write would
+              // abort the transaction and fail this read.
+              return tx.nodes.RotPerson.getById(asNodeId("p1"));
+            },
+            { accessMode: "read_only" },
+          );
+          expectReadOnlyRefusal(refusal, operation, graph.id);
+          expect({ operation, calls: counted.calls }).toEqual({
+            operation,
+            calls: [],
+          });
+          expect(committed?.id).toBe("p1");
+        }
+        expect(await graphState(store)).toEqual(before);
+      });
+    }
+    // MUTATION CHECK: build the adopted contexts' write access from
+    // `transactionReadOnlyAccess(undefined)` instead of the handle — every
+    // case fails: SQLite commits the write, PostgreSQL reports its own
+    // read-only error and aborts the transaction.
+
+    it("refuses applyMergePlanInTransaction through store.withRecordedTransaction(tx.sql, fn)", async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      // A public merge plan needs revision tracking, which withholds tx.sql;
+      // a plain store over the same graph opens the read-only transaction.
+      const [plain] = await createAdapterStoreWithSchema(graph, backend);
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        revisionTracking: true,
+      });
+      await seed(target);
+      const source = unwrap(
+        await branch(target, () => context.createIsolatedBackend(), {
+          id: asBranchId("read-only-adopted-merge"),
+        }),
+      );
+      await source.store.nodes.RotPerson.create(
+        { name: "p5", email: "p5@example.test" },
+        { id: "p5" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      let refusal: unknown;
+      const committed = await plain.transaction(
+        async (tx) => {
+          // Merge apply needs an active callback of its target, which an
+          // adopted withRecordedTransaction callback is.
+          await target.withRecordedTransaction(
+            nativeHandle(tx),
+            async (adopted) => {
+              refusal = await rejectionOf(
+                applyMergePlanInTransaction(target, adopted, artifact),
+              );
+            },
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expect(committed?.id).toBe("p1");
+      expect(refusal).toBeInstanceOf(MergeError);
+      expectReadOnlyRefusal(
+        (refusal as MergeError).cause,
+        "applyMergePlanInTransaction()",
+        graph.id,
+      );
+      expect(
+        await target.nodes.RotPerson.getById(asNodeId("p5")),
+      ).toBeUndefined();
+    });
+
+    it("refuses store.withEvolvedTransaction(tx.sql) before its callback", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      await seed(store);
+      const before = await graphState(store);
+      const plan = await store.planEvolution(
+        defineGraphExtension({
+          nodes: { RotExtra: { properties: { label: { type: "string" } } } },
+        }),
+      );
+      // The refusal precedes every look at the plan, so a changing plan
+      // stands for a no-op one too.
+      expect(plan.status).toBe("change");
+      let callbackRan = false;
+      let refusal: unknown;
+      const committed = await store.transaction(
+        async (tx) => {
+          refusal = await rejectionOf(
+            store.withEvolvedTransaction(nativeHandle(tx), plan, async () => {
+              callbackRan = true;
+              await Promise.resolve();
+            }),
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectReadOnlyRefusal(
+        refusal,
+        "store.withEvolvedTransaction()",
+        graph.id,
+      );
+      expect(callbackRan).toBe(false);
+      expect(committed?.id).toBe("p1");
+      const active = await context.getBackend().getActiveSchema(graph.id);
+      expect(active?.version).toBe(1);
+      expect(await graphState(store)).toEqual(before);
+    });
+
+    it("refuses a history store's withRecordedTransaction(tx.sql) before its callback", async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [plain] = await createAdapterStoreWithSchema(graph, backend);
+      const [history] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      await seed(plain);
+      const before = await graphState(plain);
+
+      let callbackRan = false;
+      let refusal: unknown;
+      const committed = await plain.transaction(
+        async (tx) => {
+          refusal = await rejectionOf(
+            history.withRecordedTransaction(nativeHandle(tx), async () => {
+              callbackRan = true;
+              await Promise.resolve();
+            }),
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectReadOnlyRefusal(
+        refusal,
+        "store.withRecordedTransaction()",
+        graph.id,
+      );
+      expect(callbackRan).toBe(false);
+      expect(committed?.id).toBe("p1");
+      expect(await graphState(plain)).toEqual(before);
+    });
+
+    it("does not outlive the transaction: the same adoption writes in a read-write transaction afterwards", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      await seed(store);
+      await store.transaction(
+        async (tx) => tx.nodes.RotPerson.getById(asNodeId("p1")),
+        { accessMode: "read_only" },
+      );
+      await store.transaction(async (tx) => {
+        await store
+          .withTransaction(nativeHandle(tx))
+          .nodes.RotTeam.create({ name: "t3" }, { id: "t3" });
+      });
+      const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+      expect(team?.id).toBe("t3");
+    });
+  });
+
+  // SQLite has no factory for a backend over a caller's transaction.
+  describe.runIf(
+    context.driver === "pglite" ||
+      context.driver === "node-postgres" ||
+      context.driver === "postgres-js",
+  )(
+    "writes through a Store over createPostgresTransactionBackend(tx.sql) of a read-only transaction",
+    () => {
+      type StoreOverTransaction = Awaited<
+        ReturnType<typeof createAdapterStoreWithSchema<RotGraph, unknown>>
+      >[0];
+      const WRITES: readonly Readonly<{
+        operation: string;
+        write: (
+          store: StoreOverTransaction,
+          data: Awaited<ReturnType<typeof exportGraph>>,
+        ) => Promise<unknown>;
+      }>[] = [
+        {
+          operation: "store.nodes.RotTeam.create()",
+          write: (store) => store.nodes.RotTeam.create({ name: "t3" }),
+        },
+        {
+          operation: "store.edges.rotKnows.create()",
+          write: (store) =>
+            store.edges.rotKnows.create(person("p2"), person("p1"), {}),
+        },
+        {
+          operation: "store.identity.assertSame()",
+          write: (store) =>
+            store.identity.assertSame(person("p1"), person("p2")),
+        },
+        {
+          operation: "tx.nodes.RotTeam.create()",
+          write: (store) =>
+            store.transaction((tx) => tx.nodes.RotTeam.create({ name: "t3" })),
+        },
+        {
+          operation: "importGraph()",
+          write: (store, data) =>
+            importGraph(store, data, {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              batchSize: 100,
+              refreshStatistics: false,
+            }),
+        },
+      ];
+
+      for (const { operation, write } of WRITES) {
+        it(`refuses ${operation} before any statement, and the transaction stays usable`, async () => {
+          const graph = buildGraph(nextGraphId());
+          const backend = context.getBackend();
+          const [store] = await createAdapterStoreWithSchema(graph, backend);
+          await seed(store);
+          const data = await exportGraph(store);
+          const before = await graphState(store);
+
+          let refusal: unknown;
+          const committed = await store.transaction(
+            async (tx) => {
+              const overTransaction = createAdapterStore(
+                graph,
+                createPostgresTransactionBackend(nativeHandle(tx) as never),
+              ) as unknown as StoreOverTransaction;
+              refusal = await rejectionOf(write(overTransaction, data));
+              return tx.nodes.RotPerson.getById(asNodeId("p1"));
+            },
+            { accessMode: "read_only" },
+          );
+          expectReadOnlyRefusal(refusal, operation, graph.id);
+          expect(committed?.id).toBe("p1");
+          expect(await graphState(store)).toEqual(before);
+        });
+      }
+    },
+  );
 }

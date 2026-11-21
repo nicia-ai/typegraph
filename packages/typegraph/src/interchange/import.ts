@@ -64,6 +64,7 @@ import {
   serializesWriters,
 } from "../backend/capabilities/write-fence";
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
+import { backendOwnWriteReadOnlyAccess } from "../backend/read-only-session";
 import {
   acquireSerializedStreamLease,
   type SerializedStreamKind,
@@ -184,6 +185,7 @@ import {
 } from "../store/operations/write-session";
 import {
   constraintFenceRefusal,
+  refuseReadOnlyTransactionWrite,
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
@@ -293,6 +295,7 @@ export async function importGraph<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
+  refuseImportIntoReadOnlyTransaction(store, "importGraph()");
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
@@ -303,6 +306,24 @@ export async function importGraph<G extends GraphDef>(
   );
   return withImportStreamLease(store, () =>
     importGraphData(store, data, options),
+  );
+}
+
+/**
+ * Refuses an import into a Store whose backend runs inside a transaction
+ * TypeGraph opened with `accessMode: "read_only"` (a Store over
+ * `createPostgresTransactionBackend(tx.sql)`), before any statement, with the
+ * refusal a write in that transaction raises.
+ */
+export function refuseImportIntoReadOnlyTransaction<G extends GraphDef>(
+  store: Store<G>,
+  operation: string,
+): void {
+  if (backendOwnWriteReadOnlyAccess(storeBackend(store))?.() !== true) return;
+  refuseReadOnlyTransactionWrite(
+    operation,
+    store.graphId,
+    'Remove accessMode: "read_only" from the store.transaction whose native handle this store\'s backend was built over.',
   );
 }
 
@@ -871,6 +892,7 @@ export async function importGraphStream<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
+  refuseImportIntoReadOnlyTransaction(store, "importGraphStream()");
   const options = parseInterchangeOptions(
     "importGraphStream",
     ImportOptionsSchema,

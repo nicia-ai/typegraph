@@ -2302,6 +2302,26 @@ every node and edge collection write, every `tx.identity` write, `tx.writeNodeUp
 store on every backend, so the transaction stays usable: reads after it run, and the transaction
 commits.
 
+The read-only fact belongs to the transaction's native database session, not to the `tx` object,
+so every TypeGraph surface built over that session while the transaction runs refuses the same
+way, with the same error, before any statement, on every backend:
+
+| Reached through | Refused as |
+| --- | --- |
+| `store.withTransaction(tx.sql)` | every collection and identity write and `writeNodeUpsertBatch()`, with the same `operation` names as on `tx` |
+| `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
+| `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
+| `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
+| a Store over `createPostgresTransactionBackend(tx.sql)` | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), writes in its own `store.transaction()` (opened as a savepoint) and `importGraph()` |
+
+Once the read-only transaction ends, the same handle or session adopts as read-write again.
+Adopting a native transaction TypeGraph did not open — your own
+`db.transaction(fn, { accessMode: "read only" })` — carries no read-only fact: TypeGraph writes
+through it as before, so PostgreSQL rejects the write and aborts the transaction, and SQLite has no
+read-only transaction to refuse it. One handle is not recognized: a savepoint handle that
+postgres-js opens with `tx.transaction(...)` runs on a session object of its own, so adopting that
+handle directly is not refused by TypeGraph (PostgreSQL still refuses the write).
+
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
 not checked: PostgreSQL rejects a write there and aborts the transaction, while SQLite, whose
 transaction is not read-only at the engine, runs it and commits it.
