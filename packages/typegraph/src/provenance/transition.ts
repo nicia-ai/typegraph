@@ -136,38 +136,28 @@ const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
 };
 
 /**
- * Brings fact currency in line with the post-transition support snapshot —
- * but only for the facts the transition could have affected (those reachable
- * from the flipped sources through justification edges). Facts outside that
- * set are never touched: an unsupported live fact elsewhere in the graph
+ * The close half of bringing fact currency in line with the post-transition
+ * support snapshot: tombstones exactly the rows the caller resolved once
+ * through {@link closingFactRows} and hands the report too, so every tombstone
+ * written here is named in `died`. Only facts the transition could have
+ * affected (those reachable from the flipped sources through justification
+ * edges) are ever touched: an unsupported live fact elsewhere in the graph
  * (e.g. one whose justification edges have not been linked yet) is not this
  * transition's business, and silently tombstoning it would be invisible data
  * loss the report cannot even mention.
  *
- * Closes run before reopens: a reopen re-checks uniqueness, and the unique
- * key it needs may still be held by a fact this same transition is about to
- * close — closing first makes a legal transition order-independent.
- *
- * Which rows the close pass writes is NOT decided here: the caller resolves
- * them once through {@link closingFactRows} and hands the same map to the
- * report, so every tombstone this pass writes is named in `died`.
- *
- * Both passes go through the transaction's own node operations — the one
+ * Both halves go through the transaction's own node operations — the one
  * in-frame delete and revive owners — so each fact takes exactly the steps
  * any node delete or revival owes (uniqueness, embeddings, fulltext, identity
  * detach on close and restore on reopen) under the transaction's buffered
  * hook runner, which defers every success hook until the transaction commits —
- * the transition's own, or the caller's when it runs on one.
+ * the transaction's own, or the caller's when it runs on one.
  * One fact at a time: the writes share the transaction's one connection.
  */
-async function synchronizeFactCurrency<G extends GraphDef>(
+async function closeFacts<G extends GraphDef>(
   tx: TransactionContext<G>,
-  snapshot: SupportSnapshot,
-  affected: ReadonlySet<string>,
   closing: ReadonlyMap<string, LiveNodeRow>,
 ): Promise<void> {
-  // The rows the caller already resolved through `closingFactRows`, so the
-  // pass that writes and the report that names them cannot disagree.
   for (const row of closing.values()) {
     await transactionDeleteNodeWithPolicy(
       tx,
@@ -175,6 +165,21 @@ async function synchronizeFactCurrency<G extends GraphDef>(
       FACT_CURRENCY_CLOSE_POLICY,
     );
   }
+}
+
+/**
+ * The reopen half ({@link closeFacts} states what both halves share): revives
+ * every affected fact that is supported in the post-transition snapshot and
+ * still tombstoned. It runs after the close pass, because a reopen re-checks
+ * uniqueness and the unique key it needs may still be held by a fact this
+ * same transition closes — closing first makes a legal transition
+ * order-independent.
+ */
+async function reopenFacts<G extends GraphDef>(
+  tx: TransactionContext<G>,
+  snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+): Promise<void> {
   const reopening = selectAffectedFactRows(
     snapshot,
     affected,
@@ -363,14 +368,15 @@ async function transitionInTransaction<
   );
   const before = computeSupportSnapshot(supportGraph, availableBefore);
 
+  // Decide the whole transition from the one read before writing anything:
+  // the sources that flip, the availability they leave, and the facts whose
+  // currency changes with it.
   const nextState: SourceRetractedState = retracted ? "retracted" : "available";
+  const flipping = sourceRows.filter(
+    ({ row }) => sourceRetractedState(row, config.retractedField) !== nextState,
+  );
   const availableAfter = new Set(availableBefore);
-  for (const { source, row } of sourceRows) {
-    const currentState = sourceRetractedState(row, config.retractedField);
-    if (currentState === nextState) continue;
-    await setSourceRetractionState(tx, config, source, retracted);
-    // Mirror the flip in the in-memory availability so `after` matches the
-    // source rows now persisted, without re-reading the whole graph.
+  for (const { source } of flipping) {
     if (nextState === "available") {
       availableAfter.add(refKey(source));
     } else {
@@ -383,7 +389,23 @@ async function transitionInTransaction<
     before.supportedFactKeys,
   );
   const closing = closingFactRows(after, affected);
-  await synchronizeFactCurrency(tx, after, affected, closing);
+
+  // Write in the one order whose every prefix leaves no fact live without
+  // live support, because the verb takes no savepoint (a TypeGraph-owned one's
+  // rollback would undo overlapping calls' writes): a caller that catches a
+  // failure partway and commits keeps the prefix. The facts that lose their
+  // support close first, while their sources still stand; then the source
+  // flags flip — any subset of the flips leaves a fact at least as supported
+  // as all of them do, so a fact a retraction leaves without support is
+  // already closed, and a restoration only adds support to facts still
+  // closed; then the facts that regain support reopen. A
+  // prefix can leave a fact closed whose support stands, never one live
+  // without it, and re-running the verb completes the transition.
+  await closeFacts(tx, closing);
+  for (const { source } of flipping) {
+    await setSourceRetractionState(tx, config, source, retracted);
+  }
+  await reopenFacts(tx, after, affected);
   return buildReport<G, FactKind, JustificationKind>(
     before,
     after,

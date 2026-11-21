@@ -2594,4 +2594,172 @@ export function registerProvenanceIntegrationTests(
       });
     });
   });
+
+  /**
+   * A caught failure at any of a verb's writes leaves no fact live without
+   * live support. The verb takes no savepoint (a TypeGraph-owned savepoint's
+   * rollback would undo overlapping calls' writes), so a caller that catches
+   * the failure and commits keeps the writes made before it. The verb orders
+   * them so every prefix is safe: it closes the facts that lose their support
+   * first, then flips the source flags, then reopens the facts that regain it.
+   * A prefix can leave a fact closed whose support stands (or a source flagged
+   * whose facts are already closed), never a live fact with no support, and
+   * re-running the verb completes it.
+   *
+   * Revert check: flip the source flags before the close pass in
+   * `transitionInTransaction` (`src/provenance/transition.ts`) and every
+   * `retractMany` position after the first flag leaves `only-one-fact` or
+   * `only-two-fact` live and unsupported.
+   */
+  describe("provenance retraction: a failure caught at each of a verb's writes", () => {
+    type CallerTransaction = Parameters<
+      Parameters<ProvenanceStore["transaction"]>[0]
+    >[0];
+
+    const sourceOne = ref("Source", "source-one");
+    const sourceTwo = ref("Source", "source-two");
+    const REJECTED_WRITE = "rejected verb write";
+
+    /** Facts held by one source, by either of two, and by a third. */
+    async function seedTwoSourceWorld(store: ProvenanceStore): Promise<void> {
+      const one = await createSource(store, sourceOne.id);
+      const two = await createSource(store, sourceTwo.id);
+      const other = await createSource(store, "source-other");
+      const onlyOne = await createFact(store, "only-one-fact");
+      const onlyTwo = await createFact(store, "only-two-fact");
+      const either = await createFact(store, "either-fact");
+      const unrelated = await createFact(store, "unrelated-fact");
+      await createJustification(store, "only-one-j", [one], onlyOne);
+      await createJustification(store, "only-two-j", [two], onlyTwo);
+      await createJustification(store, "either-one-j", [one], either);
+      await createJustification(store, "either-two-j", [two], either);
+      await createJustification(store, "unrelated-j", [other], unrelated);
+    }
+
+    type Capability = ReturnType<
+      typeof createRetractionCapability<typeof provenanceGraph, typeof config>
+    >;
+
+    const VERBS = [
+      {
+        name: "retractMany",
+        prepare: (_provenance: Capability) => Promise.resolve(),
+        run: (provenance: Capability, tx?: CallerTransaction) =>
+          provenance.retractMany([sourceOne, sourceTwo], tx),
+        // Three fact closes and two source flags.
+        writes: 5,
+        believedAfter: ["unrelated-fact"],
+      },
+      {
+        name: "unRetractMany",
+        prepare: (provenance: Capability) =>
+          provenance.retractMany([sourceOne, sourceTwo]),
+        run: (provenance: Capability, tx?: CallerTransaction) =>
+          provenance.unRetractMany([sourceOne, sourceTwo], tx),
+        // Two source flags and three fact reopens.
+        writes: 5,
+        believedAfter: [
+          "either-fact",
+          "only-one-fact",
+          "only-two-fact",
+          "unrelated-fact",
+        ],
+      },
+    ] as const;
+
+    const CASES = VERBS.flatMap((verb) =>
+      Array.from({ length: verb.writes }, (_unused, position) => ({
+        verb,
+        position,
+      })),
+    );
+
+    it.each(CASES)(
+      "$verb.name rejected at write $position, caught and committed, leaves no live fact without support, and re-running it completes it",
+      async ({ verb, position }) => {
+        const armed = { on: false, started: 0 };
+        const [store] = await createAdapterStoreWithSchema(
+          provenanceGraph,
+          context.getBackend(),
+          {
+            history: true,
+            hooks: {
+              onOperationStart: () => {
+                if (!armed.on) return;
+                armed.started += 1;
+                if (armed.started === position + 1) {
+                  throw new Error(REJECTED_WRITE);
+                }
+              },
+            },
+          },
+        );
+        await seedTwoSourceWorld(store);
+        const provenance = createRetractionCapability(store, config);
+        await verb.prepare(provenance);
+
+        const caught = await store.transaction(async (tx) => {
+          armed.on = true;
+          try {
+            return await captureRejection(verb.run(provenance, tx));
+          } finally {
+            armed.on = false;
+          }
+        });
+
+        expect(String(caught)).toContain(REJECTED_WRITE);
+        expect(armed.started).toBe(position + 1);
+        const live = sortedIds(await store.nodes.Fact.find());
+        const believed = sortedIds(await provenance.holding());
+        expect(
+          live.filter((id) => !believed.includes(id)),
+          "live facts without live support",
+        ).toEqual([]);
+
+        await verb.run(provenance);
+        expect(sortedIds(await provenance.holding())).toEqual(
+          verb.believedAfter,
+        );
+        expect(sortedIds(await store.nodes.Fact.find())).toEqual(
+          verb.believedAfter,
+        );
+      },
+    );
+
+    it.each(VERBS)(
+      "$name with no rejection makes exactly the writes the positions above cover (control)",
+      async (verb) => {
+        const armed = { on: false, started: 0 };
+        const [store] = await createAdapterStoreWithSchema(
+          provenanceGraph,
+          context.getBackend(),
+          {
+            history: true,
+            hooks: {
+              onOperationStart: () => {
+                if (armed.on) armed.started += 1;
+              },
+            },
+          },
+        );
+        await seedTwoSourceWorld(store);
+        const provenance = createRetractionCapability(store, config);
+        await verb.prepare(provenance);
+
+        await store.transaction(async (tx) => {
+          armed.on = true;
+          try {
+            await verb.run(provenance, tx);
+          } finally {
+            armed.on = false;
+          }
+        });
+
+        expect(armed.started).toBe(verb.writes);
+        expect(sortedIds(await provenance.holding())).toEqual(
+          verb.believedAfter,
+        );
+      },
+    );
+  });
 }
