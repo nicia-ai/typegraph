@@ -90,6 +90,7 @@ export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-prope
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerProvenanceRelationshipFactRecipeTests } from "./provenance-relationship-fact-recipe";
 export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
@@ -123,8 +124,10 @@ export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids"
 export { registerTemporalIntegrationTests } from "./temporal";
 export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";
+export { registerTransactionBoundaryIntegrationTests } from "./transaction-boundaries";
 export { registerTransactionCommitOutcomeIntegrationTests } from "./transaction-commit-outcome";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
+export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";

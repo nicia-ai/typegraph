@@ -1,0 +1,85 @@
+### provenance.assertHolds of a believed fact
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Fact","fact-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","derives","<timestamp>","<timestamp>","Fact","fact-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Justification","justification-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","premiseOf","<timestamp>","<timestamp>","Justification","justification-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Source","source-a"]
+libsql commit
+=> ok fact-a via justification-a
+revision +0
+
+### provenance.assertHolds after its only source is retracted
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Fact","fact-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","derives","<timestamp>","<timestamp>","Fact","fact-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Justification","justification-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","premiseOf","<timestamp>","<timestamp>","Justification","justification-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Source","source-a"]
+libsql rollback
+=> FactNotHoldingError[FACT_NOT_HOLDING]
+revision +0
+
+### provenance.retract
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Source","source-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."valid_from" IS NULL OR "typegraph_nodes"."valid_from" <= ?) AND ("typegraph_nodes"."valid_to" IS NULL OR "typegraph_nodes"."valid_to" > ?) ORDER BY "typegraph_nodes"."id" ASC
+    ["<graph1>","Justification","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? ORDER BY "typegraph_nodes"."id" ASC
+    ["<graph1>","Fact"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) ORDER BY "typegraph_edges"."id" ASC
+    ["<graph1>","premiseOf","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL AND ("typegraph_edges"."valid_from" IS NULL OR "typegraph_edges"."valid_from" <= ?) AND ("typegraph_edges"."valid_to" IS NULL OR "typegraph_edges"."valid_to" > ?) ORDER BY "typegraph_edges"."id" ASC
+    ["<graph1>","derives","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."valid_from" IS NULL OR "typegraph_nodes"."valid_from" <= ?) AND ("typegraph_nodes"."valid_to" IS NULL OR "typegraph_nodes"."valid_to" > ?) ORDER BY "typegraph_nodes"."id" ASC
+    ["<graph1>","Source","<timestamp>","<timestamp>"]
+hook start update node:Source source-a
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Source","source-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Fact","fact-a"]
+hook start delete node:Fact fact-a
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) ORDER BY "id"
+    ["<graph1>","Fact","fact-a"]
+sql UPDATE "typegraph_nodes" SET "deleted_at" = ? WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","Fact","fact-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",3,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",3,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [3,"<graph1>","Source",9007199254740991,"source-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Source","source-a","{\"name\":\"source-a\",\"retracted\":true}",2,"<timestamp>","<timestamp>","<timestamp>",3,9007199254740991,"update","{}"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [3,"<graph1>","Fact",9007199254740991,"fact-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Fact","fact-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","Fact","fact-a","{\"name\":\"fact-a\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",3,9007199254740991,"delete","{}"]
+libsql commit
+hook end update node:Source source-a written
+hook end delete node:Fact fact-a written
+=> ok died=1 survived=0 unaffected=0
+revision +1

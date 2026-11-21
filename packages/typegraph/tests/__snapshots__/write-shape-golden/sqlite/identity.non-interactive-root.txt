@@ -1,0 +1,1 @@
+=> store refused for every write: ConfigurationError[CONFIGURATION_ERROR:IDENTITY_REQUIRES_ATOMIC_BACKEND]
