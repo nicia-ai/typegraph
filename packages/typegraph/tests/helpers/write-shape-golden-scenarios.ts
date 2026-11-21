@@ -184,11 +184,16 @@ const ITEM_NAME_UNIQUE = {
 
 const LINK_LABEL_IDENTITY = { name: "link-label", fields: ["label"] } as const;
 
-type GraphTraits = Readonly<{
+export type GraphTraits = Readonly<{
   unique: boolean;
   disjoint: boolean;
   identity: boolean;
-  edgeCardinality: "many" | "one";
+  /** `link`'s source-side cardinality. */
+  edgeCardinality: "many" | "one" | "oneActive";
+  /** `link`'s target-side cardinality; `many` declares none. */
+  edgeTargetCardinality: "many" | "one";
+  /** Whether `link` declares `acyclic: true`. */
+  edgeAcyclic: boolean;
   edgeMatchIdentity: boolean;
   /**
    * The kinds a shape registers beyond the base graph's: `composition` makes
@@ -198,11 +203,13 @@ type GraphTraits = Readonly<{
   feature: "none" | "composition" | "provenance";
 }>;
 
-const PLAIN_TRAITS: GraphTraits = {
+export const PLAIN_TRAITS: GraphTraits = {
   unique: false,
   disjoint: false,
   identity: false,
   edgeCardinality: "many",
+  edgeTargetCardinality: "many",
+  edgeAcyclic: false,
   edgeMatchIdentity: false,
   feature: "none",
 };
@@ -212,11 +219,17 @@ function itemRegistration(traits: GraphTraits) {
 }
 
 function linkRegistration(traits: GraphTraits) {
+  // The target-side and acyclic keys are stated only when a shape declares
+  // them, so every shape that predates them registers `link` as it did.
   const registration = {
     type: link,
     from: [Item],
     to: [Item],
     cardinality: traits.edgeCardinality,
+    ...(traits.edgeTargetCardinality === "many" ?
+      {}
+    : { targetCardinality: traits.edgeTargetCardinality }),
+    ...(traits.edgeAcyclic ? { acyclic: true } : {}),
   };
   return traits.edgeMatchIdentity ?
       { ...registration, matchIdentity: LINK_LABEL_IDENTITY }
@@ -323,11 +336,11 @@ type WriteShapeStore =
   | Store<WriteShapeGraph>
   | HistoryStore<WriteShapeGraph>
   | RecordedReadStore<WriteShapeGraph>;
-type WriteSurface = Pick<Store<WriteShapeGraph>, "nodes" | "edges">;
+export type WriteSurface = Pick<Store<WriteShapeGraph>, "nodes" | "edges">;
 type CompositionSurface = Pick<Store<CompositionGraph>, "nodes" | "edges">;
 
 /** A composition shape's surface, typed over the kinds its graph registers. */
-function compositionSurface(surface: WriteSurface): CompositionSurface {
+export function compositionSurface(surface: WriteSurface): CompositionSurface {
   return surface as unknown as CompositionSurface;
 }
 
@@ -348,7 +361,7 @@ function provenanceStore(
  */
 type WriteEntity = "node" | "edge" | "composition";
 
-type StoreShape = Readonly<{
+export type StoreShape = Readonly<{
   name: string;
   traits: GraphTraits;
   options: StoreOptions;
@@ -357,8 +370,8 @@ type StoreShape = Readonly<{
 }>;
 
 const BOTH_ENTITIES: readonly WriteEntity[] = ["node", "edge"];
-const EDGE_ENTITY: readonly WriteEntity[] = ["edge"];
-const COMPOSITION_ENTITY: readonly WriteEntity[] = ["composition"];
+export const EDGE_ENTITY: readonly WriteEntity[] = ["edge"];
+export const COMPOSITION_ENTITY: readonly WriteEntity[] = ["composition"];
 const NO_ENTITY: readonly WriteEntity[] = [];
 
 const STORE_SHAPES: readonly StoreShape[] = [
@@ -430,13 +443,13 @@ function tracksRevisions(shape: StoreShape): boolean {
 // Seed rows, identical for every trace
 // ============================================================
 
-const ITEM_A = { kind: "Item", id: "item-a" } as const;
-const ITEM_B = { kind: "Item", id: "item-b" } as const;
-const ITEM_C = { kind: "Item", id: "item-c" } as const;
-const ITEM_DEAD = { kind: "Item", id: "item-dead" } as const;
-const ITEM_MISSING = { kind: "Item", id: "item-missing" } as const;
-const OTHER_A = { kind: "Other", id: "other-a" } as const;
-const OTHER_B = { kind: "Other", id: "other-b" } as const;
+export const ITEM_A = { kind: "Item", id: "item-a" } as const;
+export const ITEM_B = { kind: "Item", id: "item-b" } as const;
+export const ITEM_C = { kind: "Item", id: "item-c" } as const;
+export const ITEM_DEAD = { kind: "Item", id: "item-dead" } as const;
+export const ITEM_MISSING = { kind: "Item", id: "item-missing" } as const;
+export const OTHER_A = { kind: "Other", id: "other-a" } as const;
+export const OTHER_B = { kind: "Other", id: "other-b" } as const;
 const SOURCE_A = { kind: "Source", id: "source-a" } as const;
 const JUSTIFICATION_A = {
   kind: "Justification",
@@ -548,7 +561,7 @@ function gatedRowRetired(entity: "node" | "edge", id: string): WriteFault {
 /** A write ready to run; resolves to an optional one-line result summary. */
 type WriteThunk = () => Promise<string | undefined>;
 
-type CollectionWrite = Readonly<{
+export type CollectionWrite = Readonly<{
   name: string;
   clearsValidTo?: true;
   /** Store options this write adds to its shape's. */
@@ -1640,7 +1653,7 @@ type OpenedReceiver = Readonly<{
   store: WriteShapeStore | undefined;
 }>;
 
-type Receiver = Readonly<{
+export type Receiver = Readonly<{
   name: string;
   drivers: readonly WriteShapeDriver[];
   appliesTo?: (shape: StoreShape) => boolean;
@@ -1674,7 +1687,7 @@ function requireNonInteractiveRoot(engine: WriteShapeEngine): GraphBackend {
   return engine.nonInteractiveRoot;
 }
 
-const RECEIVERS: readonly Receiver[] = [
+export const RECEIVERS: readonly Receiver[] = [
   {
     name: "root",
     drivers: WRITE_SHAPE_DRIVERS,
@@ -1982,15 +1995,37 @@ function appliesToShape(
   return write.appliesTo === undefined || write.appliesTo(shape);
 }
 
+/**
+ * One golden matrix: the store shapes it builds, the receivers it opens
+ * each shape on, the writes it traces on each shape, and the collection
+ * methods its traces must reach. The write-shape golden is one; a second
+ * matrix reuses this runner and recorder with shapes and writes of its own,
+ * and writes its snapshots to a directory of its own.
+ */
+export type GoldenMatrix = Readonly<{
+  /** Names the matrix's `describe` blocks. */
+  title: string;
+  /** The directory under `tests/__snapshots__/` holding its golden files. */
+  snapshotDir: string;
+  shapes: readonly StoreShape[];
+  receivers: readonly Receiver[];
+  collectionWrites: (shape: StoreShape) => readonly CollectionWrite[];
+  storeWrites: readonly StoreWrite[];
+  /** Names what {@link GoldenMatrix.requiredMethods} covers, for the check. */
+  coverageSubject: string;
+  /** `node.<method>` / `edge.<method>` names the traces must invoke. */
+  requiredMethods: readonly string[];
+}>;
+
 async function traceReceiver(
   engine: WriteShapeEngine,
+  matrix: GoldenMatrix,
   shape: StoreShape,
   receiver: Receiver,
   invoked: InvokedMethods,
 ): Promise<string> {
   const results: TraceResult[] = [];
-  const writes = shape.entities.flatMap((entity) => COLLECTION_WRITES[entity]);
-  for (const write of writes) {
+  for (const write of matrix.collectionWrites(shape)) {
     if (
       !appliesToShape(write, shape) ||
       (receiver.includesWrite !== undefined && !receiver.includesWrite(write))
@@ -2017,7 +2052,7 @@ async function traceReceiver(
       }),
     );
   }
-  for (const write of STORE_WRITES) {
+  for (const write of matrix.storeWrites) {
     if (
       !appliesToShape(write, shape) ||
       (receiver.includesWrite !== undefined && !receiver.includesWrite(write))
@@ -2055,13 +2090,14 @@ const RECEIVER_FILE_BUDGET_MS = 120_000;
  */
 async function traceReceiverFile(
   driver: WriteShapeDriver,
+  matrix: GoldenMatrix,
   shape: StoreShape,
   receiver: Receiver,
   invoked: InvokedMethods,
 ): Promise<string> {
   const engine = await openWriteShapeEngine(driver);
   try {
-    return await traceReceiver(engine, shape, receiver, invoked);
+    return await traceReceiver(engine, matrix, shape, receiver, invoked);
   } finally {
     await engine.close();
   }
@@ -2070,13 +2106,16 @@ async function traceReceiverFile(
 /** The (store shape, receiver) golden files `driver` runs. */
 function receiverFiles(
   driver: WriteShapeDriver,
+  matrix: GoldenMatrix,
 ): readonly Readonly<{ shape: StoreShape; receiver: Receiver }>[] {
-  return STORE_SHAPES.flatMap((shape) =>
-    RECEIVERS.filter(
-      (receiver) =>
-        receiver.drivers.includes(driver) &&
-        (receiver.appliesTo?.(shape) ?? true),
-    ).map((receiver) => ({ shape, receiver })),
+  return matrix.shapes.flatMap((shape) =>
+    matrix.receivers
+      .filter(
+        (receiver) =>
+          receiver.drivers.includes(driver) &&
+          (receiver.appliesTo?.(shape) ?? true),
+      )
+      .map((receiver) => ({ shape, receiver })),
   );
 }
 
@@ -2085,17 +2124,20 @@ function receiverFileName(shape: StoreShape, receiver: Receiver): string {
 }
 
 /**
- * Registers one driver's golden files, then the coverage check over the
- * methods those files' traces invoked, in the calling test file. That file
- * must mock `nanoid` with {@link traceIds}.
+ * Registers one driver's golden files of `matrix`, then the coverage check
+ * over the methods those files' traces invoked, in the calling test file.
+ * That file must mock `nanoid` with {@link traceIds}.
  */
-export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
+export function registerGoldenMatrixFile(
+  driver: WriteShapeDriver,
+  matrix: GoldenMatrix,
+): void {
   const invoked: InvokedMethods = new Set();
   const traced = new Set<string>();
-  const files = receiverFiles(driver);
+  const files = receiverFiles(driver, matrix);
 
-  describe(`write-shape golden [${driver}]`, () => {
-    describe.each(STORE_SHAPES)("$name store", (shape) => {
+  describe(`${matrix.title} [${driver}]`, () => {
+    describe.each(matrix.shapes)("$name store", (shape) => {
       it.each(
         files
           .filter((file) => file.shape === shape)
@@ -2105,13 +2147,14 @@ export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
         async (receiver) => {
           const golden = await traceReceiverFile(
             driver,
+            matrix,
             shape,
             receiver,
             invoked,
           );
           traced.add(receiverFileName(shape, receiver));
           await expect(golden).toMatchFileSnapshot(
-            `./__snapshots__/write-shape-golden/${driver}/${shape.name}.${receiver.name}.txt`,
+            `./__snapshots__/${matrix.snapshotDir}/${driver}/${shape.name}.${receiver.name}.txt`,
           );
         },
         RECEIVER_FILE_BUDGET_MS,
@@ -2120,8 +2163,8 @@ export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
   });
 
   // Declared last, so it runs after every golden file above has traced.
-  describe(`write-shape golden coverage [${driver}]`, () => {
-    it("invoked every node and edge collection write method", () => {
+  describe(`${matrix.title} coverage [${driver}]`, () => {
+    it(`invoked every ${matrix.coverageSubject}`, () => {
       // The check reads what this file's traces called, so it needs all of
       // them: run the whole file, not a `-t` subset that includes this test.
       expect([...traced].toSorted()).toEqual(
@@ -2129,11 +2172,29 @@ export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
           .map(({ shape, receiver }) => receiverFileName(shape, receiver))
           .toSorted(),
       );
-      const surface = [
-        ...NODE_WRITE_NAMES.map((name) => `node.${name}`),
-        ...EDGE_WRITE_NAMES.map((name) => `edge.${name}`),
-      ];
-      expect(surface.filter((method) => !invoked.has(method))).toEqual([]);
+      expect(
+        matrix.requiredMethods.filter((method) => !invoked.has(method)),
+      ).toEqual([]);
     });
   });
+}
+
+const WRITE_SHAPE_MATRIX: GoldenMatrix = {
+  title: "write-shape golden",
+  snapshotDir: "write-shape-golden",
+  shapes: STORE_SHAPES,
+  receivers: RECEIVERS,
+  collectionWrites: (shape) =>
+    shape.entities.flatMap((entity) => COLLECTION_WRITES[entity]),
+  storeWrites: STORE_WRITES,
+  coverageSubject: "node and edge collection write method",
+  requiredMethods: [
+    ...NODE_WRITE_NAMES.map((name) => `node.${name}`),
+    ...EDGE_WRITE_NAMES.map((name) => `edge.${name}`),
+  ],
+};
+
+/** Registers one driver's write-shape golden files; see {@link registerGoldenMatrixFile}. */
+export function registerWriteShapeGoldenFile(driver: WriteShapeDriver): void {
+  registerGoldenMatrixFile(driver, WRITE_SHAPE_MATRIX);
 }
