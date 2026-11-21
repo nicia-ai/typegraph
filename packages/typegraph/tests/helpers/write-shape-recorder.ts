@@ -3,7 +3,9 @@
  *
  * Every statement is recorded at the DRIVER boundary — better-sqlite3's
  * `prepare`/`exec`, libSQL's `execute`/`batch`/`transaction` and PGlite's
- * `query`/`exec`/`transaction` — so the log is
+ * `query` plus the simple-protocol messages it sends through
+ * `execProtocolStream` (`exec` text and its own BEGIN / COMMIT / ROLLBACK)
+ * — so the log is
  * what the engine was actually asked to run, whichever backend member,
  * overlay or cached prepared statement issued it. Store hook events are
  * interleaved into the same timeline, so a trace shows WHEN `onOperationEnd`
@@ -777,14 +779,38 @@ function recordLibsqlTransaction(
   };
 }
 
+/** The frontend message type byte of a simple-protocol `Query` ('Q'). */
+const SIMPLE_QUERY_MESSAGE = 0x51;
+/** The type byte and the int32 length that precede a message's body. */
+const MESSAGE_HEADER_BYTES = 5;
+
 /**
- * Patches the client's own entry points. PGlite runs a transaction's
- * statements through the `Transaction` object it hands the callback, which
- * bypasses `client.query`, so that object is wrapped too, and the BEGIN /
- * COMMIT / ROLLBACK PGlite issues internally are recorded where it issues
- * them. Only `client.query` runs outside a transaction, so it is the one
- * entry point a fault can fire on: a fault's own statements, run from inside
- * a transaction, would wait on the transaction's own lock.
+ * The SQL text of a simple-protocol `Query` message — a type byte, an int32
+ * length, then NUL-terminated text — or `undefined` for any other message.
+ */
+function simpleQueryText(message: Uint8Array): string | undefined {
+  if (message[0] !== SIMPLE_QUERY_MESSAGE) return undefined;
+  const terminator = message.indexOf(0, MESSAGE_HEADER_BYTES);
+  return new TextDecoder().decode(
+    message.subarray(
+      MESSAGE_HEADER_BYTES,
+      terminator === -1 ? message.length : terminator,
+    ),
+  );
+}
+
+/**
+ * Patches the client's own entry points. Parameterized statements are
+ * recorded where they are called: `client.query`, and the `query` of the
+ * `Transaction` object PGlite hands a transaction's callback, which bypasses
+ * `client.query`. Everything PGlite runs through the simple query protocol —
+ * `exec` text and the BEGIN / COMMIT / ROLLBACK its `transaction` issues
+ * internally — is recorded at `execProtocolStream`, the protocol seam PGlite
+ * itself calls with each message, so a transaction-control line in a trace is
+ * one PGlite actually sent, at the point it sent it. Only `client.query` runs
+ * outside a transaction, so it is the one entry point a fault can fire on: a
+ * fault's own statements, run from inside a transaction, would wait on the
+ * transaction's own lock.
  */
 function recordPgliteDriver(
   client: PGlite,
@@ -792,8 +818,8 @@ function recordPgliteDriver(
   faultTrigger: StatementFaultTrigger,
 ): void {
   const query = client.query.bind(client);
-  const exec = client.exec.bind(client);
   const transaction = client.transaction.bind(client);
+  const execProtocolStream = client.execProtocolStream.bind(client);
   async function runFaultStatements(
     statements: readonly FaultStatement[],
   ): Promise<void> {
@@ -801,6 +827,11 @@ function recordPgliteDriver(
       await query(statement.sql, [...statement.params]);
     }
   }
+  client.execProtocolStream = (message, options) => {
+    const text = simpleQueryText(message);
+    if (text !== undefined) sink({ source: "sql", text, params: [] });
+    return execProtocolStream(message, options);
+  };
   client.query = (async (
     text: string,
     params?: unknown[],
@@ -818,24 +849,10 @@ function recordPgliteDriver(
       await runFaultStatements(fault.after);
     }
   }) as typeof client.query;
-  client.exec = (text: string, options?: unknown) => {
-    sink({ source: "sql", text, params: [] });
-    return exec(text, options as Parameters<typeof exec>[1]);
-  };
   client.transaction = <T>(
     callback: (tx: Transaction) => Promise<T>,
   ): Promise<T> =>
-    transaction(async (tx) => {
-      sink({ source: "sql", text: "BEGIN", params: [] });
-      try {
-        const result = await callback(recordPgliteTransaction(tx, sink));
-        if (!tx.closed) sink({ source: "sql", text: "COMMIT", params: [] });
-        return result;
-      } catch (error: unknown) {
-        if (!tx.closed) sink({ source: "sql", text: "ROLLBACK", params: [] });
-        throw error;
-      }
-    });
+    transaction((tx) => callback(recordPgliteTransaction(tx, sink)));
 }
 
 function recordPgliteTransaction(
@@ -855,14 +872,6 @@ function recordPgliteTransaction(
         options as Parameters<Transaction["query"]>[2],
       );
     }) as Transaction["query"],
-    exec: (text: string, options?: unknown) => {
-      sink({ source: "sql", text, params: [] });
-      return tx.exec(text, options as Parameters<Transaction["exec"]>[1]);
-    },
-    rollback: () => {
-      sink({ source: "sql", text: "ROLLBACK", params: [] });
-      return tx.rollback();
-    },
   };
 }
 
