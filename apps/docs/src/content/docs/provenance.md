@@ -239,13 +239,35 @@ part of that transaction exactly as any other write on it:
 The report, and the order `retractMany` and `unRetractMany` apply their
 sources in, are the same with and without your transaction.
 
-The verb refuses a transaction it cannot use before any statement, exactly as
-`holding(tx)` and `assertHolds` do: one from another store or graph, or one
-kept past its callback, with `ConfigurationError`
-(`PROVENANCE_TRANSACTION_NOT_OWNED`, naming the verb), and one opened with
-`accessMode: "read_only"` with `UnsupportedBackendCapabilityError`, after which
-the transaction is still usable. A store handle whose schema version is no
-longer the active one throws `StaleVersionError`.
+The verb refuses a transaction from another store or graph, or one kept past
+its callback, before any statement, with `ConfigurationError`
+(`PROVENANCE_TRANSACTION_NOT_OWNED`, naming the verb), as `holding(tx)` and
+`assertHolds` do. Unlike those two, the four verbs always write, so they also
+refuse a transaction opened with `accessMode: "read_only"` before any
+statement, with `UnsupportedBackendCapabilityError`, after which the
+transaction is still usable. `holding(tx)` answers in a read-only transaction,
+and `assertHolds(tx, [])` returns an empty result there; `assertHolds` with
+facts to judge is refused like the verbs. A store handle whose schema version
+is no longer the active one throws `StaleVersionError`.
+
+The verbs, `assertHolds` and `holding(tx)` in a transaction that can write
+decide from the support they read under the graph write lock, so those reads
+must see every write committed before the lock was granted. On PostgreSQL that
+needs read committed isolation: a `REPEATABLE READ` or `SERIALIZABLE`
+transaction keeps the snapshot it took at its first statement, which can
+predate another session's retraction that the lock then waited for. The
+isolation is read from the lock statement's own result on your transaction's
+session, not from the option you passed, and any other answer is refused with
+`UnsupportedBackendCapabilityError` (capability
+`observedReadCommittedIsolation`) before the first support read, leaving the
+transaction usable. History capture owned by TypeGraph already requires read
+committed for every write transaction; the check matters for a backend with
+engine-native recorded time, which accepts other isolation levels. A verb
+called without a transaction opens its own at read committed, whatever the
+server's default. SQLite has one writer and begins every write transaction by
+taking it (`BEGIN IMMEDIATE`), before the transaction's first read, so no
+other writer can commit after that transaction's snapshot, and nothing is
+refused.
 
 A second argument that is not a transaction context at all is refused with
 `ConfigurationError` (`PROVENANCE_TRANSACTION_ARGUMENT_INVALID`), naming what
@@ -272,13 +294,19 @@ rolls back.
 
 In `withRecordedTransaction()` and `withEvolvedTransaction()`, an error that
 leaves the callback rejects the adoption call and reaches your native
-transaction, and TypeGraph cannot roll that back for you: you must. Recorded
-time is captured only when the callback resolves, so if you catch the error and
-commit the native transaction instead, the writes the callback made before the
-error, a retraction's source flag and fact closes included, commit to the live
-rows without being recorded. `asOfRecorded()` and the other recorded-time reads
-keep showing the state before them, and no recorded revision is allocated for
-them. Under `withEvolvedTransaction()` the schema change commits too.
+transaction, and TypeGraph cannot roll that back for you: you must. If you
+catch the error and commit the native transaction instead, the writes the
+callback made before the error, a retraction's source flag and fact closes
+included, commit to the live rows, and under `withEvolvedTransaction()` the
+schema change commits too. Under TypeGraph-owned history capture they are also
+left out of recorded time, because capture flushes only when the callback
+resolves: `asOfRecorded()` and the other recorded-time reads keep showing the
+state before them, and no recorded revision is allocated for them. This
+limitation is tracked as issue #930 in the TypeGraph repository. A backend with
+[engine-native recorded time](/queries/temporal#engine-native-recorded-time)
+records committed writes itself, independently of that flush, so there the
+writes are recorded; they are still the partial writes of a failed callback,
+which only the native rollback discards.
 
 Await the verb before starting other calls on the same transaction. Its locks
 exclude other transactions, not other calls on yours, so a write that overlaps
@@ -409,8 +437,14 @@ reads in its own transaction.
   lock.
 - In a transaction opened with `accessMode: "read_only"`, `holding(tx)` takes
   the graph write lock alone, so it runs under a `SELECT`-only role. At a
-  snapshot isolation level it answers as of that transaction's snapshot. In a
+  snapshot isolation level it answers as of that transaction's snapshot, which
+  is consistent but can predate writes committed before the lock was granted;
+  a read-only transaction decides no write, so it is not refused. In a
   read-only transaction, use `holding(tx)` rather than `assertHolds`.
+- In a transaction that can write, `holding(tx)` and `assertHolds` on
+  PostgreSQL need read committed isolation, observed on the lock statement, as
+  the retraction verbs do; see
+  [Retracting inside your own transaction](#retracting-inside-your-own-transaction).
 - A `SELECT`-only role reads the believed set with `holding()`, or with
   `holding(tx)` in a transaction opened read-only.
 - `holding(tx)` holds the graph write lock until your transaction ends, so a

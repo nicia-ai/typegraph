@@ -4865,11 +4865,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * unchanged by the receipt return.
    *
    * **When `fn` rejects, roll back the native transaction.** The rejection
-   * skips the flush and reaches the caller, who owns the commit. If the caller
-   * catches it and commits instead, the graph writes `fn` made before failing
-   * commit to the live rows without being captured: recorded-time reads such
-   * as `asOfRecorded()` keep showing the state before them, and no recorded
-   * revision is allocated for them.
+   * reaches the caller, who owns the commit. If the caller catches it and
+   * commits instead, the graph writes `fn` made before failing commit to the
+   * live rows. Under TypeGraph-owned history capture the rejection also skips
+   * the flush, so those writes are not captured: recorded-time reads such as
+   * `asOfRecorded()` keep showing the state before them, and no recorded
+   * revision is allocated for them (issue #930). A backend with engine-native
+   * recorded time records committed writes itself, independently of that
+   * flush, so there they are recorded. Either way only the native rollback
+   * discards the partial writes of the failed callback.
    *
    * Operation hooks run as each write completes, not at the native commit:
    * `onOperationEnd` can report a write the native transaction then rolls
@@ -5997,9 +6001,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * **When `fn` rejects, roll back the native transaction.** The rejection
    * reaches the caller, who owns the commit. If the caller catches it and
    * commits instead, the schema change commits, and the graph writes `fn`
-   * made before failing commit to the live rows without being captured:
-   * recorded-time reads such as `asOfRecorded()` keep showing the state
-   * before them, and no recorded revision is allocated for them.
+   * made before failing commit to the live rows. Under TypeGraph-owned
+   * history capture those writes are not captured, because capture flushes
+   * only when `fn` resolves: recorded-time reads such as `asOfRecorded()`
+   * keep showing the state before them, and no recorded revision is allocated
+   * for them (issue #930). A backend with engine-native recorded time records
+   * committed writes itself, independently of that flush, so there they are
+   * recorded. Either way only the native rollback discards the schema change
+   * and the partial writes of the failed callback.
    *
    * Operation hooks run as each write completes, not at the native commit:
    * `onOperationEnd` can report a write the native transaction then rolls

@@ -135,12 +135,23 @@ export type RetractionCapability<
    * rollback. Either way it takes the schema-version fence, then the
    * per-graph write lock, before its first read.
    *
+   * Its support reads must see every write committed before the lock was
+   * granted, so on PostgreSQL a `tx` must run at read committed: the
+   * isolation is the one the lock statement observed on `tx`'s session, and
+   * a snapshot isolation (repeatable read, serializable), whose snapshot can
+   * predate another session's retraction, is refused before the first
+   * support read with the transaction still usable. Without `tx` the
+   * transition opens its own transaction at read committed, whatever the
+   * server's default.
+   *
    * A failure on a caller's `tx` takes no savepoint: if the caller catches
    * it and commits, the writes the transition made before failing commit too.
    * Let the error leave the callback to discard them. In an adopted context
    * the native transaction must then be rolled back: committing it after the
-   * callback rejected commits the callback's writes to the live rows without
-   * recording them in recorded time.
+   * callback rejected commits the callback's writes to the live rows, and
+   * under TypeGraph-owned history capture leaves them out of recorded time
+   * (issue #930); a backend with engine-native recorded time records them
+   * itself.
    *
    * Pass a function, not the verb itself, to an array method:
    * `sources.map(provenance.retract)` passes each index as `tx`, which is
@@ -152,7 +163,10 @@ export type RetractionCapability<
    *   (`PROVENANCE_TRANSACTION_NOT_OWNED`), or when a source's kind is not
    *   one of the configured source kinds.
    * @throws {UnsupportedBackendCapabilityError} in a `tx` opened with
-   *   `accessMode: "read_only"`, before any statement.
+   *   `accessMode: "read_only"`, before any statement; and, with capability
+   *   `observedReadCommittedIsolation`, in a `tx` whose session cannot prove
+   *   that its reads observe every earlier holder of the graph write lock,
+   *   before the first support read.
    * @throws {StaleVersionError} on a store handle whose schema version is no
    *   longer the active one.
    * @throws {NodeNotFoundError} when a source has no current row.
@@ -198,12 +212,19 @@ export type RetractionCapability<
    * read-write `tx` it takes the store's write locks in their canonical order
    * — the schema-version fence, then the per-graph write lock — so the
    * transaction's later writes cannot invert them; in a `tx` opened with
-   * `accessMode: "read_only"` it takes the per-graph write lock alone.
+   * `accessMode: "read_only"` it takes the per-graph write lock alone. A
+   * read-write `tx` must also run at read committed on PostgreSQL, as the
+   * retraction verbs' must; a read-only `tx` at a snapshot isolation answers
+   * as of its one snapshot.
    *
    * @throws {ConfigurationError} when `tx` does not belong to an active
    *   callback of the capability's store.
    * @throws {StaleVersionError} in a read-write `tx` on a store handle whose
    *   schema version is no longer the active one.
+   * @throws {UnsupportedBackendCapabilityError} with capability
+   *   `observedReadCommittedIsolation` in a read-write `tx` whose session
+   *   cannot prove that its reads observe every earlier holder of the graph
+   *   write lock, before the first read.
    */
   holding: (
     tx?: TransactionContext<G>,
@@ -232,7 +253,11 @@ export type RetractionCapability<
    *   callback of the capability's store, or a fact's kind is not one of the
    *   configured fact kinds.
    * @throws {UnsupportedBackendCapabilityError} in a transaction opened with
-   *   `accessMode: "read_only"`; use `holding(tx)` there.
+   *   `accessMode: "read_only"`; use `holding(tx)` there. And, with
+   *   capability `observedReadCommittedIsolation`, in a transaction whose
+   *   session cannot prove that its reads observe every earlier holder of the
+   *   graph write lock (on PostgreSQL, one not at read committed), before the
+   *   first read.
    */
   assertHolds: (
     tx: TransactionContext<G>,
