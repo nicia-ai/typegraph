@@ -61,7 +61,6 @@ import { createFragment } from "../src/query";
 import type { FulltextMatchPredicate, QueryAst } from "../src/query/ast";
 import { createQueryBuilder } from "../src/query/builder";
 import { compileQuery } from "../src/query/compiler";
-import { compileKindFilter } from "../src/query/compiler/predicate-utils";
 import {
   createRecordedReadBinding,
   createSqlSchema,
@@ -71,7 +70,6 @@ import {
   type VectorSlotMap,
 } from "../src/query/compiler/schema";
 import { compileSetOperation } from "../src/query/compiler/set-operations";
-import { compileTemporalFilter } from "../src/query/compiler/temporal";
 import { getDialect } from "../src/query/dialect";
 import {
   fts5Strategy,
@@ -81,7 +79,7 @@ import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strateg
 import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { fieldRef } from "../src/query/predicates";
-import { sql, type SqlFragment } from "../src/query/sql-fragment";
+import type { SqlFragment } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { readGraphAllocationOwner } from "../src/store/allocation-owner";
 import {
@@ -89,10 +87,7 @@ import {
   createNeighborRead,
 } from "../src/store/neighbors";
 import { recordedAnchorOwner } from "../src/store/recorded-anchor-origin";
-import {
-  buildReachableCte,
-  buildWindowedEdgesCte,
-} from "../src/store/recursive-cte";
+import { buildReachableCte } from "../src/store/recursive-cte";
 import type { StoreViewCoordinate } from "../src/store/store-view";
 import { executeSubgraph } from "../src/store/subgraph";
 import { requireDefined } from "../src/utils/presence";
@@ -326,31 +321,6 @@ function fulltextAst(): QueryAst {
     ...base,
     predicates: [{ targetAlias: "d", expression: predicate }],
   };
-}
-
-/**
- * The same `where` shape `buildSubgraphEdgeSource` (subgraph.ts) passes:
- * the graph scope, the edge-kind filter, and the edge temporal filter —
- * exactly the site a temporal-axis refactor changes. This must be a
- * `SqlFragment` so the temporal-filter path is part of the golden.
- */
-function windowWhere(
-  mode: TemporalMode = "current",
-  asOf?: string,
-): SqlFragment {
-  return sql.join(
-    [
-      sql`e.graph_id = ${graph.id}`,
-      compileKindFilter(sql.raw("e.kind"), ["knows", "worksAt"]),
-      compileTemporalFilter({
-        mode,
-        asOf,
-        tableAlias: "e",
-        currentTimestamp: sql`${FAKE_NOW}`,
-      }),
-    ],
-    sql` AND `,
-  );
 }
 
 /**
@@ -1502,39 +1472,60 @@ describe("compile-golden: store statement builders", () => {
     }
   });
 
-  describe("subgraph edge windows (buildWindowedEdgesCte)", () => {
-    const schema = DEFAULT_SQL_SCHEMA;
-
+  describe("subgraph edge windows (executeSubgraph with edgeWindows)", () => {
+    // Captured from a real windowed `executeSubgraph` call rather than from
+    // `buildWindowedEdgesCte` with a hand-built filter: the row filter a
+    // window ranks over is assembled by the production callers (the
+    // reachability CTE's windowed edge relation and the edge fetch's
+    // windowed source), so only the real call pins what those callers pass.
+    // One unbounded kind (`knows`) and one windowed kind (`worksAt`, ordered
+    // and limited) share the call, across the full valid-time × recorded
+    // grid.
     for (const dialect of DIALECTS) {
-      for (const mode of MODES) {
-        const asOf = mode === "asOf" ? AS_OF_TIMESTAMP : undefined;
-
-        it(`unbounded edge kind, ${mode} / ${dialect}`, () => {
-          const fragment = buildWindowedEdgesCte(
-            schema.edgesTable,
-            "out",
-            [["knows", undefined]],
-            windowWhere(mode, asOf),
-          );
-          expect(toSqlWithParams(fragment, dialect)).toMatchSnapshot();
-        });
-
-        it(`windowed edge kind (ordered, limited), ${mode} / ${dialect}`, () => {
-          const fragment = buildWindowedEdgesCte(
-            schema.edgesTable,
-            "out",
-            [
-              [
-                "worksAt",
-                {
+      for (const variant of fullMatrix()) {
+        it(`unbounded knows, windowed worksAt, ${variant.label} / ${dialect}`, async () => {
+          const schema = DEFAULT_SQL_SCHEMA;
+          const { backend, captured } = subgraphFetchCapture(dialect);
+          await executeSubgraph({
+            graph,
+            graphId: graph.id,
+            root: { kind: "Person", id: asNodeId<typeof Person>("person-1") },
+            registry,
+            backend,
+            dialect: getDialect(dialect),
+            schema,
+            recordedReadBinding:
+              variant.recorded ? createRecordedReadBinding(schema) : undefined,
+            options: {
+              edges: ["knows", "worksAt"],
+              edgeWindows: {
+                worksAt: {
                   limit: 5,
                   orderBy: { field: "createdAt", direction: "desc" },
                 },
-              ],
-            ],
-            windowWhere(mode, asOf),
+              },
+              maxDepth: 3,
+              temporalMode: variant.mode,
+              ...(variant.asOf === undefined ? {} : { asOf: variant.asOf }),
+              ...(variant.recorded ? { recordedAsOf: RECORDED_AS_OF } : {}),
+            },
+          });
+          const statements = captured.map((fragment) =>
+            toSqlWithParams(fragment, dialect),
           );
-          expect(toSqlWithParams(fragment, dialect)).toMatchSnapshot();
+          // Both production window sources were reached: the reachability
+          // CTE's ranked edge relation and the edge fetch's windowed source.
+          expect(
+            statements.some((statement) =>
+              statement.sql.includes("typegraph_windowed_edges AS ("),
+            ),
+          ).toBe(true);
+          expect(
+            statements.some((statement) =>
+              statement.sql.includes(") windowed_edge)"),
+            ),
+          ).toBe(true);
+          expect(statements).toMatchSnapshot();
         });
       }
     }
