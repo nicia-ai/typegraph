@@ -30,14 +30,14 @@ export function statementRelationNames<const Name extends string>(
   const taken = new Set(
     configuredRelationNames(tables).map((name) => identifierKey(name)),
   );
-  const chosen = {} as Record<Name, string>;
+  const chosen = new Map<Name, string>();
   for (const name of preferred) {
     let candidate: string = name;
     for (let suffix = 1; taken.has(identifierKey(candidate)); suffix += 1) {
       candidate = `${name}_${suffix}`;
     }
     taken.add(identifierKey(candidate));
-    chosen[name] = candidate;
+    chosen.set(name, candidate);
   }
-  return chosen;
+  return Object.fromEntries(chosen) as Readonly<Record<Name, string>>;
 }
