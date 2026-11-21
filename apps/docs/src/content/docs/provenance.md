@@ -246,8 +246,10 @@ its callback, before any statement, with `ConfigurationError`
 refuse a transaction opened with `accessMode: "read_only"` before any
 statement, with `UnsupportedBackendCapabilityError`, after which the
 transaction is still usable. `holding(tx)` answers in a read-only transaction,
-and `assertHolds(tx, [])` returns an empty result there; `assertHolds` with
-facts to judge is refused like the verbs. A store handle whose schema version
+except on PostgreSQL with a `row` write fence (see the read-only item under
+[Locking and transactions](#locking-and-transactions) below), and
+`assertHolds(tx, [])` returns an empty result there; `assertHolds` with facts
+to judge is refused like the verbs. A store handle whose schema version
 is no longer the active one throws `StaleVersionError`.
 
 The verbs, `assertHolds` and `holding(tx)` in a transaction that can write
@@ -277,6 +279,18 @@ Whether the check applies follows from the backend's declared write fence
 | `row` | Yes, unless the session reads per statement | Read committed, observed on the fence-row statement; a fence that cannot report its session's isolation is refused, as the store already refuses an edge-acyclicity probe on it |
 
 The verbs, `assertHolds` and `holding(tx)` share this rule.
+
+On a `row` fence the isolation is read from the fence-row statement, which is
+an upsert of that row, so on PostgreSQL a `REPEATABLE READ` or `SERIALIZABLE`
+transaction can end in either of two ways. If no other session has advanced the
+fence row since your transaction took its snapshot, the call is refused with
+`UnsupportedBackendCapabilityError` (`observedReadCommittedIsolation`) and your
+transaction is still usable. If another session has (any write of the same
+graph that took the fence), PostgreSQL fails the upsert itself with a
+serialization failure (`40001`) before the isolation is judged: the call throws
+`TransactionConflictError`, your transaction is aborted, and you must roll it
+back and re-run it, at read committed. Handle both when you cannot rule out a
+snapshot isolation on this profile.
 
 A transaction you begin yourself and adopt with `withRecordedTransaction()`
 or `withEvolvedTransaction()` on SQLite may have been begun `DEFERRED`: it
@@ -315,9 +329,15 @@ A refusal before the verb's first write — the transaction refusals above, a
 source of a kind outside the configured source kinds, a source with no current
 row — leaves nothing behind. A failure after a write keeps the writes the verb
 already made. The verb orders them so that no such prefix leaves a fact live
-without live support: it closes the facts that lose their support first, then
-updates the source flags, then reopens the facts that regain support. A
-partial transition can therefore leave a fact closed although its support
+without live support, or a required composition part live under a closed
+whole: it closes the facts that lose their support first, every required part
+before its whole (at any depth, across fact kinds, whatever order the fact
+kinds are configured in), then updates the source flags, then reopens the
+facts that regain support, every whole before its required parts. Every other
+constraint the store checks is either untouched by these writes (they write no
+edge, so edge cardinality, composition membership and acyclicity are
+unaffected) or checked by the write itself (a reopen claims its unique keys and
+is refused on a conflict). A partial transition can therefore leave a fact closed although its support
 still stands (a `retractMany` that closed its facts and flagged only some of
 its sources), or a source flag cleared while its fact is still closed (an
 `unRetract` that cannot reopen a fact because a live fact now holds that
@@ -471,17 +491,26 @@ reads in its own transaction.
   gets the database's own permission error, because the schema fence is a row
   lock.
 - In a transaction opened with `accessMode: "read_only"`, `holding(tx)` takes
-  the graph write lock alone, so it runs under a `SELECT`-only role. At a
-  snapshot isolation level it answers as of that transaction's snapshot, which
-  is consistent but can predate writes committed before the lock was granted;
-  a read-only transaction decides no write, so it is not refused. In a
-  read-only transaction, use `holding(tx)` rather than `assertHolds`.
+  the graph write lock alone, so on an `advisory` write fence (PostgreSQL's
+  default) it runs under a `SELECT`-only role. At a snapshot isolation level
+  it answers as of that transaction's snapshot, which is consistent but can
+  predate writes committed before the lock was granted; a read-only
+  transaction decides no write, so it is not refused. In a read-only
+  transaction, use `holding(tx)` rather than `assertHolds`.
+- On a backend that declares a `row` write fence, the graph write lock is an
+  upsert of a fence row. SQLite runs it in a read-only Store transaction, so
+  `holding(tx)` still answers there. PostgreSQL does not: the read-only form of
+  `holding(tx)` fails with the database's own error (`25006`, cannot execute
+  `INSERT` in a read-only transaction). On a PostgreSQL `row` fence, read the
+  believed set with `holding()` or with `holding(tx)` in a transaction that
+  can write, under a role that may write the fences table.
 - In a transaction that can write, `holding(tx)` and `assertHolds` on a keyed
   write fence (PostgreSQL's default) need read committed isolation, observed on
   the lock statement, as the retraction verbs do; see
   [Retracting inside your own transaction](#retracting-inside-your-own-transaction).
-- A `SELECT`-only role reads the believed set with `holding()`, or with
-  `holding(tx)` in a transaction opened read-only.
+- On an `advisory` write fence, a `SELECT`-only role reads the believed set
+  with `holding()`, or with `holding(tx)` in a transaction opened read-only.
+  On a `row` fence every form takes the fence row, which is a write.
 - `holding(tx)` holds the graph write lock until your transaction ends, so a
   long transaction that calls it early blocks every other writer of that graph
   for as long as it runs. Call it late, or keep the transaction short.
