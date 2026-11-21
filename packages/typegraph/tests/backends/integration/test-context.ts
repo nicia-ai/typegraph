@@ -87,6 +87,18 @@ export function refuseUnsupportedSerializedBackendCapabilities(
   }
 }
 
+/**
+ * The driver a lane of the shared suite runs on.
+ *
+ * For a shared case whose observed outcome on main differs by driver — a
+ * known-failing case that fails on some drivers and holds on others
+ * (`transaction-session-hazards.ts`). A case about backend semantics never
+ * branches on it: the whole point of the shared suite is one expectation for
+ * every lane.
+ */
+export type IntegrationLaneDriver =
+  "better-sqlite3" | "libsql" | "pglite" | "node-postgres" | "postgres-js";
+
 export type IntegrationTestContext = Readonly<{
   getStore: () => IntegrationStore;
   /**
@@ -144,4 +156,6 @@ export type IntegrationTestContext = Readonly<{
    * actually known.
    */
   serverLaneConcurrency: boolean;
+  /** The driver this lane runs on; see {@link IntegrationLaneDriver}. */
+  driver: IntegrationLaneDriver;
 }>;

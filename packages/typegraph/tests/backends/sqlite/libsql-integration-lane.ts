@@ -65,6 +65,6 @@ export function registerLibsqlIntegrationLane(
         },
       };
     },
-    { slice: params.slice },
+    { slice: params.slice, driver: "libsql" },
   );
 }
