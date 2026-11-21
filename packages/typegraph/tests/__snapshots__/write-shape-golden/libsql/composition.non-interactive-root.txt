@@ -1,0 +1,52 @@
+### node.reparent to another whole
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+hook start update node:Item item-c
+hook error update node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.reparent to the whole it already holds
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+hook start update node:Item item-c
+hook error update node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.reparent of an unattached part
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-b"]
+hook start update node:Item item-b
+hook error update node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.reparent of a missing part
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-missing"]
+=> NodeNotFoundError[NODE_NOT_FOUND]
+
+### node.bulkReparent
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-c","item-b"]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.bulkReparent listing a part twice
+=> ValidationError[VALIDATION_ERROR]
+
+### node.create attached to a whole
+hook start create node:Item item-part
+hook error create node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.delete of an attached part
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+hook error delete node ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:SCHEMA_WRITE_FENCE_UNSUPPORTED]
+
+### node.delete of a whole with a part
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Other","other-a"]
+hook start delete node:Other other-a
+hook error delete node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
