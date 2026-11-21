@@ -18,11 +18,11 @@
  * (`requireFreshSnapshotAfterGraphLock`) but not the declared-serialization
  * admission: it refuses both profiles, as it did before provenance used it.
  *
- * Revert check: make `refuseWriterBetweenSnapshotAndGraphLock` call
- * `requireFreshSnapshotAfterGraphLock` without the `serializesWriters`
- * admission; every caller-serialized case fails with
- * `observedReadCommittedIsolation`. Make it return without a check; every
- * row-fence refusal case fails because the verb runs.
+ * Revert checks (in `requireFreshSnapshotAfterGraphLock`): drop the
+ * `"serialized-or-evidence"` admission of a plan that serializes writers, and
+ * both caller-serialized verb cases fail with `observedReadCommittedIsolation`;
+ * return early for `"serialized-or-evidence"` without judging evidence, and
+ * both row-fence refusal cases fail because the verbs run.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";

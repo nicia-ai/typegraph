@@ -100,42 +100,62 @@ export async function lockStoreWriteFence(
     input.graphId,
     lock,
     input.freshSnapshotError,
+    "evidence",
   );
 }
 
 /**
- * THE one judgement of the evidence a held per-graph write lock carries:
- * whether every read after it observes every earlier holder of that lock.
- * Consumed as is by `lockStoreWriteFence`'s `requireFreshSnapshot` (graph
- * merge applied in a caller's transaction, `tx.assertUnchangedSince()`), and
- * behind the declared-serialization admission of
- * {@link refuseWriterBetweenSnapshotAndGraphLock} by provenance.
+ * Which write fences {@link requireFreshSnapshotAfterGraphLock} admits
+ * without lock evidence. `"evidence"` admits only a serialized engine;
+ * `"serialized-or-evidence"` admits every plan that serializes writers.
+ */
+export type FreshSnapshotAdmission = "evidence" | "serialized-or-evidence";
+
+/**
+ * THE one decision whether every read after a held per-graph write lock
+ * observes every writer that committed before this transaction could read.
  *
- * Admitted: a serialized engine, which already owns the writer slot, and a
- * keyed acquisition bound to this graph and transaction whose own statement
+ * `admits` is the caller's rule for a plan with no lock evidence:
+ *
+ * - `"evidence"` — `lockStoreWriteFence`'s `requireFreshSnapshot` (graph merge
+ *   applied in a caller's transaction, `tx.assertUnchangedSince()`). Admits a
+ *   serialized engine, which takes its single writer slot before the
+ *   transaction's first statement; a `caller-serialized` plan, which yields
+ *   no coordination token, is refused, as it always has been on these paths.
+ * - `"serialized-or-evidence"` — provenance's support reads, through
+ *   {@link refuseWriterBetweenSnapshotAndGraphLock}. Admits every plan that
+ *   serializes writers ({@link serializesWriters}): `engine-serialized`, and a
+ *   `caller-serialized` deployment, whose in-process queue runs every write
+ *   unit alone and which refuses adopted transactions. No second writer can
+ *   commit while such a transaction runs, so there is nothing to observe.
+ *
+ * Every other plan is keyed (`lock`, `row`): other sessions can commit while
+ * this one waits for the lock. It is admitted only on the evidence of a keyed
+ * acquisition bound to this graph and transaction whose own statement
  * observed read committed on this session. Refused with
- * `freshSnapshotError(isolation)`: a plan that yields no coordination token
- * (here a `caller-serialized` deployment promise is not evidence), an
- * acquisition minted for another graph or session, an isolation the
- * acquisition could not observe (`unknown`), and a snapshot isolation, whose
- * snapshot can predate a holder it then waited for. The fact
- * is the isolation the fence statement observed on the pinned session — never
- * the isolation the transaction requested, nor the server's default.
+ * `freshSnapshotError(isolation)`: no coordination token, an acquisition
+ * minted for another graph or session, an isolation the acquisition could not
+ * observe (`unknown`), and a snapshot isolation, whose snapshot can predate a
+ * holder it then waited for. The fact is the isolation the fence statement
+ * observed on the pinned session — never the isolation the transaction
+ * requested, nor the server's default. This is the same per-profile rule the
+ * store's lock-only decisions (an edge-acyclicity probe, a match-key
+ * convergence) apply.
  *
  * `lock` is the evidence the graph-lock acquisition returned.
  */
-export function requireFreshSnapshotAfterGraphLock(
+function requireFreshSnapshotAfterGraphLock(
   txBackend: TransactionBackend,
   graphId: string,
   lock: GraphWriteLock,
   freshSnapshotError: (
     isolation: GraphCommandIsolation | undefined,
   ) => TypeGraphError,
+  admits: FreshSnapshotAdmission,
 ): void {
-  // A serialized engine (SQLite) gives a write transaction its single writer
-  // slot before the transaction's first statement, so no writer can commit
-  // after its snapshot.
-  if (resolveWriteFencePlan(txBackend).kind === "engine-serialized") return;
+  const plan = resolveWriteFencePlan(txBackend);
+  if (plan.kind === "engine-serialized") return;
+  if (admits === "serialized-or-evidence" && serializesWriters(plan)) return;
   const acquisition =
     lock.coordination === undefined ?
       undefined
@@ -153,24 +173,11 @@ export function requireFreshSnapshotAfterGraphLock(
 }
 
 /**
- * THE one decision whether a transaction's reads after the per-graph write
- * lock can miss a writer that committed between the transaction's snapshot
- * and that lock — the hazard provenance's support reads must exclude
- * (retraction transitions, `assertHolds(tx)`, a writable `holding(tx)`).
- *
- * Decided first from the declared write-fence plan, then from evidence:
- *
- * - A plan that serializes writers ({@link serializesWriters}:
- *   `engine-serialized`, or a `caller-serialized` deployment, whose
- *   in-process queue runs every write unit alone and which refuses adopted
- *   transactions) admits no second writer while this transaction runs, so it
- *   needs no isolation evidence.
- * - A keyed plan (`lock`, `row`) lets other sessions commit while this one
- *   waits, so it is judged by {@link requireFreshSnapshotAfterGraphLock}: an
- *   acquisition that observed read committed is admitted, and an `unknown`
- *   or snapshot isolation is refused with `freshSnapshotError(isolation)`.
- *   That is the same per-profile rule the store's lock-only decisions
- *   (an edge-acyclicity probe, a match-key convergence) already apply.
+ * Refuses, before any read, a transaction whose reads after the per-graph
+ * write lock could miss a writer that committed between its snapshot and that
+ * lock — the hazard provenance's support reads must exclude (retraction
+ * transitions, `assertHolds(tx)`, a writable `holding(tx)`).
+ * {@link requireFreshSnapshotAfterGraphLock} with `"serialized-or-evidence"`.
  */
 export function refuseWriterBetweenSnapshotAndGraphLock(
   txBackend: TransactionBackend,
@@ -180,12 +187,12 @@ export function refuseWriterBetweenSnapshotAndGraphLock(
     isolation: GraphCommandIsolation | undefined,
   ) => TypeGraphError,
 ): void {
-  if (serializesWriters(resolveWriteFencePlan(txBackend))) return;
   requireFreshSnapshotAfterGraphLock(
     txBackend,
     graphId,
     lock,
     freshSnapshotError,
+    "serialized-or-evidence",
   );
 }
 
@@ -193,16 +200,14 @@ export function refuseWriterBetweenSnapshotAndGraphLock(
  * The refusal {@link requireFreshSnapshotAfterGraphLock} raises for a caller
  * that has no refusal of its own: `operation` names the caller, and
  * `isolation` is what the fence statement observed (absent when the
- * write-fence plan yields no evidence at all). `admits` says which of the two
- * decisions refused, so the suggestion names only remedies that one accepts:
- * `"evidence"` for {@link requireFreshSnapshotAfterGraphLock} called directly,
- * `"serialized-or-evidence"` for {@link refuseWriterBetweenSnapshotAndGraphLock}.
+ * write-fence plan yields no evidence at all). `admits` is the rule that
+ * refused, so the suggestion names only remedies that rule accepts.
  */
 export function freshSnapshotUnprovableError(
   operation: string,
   graphId: string,
   isolation: GraphCommandIsolation | undefined,
-  admits: "evidence" | "serialized-or-evidence",
+  admits: FreshSnapshotAdmission,
 ): UnsupportedBackendCapabilityError {
   return new UnsupportedBackendCapabilityError(
     operation,
