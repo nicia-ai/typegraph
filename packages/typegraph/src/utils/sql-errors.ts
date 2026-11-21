@@ -68,6 +68,7 @@ const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 const POSTGRES_NOT_NULL_VIOLATION_CODE = "23502";
 const POSTGRES_FAILED_TRANSACTION_CODE = "25P02";
+const POSTGRES_NO_ACTIVE_TRANSACTION_CODE = "25P01";
 
 /** A later statement was refused because an earlier PostgreSQL statement failed. */
 export function isPostgresFailedTransactionError(error: unknown): boolean {
@@ -75,6 +76,21 @@ export function isPostgresFailedTransactionError(error: unknown): boolean {
     if (
       canReadProperty(link) &&
       Reflect.get(link, "code") === POSTGRES_FAILED_TRANSACTION_CODE
+    )
+      return true;
+  }
+  return false;
+}
+
+/**
+ * A PostgreSQL statement that needs a transaction block (`SAVEPOINT`, for
+ * one) ran on a session that is not inside one.
+ */
+export function isPostgresNoActiveTransactionError(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (
+      canReadProperty(link) &&
+      Reflect.get(link, "code") === POSTGRES_NO_ACTIVE_TRANSACTION_CODE
     )
       return true;
   }

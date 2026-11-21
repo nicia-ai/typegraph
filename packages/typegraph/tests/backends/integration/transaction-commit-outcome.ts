@@ -431,6 +431,102 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
+    it("retries a caught serialization failure even when a later statement fails differently", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const aborts = abortsOnFailedStatement(store.backend.dialect);
+      const conflictStatement =
+        aborts ?
+          "DO $$ BEGIN RAISE EXCEPTION 'synthetic conflict' USING ERRCODE = 'serialization_failure'; END $$"
+        : "SELECT 1";
+
+      let attempts = 0;
+      const outcome = await outcomeOf(
+        store.transaction(
+          async (tx) => {
+            attempts += 1;
+            await tx.nodes.OutcomeNote.create(
+              { body: `attempt ${attempts}` },
+              { id: `outcome-first-failure-${attempts}` },
+            );
+            if (attempts > 1) return attempts;
+            const native = nativeHandleOf(tx);
+            await runNative(native, conflictStatement).catch(() => "caught");
+            // PostgreSQL parses a statement before it checks for an aborted
+            // transaction, so this fails with its own syntax error, not 25P02.
+            await runNative(native, "SELEC 1").catch(() => "caught");
+            return attempts;
+          },
+          { retry: { attempts: 2 } },
+        ),
+      );
+
+      // The serialization failure aborted the transaction; the syntax error
+      // after it must not replace it as the cause the retry classifier sees.
+      expect(outcome).toEqual({ kind: "committed", value: aborts ? 2 : 1 });
+      expect(await noteBody(store, "outcome-first-failure-1")).toBe(
+        aborts ? undefined : "attempt 1",
+      );
+    });
+
+    it("never resolves with nothing saved after the callback ended the transaction on its native handle", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const aborts = abortsOnFailedStatement(store.backend.dialect);
+
+      const outcome = await outcomeOf(
+        store.transaction(async (tx) => {
+          await tx.nodes.OutcomeNote.create(
+            { body: "written before the native rollback" },
+            { id: "outcome-native-rollback" },
+          );
+          const native = nativeHandleOf(tx);
+          await expect(
+            runNative(native, MISSING_RELATION_SQL),
+          ).rejects.toThrow();
+          await runNative(native, "ROLLBACK");
+          return "callback returned";
+        }),
+      );
+
+      expect(await noteBody(store, "outcome-native-rollback")).toBeUndefined();
+      // SQLite refuses the closing COMMIT itself with its driver's error.
+      expect(aborts ? outcome : outcome.kind).toEqual(
+        aborts ? rolledBack("42P01") : "rejected",
+      );
+    });
+
+    it("rejects a schema-version flip whose preflight caught a failed statement on PostgreSQL", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const aborts = abortsOnFailedStatement(store.backend.dialect);
+      const { backend } = store;
+      const active = await backend.getActiveSchema(outcomeGraph.id);
+      const version = active?.version ?? 1;
+      const flip = backend.setActiveVersionWithPreflight;
+      if (flip === undefined) {
+        throw new Error("The bundled backend has no preflighted flip.");
+      }
+
+      const outcome = await outcomeOf(
+        flip(
+          {
+            graphId: outcomeGraph.id,
+            expected: { kind: "active", version },
+            version,
+          },
+          async (target) => {
+            await target
+              .execute(asCompiledRowsSql(sql.raw(MISSING_RELATION_SQL)))
+              .catch(() => "caught");
+          },
+        ).then(() => "flipped"),
+      );
+
+      // The flip's own write must not reach the aborted session and surface
+      // as a raw 25P02; the rollback is reported with the preflight's error.
+      expect(outcome).toEqual(
+        aborts ? rolledBack("42P01") : { kind: "committed", value: "flipped" },
+      );
+    });
+
     it("rejects a read-only transaction after a caught failing read on PostgreSQL", async () => {
       const store = await context.createStore(outcomeGraph);
       await store.nodes.OutcomeNote.create(

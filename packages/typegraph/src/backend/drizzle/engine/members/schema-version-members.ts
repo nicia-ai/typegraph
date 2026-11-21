@@ -25,6 +25,7 @@
  * that import it at module scope), so this import adds no new reach into a
  * real Drizzle package that was not already there.
  */
+import { resolveTransactionCommitCheck } from "../../../transaction-commit-check";
 import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
@@ -91,6 +92,21 @@ export type SchemaVersionMembers = Readonly<{
  * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
  * preflight form sequences its flip exactly as a commit does.
  */
+/**
+ * Runs a caller's preflight, then — before the schema write that follows it —
+ * the transaction's commit check: a preflight that caught a failed statement
+ * on PostgreSQL has left the session aborted, and the write would otherwise
+ * surface as a raw `25P02` instead of the `TransactionRolledBackError`
+ * naming the failure. A backend that registers no check (SQLite) skips it.
+ */
+async function runPreflight(
+  preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+  target: SchemaWriteTransactionBackend,
+): Promise<void> {
+  await preflight(target);
+  await resolveTransactionCommitCheck(target)?.();
+}
+
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
 ): SchemaVersionMembers {
@@ -122,7 +138,7 @@ export function createSchemaVersionMembers(
     ): Promise<SchemaVersionRow> {
       await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, async (target) => {
-        await preflight(target);
+        await runPreflight(preflight, target);
         return target.commitSchemaVersion(params);
       });
     },
@@ -138,7 +154,7 @@ export function createSchemaVersionMembers(
       preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<void> {
       await runSchemaWriteTransaction(params.graphId, async (target) => {
-        await preflight(target);
+        await runPreflight(preflight, target);
         await target.setActiveVersion(params);
       });
     },

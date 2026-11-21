@@ -20,9 +20,20 @@
  * - One did, on postgres-js, in the transaction's own scope (not inside one of
  *   the driver's savepoint scopes): the driver will roll back in place of
  *   committing, whatever state the session is in, so the transaction is lost.
- * - One did, on any other driver: one probe statement asks the session
- *   itself. A `25P02` refusal is an aborted transaction; a result proves a
- *   savepoint rolled the session back past every failure so far.
+ * - One did, on any other driver: a probe `SAVEPOINT` asks the session
+ *   itself, through the connection's statement queue so it never overlaps a
+ *   statement the caller left running. A `25P02` refusal is an aborted
+ *   transaction. A `25P01` refusal is a session no longer inside a
+ *   transaction block at all: the caller ended the transaction through its
+ *   native handle, so nothing written before that will be committed. Success
+ *   proves the session is inside a healthy transaction block — a savepoint
+ *   rolled it back past every failure so far — and the probe's savepoint is
+ *   released at once.
+ *
+ * The probe proves the session is inside *a* transaction block, not that it
+ * is the block TypeGraph opened: a caller that ends the transaction and
+ * opens another one through the native handle is not detected, and nor is a
+ * caller that ends it with no statement failing first (no probe runs).
  *
  * The session's own answer is preferred to a guess from which calls threw,
  * because a caller may roll a savepoint back past a failure it caught. It is
@@ -37,11 +48,18 @@
  * native `tx.sql` handle a caller holds, its relational queries included) and
  * TypeGraph's compiled fast path all read it at the time they prepare a
  * statement. The observation also supplies the error that aborted the
- * transaction as the {@link TransactionRolledBackError}'s `cause`.
+ * transaction as the {@link TransactionRolledBackError}'s `cause`: the first
+ * failure since the transaction began or since the session last proved it
+ * had recovered, so a later failure (a statement PostgreSQL parses before it
+ * checks for an aborted transaction reports its own syntax error, not
+ * `25P02`) never hides the one that aborted it from the retry classifier.
  */
 import { TransactionRolledBackError } from "../../../errors";
 import { sql } from "../../../query/sql-fragment";
-import { isPostgresFailedTransactionError } from "../../../utils/sql-errors";
+import {
+  isPostgresFailedTransactionError,
+  isPostgresNoActiveTransactionError,
+} from "../../../utils/sql-errors";
 import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
@@ -50,6 +68,7 @@ import {
   isPostgresJsClient,
   replacePinnedPostgresTransactionClient,
 } from "./postgres-execution";
+import { createSerialExecutionAdapter } from "./statement-queue";
 
 /** What one TypeGraph-owned transaction exposes about its commit outcome. */
 export type ObservedPostgresTransaction = Readonly<{
@@ -76,22 +95,38 @@ const STATEMENT_MEMBERS: ReadonlySet<PropertyKey> = new Set([
   "unsafe",
 ]);
 
-type FailureRecorder = (error: unknown) => void;
+/** Receives the outcome of every statement sent on the observed session. */
+type OutcomeRecorder = Readonly<{
+  failed: (error: unknown) => void;
+  succeeded: () => void;
+}>;
+
+/**
+ * The probe's savepoint. Named so it cannot collide with a caller's; it is
+ * released by the statement after the one that takes it.
+ */
+const PROBE_SAVEPOINT = sql`SAVEPOINT typegraph_commit_probe`;
+const PROBE_RELEASE = sql`RELEASE SAVEPOINT typegraph_commit_probe`;
 
 /**
  * Observes a statement's pending result without consuming it or changing its
  * outcome. A native promise gets a side branch whose own rejection is
  * handled. A driver's lazy query object (postgres-js, which only executes once
- * something calls its `then`) instead gets an own `then` that records a
- * rejection on the way through: every consumer — `await`, `catch`, `finally`,
+ * something calls its `then`) instead gets an own `then` that records the
+ * outcome on the way through: every consumer — `await`, `catch`, `finally`,
  * the driver's own scope tracking — reaches the outcome through `then`, and
  * nothing here triggers execution early.
  */
-function observeOutcome(result: unknown, record: FailureRecorder): unknown {
+function observeOutcome(result: unknown, record: OutcomeRecorder): unknown {
   if (result instanceof Promise && result.constructor === Promise) {
-    result.then(undefined, (error: unknown) => {
-      record(error);
-    });
+    result.then(
+      () => {
+        record.succeeded();
+      },
+      (error: unknown) => {
+        record.failed(error);
+      },
+    );
     return result;
   }
   if (
@@ -110,9 +145,13 @@ function observeOutcome(result: unknown, record: FailureRecorder): unknown {
         onRejected?: unknown,
       ): unknown {
         return Reflect.apply(inheritedThen, this, [
-          onFulfilled,
+          (value: unknown) => {
+            record.succeeded();
+            if (typeof onFulfilled !== "function") return value;
+            return onFulfilled(value);
+          },
           (error: unknown) => {
-            record(error);
+            record.failed(error);
             if (typeof onRejected !== "function") throw error;
             const handled: unknown = Reflect.apply(onRejected, undefined, [
               error,
@@ -132,7 +171,7 @@ function isFixedProperty(target: object, property: PropertyKey): boolean {
   return descriptor?.configurable === false && descriptor.writable === false;
 }
 
-function observeClient(client: object, record: FailureRecorder): object {
+function observeClient(client: object, record: OutcomeRecorder): object {
   return new Proxy(client, {
     get(target, property) {
       const value: unknown = Reflect.get(target, property, target);
@@ -171,13 +210,25 @@ function observePostgresTransaction(
   if (connection === undefined) return undefined;
 
   let failed = false;
-  // The error that put the session into its aborted state: the latest failure
-  // that is not itself a `25P02` refusal caused by an earlier one. A failure a
-  // savepoint recovered is superseded by the next one that aborts.
+  // The error that put the session into its aborted state: the FIRST failure
+  // that is not itself a `25P02` refusal caused by an earlier one, counted
+  // from the start of the transaction or from the last statement that
+  // succeeded after it. An aborted session refuses every statement but a
+  // rollback, so a success after a failure means a savepoint rolled it back;
+  // only then may a later failure become the cause.
   let abortingError: unknown;
-  const record: FailureRecorder = (error) => {
-    failed = true;
-    if (!isPostgresFailedTransactionError(error)) abortingError = error;
+  let succeededSinceFailure = false;
+  const record: OutcomeRecorder = {
+    failed(error) {
+      failed = true;
+      if (isPostgresFailedTransactionError(error)) return;
+      if (abortingError !== undefined && !succeededSinceFailure) return;
+      abortingError = error;
+      succeededSinceFailure = false;
+    },
+    succeeded() {
+      if (abortingError !== undefined) succeededSinceFailure = true;
+    },
   };
 
   const release = replacePinnedPostgresTransactionClient(
@@ -191,15 +242,38 @@ function observePostgresTransaction(
   async function isAborted(): Promise<boolean> {
     if (!failed) return false;
     if (driverTracksScopeFailures) return true;
+    // Queued with every other statement on this connection, so the probe
+    // waits for a statement the caller left running instead of overlapping
+    // it on a driver that carries one statement at a time.
+    const probeConnection = createSerialExecutionAdapter(
+      createPostgresExecutionAdapter(transaction),
+      connection,
+    );
+    // The probe's own refusal is evidence, not the failure being reported.
+    const causeBeforeProbe = abortingError;
+    const succeededBeforeProbe = succeededSinceFailure;
     try {
-      await createPostgresExecutionAdapter(transaction).execute(sql`SELECT 1`);
+      await probeConnection.runExclusive(async (session) => {
+        await session.execute(PROBE_SAVEPOINT);
+        await session.execute(PROBE_RELEASE);
+      });
     } catch (probeError) {
-      if (isPostgresFailedTransactionError(probeError)) return true;
+      abortingError = causeBeforeProbe;
+      succeededSinceFailure = succeededBeforeProbe;
+      if (
+        isPostgresFailedTransactionError(probeError) ||
+        isPostgresNoActiveTransactionError(probeError)
+      ) {
+        return true;
+      }
       throw probeError;
     }
-    // The session answered: a savepoint rolled it back past every failure so
-    // far. Only a later failure can abort it again.
+    // The session is inside a healthy transaction block: a savepoint rolled
+    // it back past every failure so far. Only a later failure can abort it
+    // again, and that failure is then the cause.
     failed = false;
+    abortingError = undefined;
+    succeededSinceFailure = false;
     return false;
   }
 
