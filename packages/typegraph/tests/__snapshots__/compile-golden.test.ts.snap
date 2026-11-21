@@ -20899,7 +20899,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -21104,7 +21104,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -21373,7 +21373,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -21678,7 +21678,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -21899,7 +21899,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -22104,7 +22104,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -22373,7 +22373,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -22678,7 +22678,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -22895,7 +22895,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -23090,7 +23090,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -23349,7 +23349,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -23644,7 +23644,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -23855,7 +23855,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -24050,7 +24050,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -24309,7 +24309,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -24604,7 +24604,7 @@ exports[`compile-golden: store statement builders > algorithm degree and weighte
   {
     "params": [],
     "sql": "
-        CREATE INDEX "typegraph_iterative_<id>"
+        CREATE INDEX "typegraph_iterative_<id>_frontier"
         ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
       ",
   },
@@ -26710,14 +26710,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -26735,7 +26735,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -26762,7 +26762,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -26789,7 +26789,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -26810,7 +26810,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -26894,7 +26894,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -26944,14 +26944,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -26969,7 +26969,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -26996,7 +26996,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -27040,7 +27040,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -27124,7 +27124,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -27196,14 +27196,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -27241,7 +27241,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -27272,7 +27272,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -27299,7 +27299,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -27320,7 +27320,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -27444,7 +27444,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -27526,14 +27526,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -27551,7 +27551,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -27582,7 +27582,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -27626,7 +27626,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -27710,7 +27710,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -27770,14 +27770,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -27795,7 +27795,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -27822,7 +27822,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -27849,7 +27849,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -27870,7 +27870,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -27954,7 +27954,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -28004,14 +28004,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -28029,7 +28029,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -28056,7 +28056,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -28100,7 +28100,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -28184,7 +28184,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -28256,14 +28256,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -28301,7 +28301,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -28332,7 +28332,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -28359,7 +28359,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -28380,7 +28380,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -28504,7 +28504,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -28586,14 +28586,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -28611,7 +28611,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -28642,7 +28642,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -28686,7 +28686,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -28770,7 +28770,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -28828,14 +28828,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -28853,7 +28853,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -28876,7 +28876,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -28903,7 +28903,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -28924,7 +28924,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -29008,7 +29008,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -29056,14 +29056,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -29081,7 +29081,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -29104,7 +29104,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -29148,7 +29148,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -29232,7 +29232,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -29302,14 +29302,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -29347,7 +29347,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -29374,7 +29374,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -29401,7 +29401,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -29422,7 +29422,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -29546,7 +29546,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -29626,14 +29626,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -29651,7 +29651,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -29678,7 +29678,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -29722,7 +29722,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -29806,7 +29806,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -29864,14 +29864,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -29889,7 +29889,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -29912,7 +29912,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -29939,7 +29939,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -29960,7 +29960,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -30044,7 +30044,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -30092,14 +30092,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -30117,7 +30117,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -30140,7 +30140,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -30184,7 +30184,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -30268,7 +30268,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -30338,14 +30338,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -30383,7 +30383,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -30410,7 +30410,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -30437,7 +30437,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "ANALYZE "typegraph_iterative_<id>"",
+    "sql": "ANALYZE "typegraph_iterative_n_<id>"",
   },
   {
     "params": [
@@ -30458,7 +30458,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = $1
         AND active.run_id = $2
@@ -30582,7 +30582,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -30662,14 +30662,14 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, changed_round)
   ",
   },
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_a_<id>"
     ON "typegraph_iterative_<id>" (graph_id, run_id, active_round)
   ",
   },
@@ -30687,7 +30687,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE TEMP TABLE "typegraph_iterative_<id>" (
+    CREATE TEMP TABLE "typegraph_iterative_n_<id>" (
       target_id TEXT NOT NULL,
       target_kind TEXT NOT NULL,
       neighbor_id TEXT NOT NULL,
@@ -30714,7 +30714,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
       "<generated-id-1>",
     ],
     "sql": "
-    INSERT INTO "typegraph_iterative_<id>"
+    INSERT INTO "typegraph_iterative_n_<id>"
       (target_id, target_kind, neighbor_id, neighbor_kind)
     SELECT DISTINCT
       expanded.source_id,
@@ -30758,7 +30758,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
         neighbor.label_id,
         neighbor.label_kind,
         COUNT(*) AS total_votes
-      FROM "typegraph_iterative_<id>" neighbors
+      FROM "typegraph_iterative_n_<id>" neighbors
       JOIN "typegraph_iterative_<id>" active
         ON active.graph_id = ?
         AND active.run_id = ?
@@ -30842,7 +30842,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   },
   {
     "params": [],
-    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_<id>"",
+    "sql": "DROP TABLE IF EXISTS "typegraph_iterative_n_<id>"",
   },
   {
     "params": [],
@@ -34581,7 +34581,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -34758,7 +34758,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -34957,7 +34957,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -35230,7 +35230,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -35421,7 +35421,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -35598,7 +35598,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -35797,7 +35797,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -36070,7 +36070,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -36259,7 +36259,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -36430,7 +36430,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -36623,7 +36623,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -36890,7 +36890,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -37075,7 +37075,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -37246,7 +37246,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -37439,7 +37439,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },
@@ -37706,7 +37706,7 @@ exports[`compile-golden: store statement builders > graph analytics iteration st
   {
     "params": [],
     "sql": "
-    CREATE INDEX "typegraph_iterative_<id>"
+    CREATE INDEX "typegraph_iterative_<id>_frontier"
     ON "typegraph_iterative_<id>" (graph_id, run_id, improved_round)
   ",
   },

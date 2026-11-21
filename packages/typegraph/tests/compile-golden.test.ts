@@ -467,13 +467,16 @@ function capturedAlgorithmStatements(
   dialect: Dialect,
 ): readonly Readonly<{ sql: string; params: readonly unknown[] }>[] {
   const seenIds = new Map<string, string>();
-  return captured.map((fragment) => {
-    const { sql: sqlText, params } = toSqlWithParams(fragment, dialect);
-    return {
-      sql: normalizeWorkingTableName(sqlText),
-      params: normalizeGeneratedIdParams(params, seenIds),
-    };
-  });
+  const rendered = captured.map((fragment) =>
+    toSqlWithParams(fragment, dialect),
+  );
+  const runIdPlaceholders = workingTableRunIdPlaceholders(
+    rendered.map((statement) => statement.sql),
+  );
+  return rendered.map(({ sql: sqlText, params }) => ({
+    sql: normalizeWorkingTableRunIds(sqlText, runIdPlaceholders),
+    params: normalizeGeneratedIdParams(params, seenIds),
+  }));
 }
 
 /**
@@ -538,12 +541,67 @@ function recordingOverlayMembers<
   };
 }
 
-/** Normalizes the working table's random per-run suffix (`typegraph_iterative_<nanoid>`) to a stable placeholder before snapshotting. */
-function normalizeWorkingTableName(sqlText: string): string {
-  return sqlText.replaceAll(
-    /typegraph_iterative_[A-Za-z0-9_]+/gu,
-    "typegraph_iterative_<id>",
-  );
+/**
+ * The working table an iterative run creates, `"typegraph_iterative_<runId>"`,
+ * where `<runId>` is the run's 21-character generated id with `-` mapped to
+ * `_`. The auxiliary relations of the same run (`typegraph_iterative_n_<runId>`,
+ * `typegraph_iterative_a_<runId>`, `typegraph_iterative_<runId>_frontier`)
+ * never match: the closing quote must follow the 21 id characters directly.
+ */
+const WORKING_TABLE_IDENTIFIER = /"typegraph_iterative_([A-Za-z0-9_]{21})"/gu;
+
+/**
+ * Maps each run id a cell's working tables carry to a stable placeholder
+ * (`<id>`, then `<id-2>`, … in first-seen order).
+ */
+function workingTableRunIdPlaceholders(
+  statements: readonly string[],
+): ReadonlyMap<string, string> {
+  const placeholders = new Map<string, string>();
+  for (const statement of statements) {
+    for (const match of statement.matchAll(WORKING_TABLE_IDENTIFIER)) {
+      const runId = requireDefined(match[1]);
+      if (!placeholders.has(runId)) {
+        placeholders.set(
+          runId,
+          placeholders.size === 0 ? "<id>" : `<id-${placeholders.size + 1}>`,
+        );
+      }
+    }
+  }
+  return placeholders;
+}
+
+/** Any iterative relation name whose run id is still not a placeholder. */
+const UNNORMALIZED_ITERATIVE_NAME =
+  /typegraph_iterative_(?!(?:[an]_)?<id(?:-\d+)?>)/u;
+
+/**
+ * Replaces only the random run id inside each iterative relation name, so
+ * the working table, the neighbor table and their indexes stay distinct in
+ * the snapshot: a statement that reads the working table where it should
+ * read the neighbor table changes the normalized SQL. Throws when a name
+ * keeps an id no working table in the cell declared, rather than letting a
+ * random id reach the snapshot.
+ */
+function normalizeWorkingTableRunIds(
+  sqlText: string,
+  placeholders: ReadonlyMap<string, string>,
+): string {
+  // Run ids are `[A-Za-z0-9_]` only, so they need no escaping in the pattern.
+  const normalized =
+    placeholders.size === 0 ?
+      sqlText
+    : sqlText.replaceAll(
+        new RegExp([...placeholders.keys()].join("|"), "gu"),
+        (runId) => requireDefined(placeholders.get(runId)),
+      );
+  if (UNNORMALIZED_ITERATIVE_NAME.test(normalized)) {
+    throw new Error(
+      `An iterative relation name kept its run id after normalization: ${normalized}`,
+    );
+  }
+  return normalized;
 }
 
 /** A default `generateId()` nanoid: 21 characters, URL-safe alphabet. */
