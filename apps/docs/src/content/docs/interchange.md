@@ -658,7 +658,11 @@ The contract is deliberately narrow:
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary
   index removal, index rebuilding, and planner statistics either all commit or
-  all roll back.
+  all roll back. A backend author calling `backend.trustedImport(fn)` directly
+  gets a session bound to that transaction: a batch still running when `fn`
+  returns settles before `COMMIT`, and a session kept past the call refuses
+  every later `insertNodes()` / `insertEdges()` with `TransactionClosedError`
+  instead of writing outside the import.
 - A schema-managed Store acquires and validates its schema-write fence inside
   that transaction before loading rows. A stale managed import fails before
   row DML; a raw Store remains explicitly outside the schema-fencing guarantee.

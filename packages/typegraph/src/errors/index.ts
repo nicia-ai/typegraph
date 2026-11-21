@@ -3463,10 +3463,14 @@ export class BackendDisposedError extends TypeGraphError {
  * ```
  *
  * leaves `b`'s remaining statements in flight when `a` fails. Those
- * statements have nowhere safe to go: the driver is about to emit `ROLLBACK`
- * on the same pinned connection and then hand it back to the pool, where a
- * late arrival would execute inside somebody else's transaction. TypeGraph
- * refuses them here instead.
+ * statements have nowhere safe to go: `ROLLBACK` is about to run on the same
+ * connection. On PostgreSQL the pool then hands that connection to somebody
+ * else; on SQLite the next transaction on it may already be open, or the
+ * statement would run in autocommit. Either way a late arrival would execute
+ * outside the transaction that issued it, so TypeGraph settles what was
+ * already running before the boundary and refuses everything after it — on
+ * every bundled driver, including a prepared query or stream kept past the
+ * callback.
  *
  * The error is normally invisible — `Promise.all` has already rejected with
  * the original failure, and discards this one.
