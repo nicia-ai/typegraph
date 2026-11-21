@@ -1946,7 +1946,6 @@ export interface DialectAdapter {
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonScalarPathEquals: (this: void, column: SqlFragment, pointer: JsonPointer, value: JsonScalar) => SqlFragment;
     readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
-    readonly keyText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly like: (this: void, column: SqlFragment, pattern: SqlFragment) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
@@ -1972,7 +1971,6 @@ export interface DialectAdapter {
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
-    readonly singleEvaluationCte: (this: void, name: SqlFragment, body: SqlFragment) => SqlFragment;
     readonly supportsVectors: boolean;
     readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
     unboundedLimit(): SqlFragment;

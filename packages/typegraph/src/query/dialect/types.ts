@@ -187,37 +187,6 @@ export interface DialectAdapter {
   readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
 
   /**
-   * Gives a text expression the collation TypeGraph declares its key columns
-   * with, so a `DISTINCT`, `GROUP BY` or comparison over a projected id tells
-   * ids apart exactly as the primary key does, whatever collation the
-   * projection carried. SQLite forces `BINARY`: an explicit collation on a
-   * projected column (`id COLLATE NOCASE`) would otherwise decide its
-   * `DISTINCT`. PostgreSQL forces the database's default collation, which is
-   * always deterministic, so its equality is byte equality; unlike the
-   * `COLLATE "C"` of {@link DialectAdapter.binaryText}, it is the collation of
-   * the key indexes themselves, so comparing the result with an indexed key
-   * column stays an index condition.
-   */
-  readonly keyText: (this: void, expression: SqlFragment) => SqlFragment;
-
-  /**
-   * Builds `WITH name AS <hint>(body)` for a CTE whose rows the statement must
-   * compute once although the engine may code more than one reference to it.
-   * SQLite codes a row-value `IN (subquery)` that drives a prefix of an index
-   * twice, once to walk the index and once to test the whole row value, and
-   * evaluates an inlined subquery once per coding; it forces `MATERIALIZED`,
-   * so the CTE is computed once into an ephemeral table both codings read.
-   * PostgreSQL emits `NOT MATERIALIZED`, which inlines the CTE as the subquery
-   * it would otherwise be written as, so the plan is the subquery's plan and
-   * is costed from the statistics of what the subquery reads.
-   */
-  readonly singleEvaluationCte: (
-    this: void,
-    name: SqlFragment,
-    body: SqlFragment,
-  ) => SqlFragment;
-
-  /**
    * Builds the dialect's planner-statistics refresh for a temporary table.
    * Returns undefined when the engine plans temporary tables well enough
    * without an explicit refresh.
@@ -809,6 +778,46 @@ export interface DialectAdapter {
   readonly fulltext: FulltextStrategy | undefined;
 }
 
+/**
+ * Operations only the bundled dialects provide, consumed by backend code that
+ * obtains its adapter from `getDialect()`. They are not part of the public
+ * {@link DialectAdapter} contract, so a third-party adapter need not implement
+ * them.
+ */
+type BuiltinDialectMembers = Readonly<{
+  /**
+   * Gives a text expression the collation TypeGraph declares its key columns
+   * with, so a `DISTINCT`, `GROUP BY` or comparison over a projected id tells
+   * ids apart exactly as the primary key does, whatever collation the
+   * projection carried. SQLite forces `BINARY`: an explicit collation on a
+   * projected column (`id COLLATE NOCASE`) would otherwise decide its
+   * `DISTINCT`. PostgreSQL forces the database's default collation, which is
+   * always deterministic, so its equality is byte equality; unlike the
+   * `COLLATE "C"` of {@link DialectAdapter.binaryText}, it is the collation of
+   * the key indexes themselves, so comparing the result with an indexed key
+   * column stays an index condition.
+   */
+  keyText: (this: void, expression: SqlFragment) => SqlFragment;
+
+  /**
+   * Builds `WITH name AS <hint>(body)` for a CTE whose rows the statement must
+   * compute once although the engine may code more than one reference to it.
+   * SQLite codes a row-value `IN (subquery)` that drives a prefix of an index
+   * twice, once to walk the index and once to test the whole row value, and
+   * evaluates an inlined subquery once per coding; it forces `MATERIALIZED`,
+   * so the CTE is computed once into an ephemeral table both codings read.
+   * PostgreSQL emits `NOT MATERIALIZED`, which inlines the CTE as the subquery
+   * it would otherwise be written as, so the plan is the subquery's plan and
+   * is costed from the statistics of what the subquery reads.
+   */
+  singleEvaluationCte: (
+    this: void,
+    name: SqlFragment,
+    body: SqlFragment,
+  ) => SqlFragment;
+}>;
+
 /** Bundled dialects must support every operation consumed by the batch compiler. */
 export type BuiltinDialectAdapter = DialectAdapter &
-  Required<Pick<DialectAdapter, "partitionedRowsJsonArrays">>;
+  Required<Pick<DialectAdapter, "partitionedRowsJsonArrays">> &
+  BuiltinDialectMembers;
