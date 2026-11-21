@@ -47,7 +47,7 @@ const wiringGraph = defineGraph({
   edges: {},
 });
 
-const PLANT_PREFIX = "select set_config(";
+const PLANT_PREFIX = "set local typegraph.transaction_marker";
 const READ_PREFIX = "select current_setting(";
 const MISSING_RELATION_SQL = "SELECT * FROM commit_outcome_missing_table";
 
@@ -132,6 +132,11 @@ export type DriverFixture = Readonly<{
   name: string;
   /** Whether the driver rolls back a scope whose statement failed. */
   driverTracksScopeFailures: boolean;
+  /**
+   * Whether the backend's root can commit on another connection while a
+   * transaction is open (a pool); PGlite has one session.
+   */
+  independentConnections: boolean;
   open: (logger: Logger) => Promise<
     Readonly<{
       backend: ReturnType<typeof createPostgresBackend>;
@@ -143,6 +148,7 @@ export type DriverFixture = Readonly<{
 export const pgliteFixture: DriverFixture = {
   name: "PGlite",
   driverTracksScopeFailures: false,
+  independentConnections: false,
   async open(logger) {
     const client = new PGlite({ extensions: { vector: pgvectorExtension } });
     await client.exec(generatePostgresMigrationSQL());
@@ -157,6 +163,7 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
   return {
     name: "node-postgres",
     driverTracksScopeFailures: false,
+    independentConnections: true,
     async open(logger) {
       const pool = new Pool({ connectionString: databaseUrl });
       await pool.query(generatePostgresMigrationSQL());
@@ -175,6 +182,7 @@ export function postgresJsFixture(databaseUrl: string): DriverFixture {
   return {
     name: "postgres-js",
     driverTracksScopeFailures: true,
+    independentConnections: true,
     async open(logger) {
       const client = postgres(databaseUrl, {
         onnotice: () => {
@@ -259,6 +267,30 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
         ),
       );
     });
+
+    it.runIf(fixture.independentConnections)(
+      "leaves a repeatable-read transaction's snapshot to the callback's first statement",
+      async () => {
+        const store = await requireDefined(storePromise);
+        const id = `${fixture.name}-committed-after-begin`;
+
+        const seen = await store.transaction(
+          async (tx) => {
+            // Committed on another connection after BEGIN and the marker,
+            // before the callback's first statement takes the snapshot.
+            await store.nodes.WiringNote.create(
+              { body: "committed elsewhere" },
+              { id },
+            );
+            const note = await tx.nodes.WiringNote.getById(id as never);
+            return note?.body;
+          },
+          { isolationLevel: "repeatable_read" },
+        );
+
+        expect(seen).toBe("committed elsewhere");
+      },
+    );
 
     it("reads the marker only after a read the callback left running has finished", async () => {
       await requireDefined(storePromise);

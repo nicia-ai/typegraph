@@ -45,7 +45,6 @@ import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/aut
 import { requireCatalog } from "../src/backend/capabilities/catalog";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import { isFirstPartyFactory } from "../src/backend/capabilities/write-fence";
-import { TRANSACTION_MARKER_SETTING } from "../src/backend/drizzle/execution/postgres-commit-outcome";
 import { PGLITE_MAX_BIND_PARAMETERS } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createSqliteBackend } from "../src/backend/sqlite";
@@ -203,21 +202,6 @@ function normalizeCapturedValue(value: unknown): unknown {
   return value;
 }
 
-/**
- * The commit-outcome marker binds a fresh nonce after its setting name in
- * every transaction TypeGraph opens; it is replaced with a stable placeholder.
- */
-function normalizeMarkerNonce(params: unknown): unknown {
-  if (
-    Array.isArray(params) &&
-    params.length === 2 &&
-    params[0] === TRANSACTION_MARKER_SETTING
-  ) {
-    return [TRANSACTION_MARKER_SETTING, "<<MARKER NONCE>>"];
-  }
-  return params;
-}
-
 type CapturedStatement = Readonly<{ sql: string; params: unknown }>;
 
 function normalizeCapturedStatements(
@@ -225,7 +209,7 @@ function normalizeCapturedStatements(
 ): readonly CapturedStatement[] {
   return collected.map((statement) => ({
     sql: statement.sql,
-    params: normalizeMarkerNonce(normalizeCapturedValue(statement.params)),
+    params: normalizeCapturedValue(statement.params),
   }));
 }
 

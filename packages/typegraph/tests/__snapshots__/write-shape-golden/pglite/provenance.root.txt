@@ -1,7 +1,6 @@
 ### provenance.assertHolds of a believed fact
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -15,16 +14,14 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","premiseOf","<timestamp>","<timestamp>","Justification","justification-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3)
     ["<graph1>","Source","source-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok fact-a via justification-a
 revision +0
 
 ### provenance.assertHolds after its only source is retracted
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -44,8 +41,7 @@ revision +0
 
 ### provenance.retract
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -75,8 +71,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Fact","fact-a"]
 sql UPDATE "typegraph_nodes" SET "deleted_at" = $1 WHERE "typegraph_nodes"."graph_id" = $2 AND "typegraph_nodes"."kind" = $3 AND "typegraph_nodes"."id" = $4 AND "typegraph_nodes"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Fact","fact-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -95,8 +90,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Fact","fact-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12, $13, NULL, NULL, $14)
     ["<id3>","<graph1>","Fact","fact-a","{\"name\":\"fact-a\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",3,9007199254740991,"delete","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Source source-a written
 hook end delete node:Fact fact-a written

@@ -1988,9 +1988,9 @@ opened, whose callback returned normally, is still the healthy transaction it
 began, the evidence behind its decision to send `COMMIT`:
 
 - `"session-marker"` (the bundled PostgreSQL backends, every driver): right
-  after `BEGIN` the backend sets a transaction-local setting holding a fresh
-  value, and right before `COMMIT` reads it back on the same session, through
-  the connection's statement queue. Found: the transaction commits. Refused
+  after `BEGIN` the backend sets a transaction-local setting (`SET LOCAL`,
+  which takes no snapshot), and right before `COMMIT` reads it back on the
+  same session, through the connection's statement queue. Found: the transaction commits. Refused
   because the transaction is aborted: `TransactionRolledBackError`. Gone:
   something other than TypeGraph ended the transaction (a `COMMIT`, `ROLLBACK`
   or `BEGIN` sent through `tx.sql`), and the backend rejects with

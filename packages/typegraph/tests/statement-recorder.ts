@@ -68,7 +68,7 @@ export async function createRecordedPostgresStore<TGraph extends GraphDef>(
           // The commit-outcome marker frames every transaction TypeGraph
           // opens, like the BEGIN and COMMIT PGlite sends without logging
           // them; it is not a statement any write emits.
-          if (params[0] === TRANSACTION_MARKER_SETTING) return;
+          if (query.includes(TRANSACTION_MARKER_SETTING)) return;
           statements.push({ query, params });
         },
       },

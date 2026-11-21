@@ -1,22 +1,19 @@
 ### node.create generated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item <id1>
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item","Other","<graph1>",0,"<graph1>","Item","item_name","new","<id1>","Item","<graph1>","Item","<id1>","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item <id1> written
 => ok
 
 ### node.create supplied id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-new
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -24,16 +21,14 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-new"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item","Other","<graph1>",0,"<graph1>","Item","item_name","new","item-new","Item","<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
 
 ### node.createFromRecord supplied id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-new
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -41,16 +36,14 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-new"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item","Other","<graph1>",0,"<graph1>","Item","item_name","new","item-new","Item","<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
 
 ### node.create over a tombstone
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-dead
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -70,16 +63,14 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-dead written
 => ok
 
 ### node.create occupied id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-a
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -91,8 +82,7 @@ sql ROLLBACK
 
 ### node.create id owned by another kind
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item other-a
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -106,8 +96,7 @@ sql ROLLBACK
 
 ### node.create unique conflict
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item <id1>
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -119,8 +108,7 @@ sql ROLLBACK
 
 ### node.create after a schema bump
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-stale
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -132,8 +120,7 @@ sql ROLLBACK
 
 ### node.create generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item item-a
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -145,15 +132,13 @@ sql ROLLBACK
 
 ### node.create generated id when the statement misses its fence
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create node:Item <id1>
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item","Other","<graph1>",0,"<graph1>","Item","item_name","fence-miss","<id1>","Item","<graph1>","Item","<id1>","{\"name\":\"fence-miss\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item <id1> written
 fault not reached: the next statement misses its schema fence
@@ -161,15 +146,13 @@ fault not reached: the next statement misses its schema fence
 
 ### node.create of an unregistered kind
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql ROLLBACK
 => KindNotFoundError[KIND_NOT_FOUND]
 
 ### node.bulkCreate generated ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5) AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -180,15 +163,13 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL), ($7, $8, $9, $10, $11, $12, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","bulk-1","<id1>","Item","<graph1>","Item","item_name","bulk-2","<id2>","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkCreate generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5) AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -204,8 +185,7 @@ sql ROLLBACK
 
 ### node.bulkCreate supplied ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
@@ -222,15 +202,13 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL), ($7, $8, $9, $10, $11, $12, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","bulk-1","bulk-1","Item","<graph1>","Item","item_name","bulk-2","bulk-2","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkInsert generated ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5) AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -241,15 +219,13 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL), ($7, $8, $9, $10, $11, $12, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","bulk-1","<id1>","Item","<graph1>","Item","item_name","bulk-2","<id2>","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkInsert generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5) AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -265,8 +241,7 @@ sql ROLLBACK
 
 ### node.bulkInsert supplied ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
@@ -283,15 +258,13 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL), ($7, $8, $9, $10, $11, $12, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","bulk-1","bulk-1","Item","<graph1>","Item","item_name","bulk-2","bulk-2","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.update
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start update node:Item item-a
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -305,16 +278,14 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
 
 ### node.update clearValidTo on a missing row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start update node:Item item-missing
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -326,8 +297,7 @@ sql ROLLBACK
 
 ### node.update clearValidTo on a live row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start update node:Item item-a
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -341,16 +311,14 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
 
 ### node.update after a schema bump
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start update node:Item item-a
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -360,8 +328,7 @@ sql ROLLBACK
 
 ### node.upsertById live row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 hook start update node:Item item-a
@@ -377,16 +344,14 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
 
 ### node.upsertById absent row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-new"]
 hook start create node:Item item-new
@@ -396,16 +361,14 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-new"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-new","item-new","Item","Other","<graph1>",0,"<graph1>","Item","item_name","upserted","item-new","Item","<graph1>","Item","item-new","{\"name\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
 
 ### node.upsertById tombstone
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-dead"]
 hook start update node:Item item-dead
@@ -421,29 +384,25 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-dead written
 => ok
 
 ### node.upsertById coalesced
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.upsertByIdFromRecord live row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 hook start update node:Item item-a
@@ -459,16 +418,14 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
 
 ### node.bulkUpsertById with a repeated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4, $5)
     ["<graph1>","Item","item-a","item-new","item-a"]
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
@@ -517,15 +474,13 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","first"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkUpsertById live and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-new"]
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
@@ -560,15 +515,13 @@ sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "v
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkReplaceById
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SAVEPOINT typegraph_atomic_program
 sql WITH "atomic_node_claim_schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) UPDATE "typegraph_node_uniques" SET "deleted_at" = $3 WHERE EXISTS (SELECT 1 FROM "atomic_node_claim_schema_fence") AND "typegraph_node_uniques"."graph_id" = $4 AND "typegraph_node_uniques"."concrete_kind" = $5 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."node_id" IN ($6, $7)
     ["<graph1>",1,"<timestamp>","<graph1>","Item","item-a","item-new"]
@@ -579,15 +532,13 @@ sql WITH "schema_fence" AS ( SELECT "typegraph_schema_versions"."version" FROM "
 sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, CAST($4 AS jsonb), $5, NULL, NULL, NULL, $6 WHERE NOT EXISTS ( SELECT 1 FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $7 AND "typegraph_schema_versions"."version" = $8 AND "typegraph_schema_versions"."is_active" = TRUE ) OR ( SELECT COUNT(*) FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $9 AND "typegraph_nodes"."deleted_at" IS NULL AND (("typegraph_nodes"."kind" = $10 AND ( ( "typegraph_nodes"."id" = $11 AND "typegraph_nodes"."props" = CAST($12 AS jsonb) AND "typegraph_nodes"."updated_at" = $13 ) OR ( "typegraph_nodes"."id" = $14 AND "typegraph_nodes"."props" = CAST($15 AS jsonb) AND "typegraph_nodes"."updated_at" = $16 ) ))) ) <> $17
     ["<graph1>","Item","item-a","{\"name\":\"replaced\"}",1,"<timestamp>","<graph1>",1,"<graph1>","Item","item-a","{\"name\":\"replaced\"}","<timestamp>","item-new","{\"name\":\"item-new\"}","<timestamp>",2]
 sql RELEASE SAVEPOINT typegraph_atomic_program
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.compareAndSet match
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook bulk-start compareAndSet node:Item
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -601,31 +552,27 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-a","item-a","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","swapped","item-a","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end compareAndSet node:Item affected=1
 => ok applied
 
 ### node.compareAndSet mismatch
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook bulk-start compareAndSet node:Item
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS NOT MATERIALIZED ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND id = $7 ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND "props" #> ARRAY['name'] = CAST($10 AS jsonb) AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
     ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","{\"name\":\"swapped\"}","<timestamp>","\"not-the-name\""]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end compareAndSet node:Item affected=0
 => ok rejected
 
 ### node.updateWhere
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook bulk-start updateWhere node:Item
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -639,31 +586,27 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-a","item-a","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","set-updated","item-a","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end updateWhere node:Item affected=1
 => ok affected=1
 
 ### node.updateWhere matching no row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook bulk-start updateWhere node:Item
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS NOT MATERIALIZED ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND props #>> ARRAY['name'] = $7 ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
     ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-missing","{\"name\":\"set-updated\"}","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end updateWhere node:Item affected=0
 => ok affected=0
 
 ### node.delete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-c"]
 hook start delete node:Item item-c
@@ -681,27 +624,23 @@ sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_
     ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item-c"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-c","item_name","item-c"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete node:Item item-c written
 => ok
 
 ### node.delete missing row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-missing"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.delete with a live edge
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 hook start delete node:Item item-a
@@ -717,8 +656,7 @@ sql ROLLBACK
 
 ### node.bulkDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
@@ -735,28 +673,24 @@ sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_
     ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item-c"]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-c","item_name","item-c"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkDelete absent rows
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
     ["<graph1>","Item","item-dead","item-missing"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.hardDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-c"]
 hook start delete node:Item item-c
@@ -776,16 +710,14 @@ sql DELETE FROM "typegraph_edges" WHERE ( ("typegraph_edges"."graph_id" = $1 AND
     ["<graph1>","Item","item-c","<graph1>","Item","item-c"]
 sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-c"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete node:Item item-c unknown
 => ok
 
 ### node.bulkHardDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-c","item-missing"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
@@ -806,15 +738,13 @@ sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND ( 
 sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3) RETURNING "typegraph_nodes"."id"
     ["<graph1>","Item","item-c"]
 sql RELEASE SAVEPOINT typegraph_frame_writes
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### node.bulkHardDelete with a live edge and a tombstone
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-dead"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
@@ -828,21 +758,18 @@ sql ROLLBACK
 
 ### node.getOrCreateByConstraint found
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4
     ["<graph1>","Item","item_name","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### node.getOrCreateByConstraint created
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4
     ["<graph1>","Item","item_name","fresh"]
 hook start create node:Item <id1>
@@ -850,16 +777,14 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql WITH "node_pre_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($1, $2, $3, $4, $5, $6, $7)), "node_pre_claim_holder" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_pre_claim_input" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_pre_claim_input"."graph_id" AND "held_claim"."node_kind" = "node_pre_claim_input"."axis" AND "held_claim"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "held_claim"."key" = "node_pre_claim_input"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_pre_claim_input"."node_id" AND "held_claim"."concrete_kind" = "node_pre_claim_input"."concrete_kind") ), "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") AS ( SELECT "node_pre_disjoint_node_probe"."ordinal"::integer, "node_pre_disjoint_node_probe"."probe_ordinal"::integer, "node_pre_disjoint_node_probe"."axis", "node_pre_disjoint_node_probe"."constraint_name", "node_pre_disjoint_node_probe"."key", "legacy_disjoint_nodes"."id" AS node_id, "legacy_disjoint_nodes"."kind" AS concrete_kind, "node_pre_disjoint_node_probe"."conflicting_kind" FROM (VALUES ($8, $9, $10, $11, $12, $13, $14, $15)) AS "node_pre_disjoint_node_probe" ("ordinal", "probe_ordinal", "axis", "constraint_name", "key", "node_id", "concrete_kind", "conflicting_kind") JOIN "typegraph_nodes" AS "legacy_disjoint_nodes" ON "legacy_disjoint_nodes"."graph_id" = $16 AND "legacy_disjoint_nodes"."kind" = "node_pre_disjoint_node_probe"."conflicting_kind" AND "legacy_disjoint_nodes"."id" = "node_pre_disjoint_node_probe"."key" AND "legacy_disjoint_nodes"."deleted_at" IS NULL ) , "node_post_claim_values" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS (VALUES ($17, $18, $19, $20, $21, $22, $23)), "node_post_claim_holder" AS ( SELECT "node_post_claim_values"."ordinal" AS ordinal, "node_post_claim_values"."axis" AS axis, "node_post_claim_values"."constraint_name" AS constraint_name, "node_post_claim_values"."key" AS key, "held_claim"."node_id" AS holder_id, "held_claim"."concrete_kind" AS holder_kind FROM "node_post_claim_values" JOIN "typegraph_node_uniques" AS "held_claim" ON "held_claim"."graph_id" = "node_post_claim_values"."graph_id" AND "held_claim"."node_kind" = "node_post_claim_values"."axis" AND "held_claim"."constraint_name" = "node_post_claim_values"."constraint_name" AND "held_claim"."key" = "node_post_claim_values"."key" WHERE "held_claim"."deleted_at" IS NULL AND NOT ("held_claim"."node_id" = "node_post_claim_values"."node_id" AND "held_claim"."concrete_kind" = "node_post_claim_values"."concrete_kind") ), "node_claim_admitted" AS ( SELECT 1 AS admitted WHERE NOT EXISTS (SELECT 1 FROM "node_pre_claim_holder") AND NOT EXISTS (SELECT 1 FROM "node_pre_disjoint_node_probe") AND NOT EXISTS (SELECT 1 FROM "node_post_claim_holder") ) , "node_pre_claim_source" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_pre_claim_input"."ordinal", "node_pre_claim_input"."graph_id", "node_pre_claim_input"."axis", "node_pre_claim_input"."constraint_name", "node_pre_claim_input"."key", "node_pre_claim_input"."node_id", "node_pre_claim_input"."concrete_kind" FROM "node_pre_claim_input" CROSS JOIN "node_claim_admitted" ) , "node_pre_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_pre_claim_source"."graph_id", "node_pre_claim_source"."axis", "node_pre_claim_source"."constraint_name", "node_pre_claim_source"."key", "node_pre_claim_source"."node_id", "node_pre_claim_source"."concrete_kind", NULL FROM "node_pre_claim_source" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_pre_claim_verdict" AS ( SELECT "node_pre_claim_input"."ordinal" AS ordinal, "node_pre_claim_input"."axis" AS axis, "node_pre_claim_input"."constraint_name" AS constraint_name, "node_pre_claim_input"."key" AS key, "node_pre_claim_input"."node_id" AS new_node_id, "node_pre_claim_input"."concrete_kind" AS new_concrete_kind, "node_pre_claimed"."node_id" AS holder_id, "node_pre_claimed"."concrete_kind" AS holder_kind, "node_pre_claimed"."node_id" = "node_pre_claim_input"."node_id" AND "node_pre_claimed"."concrete_kind" = "node_pre_claim_input"."concrete_kind" AS accepted FROM "node_pre_claim_input" JOIN "node_pre_claimed" ON "node_pre_claimed"."axis" = "node_pre_claim_input"."axis" AND "node_pre_claimed"."constraint_name" = "node_pre_claim_input"."constraint_name" AND "node_pre_claimed"."key" = "node_pre_claim_input"."key" ) , "node_pre_gate" AS ( SELECT 1 AS gate FROM "node_claim_admitted" WHERE NOT EXISTS ( SELECT 1 FROM "node_pre_claim_verdict" WHERE accepted = FALSE ) ) , "node_inserted" AS MATERIALIZED ( INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $24, $25, $26, $27, 1, $28, NULL, $29, $30 FROM "node_pre_gate" RETURNING * ), "node_post_claim_input" ("ordinal", "graph_id", "axis", "constraint_name", "key", "node_id", "concrete_kind") AS ( SELECT "node_post_claim_values"."ordinal", "node_post_claim_values"."graph_id", "node_post_claim_values"."axis", "node_post_claim_values"."constraint_name", "node_post_claim_values"."key", "node_post_claim_values"."node_id", "node_post_claim_values"."concrete_kind" FROM "node_post_claim_values" CROSS JOIN "node_inserted" ) , "node_post_claimed" AS ( INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") SELECT "node_post_claim_input"."graph_id", "node_post_claim_input"."axis", "node_post_claim_input"."constraint_name", "node_post_claim_input"."key", "node_post_claim_input"."node_id", "node_post_claim_input"."concrete_kind", NULL FROM "node_post_claim_input" ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" AS axis, "constraint_name" AS constraint_name, "key" AS key, "node_id" AS node_id, "concrete_kind" AS concrete_kind ), "node_post_claim_verdict" AS ( SELECT "node_post_claim_input"."ordinal" AS ordinal, "node_post_claim_input"."axis" AS axis, "node_post_claim_input"."constraint_name" AS constraint_name, "node_post_claim_input"."key" AS key, "node_post_claim_input"."node_id" AS new_node_id, "node_post_claim_input"."concrete_kind" AS new_concrete_kind, "node_post_claimed"."node_id" AS holder_id, "node_post_claimed"."concrete_kind" AS holder_kind, "node_post_claimed"."node_id" = "node_post_claim_input"."node_id" AND "node_post_claimed"."concrete_kind" = "node_post_claim_input"."concrete_kind" AS accepted FROM "node_post_claim_input" JOIN "node_post_claimed" ON "node_post_claimed"."axis" = "node_post_claim_input"."axis" AND "node_post_claimed"."constraint_name" = "node_post_claim_input"."constraint_name" AND "node_post_claimed"."key" = "node_post_claim_input"."key" ) , "inserted_node" AS MATERIALIZED ( SELECT * FROM "node_inserted" WHERE NOT EXISTS ( SELECT 1 FROM "node_post_claim_verdict" WHERE accepted = FALSE ) ) , "node_claim_conflicts" AS (SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_holder" UNION ALL SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_pre_claim_verdict" WHERE accepted = FALSE UNION ALL SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_holder" UNION ALL SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM "node_post_claim_verdict" WHERE accepted = FALSE), "node_claim_outcome" AS ( SELECT CASE WHEN "first_claim_conflict"."axis" IS NULL THEN 'node_inserted' ELSE 'claim_conflict' END AS write_discriminator, "first_claim_conflict"."axis" AS claim_axis, "first_claim_conflict"."constraint_name" AS claim_constraint_name, "first_claim_conflict"."key" AS claim_key, "first_claim_conflict"."holder_id" AS claim_holder_id, "first_claim_conflict"."holder_kind" AS claim_holder_kind FROM (SELECT 1 AS sentinel) AS "outcome_sentinel" LEFT JOIN LATERAL ( SELECT * FROM "node_claim_conflicts" ORDER BY phase, ordinal, probe_ordinal LIMIT 1 ) AS "first_claim_conflict" ON TRUE ) SELECT "inserted_node".*, "node_claim_outcome".write_discriminator, "node_claim_outcome".claim_axis, "node_claim_outcome".claim_constraint_name, "node_claim_outcome".claim_key, "node_claim_outcome".claim_holder_id, "node_claim_outcome".claim_holder_kind FROM "node_claim_outcome" LEFT JOIN "inserted_node" ON TRUE
     [0,"<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item",0,0,"\u001edisjoint\u001eItem|Other","\u001edisjointWith","<id1>","<id1>","Item","Other","<graph1>",0,"<graph1>","Item","item_name","fresh","<id1>","Item","<graph1>","Item","<id1>","{\"name\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item <id1> written
 => ok created
 
 ### node.bulkGetOrCreateByConstraint
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5)
     ["<graph1>","Item","item_name","item-a","fresh"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -874,28 +799,24 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","<id1>","{\"name\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","fresh","<id1>","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found,created
 
 ### node.bulkGetOrCreateByConstraint found only
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4)
     ["<graph1>","Item","item_name","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### node.getOrCreateByConstraint ifExists update found
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4
     ["<graph1>","Item","item_name","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -906,15 +827,13 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 
 ### node.getOrCreateByConstraint ifExists update found coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4
     ["<graph1>","Item","item_name","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -925,15 +844,13 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 
 ### node.bulkGetOrCreateByConstraint ifExists update live, retired and fresh
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5, $6)
     ["<graph1>","Item","item_name","item-a","item-dead","fresh"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -976,15 +893,13 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","<id1>","{\"name\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","fresh","<id1>","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated,resurrected,created
 
 ### node.bulkGetOrCreateByConstraint ifExists update live, retired and fresh coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4, $5, $6)
     ["<graph1>","Item","item_name","item-a","item-dead","fresh"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -1027,41 +942,35 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","<id1>","{\"name\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ($1, $2, $3, $4, $5, $6, NULL) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id" ELSE "typegraph_node_uniques"."node_id" END, "concrete_kind" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind" WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind" ELSE "typegraph_node_uniques"."concrete_kind" END, "deleted_at" = CASE WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL ELSE "typegraph_node_uniques"."deleted_at" END RETURNING "node_kind" as node_kind, "constraint_name" as constraint_name, "key" as key, "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","fresh","<id1>","Item"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated,resurrected,created
 
 ### edge.create generated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
 
 ### edge.create supplied id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link link-new
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link link-new written
 => ok
 
 ### edge.create over a tombstone
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link link-dead
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-a"]
@@ -1071,8 +980,7 @@ sql ROLLBACK
 
 ### edge.create occupied id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link link-live
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
@@ -1082,8 +990,7 @@ sql ROLLBACK
 
 ### edge.create generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link link-live
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"collides\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
@@ -1093,15 +1000,13 @@ sql ROLLBACK
 
 ### edge.create of an unregistered kind
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql ROLLBACK
 => KindNotFoundError[KIND_NOT_FOUND]
 
 ### edge.create endpoint of an unregistered kind
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 hook error create edge EndpointError[ENDPOINT_ERROR]
 sql ROLLBACK
@@ -1109,34 +1014,29 @@ sql ROLLBACK
 
 ### edge.create parallel to a live edge
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
     ["<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-a","<graph1>","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
 
 ### edge.create second edge from one source
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
     ["<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-a","<graph1>","Item","item-c"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
 
 ### edge.create missing endpoint
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-missing","{\"label\":\"missing\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-missing"]
@@ -1152,8 +1052,7 @@ sql ROLLBACK
 
 ### edge.create tombstoned endpoint
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link <id1>
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-dead","{\"label\":\"tombstoned\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-dead"]
@@ -1169,8 +1068,7 @@ sql ROLLBACK
 
 ### edge.create after a schema bump
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 hook start create edge:link link-stale
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" CROSS JOIN ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $12 AND "typegraph_schema_versions"."version" = $13 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE "from_node"."graph_id" = $14 AND "from_node"."kind" = $15 AND "from_node"."id" = $16 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $17 AND "to_node"."kind" = $18 AND "to_node"."id" = $19 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *
     ["<graph1>","link-stale","link","Item","item-c","Item","item-b","{\"label\":\"stale\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>",1,"<graph1>","Item","item-c","<graph1>","Item","item-b"]
@@ -1182,23 +1080,20 @@ sql ROLLBACK
 
 ### edge.bulkCreate
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
     ["<graph1>","Item","item-b","item-c"]
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11), ($12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20, NULL, $21, $22) RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.bulkCreate generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
@@ -1210,23 +1105,20 @@ sql ROLLBACK
 
 ### edge.bulkInsert
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
     ["<graph1>","Item","item-b","item-c"]
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11), ($12, $13, $14, $15, $16, $17, $18, $19, NULL, NULL, $20, NULL, $21, $22)
     ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.update
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
 hook start update edge:link link-live
@@ -1236,16 +1128,14 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update edge:link link-live written
 => ok
 
 ### edge.update clearValidTo on a missing row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-missing"]
 sql ROLLBACK
@@ -1253,8 +1143,7 @@ sql ROLLBACK
 
 ### edge.update clearValidTo on a live row
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
 hook start update edge:link link-live
@@ -1264,16 +1153,14 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "valid_to" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update edge:link link-live written
 => ok
 
 ### edge.update after a schema bump
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
 hook start update edge:link link-live
@@ -1285,8 +1172,7 @@ sql ROLLBACK
 
 ### edge.bulkUpsertById with a repeated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3, $4)
     ["<graph1>","link-live","link-new","link-live"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
@@ -1303,15 +1189,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"second\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.bulkUpsertById live and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-live","link-new"]
 sql SAVEPOINT typegraph_atomic_program
@@ -1328,15 +1212,13 @@ sql SELECT "typegraph_edges".* FROM "typegraph_edges" CROSS JOIN "typegraph_sche
 sql SELECT "typegraph_edges".* FROM "typegraph_edges" CROSS JOIN "typegraph_schema_versions" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2) AND "typegraph_schema_versions"."graph_id" = $3 AND "typegraph_schema_versions"."version" = $4 AND "typegraph_schema_versions"."is_active" = TRUE
     ["<graph1>","link-live","<graph1>",1]
 sql RELEASE SAVEPOINT typegraph_atomic_program
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.delete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
 hook start delete edge:link link-live
@@ -1344,44 +1226,38 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql UPDATE "typegraph_edges" SET "deleted_at" = $1 WHERE "typegraph_edges"."graph_id" = $2 AND "typegraph_edges"."id" = $3 AND "typegraph_edges"."kind" = $4 AND "typegraph_edges"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","link-live","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete edge:link link-live unknown
 => ok
 
 ### edge.bulkDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-live","link-dead"]
 sql UPDATE "typegraph_edges" SET "deleted_at" = $1 WHERE "typegraph_edges"."graph_id" = $2 AND "typegraph_edges"."id" IN ($3) AND "typegraph_edges"."kind" = $4 AND "typegraph_edges"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","link-live","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.bulkDelete absent rows
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-dead","link-missing"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.hardDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
 hook start delete edge:link link-live
@@ -1389,16 +1265,14 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2 AND "typegraph_edges"."kind" = $3 RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete edge:link link-live unknown
 => ok
 
 ### edge.bulkHardDelete live, tombstoned and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3, $4)
@@ -1407,28 +1281,24 @@ sql SAVEPOINT typegraph_frame_writes
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3) AND "typegraph_edges"."kind" = $4 RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link-dead","link"]
 sql RELEASE SAVEPOINT typegraph_frame_writes
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 
 ### edge.getOrCreateByEndpoints found
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### edge.getOrCreateByEndpoints created
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-c","Item","item-b"]
 hook start create edge:link <id1>
@@ -1436,16 +1306,14 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql WITH existing AS MATERIALIZED ( SELECT "candidate".*, 0::integer AS write_discriminator FROM "typegraph_edges" AS "candidate" WHERE "candidate"."graph_id" = $1 AND "candidate"."kind" = $2 AND "candidate"."from_kind" = $3 AND "candidate"."from_id" = $4 AND "candidate"."to_kind" = $5 AND "candidate"."to_id" = $6 AND TRUE ORDER BY "candidate"."deleted_at" IS NULL DESC, "candidate"."created_at" DESC, "candidate"."id" DESC LIMIT 1 ), inserted AS ( INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL, $15, NULL, $16, $17 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE NOT EXISTS (SELECT 1 FROM existing) AND "from_node"."graph_id" = $18 AND "from_node"."kind" = $19 AND "from_node"."id" = $20 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $21 AND "to_node"."kind" = $22 AND "to_node"."id" = $23 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "to_node", "from_node" RETURNING *, 1::integer AS write_discriminator ) SELECT * FROM existing UNION ALL SELECT * FROM inserted LIMIT 1
     ["<graph1>","link","Item","item-c","Item","item-b","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok created
 
 ### edge.getOrCreateByEndpoints matchOn label
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 hook start create edge:link <id1>
@@ -1453,16 +1321,14 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql WITH existing AS MATERIALIZED ( SELECT "candidate".*, 0::integer AS write_discriminator FROM "typegraph_edges" AS "candidate" WHERE "candidate"."graph_id" = $1 AND "candidate"."kind" = $2 AND "candidate"."from_kind" = $3 AND "candidate"."from_id" = $4 AND "candidate"."to_kind" = $5 AND "candidate"."to_id" = $6 AND ("candidate"."props" -> $7) = $8::jsonb ORDER BY "candidate"."deleted_at" IS NULL DESC, "candidate"."created_at" DESC, "candidate"."id" DESC LIMIT 1 ), inserted AS ( INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT $9, $10, $11, $12, $13, $14, $15, $16, NULL, NULL, $17, NULL, $18, $19 FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE NOT EXISTS (SELECT 1 FROM existing) AND "from_node"."graph_id" = $20 AND "from_node"."kind" = $21 AND "from_node"."id" = $22 AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = $23 AND "to_node"."kind" = $24 AND "to_node"."id" = $25 AND "to_node"."deleted_at" IS NULL FOR KEY SHARE OF "from_node", "to_node" RETURNING *, 1::integer AS write_discriminator ) SELECT * FROM existing UNION ALL SELECT * FROM inserted LIMIT 1
     ["<graph1>","link","Item","item-a","Item","item-b","label","\"other\"","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"other\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok created
 
 ### edge.bulkGetOrCreateByEndpoints
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $9 AND "typegraph_edges"."kind" IN ($10) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
@@ -1475,41 +1341,35 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-b","item-c"]
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found,created
 
 ### edge.bulkGetOrCreateByEndpoints found only
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $5 AND "typegraph_edges"."kind" IN ($6) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["Item","item-a","Item","item-b","<graph1>","link"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update all found unchanged
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $5 AND "typegraph_edges"."kind" IN ($6) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["Item","item-a","Item","item-b","<graph1>","link"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### edge.getOrCreateByEndpoints ifExists update found and changed
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1520,15 +1380,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 
 ### edge.getOrCreateByEndpoints ifExists update found and changed coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1539,15 +1397,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 
 ### edge.getOrCreateByEndpoints ifExists update found unchanged
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1558,15 +1414,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
     ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 
 ### edge.getOrCreateByEndpoints ifExists update found unchanged coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1575,15 +1429,13 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 
 ### edge.getOrCreateByEndpoints ifExists update over a tombstone
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-c","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1596,15 +1448,13 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a","item-c"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
     ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok resurrected
 
 ### edge.getOrCreateByEndpoints ifExists update over a tombstone coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-c","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1617,15 +1467,13 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a","item-c"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
     ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok resurrected
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."kind" IN ($14) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1646,15 +1494,13 @@ sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2 WHERE "typegrap
     ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
     ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated,resurrected,created
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $13 AND "typegraph_edges"."kind" IN ($14) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
@@ -1673,7 +1519,6 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a","item-c"]
 sql UPDATE "typegraph_edges" SET "props" = $1, "updated_at" = $2, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = $3 AND "typegraph_edges"."id" = $4 AND "typegraph_edges"."kind" = $5 AND "typegraph_edges"."from_kind" = $6 AND "typegraph_edges"."from_id" = $7 AND "typegraph_edges"."to_kind" = $8 AND "typegraph_edges"."to_id" = $9 RETURNING *
     ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found,resurrected,created

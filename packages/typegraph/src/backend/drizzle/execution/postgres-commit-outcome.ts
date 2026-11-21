@@ -13,7 +13,7 @@
  *
  * The evidence is a marker that identifies the transaction itself: right
  * after the transaction opens, a transaction-local setting
- * (`set_config(key, nonce, true)`) holding a fresh nonce; right before the
+ * (`SET LOCAL typegraph.transaction_marker = 'open'`); right before the
  * `COMMIT`, a read of that setting on the same session, through the
  * connection's statement queue so it never overlaps a statement still
  * running. A transaction-local setting lives exactly as long as the
@@ -21,7 +21,7 @@
  * `ROLLBACK` — and survives a caller's `ROLLBACK TO SAVEPOINT`, since it was
  * set before any savepoint the caller could take. The read decides:
  *
- * - It returns the nonce: the session is still inside the transaction
+ * - It returns the marker: the session is still inside the transaction
  *   TypeGraph opened, and that transaction is healthy. Commit.
  * - It is refused with `25P02`: that transaction is aborted. Reject with
  *   {@link TransactionRolledBackError}.
@@ -29,6 +29,15 @@
  *   and possibly replaced, by a statement TypeGraph did not issue. Do not
  *   commit; reject with {@link TransactionOutcomeUnknownError}, which is
  *   never retried — whatever ended the transaction may have committed it.
+ *
+ * The marker is planted with `SET LOCAL`, not `SELECT set_config(...)`: a
+ * `SET` takes no snapshot, so a `REPEATABLE READ` or `SERIALIZABLE`
+ * transaction still takes its snapshot at the callback's first statement,
+ * exactly as it did before the marker existed. The value is a constant, which
+ * `SET` (it binds no parameters) and statement caching both prefer: no
+ * other transaction can set it on this session, since the setting ends with
+ * the transaction that set it and a nested transaction (a savepoint on this
+ * one) plants none, so its presence alone identifies the transaction.
  *
  * A transaction-local setting is preferred to a savepoint marker: both
  * survive a caller's savepoint rollback and both distinguish the three
@@ -90,15 +99,20 @@ export type PostgresTransactionMarker = Readonly<{
 /**
  * The transaction-local setting that carries the marker. Namespaced so it
  * cannot collide with an application's own custom setting. Both marker
- * statements bind it as their first parameter.
+ * statements name it in their text and bind no parameters.
  */
 export const TRANSACTION_MARKER_SETTING = "typegraph.transaction_marker";
 
-function plantMarkerStatement(nonce: string) {
-  return sql`SELECT set_config(${TRANSACTION_MARKER_SETTING}, ${nonce}, true)`;
-}
+/** The marker's value while the transaction that set it is open. */
+const MARKER_VALUE = "open";
 
-const READ_MARKER_STATEMENT = sql`SELECT current_setting(${TRANSACTION_MARKER_SETTING}, true) AS marker`;
+const PLANT_MARKER_STATEMENT = sql.raw(
+  `SET LOCAL ${TRANSACTION_MARKER_SETTING} = '${MARKER_VALUE}'`,
+);
+
+const READ_MARKER_STATEMENT = sql.raw(
+  `SELECT current_setting('${TRANSACTION_MARKER_SETTING}', true) AS marker`,
+);
 
 /**
  * Driver-client members that send a statement and return its pending result:
@@ -286,10 +300,7 @@ async function plantMarker(
     createPostgresExecutionAdapter(transaction),
     getPinnedPostgresTransactionConnection(transaction) ?? transaction,
   );
-  // Not drawn from the entity id generator: the marker must neither consume
-  // nor depend on the ids a transaction's writes are given.
-  const nonce = globalThis.crypto.randomUUID();
-  await session.execute(plantMarkerStatement(nonce));
+  await session.execute(PLANT_MARKER_STATEMENT);
   // The statement count at the last read that found the marker; a check
   // with nothing sent since has nothing new to learn from the session.
   let verifiedAtStatement: number | undefined;
@@ -313,7 +324,7 @@ async function plantMarker(
         }
         throw error;
       }
-      if (rows[0]?.marker !== nonce) {
+      if (rows[0]?.marker !== MARKER_VALUE) {
         throw new TransactionOutcomeUnknownError(
           { reason: "transaction-ended" },
           { cause: evidence.firstEngineError },

@@ -1634,11 +1634,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "-- BEGIN (native transaction) --",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-      "<<MARKER NONCE>>",
-    ],
-    "sql": "SELECT set_config($1, $2, true)",
+    "params": [],
+    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
   },
   {
     "params": [],
@@ -1821,10 +1818,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "ANALYZE "typegraph_edges"",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-    ],
-    "sql": "SELECT current_setting($1, true) AS marker",
+    "params": [],
+    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
@@ -1861,11 +1856,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "set transaction isolation level read committed",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-      "<<MARKER NONCE>>",
-    ],
-    "sql": "SELECT set_config($1, $2, true)",
+    "params": [],
+    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
   },
   {
     "params": [
@@ -1925,10 +1917,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   ",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-    ],
-    "sql": "SELECT current_setting($1, true) AS marker",
+    "params": [],
+    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
@@ -2190,11 +2180,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "-- BEGIN (native transaction) --",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-      "<<MARKER NONCE>>",
-    ],
-    "sql": "SELECT set_config($1, $2, true)",
+    "params": [],
+    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
   },
   {
     "params": [
@@ -2293,10 +2280,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       ",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-    ],
-    "sql": "SELECT current_setting($1, true) AS marker",
+    "params": [],
+    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
@@ -3269,11 +3254,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "set transaction isolation level read committed",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-      "<<MARKER NONCE>>",
-    ],
-    "sql": "SELECT set_config($1, $2, true)",
+    "params": [],
+    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
   },
   {
     "params": [
@@ -3333,10 +3315,8 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   ",
   },
   {
-    "params": [
-      "typegraph.transaction_marker",
-    ],
-    "sql": "SELECT current_setting($1, true) AS marker",
+    "params": [],
+    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],

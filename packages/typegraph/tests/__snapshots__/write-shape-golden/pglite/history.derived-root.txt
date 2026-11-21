@@ -1,8 +1,7 @@
 ### node.create generated id
 hook start create node:Item <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -20,8 +19,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id3>","<graph1>","Item","<id1>","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item <id1> written
 => ok
@@ -30,8 +28,7 @@ revision +1
 ### node.create supplied id
 hook start create node:Item item-new
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -49,8 +46,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
@@ -59,8 +55,7 @@ revision +1
 ### node.createFromRecord supplied id
 hook start create node:Item item-new
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -78,8 +73,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
@@ -88,8 +82,7 @@ revision +1
 ### node.create over a tombstone
 hook start create node:Item item-dead
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -113,8 +106,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-dead"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-dead","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-dead written
 => ok
@@ -123,8 +115,7 @@ revision +1
 ### node.create occupied id
 hook start create node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -140,8 +131,7 @@ revision +0
 ### node.create id owned by another kind
 hook start create node:Item other-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -159,8 +149,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"other-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","other-a","{\"name\":\"cross\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item other-a written
 => ok
@@ -169,8 +158,7 @@ revision +1
 ### node.create after a schema bump
 hook start create node:Item item-stale
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -184,8 +172,7 @@ revision +0
 ### node.create generated id already occupied
 hook start create node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -199,8 +186,7 @@ revision +0
 ### node.create generated id when the statement misses its fence
 hook start create node:Item <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -218,8 +204,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id3>","<graph1>","Item","<id1>","{\"name\":\"fence-miss\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item <id1> written
 fault not reached: the next statement misses its schema fence
@@ -232,8 +217,7 @@ revision +0
 
 ### node.bulkCreate generated ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -251,16 +235,14 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"<id1>","<id2>"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id4>","<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkCreate generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -272,8 +254,7 @@ revision +0
 
 ### node.bulkCreate supplied ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -293,16 +274,14 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"bulk-1","bulk-2"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id2>","<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkInsert generated ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -322,16 +301,14 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","<id1>","<id2>"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id4>","<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkInsert generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -343,8 +320,7 @@ revision +0
 
 ### node.bulkInsert supplied ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -366,8 +342,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","bulk-1","bulk-2"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id2>","<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -375,8 +350,7 @@ revision +1
 ### node.update
 hook start update node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -396,8 +370,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"renamed\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -406,8 +379,7 @@ revision +1
 ### node.update clearValidTo on a missing row
 hook start update node:Item item-missing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -421,8 +393,7 @@ revision +0
 ### node.update clearValidTo on a live row
 hook start update node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -442,8 +413,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"renamed\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -452,8 +422,7 @@ revision +1
 ### node.update after a schema bump
 hook start update node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -469,8 +438,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a"]
 hook start update node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -490,8 +458,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -502,8 +469,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-new"]
 hook start create node:Item item-new
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -521,8 +487,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"upserted\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-new written
 => ok
@@ -533,8 +498,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-dead"]
 hook start update node:Item item-dead
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -554,8 +518,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-dead"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-dead","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-dead written
 => ok
@@ -565,13 +528,11 @@ revision +1
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +0
@@ -581,8 +542,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a"]
 hook start update node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -602,8 +562,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -611,8 +570,7 @@ revision +1
 
 ### node.bulkUpsertById with a repeated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4, $5)
     ["<graph1>","Item","item-a","item-new","item-a"]
@@ -644,16 +602,14 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"second\"}",3,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkUpsertById live and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-new"]
@@ -681,16 +637,14 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkReplaceById
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-new"]
@@ -718,8 +672,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26)
     ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"replaced\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -727,8 +680,7 @@ revision +1
 ### node.compareAndSet match
 hook bulk-start compareAndSet node:Item
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -746,8 +698,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"swapped\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end compareAndSet node:Item affected=1
 => ok applied
@@ -756,15 +707,13 @@ revision +1
 ### node.compareAndSet mismatch
 hook bulk-start compareAndSet node:Item
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS NOT MATERIALIZED ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND id = $7 ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND "props" #> ARRAY['name'] = CAST($10 AS jsonb) AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
     ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","{\"name\":\"swapped\"}","<timestamp>","\"not-the-name\""]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end compareAndSet node:Item affected=0
 => ok rejected
@@ -773,8 +722,7 @@ revision +0
 ### node.updateWhere
 hook bulk-start updateWhere node:Item
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -792,8 +740,7 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"set-updated\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end updateWhere node:Item affected=1
 => ok affected=1
@@ -802,15 +749,13 @@ revision +1
 ### node.updateWhere matching no row
 hook bulk-start updateWhere node:Item
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql WITH "tg_set_keys" AS NOT MATERIALIZED ( SELECT DISTINCT CAST($1 AS TEXT) AS "tg_set_key_graph_id", CAST($2 AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE "default" AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS NOT MATERIALIZED ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = $3 AND kind = $4 AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= $5) AND (valid_to IS NULL OR valid_to > $6) AND props #>> ARRAY['name'] = $7 ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = "props" || $8::jsonb, "updated_at" = $9, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
     ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-missing","{\"name\":\"set-updated\"}","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook bulk-end updateWhere node:Item affected=0
 => ok affected=0
@@ -821,8 +766,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c"]
 hook start delete node:Item item-c
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -846,8 +790,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12, $13, NULL, NULL, $14)
     ["<id2>","<graph1>","Item","item-c","{\"name\":\"item-c\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete node:Item item-c written
 => ok
@@ -864,8 +807,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-a"]
 hook start delete node:Item item-a
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -880,8 +822,7 @@ revision +0
 
 ### node.bulkDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -907,23 +848,20 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11, $12, $13, NULL, NULL, $14)
     ["<id2>","<graph1>","Item","item-c","{\"name\":\"item-c\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### node.bulkDelete absent rows
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR UPDATE
     ["<graph1>","Item","item-dead","item-missing"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +0
@@ -933,8 +871,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c"]
 hook start delete node:Item item-c
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -970,8 +907,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-dead"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
     ["<graph1>","link-dead"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete node:Item item-c unknown
 => ok
@@ -981,8 +917,7 @@ revision +1
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-c","item-missing"]
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1016,8 +951,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-dead"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
     ["<graph1>","link-dead"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -1026,8 +960,7 @@ revision +1
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-dead"]
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1042,8 +975,7 @@ revision +0
 ### edge.create generated id
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1061,8 +993,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
@@ -1071,8 +1002,7 @@ revision +1
 ### edge.create supplied id
 hook start create edge:link link-new
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1090,8 +1020,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-new"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link link-new written
 => ok
@@ -1100,8 +1029,7 @@ revision +1
 ### edge.create over a tombstone
 hook start create edge:link link-dead
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1115,8 +1043,7 @@ revision +0
 ### edge.create occupied id
 hook start create edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1130,8 +1057,7 @@ revision +0
 ### edge.create generated id already occupied
 hook start create edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1149,8 +1075,7 @@ revision +0
 ### edge.create endpoint of an unregistered kind
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1162,8 +1087,7 @@ revision +0
 ### edge.create parallel to a live edge
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1181,8 +1105,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
@@ -1191,8 +1114,7 @@ revision +1
 ### edge.create second edge from one source
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1210,8 +1132,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok
@@ -1220,8 +1141,7 @@ revision +1
 ### edge.create missing endpoint
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1237,8 +1157,7 @@ revision +0
 ### edge.create tombstoned endpoint
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1254,8 +1173,7 @@ revision +0
 ### edge.create after a schema bump
 hook start create edge:link link-stale
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1268,8 +1186,7 @@ revision +0
 
 ### edge.bulkCreate
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1289,16 +1206,14 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>","<id2>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32)
     ["<id4>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### edge.bulkCreate generated id already occupied
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1312,8 +1227,7 @@ revision +0
 
 ### edge.bulkInsert
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1335,8 +1249,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","<id1>","<id2>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32)
     ["<id4>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -1346,8 +1259,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 hook start update edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1367,8 +1279,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update edge:link link-live written
 => ok
@@ -1385,8 +1296,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 hook start update edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1406,8 +1316,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end update edge:link link-live written
 => ok
@@ -1418,8 +1327,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 hook start update edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1432,8 +1340,7 @@ revision +0
 
 ### edge.bulkUpsertById with a repeated id
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3, $4)
     ["<graph1>","link-live","link-new","link-live"]
@@ -1465,16 +1372,14 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-new","link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32)
     ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### edge.bulkUpsertById live and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-live","link-new"]
@@ -1502,8 +1407,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-new","link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32)
     ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -1513,8 +1417,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 hook start delete edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1534,8 +1437,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, $14, $15, $16, NULL, NULL, $17)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete edge:link link-live unknown
 => ok
@@ -1543,8 +1445,7 @@ revision +1
 
 ### edge.bulkDelete
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1566,23 +1467,20 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, $14, $15, $16, NULL, NULL, $17)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
 
 ### edge.bulkDelete absent rows
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-dead","link-missing"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +0
@@ -1592,8 +1490,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-live"]
 hook start delete edge:link link-live
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1611,8 +1508,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
     ["<graph1>","link-live"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end delete edge:link link-live unknown
 => ok
@@ -1620,8 +1516,7 @@ revision +1
 
 ### edge.bulkHardDelete live, tombstoned and absent ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1641,8 +1536,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live","link-dead"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3)
     ["<graph1>","link-live","link-dead"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok
 revision +1
@@ -1652,12 +1546,10 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 revision +0
@@ -1667,8 +1559,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-c","Item","item-b"]
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -1686,8 +1577,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok created
@@ -1698,8 +1588,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 hook start create edge:link <id1>
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -1717,8 +1606,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"other\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create edge:link <id1> written
 => ok created
@@ -1728,8 +1616,7 @@ revision +1
 sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES ($1, $2, $3, $4), ($5, $6, $7, $8) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = $9 AND "typegraph_edges"."kind" IN ($10) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -1753,8 +1640,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found,created
 revision +1
@@ -1767,8 +1653,7 @@ revision +0
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update all found unchanged
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -1776,8 +1661,7 @@ sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite
     ["Item","item-a","Item","item-b","<graph1>","link"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 revision +0
@@ -1787,16 +1671,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1816,8 +1697,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 revision +1
@@ -1827,16 +1707,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1856,8 +1733,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 revision +1
@@ -1867,16 +1743,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1896,8 +1769,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-live"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated
 revision +1
@@ -1907,23 +1779,19 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-a","Item","item-b"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-a","Item","item-b"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
     ["<graph1>","link-live"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found
 revision +0
@@ -1933,16 +1801,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-c","Item","item-a"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -1964,8 +1829,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-dead"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok resurrected
 revision +1
@@ -1975,16 +1839,13 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link","Item","item-c","Item","item-a"]
 sql BEGIN
 sql set transaction read only
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
     ["<graph1>","link","Item","item-c","Item","item-a"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -2006,16 +1867,14 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"link-dead"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id2>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok resurrected
 revision +1
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -2051,16 +1910,14 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>","link-live","link-dead"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32), ($33, $34, $35, $36, $37, $38, $39, $40, $41, $42, NULL, $43, $44, NULL, $45, $46, $47, NULL, NULL, $48)
     ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id4>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}","<id5>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok updated,resurrected,created
 revision +1
 
 ### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh coalescing
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
@@ -2096,23 +1953,20 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>","link-dead"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16), ($17, $18, $19, $20, $21, $22, $23, $24, $25, $26, NULL, $27, $28, NULL, $29, $30, $31, NULL, NULL, $32)
     ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id4>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok found,resurrected,created
 revision +1
 
 ### tx.writeNodeUpsertBatch live, absent and tombstoned ids
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2)), current_setting('transaction_isolation') AS transaction_isolation
     ["typegraph:recorded-graph-write","<graph1>"]
 sql WITH "schema_fence" AS ( SELECT 1 FROM "typegraph_schema_versions" WHERE graph_id = $1 AND version = $2 AND is_active = TRUE FOR SHARE ), "input_rows" (graph_id, kind, id, create_props, update_props, ord) AS ( VALUES ($3, $4, $5, $6, $7, $8), ($9, $10, $11, $12, $13, $14), ($15, $16, $17, $18, $19, $20) ), "upserted" AS ( INSERT INTO "typegraph_nodes" AS "target" (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at) SELECT graph_id, kind, id, create_props::jsonb, 1, $21, NULL, $22, $23 FROM "input_rows" CROSS JOIN "schema_fence" ON CONFLICT (graph_id, kind, id) DO UPDATE SET props = CASE WHEN "target".deleted_at IS NULL THEN "target".props || ( SELECT update_props::jsonb FROM "input_rows" WHERE graph_id = "target".graph_id AND kind = "target".kind AND id = "target".id ) ELSE EXCLUDED.props END, version = "target".version + 1, valid_from = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_from ELSE EXCLUDED.valid_from END, valid_to = CASE WHEN "target".deleted_at IS NULL THEN "target".valid_to ELSE EXCLUDED.valid_to END, deleted_at = NULL, updated_at = EXCLUDED.updated_at RETURNING * ) SELECT "upserted".* FROM "upserted" JOIN "input_rows" USING (graph_id, kind, id) ORDER BY "input_rows".ord
     ["<graph1>",1,"<graph1>","Item","item-a","{\"name\":\"batched\"}","{\"name\":\"batched\"}",0,"<graph1>","Item","item-new","{\"name\":\"item-new\"}","{\"name\":\"item-new\"}",1,"<graph1>","Item","item-dead","{\"name\":\"item-dead\"}","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -2125,16 +1979,14 @@ sql UPDATE "typegraph_recorded_nodes" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>","Item",9007199254740991,"item-a","item-new","item-dead"]
 sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, NULL, $10, $11, $12, NULL, NULL, $13), ($14, $15, $16, $17, $18, $19, $20, NULL, $21, $22, NULL, $23, $24, $25, NULL, NULL, $26), ($27, $28, $29, $30, $31, $32, $33, NULL, $34, $35, NULL, $36, $37, $38, NULL, NULL, $39)
     ["<id2>","<graph1>","Item","item-a","{\"name\":\"batched\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}","<id3>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id4>","<graph1>","Item","item-dead","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok upserted=3
 revision +1
 
 ### tx.writeNodeUpsertBatch after a schema bump
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2)), current_setting('transaction_isolation') AS transaction_isolation
     ["typegraph:recorded-graph-write","<graph1>"]
@@ -2148,8 +2000,7 @@ revision +0
 
 ### tx.writeNodeUpsertBatch of an unregistered kind
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql ROLLBACK
 => KindNotFoundError[KIND_NOT_FOUND]
@@ -2157,8 +2008,7 @@ revision +0
 
 ### tx.assertUnchangedSince over an unchanged read set
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -2172,16 +2022,14 @@ sql SELECT scope_index, kind, id FROM ( SELECT CAST($1 AS INTEGER) AS scope_inde
     [0,"<graph1>","Item","item-a",1,1,9007199254740991,101]
 sql SELECT scope_index, kind, id FROM ( SELECT CAST($1 AS INTEGER) AS scope_index, kind, id FROM ( SELECT kind, id FROM ( SELECT DISTINCT kind, id FROM "typegraph_recorded_edges" WHERE graph_id = $2 AND from_kind = $3 AND from_id = $4 AND kind = $5 AND ( recorded_from > $6 OR (recorded_to > $7 AND recorded_to <> $8) ) ) AS region_changed_keys ORDER BY "kind" COLLATE "C", "id" COLLATE "C" LIMIT $9 ) AS region_reported_keys ) AS read_set_changed_keys ORDER BY scope_index, "kind" COLLATE "C", "id" COLLATE "C"
     [1,"<graph1>","Item","item-a","link",1,1,9007199254740991,101]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 => ok unchanged
 revision +0
 
 ### tx.assertUnchangedSince after a change in the read set
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -2203,8 +2051,7 @@ revision +0
 
 ### store import
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
@@ -2238,8 +2085,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","link-imported"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id3>","<graph1>","link-imported","link","Item","item-imported","Item","item-b","{\"label\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 sql ANALYZE (SKIP_LOCKED) "typegraph_nodes"
 sql ANALYZE (SKIP_LOCKED) "typegraph_edges"
@@ -2291,8 +2137,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2)
     ["<graph1>","<id1>"]
 sql BEGIN
-sql SELECT set_config($1, $2, true)
-    ["typegraph.transaction_marker","<marker nonce>"]
+sql SET LOCAL typegraph.transaction_marker = 'open'
 sql SELECT current_setting('transaction_isolation') AS transaction_isolation
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
@@ -2317,8 +2162,7 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-branched","item-c"]
 sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, NULL, $10, $11) RETURNING *
     ["<graph1>","<id1>","link","Item","item-c","Item","item-branched","{\"label\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -2335,8 +2179,7 @@ sql UPDATE "typegraph_recorded_edges" SET recorded_to = $1 WHERE graph_id = $2 A
     [2,"<graph1>",9007199254740991,"<id1>"]
 sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, NULL, $13, $14, $15, NULL, NULL, $16)
     ["<id4>","<graph1>","<id1>","link","Item","item-c","Item","item-branched","{\"label\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
-sql SELECT current_setting($1, true) AS marker
-    ["typegraph.transaction_marker"]
+sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
 sql COMMIT
 hook end create node:Item item-branched written
 => ok merged nodes=1 edges=1
