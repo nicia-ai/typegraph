@@ -68,8 +68,16 @@ function errorMessages(error: unknown): readonly string[] {
   return [error.message, ...errorMessages(error.cause)];
 }
 
-/** The row, counted from one, at which {@link installSetUpdatePoison} fails. */
-const POISONED_ROW = 4;
+/**
+ * The row, counted from one, at which {@link installSetUpdatePoison} fails:
+ * past the first statement of any split of a set update over
+ * {@link AUTOCOMMIT_ROWS} keys at a bind budget of ten, which held three keys
+ * of a version-keyed write and six of an id-keyed one.
+ */
+const POISONED_ROW = 10;
+
+/** The rows the autocommit case writes. */
+const AUTOCOMMIT_ROWS = 12;
 
 /**
  * Installs a trigger that fails the {@link POISONED_ROW}th node row any
@@ -1444,61 +1452,80 @@ export function registerSetNodeMutationIntegrationTests(
       });
     });
 
-    it("commits none of a direct set update that fails partway on an autocommit connection", async () => {
-      const store = context.getStore();
-      const backend = context.getBackend();
-      // On PostgreSQL a tiny bind budget is what would split a write of the
-      // keys into several statements (three keys per statement); the set
-      // update must stay one statement whatever the budget. SQLite's
-      // serialized handle is a separate database, so its own connection is
-      // used there; it has no construction-time budget to shrink.
-      const direct =
-        backend.dialect === "postgres" ?
-          await context.createSerializedBackend({
-            capabilities: { maxBindParameters: 10 },
-          })
-        : { backend, close: () => Promise.resolve() };
-      const people = [];
-      for (let index = 0; index < 6; index += 1) {
-        people.push(
-          await store.nodes.Person.create({ name: `Autocommit ${index}` }),
+    // Both operations, because a set update split into a key read and keyed
+    // UPDATE chunks may choose that path for one and not the other: an earlier
+    // revision chunked compareAndSet always but updateWhere only when its
+    // candidates projected a version, so an updateWhere-only case took the
+    // atomic fallback there and passed, while compareAndSet committed the six
+    // rows of its first chunk (as did updateWhere with a projected version,
+    // nine rows in three chunks).
+    it.for(["updateWhere", "compareAndSet"] as const)(
+      "commits none of a direct %s that fails partway on an autocommit connection",
+      async (operation) => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        // On PostgreSQL a tiny bind budget is what would split a write of the
+        // keys into several statements; the set update must stay one
+        // statement whatever the budget. SQLite's
+        // serialized handle is a separate database, so its own connection is
+        // used there; it has no construction-time budget to shrink.
+        const direct =
+          backend.dialect === "postgres" ?
+            await context.createSerializedBackend({
+              capabilities: { maxBindParameters: 10 },
+            })
+          : { backend, close: () => Promise.resolve() };
+        const people = [];
+        for (let index = 0; index < AUTOCOMMIT_ROWS; index += 1) {
+          people.push(
+            await store.nodes.Person.create({ name: `Autocommit ${index}` }),
+          );
+        }
+        const removePoison = await installSetUpdatePoison(
+          direct.backend,
+          store.graphId,
         );
-      }
-      const removePoison = await installSetUpdatePoison(
-        direct.backend,
-        store.graphId,
-      );
-      try {
-        const failure = await updateNodeSet(direct.backend, {
-          operation: "updateWhere",
-          graphId: store.graphId,
-          kind: "Person",
-          patch: { isActive: true },
-          candidateIds: asCompiledSelectSql(sql`
-            SELECT id AS person_id
-            FROM ${createSqlSchema(backend.tableNames).nodesTable}
-            WHERE graph_id = ${store.graphId} AND kind = 'Person'
-          `),
-          candidateIdColumn: "person_id",
-        }).catch((error: unknown) => error);
-        // Drivers wrap the trigger's error; it is the cause of what surfaces.
-        expect(errorMessages(failure).join("\n")).toContain(
-          "poisoned set update",
+        try {
+          const common = {
+            graphId: store.graphId,
+            kind: "Person",
+            patch: { isActive: true },
+            candidateIds: asCompiledSelectSql(sql`
+              SELECT id AS person_id
+              FROM ${createSqlSchema(backend.tableNames).nodesTable}
+              WHERE graph_id = ${store.graphId} AND kind = 'Person'
+            `),
+            candidateIdColumn: "person_id",
+          };
+          const failure = await (
+            operation === "compareAndSet" ?
+              compareAndSetNode(direct.backend, {
+                ...common,
+                operation,
+                expected: { isActive: { kind: "absent" } },
+              })
+            : updateNodeSet(direct.backend, { ...common, operation })).catch(
+            (error: unknown) => error,
+          );
+          // Drivers wrap the trigger's error; it is the cause of what surfaces.
+          expect(errorMessages(failure).join("\n")).toContain(
+            "poisoned set update",
+          );
+        } finally {
+          await removePoison();
+          await direct.close();
+        }
+        const stored = await Promise.all(
+          people.map(async (person) =>
+            requireDefined(await store.nodes.Person.getById(person.id)),
+          ),
         );
-      } finally {
-        await removePoison();
-        await direct.close();
-      }
-      const stored = await Promise.all(
-        people.map(async (person) =>
-          requireDefined(await store.nodes.Person.getById(person.id)),
-        ),
-      );
 
-      expect(
-        stored.map((person) => [person.meta.version, person.isActive]),
-      ).toEqual(people.map(() => [1, undefined]));
-    });
+        expect(
+          stored.map((person) => [person.meta.version, person.isActive]),
+        ).toEqual(people.map(() => [1, undefined]));
+      },
+    );
 
     it("updates node ids that differ only by case as two rows", async () => {
       const store = context.getStore();
