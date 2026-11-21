@@ -72,7 +72,7 @@ import {
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";
-import { validateSqlIdentifier } from "./validation";
+import { derivedAlias, validateSqlIdentifier } from "./validation";
 
 /**
  * Resolves the edge type for an edge alias based on its kind type parameter.
@@ -1026,7 +1026,8 @@ export class TraversalBuilder<
             : {}),
             cyclePolicy: this.#variableLength.cyclePolicy,
             ...(this.#variableLength.pathEnabled && {
-              pathAlias: this.#variableLength.pathAlias ?? `${alias}_path`,
+              pathAlias:
+                this.#variableLength.pathAlias ?? derivedAlias(alias, "path"),
               ...(this.#variableLength.pathFormat === undefined ?
                 {}
               : {
@@ -1034,7 +1035,8 @@ export class TraversalBuilder<
                 }),
             }),
             ...(this.#variableLength.depthEnabled && {
-              depthAlias: this.#variableLength.depthAlias ?? `${alias}_depth`,
+              depthAlias:
+                this.#variableLength.depthAlias ?? derivedAlias(alias, "depth"),
             }),
           },
         }

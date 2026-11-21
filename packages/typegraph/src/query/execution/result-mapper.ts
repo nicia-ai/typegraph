@@ -26,6 +26,7 @@ import type {
 } from "../builder/types";
 import { recursivePathTokenShape } from "../compiler/recursive-path-token";
 import { type SqlDialect } from "../dialect/types";
+import { aliasColumnName, generatedIdentifier } from "../generated-identifier";
 
 /**
  * A variable-length traversal's path column, plus whether its tokens carry the
@@ -48,7 +49,7 @@ function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
     const pathAlias = traversal.variableLength?.pathAlias;
     if (pathAlias !== undefined) {
       columns.push({
-        alias: pathAlias,
+        alias: generatedIdentifier(pathAlias),
         kindQualified:
           recursivePathTokenShape(scope, traversal) === "kind_qualified",
         format:
@@ -231,9 +232,9 @@ export function buildSelectableNode(
   row: Record<string, unknown>,
   alias: string,
 ): SelectableNode<NodeType> {
-  const id = row[`${alias}_id`] as string;
-  const kind = row[`${alias}_kind`] as string;
-  const propsRaw: unknown = row[`${alias}_props`];
+  const id = row[aliasColumnName(alias, "id")] as string;
+  const kind = row[aliasColumnName(alias, "kind")] as string;
+  const propsRaw: unknown = row[aliasColumnName(alias, "props")];
   const rawProps: Record<string, unknown> =
     typeof propsRaw === "string" ?
       (JSON.parse(propsRaw) as Record<string, unknown>)
@@ -241,26 +242,26 @@ export function buildSelectableNode(
 
   // Metadata columns - these are now always projected in CTEs
   // Normalize null → undefined for optional fields
-  const version = row[`${alias}_version`] as number;
+  const version = row[aliasColumnName(alias, "version")] as number;
   const validFrom = normalizeRowTimestamp(
-    row[`${alias}_valid_from`],
-    `${alias}_valid_from`,
+    row[aliasColumnName(alias, "valid_from")],
+    aliasColumnName(alias, "valid_from"),
   );
   const validTo = normalizeRowTimestamp(
-    row[`${alias}_valid_to`],
-    `${alias}_valid_to`,
+    row[aliasColumnName(alias, "valid_to")],
+    aliasColumnName(alias, "valid_to"),
   );
   const createdAt = normalizeRequiredRowTimestamp(
-    row[`${alias}_created_at`],
-    `${alias}_created_at`,
+    row[aliasColumnName(alias, "created_at")],
+    aliasColumnName(alias, "created_at"),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
-    row[`${alias}_updated_at`],
-    `${alias}_updated_at`,
+    row[aliasColumnName(alias, "updated_at")],
+    aliasColumnName(alias, "updated_at"),
   );
   const deletedAt = normalizeRowTimestamp(
-    row[`${alias}_deleted_at`],
-    `${alias}_deleted_at`,
+    row[aliasColumnName(alias, "deleted_at")],
+    aliasColumnName(alias, "deleted_at"),
   );
 
   const result: Record<string, unknown> = {
@@ -288,7 +289,7 @@ function buildSelectableNodeOrUndefined(
   row: Record<string, unknown>,
   alias: string,
 ): SelectableNode<NodeType> | undefined {
-  const id = row[`${alias}_id`] as string | null | undefined;
+  const id = row[aliasColumnName(alias, "id")] as string | null | undefined;
   if (id === null || id === undefined) {
     return undefined;
   }
@@ -307,18 +308,18 @@ function buildSelectableEdge(
   row: Record<string, unknown>,
   alias: string,
 ): SelectableEdge | undefined {
-  const id = row[`${alias}_id`] as string | null | undefined;
+  const id = row[aliasColumnName(alias, "id")] as string | null | undefined;
 
   // For optional traversals, edge may be null (LEFT JOIN)
   if (id === null || id === undefined) {
     return undefined;
   }
 
-  const kind = row[`${alias}_kind`] as string;
-  const fromId = row[`${alias}_from_id`] as string;
-  const toId = row[`${alias}_to_id`] as string;
+  const kind = row[aliasColumnName(alias, "kind")] as string;
+  const fromId = row[aliasColumnName(alias, "from_id")] as string;
+  const toId = row[aliasColumnName(alias, "to_id")] as string;
 
-  const propsRaw: unknown = row[`${alias}_props`];
+  const propsRaw: unknown = row[aliasColumnName(alias, "props")];
   const rawProps: Record<string, unknown> =
     typeof propsRaw === "string" ?
       (JSON.parse(propsRaw) as Record<string, unknown>)
@@ -327,24 +328,24 @@ function buildSelectableEdge(
   // Metadata columns - these are always projected in traversal CTEs
   // Normalize null → undefined for optional fields
   const validFrom = normalizeRowTimestamp(
-    row[`${alias}_valid_from`],
-    `${alias}_valid_from`,
+    row[aliasColumnName(alias, "valid_from")],
+    aliasColumnName(alias, "valid_from"),
   );
   const validTo = normalizeRowTimestamp(
-    row[`${alias}_valid_to`],
-    `${alias}_valid_to`,
+    row[aliasColumnName(alias, "valid_to")],
+    aliasColumnName(alias, "valid_to"),
   );
   const createdAt = normalizeRequiredRowTimestamp(
-    row[`${alias}_created_at`],
-    `${alias}_created_at`,
+    row[aliasColumnName(alias, "created_at")],
+    aliasColumnName(alias, "created_at"),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
-    row[`${alias}_updated_at`],
-    `${alias}_updated_at`,
+    row[aliasColumnName(alias, "updated_at")],
+    aliasColumnName(alias, "updated_at"),
   );
   const deletedAt = normalizeRowTimestamp(
-    row[`${alias}_deleted_at`],
-    `${alias}_deleted_at`,
+    row[aliasColumnName(alias, "deleted_at")],
+    aliasColumnName(alias, "deleted_at"),
   );
 
   const result: Record<string, unknown> = {
@@ -411,16 +412,16 @@ export function buildSelectContext<
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
+        const depth = row[generatedIdentifier(vl.depthAlias)];
         context[vl.depthAlias] =
-          traversal.optional && row[vl.depthAlias] === null ?
-            undefined
-          : (row[vl.depthAlias] as number);
+          traversal.optional && depth === null ? undefined : (depth as number);
       }
       if (vl.pathAlias !== undefined) {
+        const path = row[generatedIdentifier(vl.pathAlias)];
         context[vl.pathAlias] =
-          traversal.optional && row[vl.pathAlias] === null ?
+          traversal.optional && path === null ?
             undefined
-          : (row[vl.pathAlias] as readonly string[]);
+          : (path as readonly string[]);
       }
     }
   }

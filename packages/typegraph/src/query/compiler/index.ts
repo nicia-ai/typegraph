@@ -71,6 +71,12 @@ import {
 } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import type { DatabaseExpression } from "../expressions";
+import {
+  aliasColumnName,
+  aliasCteName,
+  generatedIdentifier,
+  rawAliasCte,
+} from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import {
   annIndexScanTypes,
@@ -424,7 +430,7 @@ function compileQueryInExpressionContext(
         dialect: adapter,
         resolveFieldCteAlias: (field) =>
           recursiveResultAlias ??
-          `cte_${aliases.get(field.alias) ?? field.alias}`,
+          aliasCteName(aliases.get(field.alias) ?? field.alias),
       });
     },
     ...(options_.vectorStrategy === undefined ?
@@ -829,13 +835,21 @@ function compileCountAggregateFastPath(
   const { dialect } = ctx;
   const startAlias = ast.start.alias;
   const previousAlias = traversal.joinFromAlias;
-  const previousAliasIdColumn = `${previousAlias}_id`;
-  const previousAliasKindColumn = `${previousAlias}_kind`;
-  const countCteAlias = `cte_${traversal.nodeAlias}_counts`;
-  const nodeCountColumn = `${traversal.nodeAlias}_count`;
-  const nodeCountDistinctColumn = `${traversal.nodeAlias}_count_distinct`;
-  const edgeCountColumn = `${traversal.edgeAlias}_count`;
-  const edgeCountDistinctColumn = `${traversal.edgeAlias}_count_distinct`;
+  const previousAliasIdColumn = aliasColumnName(previousAlias, "id");
+  const previousAliasKindColumn = aliasColumnName(previousAlias, "kind");
+  const countCteAlias = generatedIdentifier(
+    `cte_${traversal.nodeAlias}_counts`,
+  );
+  const nodeCountColumn = aliasColumnName(traversal.nodeAlias, "count");
+  const nodeCountDistinctColumn = aliasColumnName(
+    traversal.nodeAlias,
+    "count_distinct",
+  );
+  const edgeCountColumn = aliasColumnName(traversal.edgeAlias, "count");
+  const edgeCountDistinctColumn = aliasColumnName(
+    traversal.edgeAlias,
+    "count_distinct",
+  );
 
   const previousNodeKinds = getNodeKindsForAlias(ast, traversal.joinFromAlias);
   const edgeKinds = [...new Set(traversal.edgeKinds)];
@@ -1001,16 +1015,16 @@ function compileCountAggregateFastPath(
   const countCte = sql`
     ${sql.raw(countCteAlias)} AS (
       SELECT
-        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} AS ${sql.raw(previousAliasIdColumn)},
-        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} AS ${sql.raw(previousAliasKindColumn)},
+        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)} AS ${sql.raw(previousAliasIdColumn)},
+        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)} AS ${sql.raw(previousAliasKindColumn)},
         ${sql.join(aggregateColumns, sql`, `)}
-      FROM cte_${sql.raw(previousAlias)}
-      JOIN ${ctx.schema.edgesTable} e ON cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
-        AND cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}${targetNodeJoin}
+      FROM ${rawAliasCte(previousAlias)}
+      JOIN ${ctx.schema.edgesTable} e ON ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
+        AND ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}${targetNodeJoin}
       WHERE ${sql.join(whereClauses, sql` AND `)}
       GROUP BY
-        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)},
-        cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
+        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)},
+        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)}
     )
   `;
 
@@ -1037,7 +1051,7 @@ function compileCountAggregateFastPath(
           source,
           dialect,
           source.valueType,
-          `cte_${source.alias}`,
+          aliasCteName(source.alias),
         );
         return sql`${value} AS ${quoteIdentifier(projectedField.outputName)}`;
       }
@@ -1054,10 +1068,10 @@ function compileCountAggregateFastPath(
 
   const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
   const fromClause = sql`
-    FROM cte_${sql.raw(startAlias)}
+    FROM ${rawAliasCte(startAlias)}
     ${sql.raw(joinType)} ${sql.raw(countCteAlias)}
-      ON ${sql.raw(countCteAlias)}.${sql.raw(previousAliasIdColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasIdColumn)}
-      AND ${sql.raw(countCteAlias)}.${sql.raw(previousAliasKindColumn)} = cte_${sql.raw(previousAlias)}.${sql.raw(previousAliasKindColumn)}
+      ON ${sql.raw(countCteAlias)}.${sql.raw(previousAliasIdColumn)} = ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)}
+      AND ${sql.raw(countCteAlias)}.${sql.raw(previousAliasKindColumn)} = ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)}
   `;
 
   // Also picks up `ast.aggregateOrderBy` (ORDER BY output-alias entries
@@ -1321,7 +1335,7 @@ function buildLateMaterializedOuterFromClause(
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
   const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
     const physical = sql.raw(lateMaterializedPhysicalAlias(alias));
-    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(`${alias}_kind`)} AND ${physical}.id = ${topk}.${sql.raw(`${alias}_id`)}`;
+    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(aliasColumnName(alias, "kind"))} AND ${physical}.id = ${topk}.${sql.raw(aliasColumnName(alias, "id"))}`;
   });
   return joins.length === 0 ?
       sql`FROM ${topk}`

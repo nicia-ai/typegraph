@@ -58,6 +58,7 @@ import {
   createOuterReferenceExpression,
   type DatabaseExpression,
 } from "../expressions";
+import { aliasColumnName, aliasCteName } from "../generated-identifier";
 import { jsonPointer, parseJsonPointer } from "../json-pointer";
 import {
   buildFieldBuilderForTypeInfo,
@@ -138,6 +139,7 @@ import {
   type UniqueAlias,
 } from "./types";
 import {
+  derivedAlias,
   hasQuerySource,
   validateHybridFusionOptions,
   validateQueryRange,
@@ -328,39 +330,39 @@ type CompositionNavigationResult<
 function buildNodeFields(alias: string): ProjectedField[] {
   return [
     {
-      outputName: `${alias}_id`,
+      outputName: aliasColumnName(alias, "id"),
       source: fieldRef(alias, ["id"]),
     },
     {
-      outputName: `${alias}_kind`,
+      outputName: aliasColumnName(alias, "kind"),
       source: fieldRef(alias, ["kind"]),
     },
     {
-      outputName: `${alias}_props`,
+      outputName: aliasColumnName(alias, "props"),
       source: fieldRef(alias, ["props"]),
     },
     {
-      outputName: `${alias}_version`,
+      outputName: aliasColumnName(alias, "version"),
       source: fieldRef(alias, ["version"]),
     },
     {
-      outputName: `${alias}_valid_from`,
+      outputName: aliasColumnName(alias, "valid_from"),
       source: fieldRef(alias, ["valid_from"]),
     },
     {
-      outputName: `${alias}_valid_to`,
+      outputName: aliasColumnName(alias, "valid_to"),
       source: fieldRef(alias, ["valid_to"]),
     },
     {
-      outputName: `${alias}_created_at`,
+      outputName: aliasColumnName(alias, "created_at"),
       source: fieldRef(alias, ["created_at"]),
     },
     {
-      outputName: `${alias}_updated_at`,
+      outputName: aliasColumnName(alias, "updated_at"),
       source: fieldRef(alias, ["updated_at"]),
     },
     {
-      outputName: `${alias}_deleted_at`,
+      outputName: aliasColumnName(alias, "deleted_at"),
       source: fieldRef(alias, ["deleted_at"]),
     },
   ];
@@ -376,55 +378,55 @@ function buildEdgeFields(
   edgeAlias: string,
   nodeCteAlias: string,
 ): ProjectedField[] {
-  const cteAlias = `cte_${nodeCteAlias}`;
+  const cteAlias = aliasCteName(nodeCteAlias);
   return [
     {
-      outputName: `${edgeAlias}_id`,
+      outputName: aliasColumnName(edgeAlias, "id"),
       source: fieldRef(edgeAlias, ["id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_kind`,
+      outputName: aliasColumnName(edgeAlias, "kind"),
       source: fieldRef(edgeAlias, ["kind"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_from_id`,
+      outputName: aliasColumnName(edgeAlias, "from_id"),
       source: fieldRef(edgeAlias, ["from_id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_to_id`,
+      outputName: aliasColumnName(edgeAlias, "to_id"),
       source: fieldRef(edgeAlias, ["to_id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_props`,
+      outputName: aliasColumnName(edgeAlias, "props"),
       source: fieldRef(edgeAlias, ["props"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_valid_from`,
+      outputName: aliasColumnName(edgeAlias, "valid_from"),
       source: fieldRef(edgeAlias, ["valid_from"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_valid_to`,
+      outputName: aliasColumnName(edgeAlias, "valid_to"),
       source: fieldRef(edgeAlias, ["valid_to"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_created_at`,
+      outputName: aliasColumnName(edgeAlias, "created_at"),
       source: fieldRef(edgeAlias, ["created_at"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_updated_at`,
+      outputName: aliasColumnName(edgeAlias, "updated_at"),
       source: fieldRef(edgeAlias, ["updated_at"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_deleted_at`,
+      outputName: aliasColumnName(edgeAlias, "deleted_at"),
       source: fieldRef(edgeAlias, ["deleted_at"]),
       cteAlias,
     },
@@ -1354,8 +1356,7 @@ export class QueryBuilder<
         ["out", outEdgeKinds, inEdgeKinds]
       : ["in", inEdgeKinds, []];
 
-    const edgeAlias = `${nodeAlias}_edge`;
-    validateSqlIdentifier(edgeAlias);
+    const edgeAlias = derivedAlias(nodeAlias, "edge");
 
     // The derived edge alias is not caller-chosen the way `.traverse()`'s
     // is, so a collision is invisible to the caller until it silently
@@ -2078,7 +2079,7 @@ export class QueryBuilder<
           : {
               outputName,
               source,
-              cteAlias: `cte_${edgeTraversal.nodeAlias}`,
+              cteAlias: aliasCteName(edgeTraversal.nodeAlias),
             };
       },
     );

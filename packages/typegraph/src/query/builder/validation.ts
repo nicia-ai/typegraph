@@ -345,14 +345,45 @@ export function hasQuerySource(state: QueryBuilderState): boolean {
   return state.startAlias !== "";
 }
 
+/** What the builder appends to a node alias to name an output the caller did not. */
+type DerivedAliasSuffix = "depth" | "edge" | "path";
+
+/**
+ * The alias the builder derives from a caller's node alias when the caller
+ * names none: `<alias>_depth` / `<alias>_path` for a recursive traversal's
+ * outputs, `<alias>_edge` for a composition navigation's edge.
+ *
+ * A derived alias may exceed the 63-character alias limit: it is a result key
+ * and a namespace entry, and every SQL identifier built from it is bounded by
+ * `generatedIdentifier`. Refusing it would reject a query whose only alias
+ * the caller wrote is valid.
+ */
+export function derivedAlias(
+  nodeAlias: string,
+  suffix: DerivedAliasSuffix,
+): string {
+  return `${nodeAlias}_${suffix}`;
+}
+
 /** Validates the alias namespace and references once for every builder stage. */
 export function validateQueryState(state: QueryBuilderState): void {
   if (!hasQuerySource(state)) return;
   const aliases = new Set<string>();
   const nodes = new Set<string>();
   const edges = new Set<string>();
-  function addAlias(alias: string): void {
-    validateSqlIdentifier(alias);
+  /**
+   * `derivedFrom` names the validated node alias the builder derived `alias`
+   * from; such an alias needs only the uniqueness check.
+   */
+  function addAlias(
+    alias: string,
+    derivedFrom?: Readonly<{ nodeAlias: string; suffix: DerivedAliasSuffix }>,
+  ): void {
+    if (
+      derivedFrom === undefined ||
+      alias !== derivedAlias(derivedFrom.nodeAlias, derivedFrom.suffix)
+    )
+      validateSqlIdentifier(alias);
     if (aliases.has(alias))
       throw new ValidationError(`Query alias "${alias}" is already in use`, {
         issues: [
@@ -376,15 +407,19 @@ export function validateQueryState(state: QueryBuilderState): void {
           ],
         },
       );
-    addAlias(traversal.edgeAlias);
+    addAlias(traversal.edgeAlias, {
+      nodeAlias: traversal.nodeAlias,
+      suffix: "edge",
+    });
     edges.add(traversal.edgeAlias);
     addAlias(traversal.nodeAlias);
     nodes.add(traversal.nodeAlias);
-    for (const alias of [
-      traversal.variableLength?.depthAlias,
-      traversal.variableLength?.pathAlias,
-    ]) {
-      if (alias !== undefined) addAlias(alias);
+    for (const [alias, suffix] of [
+      [traversal.variableLength?.depthAlias, "depth"],
+      [traversal.variableLength?.pathAlias, "path"],
+    ] as const) {
+      if (alias !== undefined)
+        addAlias(alias, { nodeAlias: traversal.nodeAlias, suffix });
     }
   }
   for (const predicate of state.predicates) {

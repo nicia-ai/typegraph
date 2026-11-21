@@ -11,6 +11,7 @@ import { compareStrings } from "../../utils/compare";
 import { createDataKeyedBag, isInteropProbeKey } from "../../utils/object";
 import { mergeEdgeKinds, type SelectiveField, type ValueType } from "../ast";
 import { type QueryBuilderState } from "../builder/types";
+import { aliasColumnName } from "../generated-identifier";
 import {
   type FieldTypeInfo,
   type SchemaIntrospector,
@@ -314,7 +315,7 @@ export function buildSelectiveFields(
       const base: SelectiveField = {
         alias: access.alias,
         field: access.field,
-        outputName: `${access.alias}_${access.field}`,
+        outputName: aliasColumnName(access.alias, access.field),
         isSystemField: access.isSystemField,
       };
 

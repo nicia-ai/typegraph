@@ -30,6 +30,7 @@ import {
 } from "../../errors";
 import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
+import { aliasColumnName } from "../../query/generated-identifier";
 import { type Predicate } from "../../query/predicates";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import {
@@ -560,7 +561,7 @@ export function createNodeCollection<
         );
       }
       const rootAlias = "compare_and_set_candidate";
-      const candidateIdColumn = `${rootAlias}_id`;
+      const candidateIdColumn = aliasColumnName(rootAlias, "id");
       // Root pins to exact kind (here and in updateWhere) are redundant with
       // `executeNodeSetUpdate`'s `WHERE nodes.kind = <kind>` filter, which
       // re-filters whatever these candidate subqueries widen to.
@@ -602,7 +603,7 @@ export function createNodeCollection<
 
       const rootAlias = "update_candidate";
       const readInstant = nowIso();
-      const candidateIdColumn = `${rootAlias}_id`;
+      const candidateIdColumn = aliasColumnName(rootAlias, "id");
       const compiledBranches: CompiledSelectSql[] = [];
 
       const candidateQuery = params.candidates;

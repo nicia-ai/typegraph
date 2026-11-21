@@ -8,6 +8,7 @@ import type {
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type DatabaseExpression } from "../expressions";
+import { aliasCteName } from "../generated-identifier";
 import {
   expressionContainsAggregate,
   visitExpressionChildren,
@@ -556,7 +557,7 @@ export function runStandardQueryPassPipeline(
       const lastTraversal = currentState.ast.traversals.at(-1);
       const collapsedTraversalCteAlias =
         shouldCollapseLinearTraversalRowset && lastTraversal !== undefined ?
-          `cte_${lastTraversal.nodeAlias}`
+          aliasCteName(lastTraversal.nodeAlias)
         : undefined;
 
       return {

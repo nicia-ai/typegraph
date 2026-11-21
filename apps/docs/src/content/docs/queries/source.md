@@ -28,6 +28,12 @@ const results = await store
 | `alias` | `string` | A unique identifier for referencing this node in the query |
 | `options.expansion` | `"exact" \| "subclasses" \| "narrower"` | The alias's expansion axis. `"subclasses"` (the default) includes nodes of subclass kinds; `"exact"` is the named kind alone; `"narrower"` follows `broader`/`narrower` descendants instead |
 
+An alias is an identifier: a letter or underscore followed by letters, digits, or underscores, at
+most 63 characters, and not starting with `cte_`. Every alias up to that limit behaves the same on
+every backend. The SQL names TypeGraph derives from an alias (`<alias>_id`, `cte_<alias>`, and so
+on) are shortened with a hash suffix when they would exceed PostgreSQL's 63-byte identifier limit,
+and the same shortened SQL is emitted on SQLite.
+
 ## Multiple kinds in one query
 
 Pass a nonempty list to scan several registered kinds in one SQL query:

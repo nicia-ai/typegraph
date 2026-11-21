@@ -143,7 +143,8 @@ const distantConnections = await store
 
 When `depth` or `path` are enabled, they become available as properties on the `select()` context.
 Pass a string to control the property name. Pass `true` to derive the default name from the target
-alias: `${targetAlias}_depth` or `${targetAlias}_path`.
+alias: `${targetAlias}_depth` or `${targetAlias}_path`. A derived name may be longer than the
+63-character alias limit; it is still a valid property name on every backend.
 
 ### depth
 

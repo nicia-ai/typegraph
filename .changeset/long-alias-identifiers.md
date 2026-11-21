@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+Query aliases of up to 63 characters now work on PostgreSQL. The compiler derives SQL identifiers from an alias (`<alias>_id`, `<alias>_valid_from`, `cte_<alias>`, `<alias>_<field>` projections, recursive `<alias>_depth` / `<alias>_path` columns), and PostgreSQL clips identifiers to 63 bytes, so names that differed only past byte 63 became one identifier: a whole-node select failed from a 59- or 60-character alias, a root-id read from 61, and a field projected under a long alias, or under a multi-byte field name, could come back missing or wrong. SQLite ran the same queries correctly. Every derived name now goes through one owner that leaves a name of at most 63 bytes untouched and shortens a longer one deterministically with a hash of the full name, on every backend, and result decoding reads the same shortened names. SQL for names that already fit is unchanged. The default `<alias>_depth` / `<alias>_path` outputs of `recursive({ depth: true, path: true })` and the `<alias>_edge` alias of `parts()` / `wholes()` are no longer refused when the derived name exceeds 63 characters.

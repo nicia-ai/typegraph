@@ -20,6 +20,11 @@ import {
   type DialectRecursiveQueryStrategy,
 } from "../dialect";
 import type { DatabaseExpression } from "../expressions";
+import {
+  aliasColumnName,
+  generatedIdentifier,
+  rawAliasColumn,
+} from "../generated-identifier";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { compileDatabaseExpression } from "./database-expressions";
@@ -344,7 +349,9 @@ export function assertRecursiveOutputSupported(ast: QueryAst): void {
     [
       ast.start.alias,
       ...ast.traversals.map((traversal) => traversal.nodeAlias),
-    ].flatMap((alias) => NODE_COLUMNS.map((column) => `${alias}_${column}`)),
+    ].flatMap((alias) =>
+      NODE_COLUMNS.map((column) => aliasColumnName(alias, column)),
+    ),
   );
   for (const field of ast.projection.fields) materialized.add(field.outputName);
   for (const field of ast.selectiveFields ?? [])
@@ -355,12 +362,12 @@ export function assertRecursiveOutputSupported(ast: QueryAst): void {
       traversal.variableLength?.pathAlias,
     ]) {
       if (alias === undefined) continue;
-      if (materialized.has(alias)) {
+      if (materialized.has(generatedIdentifier(alias))) {
         throw new UnsupportedPredicateError(
           `Recursive traversal output alias "${alias}" collides with another result column`,
         );
       }
-      materialized.add(alias);
+      materialized.add(generatedIdentifier(alias));
     }
   }
 }
@@ -671,8 +678,8 @@ function compileRecursiveCte(
     );
   }
 
-  const previousIdColumn = sql`r.${sql.raw(nodeAlias)}_id`;
-  const previousKindColumn = sql`r.${sql.raw(nodeAlias)}_kind`;
+  const previousIdColumn = sql`r.${rawAliasColumn(nodeAlias, "id")}`;
+  const previousKindColumn = sql`r.${rawAliasColumn(nodeAlias, "kind")}`;
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
       planIdentityFrontierExpansion({
@@ -834,7 +841,9 @@ function compileRecursiveCte(
   // PostgreSQL allows one recursive reference per recursive term, so both
   // orientations are normalized into this single CTE before recursion starts.
   const mixesOrientations = inverseEdgeKinds.length > 0;
-  const directedEdgesCteName = `${traversal.edgeAlias}_directed_edges`;
+  const directedEdgesCteName = generatedIdentifier(
+    `${traversal.edgeAlias}_directed_edges`,
+  );
 
   function compileRecursiveDirectedEdgesCte(): SqlFragment {
     // A self-loop of a kind in both lists would yield two identical rows; the
@@ -1095,7 +1104,7 @@ function compileNodeSelectColumnsFromTable(
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map(
     (column) =>
-      sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${sql.raw(`${alias}_${column}`)}`,
+      sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${sql.raw(aliasColumnName(alias, column))}`,
   );
 }
 
@@ -1107,7 +1116,7 @@ function compileNodeSelectColumnsFromRecursiveRow(
   return NODE_COLUMNS.filter((column) =>
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map((column) => {
-    const projected = `${alias}_${column}`;
+    const projected = aliasColumnName(alias, column);
     return sql`r.${sql.raw(projected)} AS ${sql.raw(projected)}`;
   });
 }
@@ -1145,18 +1154,20 @@ function compileRecursiveProjection(
       )
     : [startAlias, nodeAlias].flatMap((alias) =>
         NODE_COLUMNS.map((column) => {
-          const name = `${alias}_${column}`;
+          const name = aliasColumnName(alias, column);
           return sql`${sql.raw(name)} AS ${quoteIdentifier(name)}`;
         }),
       );
 
   if (vl.depthAlias !== undefined) {
-    fields.push(sql`depth AS ${quoteIdentifier(vl.depthAlias)}`);
+    fields.push(
+      sql`depth AS ${quoteIdentifier(generatedIdentifier(vl.depthAlias))}`,
+    );
   }
 
   if (vl.pathAlias !== undefined) {
     fields.push(
-      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(vl.pathAlias)}`,
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(generatedIdentifier(vl.pathAlias))}`,
     );
   }
 
@@ -1166,7 +1177,7 @@ function compileRecursiveProjection(
         ast,
         new Set(
           [startAlias, nodeAlias].flatMap((alias) =>
-            NODE_COLUMNS.map((column) => `${alias}_${column}`),
+            NODE_COLUMNS.map((column) => aliasColumnName(alias, column)),
           ),
         ),
         ctx,
@@ -1204,11 +1215,13 @@ function compileRecursiveSelectiveProjection(
   // Include recursive depth/path columns when present
   const vl = traversal.variableLength;
   if (vl.depthAlias !== undefined) {
-    columns.push(sql`depth AS ${quoteIdentifier(vl.depthAlias)}`);
+    columns.push(
+      sql`depth AS ${quoteIdentifier(generatedIdentifier(vl.depthAlias))}`,
+    );
   }
   if (vl.pathAlias !== undefined) {
     columns.push(
-      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(vl.pathAlias)}`,
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(generatedIdentifier(vl.pathAlias))}`,
     );
   }
 
@@ -1233,7 +1246,12 @@ export function compileRecursiveSelectiveField(
     throw new UnsupportedPredicateError(
       `Selective projection for recursive traversals does not support alias "${field.alias}"`,
     );
-  const column = `${field.alias}_${field.isSystemField ? mapSelectiveSystemFieldToColumn(field.field) : "props"}`;
+  const column = aliasColumnName(
+    field.alias,
+    field.isSystemField ?
+      mapSelectiveSystemFieldToColumn(field.field)
+    : "props",
+  );
   const reference =
     resultAlias === undefined ?
       sql.raw(column)
@@ -1337,8 +1355,8 @@ export function compileRecursiveResultField(
 ): SqlFragment {
   const baseColumn =
     field.path[0] === "props" ?
-      `${field.alias}_props`
-    : `${field.alias}_${field.path.join("_")}`;
+      aliasColumnName(field.alias, "props")
+    : aliasColumnName(field.alias, field.path.join("_"));
   const column = sql`${sql.identifier(resultAlias)}.${sql.identifier(baseColumn)}`;
   return compileFieldValueFromColumn(field, dialect, valueType, column);
 }

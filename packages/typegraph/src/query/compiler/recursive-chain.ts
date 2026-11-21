@@ -5,6 +5,11 @@ import type {
   QueryAst,
   Traversal,
 } from "../ast";
+import {
+  aliasColumnName,
+  aliasCteName,
+  generatedIdentifier,
+} from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { compileLimitOffsetClauses } from "./limit-offset";
 import { getNodeKindsForAlias } from "./predicate-utils";
@@ -86,7 +91,7 @@ function sourceAst(ast: QueryAst): QueryAst {
     ),
     projection: {
       fields: NODE_COLUMNS.map((column) => ({
-        outputName: `${ast.start.alias}_${column}`,
+        outputName: aliasColumnName(ast.start.alias, column),
         source: {
           __type: "field_ref",
           alias: ast.start.alias,
@@ -99,7 +104,7 @@ function sourceAst(ast: QueryAst): QueryAst {
 
 function selectNodeColumns(alias: string, sourceAlias?: string): SqlFragment[] {
   return NODE_COLUMNS.map((column) => {
-    const name = `${alias}_${column}`;
+    const name = aliasColumnName(alias, column);
     return sourceAlias === undefined ?
         sql.identifier(name)
       : sql`${sql.identifier(sourceAlias)}.${sql.identifier(name)} AS ${sql.identifier(name)}`;
@@ -114,12 +119,12 @@ function stageOutputColumns(
   const variableLength = traversal.variableLength;
   if (variableLength?.depthAlias !== undefined) {
     columns.push(
-      sql`${sql.identifier(sourceAlias)}.${sql.identifier(variableLength.depthAlias)} AS ${sql.identifier(variableLength.depthAlias)}`,
+      sql`${sql.identifier(sourceAlias)}.${sql.identifier(generatedIdentifier(variableLength.depthAlias))} AS ${sql.identifier(generatedIdentifier(variableLength.depthAlias))}`,
     );
   }
   if (variableLength?.pathAlias !== undefined) {
     columns.push(
-      sql`${sql.identifier(sourceAlias)}.${sql.identifier(variableLength.pathAlias)} AS ${sql.identifier(variableLength.pathAlias)}`,
+      sql`${sql.identifier(sourceAlias)}.${sql.identifier(generatedIdentifier(variableLength.pathAlias))} AS ${sql.identifier(generatedIdentifier(variableLength.pathAlias))}`,
     );
   }
   return columns;
@@ -132,7 +137,7 @@ function fixedStageOutputColumns(
   return [
     ...stageOutputColumns(traversal, sourceAlias),
     ...EDGE_COLUMNS.map((column) => {
-      const name = `${traversal.edgeAlias}_${column}`;
+      const name = aliasColumnName(traversal.edgeAlias, column);
       return sql`${sql.identifier(sourceAlias)}.${sql.identifier(name)} AS ${sql.identifier(name)}`;
     }),
   ];
@@ -154,14 +159,14 @@ function fixedStageProjection(traversal: Traversal): readonly ProjectedField[] {
     })),
   ];
   return fields.map(({ alias, column }) => ({
-    outputName: `${alias}_${column}`,
+    outputName: aliasColumnName(alias, column),
     source: {
       __type: "field_ref",
       alias,
       path: [column],
     },
     ...(alias === traversal.edgeAlias ?
-      { cteAlias: `cte_${traversal.nodeAlias}` }
+      { cteAlias: aliasCteName(traversal.nodeAlias) }
     : {}),
   }));
 }
@@ -200,8 +205,8 @@ function compileStage(
       SELECT * FROM (${compiled}) AS ${sql.identifier(stageAlias)}
       WHERE EXISTS (
         SELECT 1 FROM (${seed}) AS ${sql.identifier(seedAlias)}
-        WHERE ${sql.identifier(seedAlias)}.kind = ${sql.identifier(stageAlias)}.${sql.identifier(`${traversal.joinFromAlias}_kind`)}
-          AND ${sql.identifier(seedAlias)}.id = ${sql.identifier(stageAlias)}.${sql.identifier(`${traversal.joinFromAlias}_id`)}
+        WHERE ${sql.identifier(seedAlias)}.kind = ${sql.identifier(stageAlias)}.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "kind"))}
+          AND ${sql.identifier(seedAlias)}.id = ${sql.identifier(stageAlias)}.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "id"))}
       )
     `;
   }
@@ -245,12 +250,12 @@ function compileFinalProjection(
       const variableLength = traversal.variableLength;
       if (variableLength?.depthAlias !== undefined) {
         columns.push(
-          sql`${sql.identifier(resultAlias)}.${sql.identifier(variableLength.depthAlias)} AS ${sql.identifier(variableLength.depthAlias)}`,
+          sql`${sql.identifier(resultAlias)}.${sql.identifier(generatedIdentifier(variableLength.depthAlias))} AS ${sql.identifier(generatedIdentifier(variableLength.depthAlias))}`,
         );
       }
       if (variableLength?.pathAlias !== undefined) {
         columns.push(
-          sql`${sql.identifier(resultAlias)}.${sql.identifier(variableLength.pathAlias)} AS ${sql.identifier(variableLength.pathAlias)}`,
+          sql`${sql.identifier(resultAlias)}.${sql.identifier(generatedIdentifier(variableLength.pathAlias))} AS ${sql.identifier(generatedIdentifier(variableLength.pathAlias))}`,
         );
       }
     }
@@ -286,7 +291,7 @@ function compileFinalProjection(
           .filter((traversal) => traversal.variableLength === undefined)
           .flatMap((traversal) =>
             EDGE_COLUMNS.map((column) => {
-              const name = `${traversal.edgeAlias}_${column}`;
+              const name = aliasColumnName(traversal.edgeAlias, column);
               return sql`${sql.identifier(resultAlias)}.${sql.identifier(name)} AS ${sql.identifier(name)}`;
             }),
           ),
@@ -301,13 +306,13 @@ function compileFinalProjection(
           []
         : [
             ...nodeAliases.flatMap((alias) =>
-              NODE_COLUMNS.map((column) => `${alias}_${column}`),
+              NODE_COLUMNS.map((column) => aliasColumnName(alias, column)),
             ),
             ...traversals
               .filter((traversal) => traversal.variableLength === undefined)
               .flatMap((traversal) =>
-                EDGE_COLUMNS.map(
-                  (column) => `${traversal.edgeAlias}_${column}`,
+                EDGE_COLUMNS.map((column) =>
+                  aliasColumnName(traversal.edgeAlias, column),
                 ),
               ),
           ],
@@ -383,7 +388,7 @@ export function compileMultiStageRecursiveQuery(
     assertTraversalStagePredicatesSupported(ast, firstTraversal, 0);
     const sourceName = "typegraph_recursive_source_0";
     const source = ctx.compileQuery(sourceAst(ast), graphId);
-    const seed = sql`SELECT DISTINCT ${sql.identifier(`${ast.start.alias}_kind`)} AS kind, ${sql.identifier(`${ast.start.alias}_id`)} AS id FROM ${sql.identifier(sourceName)}`;
+    const seed = sql`SELECT DISTINCT ${sql.identifier(aliasColumnName(ast.start.alias, "kind"))} AS kind, ${sql.identifier(aliasColumnName(ast.start.alias, "id"))} AS id FROM ${sql.identifier(sourceName)}`;
     const expansion = compileStage(ast, firstTraversal, 1, graphId, ctx, seed);
     const expansionName = "typegraph_recursive_expansion_0";
     ctes.push(
@@ -394,8 +399,8 @@ export function compileMultiStageRecursiveQuery(
           SELECT source.*, ${sql.join(outputColumnsForStage(firstTraversal, "expanded"), sql`, `)}
           FROM ${sql.identifier(sourceName)} AS source
           LEFT JOIN ${sql.identifier(expansionName)} AS expanded
-            ON expanded.${sql.identifier(`${ast.start.alias}_kind`)} = source.${sql.identifier(`${ast.start.alias}_kind`)}
-           AND expanded.${sql.identifier(`${ast.start.alias}_id`)} = source.${sql.identifier(`${ast.start.alias}_id`)}
+            ON expanded.${sql.identifier(aliasColumnName(ast.start.alias, "kind"))} = source.${sql.identifier(aliasColumnName(ast.start.alias, "kind"))}
+           AND expanded.${sql.identifier(aliasColumnName(ast.start.alias, "id"))} = source.${sql.identifier(aliasColumnName(ast.start.alias, "id"))}
         )
       `,
     );
@@ -410,7 +415,7 @@ export function compileMultiStageRecursiveQuery(
     if (traversal === undefined) continue;
     const expansionName = `typegraph_recursive_expansion_${index}`;
     const nextCompletedName = `typegraph_recursive_stage_${index}`;
-    const seed = sql`SELECT DISTINCT ${sql.identifier(`${traversal.joinFromAlias}_kind`)} AS kind, ${sql.identifier(`${traversal.joinFromAlias}_id`)} AS id FROM ${sql.identifier(completedName)} WHERE ${sql.identifier(`${traversal.joinFromAlias}_id`)} IS NOT NULL`;
+    const seed = sql`SELECT DISTINCT ${sql.identifier(aliasColumnName(traversal.joinFromAlias, "kind"))} AS kind, ${sql.identifier(aliasColumnName(traversal.joinFromAlias, "id"))} AS id FROM ${sql.identifier(completedName)} WHERE ${sql.identifier(aliasColumnName(traversal.joinFromAlias, "id"))} IS NOT NULL`;
     const expansion = compileStage(ast, traversal, index, graphId, ctx, seed);
     ctes.push(sql`${sql.identifier(expansionName)} AS (${expansion})`);
     const join = traversal.optional ? sql`LEFT JOIN` : sql`JOIN`;
@@ -419,8 +424,8 @@ export function compileMultiStageRecursiveQuery(
             SELECT previous.*, ${sql.join(outputColumnsForStage(traversal, "expanded"), sql`, `)}
             FROM ${sql.identifier(completedName)} AS previous
             ${join} ${sql.identifier(expansionName)} AS expanded
-              ON expanded.${sql.identifier(`${traversal.joinFromAlias}_kind`)} = previous.${sql.identifier(`${traversal.joinFromAlias}_kind`)}
-             AND expanded.${sql.identifier(`${traversal.joinFromAlias}_id`)} = previous.${sql.identifier(`${traversal.joinFromAlias}_id`)}
+              ON expanded.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "kind"))} = previous.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "kind"))}
+             AND expanded.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "id"))} = previous.${sql.identifier(aliasColumnName(traversal.joinFromAlias, "id"))}
           )
     `);
     completedName = nextCompletedName;

@@ -11,6 +11,7 @@ import {
   extractVectorSimilarityPredicates,
 } from "../compiler/predicates";
 import { getDialect } from "../dialect";
+import { aliasColumnName } from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 
@@ -100,8 +101,12 @@ export async function executeSchemaCheckedRead(
   return rows
     .filter(
       (row) =>
-        row[input.rowIdentityColumn ?? `${ast.start.alias}_id`] !== null &&
-        row[input.rowIdentityColumn ?? `${ast.start.alias}_id`] !== undefined,
+        row[
+          input.rowIdentityColumn ?? aliasColumnName(ast.start.alias, "id")
+        ] !== null &&
+        row[
+          input.rowIdentityColumn ?? aliasColumnName(ast.start.alias, "id")
+        ] !== undefined,
     )
     .map((row) => {
       const { [marker]: _version, ...data } = row;

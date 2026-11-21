@@ -72,6 +72,7 @@ export { registerImportUniquenessIntegrationTests } from "./import-uniqueness";
 export { registerLateMaterializationIntegrationTests } from "./late-materialization";
 export { registerLegacyClaimAxisIntegrationTests } from "./legacy-claim-axis";
 export { registerLineageConformanceIntegrationTests } from "./lineage-conformance";
+export { registerLongAliasIntegrationTests } from "./long-aliases";
 export { registerMatchResultFilteringIntegrationTests } from "./match-result-filtering";
 export { registerMatchResultRankingIntegrationTests } from "./match-result-ranking";
 export { registerMetadataPredicateIntegrationTests } from "./metadata-predicates";

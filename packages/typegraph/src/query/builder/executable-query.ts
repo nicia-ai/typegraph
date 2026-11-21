@@ -56,6 +56,7 @@ import {
   nullToUndefined,
   transformPathColumns,
 } from "../execution";
+import { aliasColumnName, aliasCteName } from "../generated-identifier";
 import { parseJsonPointer } from "../json-pointer";
 import { resolveNullOrdering } from "../order";
 import { type CompiledSelectSql } from "../sql-intent";
@@ -393,7 +394,7 @@ export class ExecutableQuery<
    */
   compileNodeCandidateIds(readInstant?: string): CompiledSelectSql {
     const ast = this.toAst();
-    const idColumn = `${ast.start.alias}_id`;
+    const idColumn = aliasColumnName(ast.start.alias, "id");
     return compileQuery(
       {
         ...ast,
@@ -875,7 +876,7 @@ export class ExecutableQuery<
           undefined
         : backendDerivationRoot(this.#config.backend),
       kind,
-      idColumn: `${ast.start.alias}_id`,
+      idColumn: aliasColumnName(ast.start.alias, "id"),
       temporalMode: ast.temporalMode.mode,
       recordedAsOf: ast.recordedAsOf,
     };
@@ -947,7 +948,7 @@ export class ExecutableQuery<
                   source: order.field,
                   ...(edgeTraversal === undefined ?
                     {}
-                  : { cteAlias: `cte_${edgeTraversal.nodeAlias}` }),
+                  : { cteAlias: aliasCteName(edgeTraversal.nodeAlias) }),
                 };
               }),
             ],
@@ -1203,7 +1204,7 @@ export class ExecutableQuery<
       result.push({
         alias,
         field: "id",
-        outputName: `${alias}_id`,
+        outputName: aliasColumnName(alias, "id"),
         isSystemField: true,
       });
     }

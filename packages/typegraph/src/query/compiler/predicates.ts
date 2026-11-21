@@ -40,6 +40,7 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import type { DatabaseExpression } from "../expressions";
+import { aliasColumnName, aliasCteName } from "../generated-identifier";
 import {
   joinJsonPointers,
   type JsonPointer,
@@ -117,16 +118,18 @@ export function compileFieldColumn(
   const qualifier = cteAlias ? `${cteAlias}.` : "";
 
   if (field.path.length === 1 && field.path[0] === "id") {
-    return sql.raw(`${qualifier}${prefix}_id`);
+    return sql.raw(`${qualifier}${aliasColumnName(prefix, "id")}`);
   }
   if (field.path.length === 1 && field.path[0] === "kind") {
-    return sql.raw(`${qualifier}${prefix}_kind`);
+    return sql.raw(`${qualifier}${aliasColumnName(prefix, "kind")}`);
   }
   if (field.path.length > 0 && field.path[0] === "props") {
-    return sql.raw(`${qualifier}${prefix}_props`);
+    return sql.raw(`${qualifier}${aliasColumnName(prefix, "props")}`);
   }
 
-  return sql.raw(`${qualifier}${prefix}_${field.path.join("_")}`);
+  return sql.raw(
+    `${qualifier}${aliasColumnName(prefix, field.path.join("_"))}`,
+  );
 }
 
 /**
@@ -773,7 +776,7 @@ export function compilePredicateExpression(
           if (ctx.resolveFieldCteAlias !== undefined)
             return ctx.resolveFieldCteAlias(field);
           return ctx.cteColumnPrefix === undefined ?
-              `cte_${field.alias}`
+              aliasCteName(field.alias)
             : undefined;
         },
       });
@@ -1184,7 +1187,7 @@ function compileAggregateExpr(
   return compileLegacyAggregateExpression(expr, {
     dialect,
     resolveFieldCteAlias() {
-      return `cte_${expr.field.alias}`;
+      return aliasCteName(expr.field.alias);
     },
   });
 }

@@ -925,7 +925,6 @@ export function vectorSlotKey(nodeKind: string, fieldPath: string): string {
  * across multiple builder files is fragile when typed as raw strings —
  * import these constants instead.
  */
-export const ALIAS_CTE_PREFIX = "cte_" as const;
 export const EMBEDDINGS_CTE_ALIAS = "cte_embeddings" as const;
 export const FULLTEXT_CTE_ALIAS = "cte_fulltext" as const;
 export const HYBRID_CANDIDATES_CTE_ALIAS = "cte_relevance_candidates" as const;

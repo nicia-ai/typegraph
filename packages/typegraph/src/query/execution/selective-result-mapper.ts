@@ -19,6 +19,7 @@ import type {
   QueryBuilderState,
   SelectContext,
 } from "../builder/types";
+import { generatedIdentifier } from "../generated-identifier";
 import {
   type FieldTypeInfo,
   type SchemaIntrospector,
@@ -275,13 +276,12 @@ function buildSelectiveContext<
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
+        const depth = row[generatedIdentifier(vl.depthAlias)];
         context[vl.depthAlias] =
-          traversal.optional && row[vl.depthAlias] === null ?
-            undefined
-          : row[vl.depthAlias];
+          traversal.optional && depth === null ? undefined : depth;
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = row[vl.pathAlias];
+        context[vl.pathAlias] = row[generatedIdentifier(vl.pathAlias)];
       }
     }
   }
