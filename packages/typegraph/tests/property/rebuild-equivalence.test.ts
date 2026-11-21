@@ -17,8 +17,16 @@
  *    as raw rows in canonical order;
  * 3. run the rebuild in place — `rebuildIdentityClosure` for the closure and
  *    separation relations, the destructive `rebuildContribution("fulltext")`
- *    for the fulltext projection and its durable marker — and snapshot again;
+ *    for the fulltext projection and its durable markers — and snapshot again;
  * 4. require the two snapshots to be equal, row for row.
+ *
+ * Two fixtures drive it. The identity fixture enables identity, history and
+ * provenance, so every derived relation is maintained; each of those settings
+ * routes a node create away from the fused root command. The root-fusion
+ * fixture turns them off and lets the store generate node ids, so a create of
+ * a searchable kind writes its fulltext row through the fused `node.create`
+ * command. On a lane whose root fuses creates, the property proves from the
+ * command trace that one did before it compares the rows with the rebuild.
  *
  * Columns that record WHEN a row was written rather than WHAT it derives
  * (`updated_at`, `materialized_at`, `last_attempted_at`) and the PostgreSQL
@@ -40,11 +48,23 @@ import {
   defineGraph,
   defineNode,
   searchable,
+  type Store,
 } from "../../src";
 import { createPostgresBackend } from "../../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
+import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import { DEPLOYMENT_CONTRIBUTION_GRAPH_ID } from "../../src/backend/table-contribution";
 import { type GraphBackend } from "../../src/backend/types";
-import { TypeGraphError } from "../../src/errors";
+import type { TypeGraphError } from "../../src/errors";
+import {
+  EndpointNotFoundError,
+  IdentityContradictionError,
+  IdentityEndpointValidityError,
+  NodeNotFoundError,
+  RestrictedDeleteError,
+  UniquenessError,
+  ValidationError,
+} from "../../src/errors";
 import { asIdentityAssertionId } from "../../src/identity/types";
 import {
   type IdentityAssertionId,
@@ -57,7 +77,6 @@ import { storeBackend } from "../../src/store/runtime-port";
 import type { HistoryStore } from "../../src/store-entry";
 import { compareStrings } from "../../src/utils/compare";
 import { requireDefined } from "../../src/utils/presence";
-import { createTestBackend } from "../test-utils";
 import { propertyRuns } from "./run-budget";
 
 // ============================================================
@@ -85,43 +104,63 @@ const knows = defineEdge("knows");
 const premiseOf = defineEdge("premiseOf");
 const derives = defineEdge("derives");
 
+const NODES = {
+  Person: {
+    type: Person,
+    unique: [
+      {
+        name: "person_email",
+        fields: ["email"],
+        scope: "kind",
+        collation: "binary",
+      },
+    ],
+  },
+  Robot: { type: Robot },
+  Source: { type: Source },
+  Fact: { type: Fact },
+  Justification: { type: Justification },
+} as const;
+
+const EDGES = {
+  knows: { type: knows, from: [Person], to: [Person] },
+  premiseOf: { type: premiseOf, from: [Source, Fact], to: [Justification] },
+  derives: { type: derives, from: [Justification], to: [Fact] },
+} as const;
+
 function buildGraph(id: string, sameIdAcrossKinds: "fold" | "ignore") {
   return defineGraph({
     id,
-    nodes: {
-      Person: {
-        type: Person,
-        unique: [
-          {
-            name: "person_email",
-            fields: ["email"],
-            scope: "kind",
-            collation: "binary",
-          },
-        ],
-      },
-      Robot: { type: Robot },
-      Source: { type: Source },
-      Fact: { type: Fact },
-      Justification: { type: Justification },
-    },
-    edges: {
-      knows: { type: knows, from: [Person], to: [Person] },
-      premiseOf: { type: premiseOf, from: [Source, Fact], to: [Justification] },
-      derives: { type: derives, from: [Justification], to: [Fact] },
-    },
+    nodes: NODES,
+    edges: EDGES,
     identity: { sameIdAcrossKinds },
   });
 }
 
+/**
+ * The same kinds without identity. Robot and Fact are searchable and carry no
+ * unique constraint, so their generated-id creates are fused-root eligible;
+ * Person keeps its unique constraint and takes the portable path.
+ */
+function buildFusionGraph(id: string) {
+  return defineGraph({ id, nodes: NODES, edges: EDGES });
+}
+
 type RebuildGraph = ReturnType<typeof buildGraph>;
 type RebuildStore = HistoryStore<RebuildGraph>;
+type FusionStore = Store<ReturnType<typeof buildFusionGraph>>;
 
 /**
  * What a write runs through: the store itself, or the context of a
  * caller-owned transaction (`store.transaction(async (tx) => ...)`).
+ * `identity` is absent on the root-fusion fixture, which never generates an
+ * identity write.
  */
-type WriteSurface = Pick<RebuildStore, "nodes" | "edges" | "identity">;
+type WriteSurface = Readonly<{
+  data: Pick<FusionStore, "nodes" | "edges">;
+  identity: RebuildStore["identity"] | undefined;
+  inTransaction: boolean;
+}>;
 
 const PROVENANCE_CONFIG = {
   source: { kind: "Source" },
@@ -217,7 +256,8 @@ const refArb: fc.Arbitrary<Ref> = fc.record({
 const relationArb = fc.constantFrom("same" as const, "different" as const);
 const sourceArb = fc.nat({ max: SOURCES.length - 1 });
 
-const writeOpArb: fc.Arbitrary<WriteOp> = fc.oneof(
+/** Node and edge writes: every fixture generates these. */
+const DATA_WRITE_ARBS: readonly fc.WeightedArbitrary<WriteOp>[] = [
   {
     arbitrary: fc.record({
       type: fc.constant("create" as const),
@@ -236,48 +276,79 @@ const writeOpArb: fc.Arbitrary<WriteOp> = fc.oneof(
     }),
     weight: 2,
   },
-  fc.record({
-    type: fc.constant("softDelete" as const),
-    kind: kindArb,
-    id: idArb,
-  }),
-  fc.record({
-    type: fc.constant("hardDelete" as const),
-    kind: kindArb,
-    id: idArb,
-  }),
-  fc.record({
-    type: fc.constantFrom("bulkCreate" as const, "bulkUpsert" as const),
-    kind: kindArb,
-    ids: idsArb,
-    word: wordArb,
-  }),
-  fc.record({
-    type: fc.constantFrom("bulkSoftDelete" as const, "bulkHardDelete" as const),
-    kind: kindArb,
-    ids: idsArb,
-  }),
-  fc.record({
-    type: fc.constant("endWindow" as const),
-    kind: kindArb,
-    id: idArb,
-  }),
-  fc.record({
-    type: fc.constant("reopenWindow" as const),
-    kind: kindArb,
-    id: idArb,
-  }),
-  fc.record({
-    type: fc.constant("createEdge" as const),
-    from: idArb,
-    to: idArb,
-  }),
-  fc.record({
-    type: fc.constant("deleteEdge" as const),
-    from: idArb,
-    to: idArb,
-    hard: fc.boolean(),
-  }),
+  {
+    arbitrary: fc.record({
+      type: fc.constant("softDelete" as const),
+      kind: kindArb,
+      id: idArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("hardDelete" as const),
+      kind: kindArb,
+      id: idArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constantFrom("bulkCreate" as const, "bulkUpsert" as const),
+      kind: kindArb,
+      ids: idsArb,
+      word: wordArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constantFrom(
+        "bulkSoftDelete" as const,
+        "bulkHardDelete" as const,
+      ),
+      kind: kindArb,
+      ids: idsArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("endWindow" as const),
+      kind: kindArb,
+      id: idArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("reopenWindow" as const),
+      kind: kindArb,
+      id: idArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("createEdge" as const),
+      from: idArb,
+      to: idArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("deleteEdge" as const),
+      from: idArb,
+      to: idArb,
+      hard: fc.boolean(),
+    }),
+    weight: 1,
+  },
+];
+
+/** Identity writes: only the identity fixture generates these. */
+const IDENTITY_WRITE_ARBS: readonly fc.WeightedArbitrary<WriteOp>[] = [
   {
     arbitrary: fc.record({
       type: fc.constant("assert" as const),
@@ -308,48 +379,171 @@ const writeOpArb: fc.Arbitrary<WriteOp> = fc.oneof(
     }),
     weight: 2,
   },
-  fc.record({
-    type: fc.constant("bulkRetract" as const),
-    picks: fc.array(fc.nat(), { minLength: 1, maxLength: 3 }),
-  }),
-  fc.record({
-    type: fc.constant("unassert" as const),
-    relation: relationArb,
-    a: refArb,
-    b: refArb,
-  }),
-);
-
-const opArb: fc.Arbitrary<Op> = fc.oneof(
   {
-    arbitrary: writeOpArb.map((write) => ({ type: "write" as const, write })),
-    weight: 20,
+    arbitrary: fc.record({
+      type: fc.constant("bulkRetract" as const),
+      picks: fc.array(fc.nat(), { minLength: 1, maxLength: 3 }),
+    }),
+    weight: 1,
   },
-  fc.record({ type: fc.constant("retractSource" as const), source: sourceArb }),
-  fc.record({
-    type: fc.constant("unRetractSource" as const),
-    source: sourceArb,
-  }),
-  fc.record({ type: fc.constant("advanceClock" as const) }),
-  fc.record({ type: fc.constant("checkpoint" as const) }),
-  fc.record({
-    type: fc.constant("transaction" as const),
-    writes: fc.array(writeOpArb, { minLength: 1, maxLength: 4 }),
-  }),
-);
+  {
+    arbitrary: fc.record({
+      type: fc.constant("unassert" as const),
+      relation: relationArb,
+      a: refArb,
+      b: refArb,
+    }),
+    weight: 1,
+  },
+];
+
+/** Provenance transitions: only the identity fixture (history on) has them. */
+const PROVENANCE_OP_ARBS: readonly fc.WeightedArbitrary<Op>[] = [
+  {
+    arbitrary: fc.record({
+      type: fc.constant("retractSource" as const),
+      source: sourceArb,
+    }),
+    weight: 1,
+  },
+  {
+    arbitrary: fc.record({
+      type: fc.constant("unRetractSource" as const),
+      source: sourceArb,
+    }),
+    weight: 1,
+  },
+];
+
+function opArbitrary(
+  writeArbs: readonly fc.WeightedArbitrary<WriteOp>[],
+  extraOpArbs: readonly fc.WeightedArbitrary<Op>[],
+): fc.Arbitrary<Op> {
+  const writeOpArb = fc.oneof(...writeArbs);
+  return fc.oneof(
+    {
+      arbitrary: writeOpArb.map((write) => ({ type: "write" as const, write })),
+      weight: 20,
+    },
+    ...extraOpArbs,
+    {
+      arbitrary: fc.record({ type: fc.constant("advanceClock" as const) }),
+      weight: 1,
+    },
+    {
+      arbitrary: fc.record({ type: fc.constant("checkpoint" as const) }),
+      weight: 1,
+    },
+    {
+      arbitrary: fc.record({
+        type: fc.constant("transaction" as const),
+        writes: fc.array(writeOpArb, { minLength: 1, maxLength: 4 }),
+      }),
+      weight: 1,
+    },
+  );
+}
 
 const MAX_OPS = 30;
+
+// ============================================================
+// Expected refusals
+// ============================================================
+
+type RefusalClass = abstract new (...args: never[]) => TypeGraphError;
+
+/** Every operation the property wraps in {@link attempt}. */
+type AttemptedOperation =
+  WriteOp["type"] | "retractSource" | "unRetractSource" | "transaction";
+
+/**
+ * The refusals each operation can legitimately produce from the states this
+ * property reaches. A refused write is part of the sequence: it leaves the
+ * store as it was, and the snapshot after it still has to equal its rebuild.
+ * Any other error — a `DatabaseOperationError` from a write that should have
+ * landed, a `CompilerInvariantError`, a refusal an operation cannot produce
+ * here — fails the property.
+ *
+ * - `ValidationError`: a create naming an id that already holds a live node
+ *   or edge; an identity assertion naming one node twice.
+ * - `UniquenessError`: two Person words share an e-mail.
+ * - `NodeNotFoundError`: the node to update, bound or reopen is absent; an
+ *   identity assertion names an absent node.
+ * - `RestrictedDeleteError`: the node still has a live edge (`knows`, a
+ *   provenance premise or derivation), and the graph's default node-delete
+ *   behaviour is `restrict`. Deleting an absent node, or an absent edge, is
+ *   not a refusal.
+ * - `EndpointNotFoundError`: an edge create names an absent endpoint.
+ * - `IdentityContradictionError`: a same / different assertion against an
+ *   existing different / same relation.
+ * - `IdentityEndpointValidityError`: an identity assertion whose window its
+ *   endpoints do not cover, or a window end that would uncover an assertion.
+ * - `transaction`: only the edge-create refusals {@link applyWrite} lets
+ *   propagate out of a transaction; every other write in it catches its own.
+ */
+const EXPECTED_REFUSALS = {
+  create: [ValidationError, UniquenessError],
+  update: [NodeNotFoundError, UniquenessError],
+  softDelete: [RestrictedDeleteError],
+  hardDelete: [RestrictedDeleteError],
+  bulkCreate: [ValidationError, UniquenessError],
+  bulkUpsert: [UniquenessError],
+  bulkSoftDelete: [RestrictedDeleteError],
+  bulkHardDelete: [RestrictedDeleteError],
+  endWindow: [NodeNotFoundError, IdentityEndpointValidityError],
+  reopenWindow: [NodeNotFoundError],
+  createEdge: [EndpointNotFoundError, ValidationError],
+  deleteEdge: [],
+  assert: [
+    ValidationError,
+    NodeNotFoundError,
+    IdentityContradictionError,
+    IdentityEndpointValidityError,
+  ],
+  bulkAssert: [
+    ValidationError,
+    NodeNotFoundError,
+    IdentityContradictionError,
+    IdentityEndpointValidityError,
+  ],
+  retract: [],
+  bulkRetract: [],
+  unassert: [],
+  retractSource: [],
+  unRetractSource: [],
+  transaction: [EndpointNotFoundError, ValidationError],
+} as const satisfies Record<AttemptedOperation, readonly RefusalClass[]>;
+
+async function attempt<T>(
+  operation: AttemptedOperation,
+  write: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    return await write();
+  } catch (error) {
+    const expected: readonly RefusalClass[] = EXPECTED_REFUSALS[operation];
+    if (expected.some((refusal) => error instanceof refusal)) return undefined;
+    throw error;
+  }
+}
 
 // ============================================================
 // Executing operations
 // ============================================================
 
+type CreatedNode = Readonly<{ id: string }>;
+
 type NodeWrites = Readonly<{
-  create: (id: string, word: string) => Promise<unknown>;
+  /** `id` undefined leaves the id to the store. */
+  create: (id: string | undefined, word: string) => Promise<CreatedNode>;
   update: (id: string, word: string) => Promise<unknown>;
   softDelete: (id: string) => Promise<unknown>;
   hardDelete: (id: string) => Promise<unknown>;
-  bulkCreate: (ids: readonly string[], word: string) => Promise<unknown>;
+  /** An `undefined` entry leaves that node's id to the store. */
+  bulkCreate: (
+    ids: readonly (string | undefined)[],
+    word: string,
+  ) => Promise<readonly CreatedNode[]>;
   bulkUpsert: (ids: readonly string[], word: string) => Promise<unknown>;
   bulkSoftDelete: (ids: readonly string[]) => Promise<unknown>;
   bulkHardDelete: (ids: readonly string[]) => Promise<unknown>;
@@ -362,7 +556,23 @@ function personEmail(word: string): string {
   return `${word.length}@example.test`;
 }
 
-function nodeWrites(store: WriteSurface, kind: WritableKind): NodeWrites {
+function createOptions(
+  id: string | undefined,
+): Readonly<{ id: string }> | undefined {
+  return id === undefined ? undefined : { id };
+}
+
+function bulkCreateItem<P>(
+  props: P,
+  id: string | undefined,
+): Readonly<{ props: P; id?: string }> {
+  return id === undefined ? { props } : { props, id };
+}
+
+function nodeWrites(
+  store: WriteSurface["data"],
+  kind: WritableKind,
+): NodeWrites {
   switch (kind) {
     case "Person": {
       const nodes = store.nodes.Person;
@@ -372,14 +582,12 @@ function nodeWrites(store: WriteSurface, kind: WritableKind): NodeWrites {
         email: personEmail(word),
       });
       return {
-        create: (raw, word) => nodes.create(props(word), { id: raw }),
+        create: (raw, word) => nodes.create(props(word), createOptions(raw)),
         update: (raw, word) => nodes.update(id(raw), props(word)),
         softDelete: (raw) => nodes.delete(id(raw)),
         hardDelete: (raw) => nodes.hardDelete(id(raw)),
         bulkCreate: (raws, word) =>
-          nodes.bulkCreate(
-            raws.map((raw) => ({ props: props(word), id: raw })),
-          ),
+          nodes.bulkCreate(raws.map((raw) => bulkCreateItem(props(word), raw))),
         bulkUpsert: (raws, word) =>
           nodes.bulkUpsertById(
             raws.map((raw) => ({ id: raw, props: props(word) })),
@@ -397,14 +605,12 @@ function nodeWrites(store: WriteSurface, kind: WritableKind): NodeWrites {
       const id = (raw: string) => asNodeId<typeof Robot>(raw);
       const props = (word: string) => ({ label: word });
       return {
-        create: (raw, word) => nodes.create(props(word), { id: raw }),
+        create: (raw, word) => nodes.create(props(word), createOptions(raw)),
         update: (raw, word) => nodes.update(id(raw), props(word)),
         softDelete: (raw) => nodes.delete(id(raw)),
         hardDelete: (raw) => nodes.hardDelete(id(raw)),
         bulkCreate: (raws, word) =>
-          nodes.bulkCreate(
-            raws.map((raw) => ({ props: props(word), id: raw })),
-          ),
+          nodes.bulkCreate(raws.map((raw) => bulkCreateItem(props(word), raw))),
         bulkUpsert: (raws, word) =>
           nodes.bulkUpsertById(
             raws.map((raw) => ({ id: raw, props: props(word) })),
@@ -422,14 +628,12 @@ function nodeWrites(store: WriteSurface, kind: WritableKind): NodeWrites {
       const id = (raw: string) => asNodeId<typeof Fact>(raw);
       const props = (word: string) => ({ code: word });
       return {
-        create: (raw, word) => nodes.create(props(word), { id: raw }),
+        create: (raw, word) => nodes.create(props(word), createOptions(raw)),
         update: (raw, word) => nodes.update(id(raw), props(word)),
         softDelete: (raw) => nodes.delete(id(raw)),
         hardDelete: (raw) => nodes.hardDelete(id(raw)),
         bulkCreate: (raws, word) =>
-          nodes.bulkCreate(
-            raws.map((raw) => ({ props: props(word), id: raw })),
-          ),
+          nodes.bulkCreate(raws.map((raw) => bulkCreateItem(props(word), raw))),
         bulkUpsert: (raws, word) =>
           nodes.bulkUpsertById(
             raws.map((raw) => ({ id: raw, props: props(word) })),
@@ -445,37 +649,70 @@ function nodeWrites(store: WriteSurface, kind: WritableKind): NodeWrites {
   }
 }
 
+type Provenance = ReturnType<
+  typeof createRetractionCapability<RebuildGraph, typeof PROVENANCE_CONFIG>
+>;
+
 type Run = Readonly<{
-  store: RebuildStore;
-  provenance: ReturnType<
-    typeof createRetractionCapability<RebuildGraph, typeof PROVENANCE_CONFIG>
-  >;
+  graphId: string;
+  backend: GraphBackend;
+  /** Whether the graph maintains the identity closure and separation. */
+  identity: boolean;
+  root: WriteSurface;
+  /** Runs `body` inside one caller-owned transaction. */
+  transaction: (
+    body: (surface: WriteSurface) => Promise<void>,
+  ) => Promise<void>;
+  /** Every library rebuild of a derived relation the graph maintains. */
+  rebuild: () => Promise<void>;
+  provenance: Provenance | undefined;
   /** Every assertion id a write returned, in order, for `retract` picks. */
   assertionIds: IdentityAssertionId[];
+  /**
+   * Store-generated node ids by `kind:slot`, when creates leave the id to the
+   * store; `undefined` when every create supplies its slot's id.
+   */
+  generatedIds: Map<string, string> | undefined;
 }>;
 
 function nowPlus(milliseconds: number): string {
   return new Date(Date.now() + milliseconds).toISOString();
 }
 
-/**
- * A refused write is part of the sequence, not a failure of the property: a
- * typed refusal (duplicate id, uniqueness, identity contradiction, missing
- * node, window conflict) leaves the store as it was, and the snapshot after it
- * still has to equal its rebuild. Anything that is not a TypeGraph error is a
- * real failure and propagates.
- */
-async function attempt(write: () => Promise<unknown>): Promise<unknown> {
-  try {
-    return await write();
-  } catch (error) {
-    if (error instanceof TypeGraphError) return undefined;
-    throw error;
-  }
+function slotKey(kind: WritableKind, slot: number): string {
+  return `${kind}:${slot}`;
+}
+
+/** The id a slot names now: its generated id once a create has bound one. */
+function nodeId(run: Run, kind: WritableKind, slot: number): string {
+  return (
+    run.generatedIds?.get(slotKey(kind, slot)) ?? requireDefined(IDS[slot])
+  );
+}
+
+/** The id a create supplies for a slot, or `undefined` to let the store pick. */
+function createId(run: Run, slot: number): string | undefined {
+  return run.generatedIds === undefined ? requireDefined(IDS[slot]) : undefined;
+}
+
+function bindGeneratedId(
+  run: Run,
+  kind: WritableKind,
+  slot: number,
+  node: CreatedNode | undefined,
+): void {
+  if (node !== undefined) run.generatedIds?.set(slotKey(kind, slot), node.id);
 }
 
 function identityRef(ref: Ref) {
   return { kind: ref.kind, id: ref.id };
+}
+
+function requireIdentity(surface: WriteSurface): RebuildStore["identity"] {
+  return requireDefined(
+    surface.identity,
+    "an identity write on a fixture without identity",
+  );
 }
 
 function noteAssertion(run: Run, result: unknown): void {
@@ -498,8 +735,9 @@ function pickAssertion(
 async function applyOp(run: Run, op: Op): Promise<void> {
   switch (op.type) {
     case "retractSource": {
-      await attempt(() =>
-        run.provenance.retract({
+      const provenance = requireDefined(run.provenance, "provenance");
+      await attempt("retractSource", () =>
+        provenance.retract({
           kind: "Source",
           id: requireDefined(SOURCES[op.source]),
         }),
@@ -507,8 +745,9 @@ async function applyOp(run: Run, op: Op): Promise<void> {
       return;
     }
     case "unRetractSource": {
-      await attempt(() =>
-        run.provenance.unRetract({
+      const provenance = requireDefined(run.provenance, "provenance");
+      await attempt("unRetractSource", () =>
+        provenance.unRetract({
           kind: "Source",
           id: requireDefined(SOURCES[op.source]),
         }),
@@ -520,22 +759,23 @@ async function applyOp(run: Run, op: Op): Promise<void> {
       return;
     }
     case "checkpoint": {
-      await expectRebuildEquivalent(run.store, "checkpoint");
+      await expectRebuildEquivalent(run, "checkpoint");
       return;
     }
     case "transaction": {
       // The caller catches each refused write inside its own transaction
       // and commits the rest: whatever a refused write left behind commits
-      // with it.
-      await attempt(() =>
-        run.store.transaction(async (tx) => {
+      // with it. An edge-create refusal is the exception: it propagates and
+      // rolls the transaction back (see `applyWrite`).
+      await attempt("transaction", () =>
+        run.transaction(async (tx) => {
           for (const write of op.writes) await applyWrite(run, write, tx);
         }),
       );
       return;
     }
     case "write": {
-      await applyWrite(run, op.write, run.store);
+      await applyWrite(run, op.write, run.root);
       return;
     }
   }
@@ -544,14 +784,24 @@ async function applyOp(run: Run, op: Op): Promise<void> {
 async function applyWrite(
   run: Run,
   op: WriteOp,
-  store: WriteSurface,
+  surface: WriteSurface,
 ): Promise<void> {
+  const store = surface.data;
   switch (op.type) {
-    case "create":
+    case "create": {
+      const node = await attempt("create", () =>
+        nodeWrites(store, op.kind).create(
+          createId(run, op.id),
+          requireDefined(WORDS[op.word]),
+        ),
+      );
+      bindGeneratedId(run, op.kind, op.id, node);
+      return;
+    }
     case "update": {
-      await attempt(() =>
-        nodeWrites(store, op.kind)[op.type](
-          requireDefined(IDS[op.id]),
+      await attempt("update", () =>
+        nodeWrites(store, op.kind).update(
+          nodeId(run, op.kind, op.id),
           requireDefined(WORDS[op.word]),
         ),
       );
@@ -559,16 +809,27 @@ async function applyWrite(
     }
     case "softDelete":
     case "hardDelete": {
-      await attempt(() =>
-        nodeWrites(store, op.kind)[op.type](requireDefined(IDS[op.id])),
+      await attempt(op.type, () =>
+        nodeWrites(store, op.kind)[op.type](nodeId(run, op.kind, op.id)),
       );
       return;
     }
-    case "bulkCreate":
+    case "bulkCreate": {
+      const nodes = await attempt("bulkCreate", () =>
+        nodeWrites(store, op.kind).bulkCreate(
+          op.ids.map((slot) => createId(run, slot)),
+          requireDefined(WORDS[op.word]),
+        ),
+      );
+      for (const [index, slot] of op.ids.entries()) {
+        bindGeneratedId(run, op.kind, slot, nodes?.[index]);
+      }
+      return;
+    }
     case "bulkUpsert": {
-      await attempt(() =>
-        nodeWrites(store, op.kind)[op.type](
-          op.ids.map((index) => requireDefined(IDS[index])),
+      await attempt("bulkUpsert", () =>
+        nodeWrites(store, op.kind).bulkUpsert(
+          op.ids.map((slot) => nodeId(run, op.kind, slot)),
           requireDefined(WORDS[op.word]),
         ),
       );
@@ -576,44 +837,51 @@ async function applyWrite(
     }
     case "bulkSoftDelete":
     case "bulkHardDelete": {
-      await attempt(() =>
+      await attempt(op.type, () =>
         nodeWrites(store, op.kind)[op.type](
-          op.ids.map((index) => requireDefined(IDS[index])),
+          op.ids.map((slot) => nodeId(run, op.kind, slot)),
         ),
       );
       return;
     }
     case "endWindow": {
-      await attempt(() =>
+      await attempt("endWindow", () =>
         nodeWrites(store, op.kind).endWindow(
-          requireDefined(IDS[op.id]),
+          nodeId(run, op.kind, op.id),
           nowPlus(WINDOW_LENGTH_MS),
         ),
       );
       return;
     }
     case "reopenWindow": {
-      await attempt(() =>
-        nodeWrites(store, op.kind).reopenWindow(requireDefined(IDS[op.id])),
+      await attempt("reopenWindow", () =>
+        nodeWrites(store, op.kind).reopenWindow(nodeId(run, op.kind, op.id)),
       );
       return;
     }
     case "createEdge": {
-      const from = requireDefined(IDS[op.from]);
-      const to = requireDefined(IDS[op.to]);
-      await attempt(() =>
+      const from = nodeId(run, "Person", op.from);
+      const to = nodeId(run, "Person", op.to);
+      const create = () =>
         store.edges.knows.create(
           { kind: "Person", id: from },
           { kind: "Person", id: to },
           {},
           { id: `knows-${from}-${to}` },
-        ),
-      );
+        );
+      // Inside a transaction an edge-create refusal propagates and rolls the
+      // transaction back. On PostgreSQL a duplicate edge id reaches the
+      // database as a failed INSERT: the store reports it as a
+      // `ValidationError`, but the transaction is left aborted and the next
+      // statement on it throws an untyped driver error, so catching it and
+      // writing on is not a sequence the store can complete.
+      if (surface.inTransaction) await create();
+      else await attempt("createEdge", create);
       return;
     }
     case "deleteEdge": {
-      const edgeId = `knows-${requireDefined(IDS[op.from])}-${requireDefined(IDS[op.to])}`;
-      await attempt(() =>
+      const edgeId = `knows-${nodeId(run, "Person", op.from)}-${nodeId(run, "Person", op.to)}`;
+      await attempt("deleteEdge", () =>
         op.hard ?
           store.edges.knows.hardDelete(asEdgeId<typeof knows>(edgeId))
         : store.edges.knows.delete(asEdgeId<typeof knows>(edgeId)),
@@ -621,6 +889,7 @@ async function applyWrite(
       return;
     }
     case "assert": {
+      const identity = requireIdentity(surface);
       // Identity refuses a validity end in the future, so a windowed
       // assertion is a CLOSED one: it ended a moment ago and is history
       // the moment it lands. It is refused until the clock has moved far
@@ -629,14 +898,10 @@ async function applyWrite(
         op.windowed ?
           { validFrom: nowPlus(-WINDOW_LENGTH_MS), validTo: nowPlus(-1) }
         : undefined;
-      const result = await attempt(() =>
+      const result = await attempt("assert", () =>
         op.relation === "same" ?
-          store.identity.assertSame(
-            identityRef(op.a),
-            identityRef(op.b),
-            window,
-          )
-        : store.identity.assertDifferent(
+          identity.assertSame(identityRef(op.a), identityRef(op.b), window)
+        : identity.assertDifferent(
             identityRef(op.a),
             identityRef(op.b),
             window,
@@ -646,14 +911,15 @@ async function applyWrite(
       return;
     }
     case "bulkAssert": {
+      const identity = requireIdentity(surface);
       const pairs = op.pairs.map(([a, b]) => ({
         a: identityRef(a),
         b: identityRef(b),
       }));
-      const results = await attempt(() =>
+      const results = await attempt("bulkAssert", () =>
         op.relation === "same" ?
-          store.identity.bulkAssertSame(pairs)
-        : store.identity.bulkAssertDifferent(pairs),
+          identity.bulkAssertSame(pairs)
+        : identity.bulkAssertDifferent(pairs),
       );
       if (Array.isArray(results)) {
         for (const result of results) noteAssertion(run, result);
@@ -661,28 +927,28 @@ async function applyWrite(
       return;
     }
     case "retract": {
+      const identity = requireIdentity(surface);
       const id = pickAssertion(run, op.pick);
       if (id !== undefined) {
-        await attempt(() => store.identity.retractAssertion(id));
+        await attempt("retract", () => identity.retractAssertion(id));
       }
       return;
     }
     case "bulkRetract": {
+      const identity = requireIdentity(surface);
       const ids = op.picks.flatMap((pick) => {
         const id = pickAssertion(run, pick);
         return id === undefined ? [] : [id];
       });
-      await attempt(() => store.identity.bulkRetractAssertions(ids));
+      await attempt("bulkRetract", () => identity.bulkRetractAssertions(ids));
       return;
     }
     case "unassert": {
-      await attempt(() =>
+      const identity = requireIdentity(surface);
+      await attempt("unassert", () =>
         op.relation === "same" ?
-          store.identity.retractSameAssertion(
-            identityRef(op.a),
-            identityRef(op.b),
-          )
-        : store.identity.retractDifferentAssertion(
+          identity.retractSameAssertion(identityRef(op.a), identityRef(op.b))
+        : identity.retractDifferentAssertion(
             identityRef(op.a),
             identityRef(op.b),
           ),
@@ -693,14 +959,14 @@ async function applyWrite(
 }
 
 /**
- * The world every run starts from: Persons `n0`–`n3` and Robots `n0`–`n1`
- * live, so identity writes mostly land. The provenance part: `j0` is justified by `s0` and
- * derives facts `n0` and `n1`; `j1` is justified by `s1` and fact `n0` and
- * derives fact `n2`. Fact ids deliberately reuse the generic node ids, so a
- * provenance transition, a node write, and an identity assertion can all
- * touch the same reference.
+ * The world every identity-fixture run starts from: Persons `n0`–`n3` and
+ * Robots `n0`–`n1` live, so identity writes mostly land. The provenance part:
+ * `j0` is justified by `s0` and derives facts `n0` and `n1`; `j1` is justified
+ * by `s1` and fact `n0` and derives fact `n2`. Fact ids deliberately reuse the
+ * generic node ids, so a provenance transition, a node write, and an identity
+ * assertion can all touch the same reference.
  */
-async function seedWorld(store: RebuildStore): Promise<void> {
+async function seedIdentityWorld(store: RebuildStore): Promise<void> {
   for (const [index, id] of IDS.entries()) {
     const word = requireDefined(WORDS[index]);
     await store.nodes.Person.create(
@@ -748,6 +1014,69 @@ async function seedWorld(store: RebuildStore): Promise<void> {
   }
 }
 
+/**
+ * The world every root-fusion run starts from: Persons in slots 0–3, Robots
+ * in 0–1 and Facts in 0–2, each created at the root with a store-generated
+ * id, so every Robot and Fact here is a fused-root create candidate.
+ */
+async function seedFusionWorld(run: Run): Promise<void> {
+  const nodes = run.root.data.nodes;
+  for (const [slot, word] of WORDS.entries()) {
+    bindGeneratedId(
+      run,
+      "Person",
+      slot,
+      await nodes.Person.create({ name: word, email: `${slot}@example.test` }),
+    );
+    if (slot < 2) {
+      bindGeneratedId(
+        run,
+        "Robot",
+        slot,
+        await nodes.Robot.create({ label: word }),
+      );
+    }
+    if (slot < 3) {
+      bindGeneratedId(
+        run,
+        "Fact",
+        slot,
+        await nodes.Fact.create({ code: word }),
+      );
+    }
+  }
+}
+
+// ============================================================
+// Command trace
+// ============================================================
+
+/**
+ * Records every command the root backend's command port executes, so a run
+ * can prove a fused command — not the portable path — wrote a fulltext row.
+ */
+function traceRootCommands(backend: GraphBackend) {
+  const spy = vi.spyOn(backend.commands, "execute");
+  return {
+    /** Fused node creates that reported `created` with a fulltext projection. */
+    fulltextCreates: () =>
+      spy.mock.calls.filter(([command], index) => {
+        const settled = spy.mock.settledResults[index];
+        return (
+          command.kind === "node.create" &&
+          command.plan.projections.some(
+            (projection) => projection.kind === "fulltext",
+          ) &&
+          settled?.type === "fulfilled" &&
+          settled.value.outcome === "created"
+        );
+      }).length,
+    restore: () => {
+      spy.mockRestore();
+    },
+  };
+}
+
 // ============================================================
 // Snapshot and rebuild
 // ============================================================
@@ -759,7 +1088,10 @@ type DerivedSnapshot = Readonly<{
   separation: readonly string[];
   /** `kind:id [language] content`, one entry per fulltext row. */
   fulltext: readonly string[];
-  /** One entry per contribution marker row this graph owns. */
+  /**
+   * One entry per contribution marker row in either scope: the graph's own
+   * activation marker and the deployment-wide physical attestation.
+   */
   contributionMarkers: readonly string[];
 }>;
 
@@ -774,6 +1106,11 @@ async function readRows(
   return backend.execute<Record<string, unknown>>(asCompiledRowsSql(query));
 }
 
+/** `last_error` as stored: SQL `NULL` and an empty string stay distinct. */
+function describeLastError(value: unknown): string {
+  return value === null || value === undefined ? "NULL" : JSON.stringify(value);
+}
+
 /**
  * Every derived row this graph owns, read straight from the tables (default
  * table names) and spelled as canonically ordered strings.
@@ -783,25 +1120,30 @@ async function readRows(
  * function of `language` and `content`, both compared); contribution marker
  * `materialized_at` (compared as present/absent) and `last_attempted_at`.
  */
-async function snapshotDerived(store: RebuildStore): Promise<DerivedSnapshot> {
-  const backend = storeBackend(store);
-  const graphId = store.graphId;
-  const closure = await readRows(
-    backend,
-    sql`
-      SELECT member_kind, member_id, class_kind, class_id
-      FROM ${sql.raw("typegraph_identity_closure")}
-      WHERE graph_id = ${graphId}
-    `,
-  );
-  const separation = await readRows(
-    backend,
-    sql`
-      SELECT class_key_low, class_key_high
-      FROM ${sql.raw("typegraph_identity_separation")}
-      WHERE graph_id = ${graphId}
-    `,
-  );
+async function snapshotDerived(run: Run): Promise<DerivedSnapshot> {
+  const { backend, graphId } = run;
+  const closure =
+    run.identity ?
+      await readRows(
+        backend,
+        sql`
+          SELECT member_kind, member_id, class_kind, class_id
+          FROM ${sql.raw("typegraph_identity_closure")}
+          WHERE graph_id = ${graphId}
+        `,
+      )
+    : [];
+  const separation =
+    run.identity ?
+      await readRows(
+        backend,
+        sql`
+          SELECT class_key_low, class_key_high
+          FROM ${sql.raw("typegraph_identity_separation")}
+          WHERE graph_id = ${graphId}
+        `,
+      )
+    : [];
   const fulltext = await readRows(
     backend,
     sql`
@@ -813,11 +1155,11 @@ async function snapshotDerived(store: RebuildStore): Promise<DerivedSnapshot> {
   const markers = await readRows(
     backend,
     sql`
-      SELECT logical_name, owner, table_name, signature,
+      SELECT graph_id, logical_name, owner, table_name, signature,
         CASE WHEN materialized_at IS NULL THEN 0 ELSE 1 END AS materialized,
         last_error
       FROM ${sql.raw("typegraph_contribution_materializations")}
-      WHERE graph_id = ${graphId}
+      WHERE graph_id IN (${graphId}, ${DEPLOYMENT_CONTRIBUTION_GRAPH_ID})
     `,
   );
   return {
@@ -842,38 +1184,131 @@ async function snapshotDerived(store: RebuildStore): Promise<DerivedSnapshot> {
     contributionMarkers: sorted(
       markers.map((row) =>
         [
-          row["logical_name"],
-          row["owner"],
-          row["table_name"],
-          row["signature"],
+          row["graph_id"] === DEPLOYMENT_CONTRIBUTION_GRAPH_ID ?
+            "deployment"
+          : "graph",
+          String(row["logical_name"]),
+          String(row["owner"]),
+          String(row["table_name"]),
+          String(row["signature"]),
           Number(row["materialized"]) === 1 ? "materialized" : "pending",
-          row["last_error"] ?? "",
-        ]
-          .map(String)
-          .join(" | "),
+          describeLastError(row["last_error"]),
+        ].join(" | "),
       ),
     ),
   };
 }
 
-/** Every library rebuild of a derived relation, run in place. */
-async function rebuildAll(store: RebuildStore): Promise<void> {
-  await rebuildIdentityClosure(store);
-  await store.rebuildContribution("fulltext");
-}
-
-async function expectRebuildEquivalent(
-  store: RebuildStore,
-  label: string,
-): Promise<void> {
-  const stored = await snapshotDerived(store);
-  await rebuildAll(store);
-  const rebuilt = await snapshotDerived(store);
+async function expectRebuildEquivalent(run: Run, label: string): Promise<void> {
+  const stored = await snapshotDerived(run);
+  await run.rebuild();
+  const rebuilt = await snapshotDerived(run);
   expect({ at: label, derived: stored }).toEqual({
     at: label,
     derived: rebuilt,
   });
 }
+
+// ============================================================
+// Fixtures
+// ============================================================
+
+type Fixture = Readonly<{
+  name: string;
+  /** Generated node and op sequences, with an identity profile per run. */
+  arbitrary: fc.Arbitrary<
+    Readonly<{ profile: "fold" | "ignore"; ops: readonly Op[] }>
+  >;
+  /** Creates the graph and its seeded store on `backend`. */
+  open: (
+    backend: GraphBackend,
+    graphId: string,
+    profile: "fold" | "ignore",
+  ) => Promise<Run>;
+  /**
+   * Whether a run must show, on a lane that fuses root creates, a fused
+   * fulltext create in its command trace.
+   */
+  requiresFusedFulltext: boolean;
+}>;
+
+const FIXTURES: readonly Fixture[] = [
+  {
+    name: "identity, history and provenance",
+    arbitrary: fc.record({
+      profile: fc.constantFrom("fold" as const, "ignore" as const),
+      ops: fc.array(
+        opArbitrary(
+          [...DATA_WRITE_ARBS, ...IDENTITY_WRITE_ARBS],
+          PROVENANCE_OP_ARBS,
+        ),
+        { maxLength: MAX_OPS, size: "max" },
+      ),
+    }),
+    requiresFusedFulltext: false,
+    open: async (backend, graphId, profile) => {
+      const [store] = await createStoreWithSchema(
+        buildGraph(graphId, profile),
+        backend,
+        { history: true },
+      );
+      await seedIdentityWorld(store);
+      return {
+        graphId,
+        backend: storeBackend(store),
+        identity: true,
+        root: { data: store, identity: store.identity, inTransaction: false },
+        transaction: (body) =>
+          store.transaction((tx) =>
+            body({ data: tx, identity: tx.identity, inTransaction: true }),
+          ),
+        rebuild: async () => {
+          await rebuildIdentityClosure(store);
+          await store.rebuildContribution("fulltext");
+        },
+        provenance: createRetractionCapability(store, PROVENANCE_CONFIG),
+        assertionIds: [],
+        generatedIds: undefined,
+      };
+    },
+  },
+  {
+    name: "root fusion",
+    arbitrary: fc.record({
+      // No identity: the profile is unused, fixed so shrinking ignores it.
+      profile: fc.constant("fold" as const),
+      ops: fc.array(opArbitrary(DATA_WRITE_ARBS, []), {
+        maxLength: MAX_OPS,
+        size: "max",
+      }),
+    }),
+    requiresFusedFulltext: true,
+    open: async (backend, graphId) => {
+      const [store] = await createStoreWithSchema(
+        buildFusionGraph(graphId),
+        backend,
+      );
+      const run: Run = {
+        graphId,
+        backend: storeBackend(store),
+        identity: false,
+        root: { data: store, identity: undefined, inTransaction: false },
+        transaction: (body) =>
+          store.transaction((tx) =>
+            body({ data: tx, identity: undefined, inTransaction: true }),
+          ),
+        rebuild: async () => {
+          await store.rebuildContribution("fulltext");
+        },
+        provenance: undefined,
+        assertionIds: [],
+        generatedIds: new Map(),
+      };
+      await seedFusionWorld(run);
+      return run;
+    },
+  },
+];
 
 // ============================================================
 // Lanes
@@ -887,6 +1322,12 @@ type Lane = Readonly<{
     Readonly<{ backend: GraphBackend; close: () => Promise<void> }>
   >;
   shared: boolean;
+  /**
+   * Whether an eligible root create on this backend takes the fused
+   * `node.create` command. The SQLite lane's root creates take the portable
+   * path; both PGlite backends are bundled roots and fuse them.
+   */
+  fusesRootNodeCreates: boolean;
 }>;
 
 const LANES: readonly Lane[] = [
@@ -894,27 +1335,31 @@ const LANES: readonly Lane[] = [
     name: "SQLite",
     runs: propertyRuns({ ci: 40, local: 100 }),
     shared: false,
-    open: () =>
-      Promise.resolve({
-        backend: createTestBackend(),
-        close: () => Promise.resolve(),
-      }),
+    fusesRootNodeCreates: false,
+    open: () => {
+      // Closed by the run that opened it: a native database per run held to
+      // the end of the property grows the worker by hundreds of megabytes.
+      const { backend } = createLocalSqliteBackend();
+      return Promise.resolve({ backend, close: () => backend.close() });
+    },
   },
   {
     name: "PGlite",
     runs: propertyRuns({ ci: 15, local: 40 }),
     shared: true,
+    fusesRootNodeCreates: true,
     open: async () => {
       const local = await createLocalPgliteBackend({ vector: false });
       return { backend: local.backend, close: () => local.backend.close() };
     },
   },
   {
-    // The root backend over the same database: fused command paths write
-    // the derived rows here, by a route the store-mediated lane never takes.
+    // The unwrapped `createPostgresBackend` root over the same database,
+    // without the local factory's managed-close wrapper.
     name: "PGlite root (fused-capable)",
     runs: propertyRuns({ ci: 15, local: 40 }),
     shared: true,
+    fusesRootNodeCreates: true,
     open: async () => {
       const local = await createLocalPgliteBackend({ vector: false });
       return {
@@ -938,47 +1383,46 @@ describe.each(LANES)("rebuild equivalence ($name)", (lane) => {
     await shared?.close();
   });
 
-  it("stored derived rows equal their rebuild after every random write sequence", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      await fc.assert(
-        fc.asyncProperty(
-          fc.constantFrom("fold" as const, "ignore" as const),
-          fc.array(opArb, { maxLength: MAX_OPS, size: "max" }),
-          async (profile, ops) => {
+  it.each(FIXTURES)(
+    "stored derived rows equal their rebuild after every random write sequence ($name)",
+    async (fixture) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        await fc.assert(
+          fc.asyncProperty(fixture.arbitrary, async ({ profile, ops }) => {
             graphSerial += 1;
             vi.setSystemTime(START_INSTANT);
             const opened = shared ?? (await lane.open());
+            const trace = traceRootCommands(opened.backend);
             try {
-              const graph = buildGraph(
+              const run = await fixture.open(
+                opened.backend,
                 `rebuild_eq_${profile}_${graphSerial}`,
                 profile,
               );
-              const [store] = await createStoreWithSchema(
-                graph,
-                opened.backend,
-                { history: true },
-              );
-              await seedWorld(store);
-              const run: Run = {
-                store,
-                provenance: createRetractionCapability(
-                  store,
-                  PROVENANCE_CONFIG,
-                ),
-                assertionIds: [],
-              };
               for (const op of ops) await applyOp(run, op);
-              await expectRebuildEquivalent(store, "end");
+              // Where the lane fuses root creates, a fused command wrote at
+              // least one fulltext row the comparison below checks against
+              // its rebuild.
+              const requiredFusedCreates =
+                fixture.requiresFusedFulltext && lane.fusesRootNodeCreates ?
+                  1
+                : 0;
+              expect(trace.fulltextCreates()).toBeGreaterThanOrEqual(
+                requiredFusedCreates,
+              );
+              await expectRebuildEquivalent(run, "end");
             } finally {
+              trace.restore();
               if (shared === undefined) await opened.close();
             }
-          },
-        ),
-        { numRuns: lane.runs },
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  }, 600_000);
+          }),
+          { numRuns: lane.runs },
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+    600_000,
+  );
 });
