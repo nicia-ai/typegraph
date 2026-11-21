@@ -107,6 +107,7 @@ import { assertSharedNodeField, resolveAliasOrderSpec } from "./order-by-field";
 import { withRecursiveStopExpansion } from "./recursive-stop";
 import { executeQueryTerminal } from "./terminal-query";
 import {
+  type DynamicNodeTypeFor,
   EXHAUSTIVE_VARIABLE_LENGTH_STATE,
   TraversalBuilder,
 } from "./traversal-builder";
@@ -203,11 +204,8 @@ export type IdentityTraversalOption<G extends GraphDef> =
     Readonly<{ includeIdentityMembers?: boolean }>
   : Readonly<{ includeIdentityMembers?: never }>;
 
-type DynamicNodeTypeFor<T> =
-  T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
-
 /** A nonempty list of compile-time node kinds, as `from()` accepts it. */
-type SourceKindList<G extends GraphDef> = readonly [
+export type SourceKindList<G extends GraphDef> = readonly [
   keyof G["nodes"] & string,
   ...(keyof G["nodes"] & string)[],
 ];
@@ -283,11 +281,11 @@ function assertCompositionNavigationOptionKeys(
   );
 }
 
-type DynamicEdgeTypeFor<T> =
+export type DynamicEdgeTypeFor<T> =
   T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
 
 /** The edge type `via` narrows the edge alias to, else `DynamicEdgeType`. */
-type CompositionNavigationEdge<O> =
+export type CompositionNavigationEdge<O> =
   O extends { via: infer V extends AnyEdgeType } ? V : DynamicEdgeType;
 
 /**
@@ -295,7 +293,7 @@ type CompositionNavigationEdge<O> =
  * consumed by both methods' public signatures and their internal casts, so
  * the same generic expansion is never re-spelled four times over.
  */
-type CompositionNavigationResult<
+export type CompositionNavigationResult<
   G extends GraphDef,
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap,
@@ -431,7 +429,7 @@ function buildEdgeFields(
   ];
 }
 
-type TemporalMethod<
+export type TemporalMethod<
   G extends GraphDef,
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap,

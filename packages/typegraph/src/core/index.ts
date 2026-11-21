@@ -140,3 +140,49 @@ export type { ALL_META_EDGE_NAMES } from "../ontology/constants";
 
 // ID generation
 export { generateId } from "../utils/id";
+
+/**
+ * Types the public declarations name without being everyday API: exported so
+ * a consumer's declaration emit can spell an inferred type through a public
+ * specifier. Entrypoints whose declarations name them load this entrypoint's
+ * declarations (contract 3 in `tests/public-type-reachability.test.ts`).
+ */
+export type { UniquePredicate } from "../constraints";
+export type {
+  EdgeEntry,
+  GraphDefConfig,
+  NormalizedEdges,
+} from "./define-graph";
+export type { EmptySchema } from "./edge";
+export type {
+  EmbeddingIndexOptions,
+  EmbeddingIndexType,
+  EmbeddingMetric,
+} from "./embedding";
+export type {
+  EngineRecordedInstantParts,
+  ReadCoordinate,
+  RecordedInstantParts,
+  TypeGraphRecordedInstantParts,
+} from "./temporal";
+export type {
+  UniqueConstraintField,
+  UniqueConstraintPredicate,
+  UniqueConstraintPredicateBuilder,
+} from "./types";
+export type {
+  IncompatibleKeys,
+  LiteralKeysOf,
+  OpaqueTypeLevelValue,
+  RuntimeInvisibleTags,
+  StructuralSubtypeMismatchWording,
+  TypeLevelChild,
+  TypeLevelElement,
+} from "../ontology/types";
+export type {
+  CompositionPair,
+  CompositionRealization,
+  CompositionRelation,
+} from "../registry/composition-relation";
+export type { EdgeKindFacts } from "../registry/edge-kind-facts";
+export type { KindRegistry, RegistryClosures } from "../registry/kind-registry";

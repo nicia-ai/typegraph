@@ -83,7 +83,7 @@ export type EvolutionPlanRequirements = Readonly<{
 
 declare const evolutionPlanBrand: unique symbol;
 
-type EvolutionPlanBase = Readonly<{
+export type EvolutionPlanBase = Readonly<{
   graphId: string;
   baseline: SchemaIdentity;
   result: SchemaIdentity;

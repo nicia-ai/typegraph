@@ -68,7 +68,7 @@ function recordedAsOfForComposableQuery(
 
 // Forward declaration for ExecutableQuery to avoid circular imports
 // G and R are used for type compatibility with ExecutableQuery but not accessed in the interface body
-interface ExecutableQueryLike<
+export interface ExecutableQueryLike<
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Used for type compatibility
   G extends GraphDef,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Used for type compatibility
@@ -85,7 +85,7 @@ interface ExecutableQueryLike<
 /**
  * Internal state for unionable query.
  */
-type UnionableQueryState = Readonly<{
+export type UnionableQueryState = Readonly<{
   left: ComposableQuery;
   operator: SetOperationType;
   right: ComposableQuery;

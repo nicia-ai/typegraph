@@ -8,9 +8,9 @@ export type JsonPointer = string & { readonly __jsonPointer: unique symbol };
 export type JsonPointerSegment = string | number;
 export type JsonPointerSegments = readonly JsonPointerSegment[];
 
-type Depth = 0 | 1 | 2 | 3 | 4 | 5;
+export type Depth = 0 | 1 | 2 | 3 | 4 | 5;
 
-interface DepthDecrementMap {
+export interface DepthDecrementMap {
   0: 0;
   1: 0;
   2: 1;
@@ -19,25 +19,27 @@ interface DepthDecrementMap {
   5: 4;
 }
 
-type Decrement<Current extends Depth> = DepthDecrementMap[Current];
+export type Decrement<Current extends Depth> = DepthDecrementMap[Current];
 
-type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
-type ObjectPointerKey<T> = Exclude<
+export type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
+export type ObjectPointerKey<T> = Exclude<
   Extract<keyof T, string>,
   NonNegativeIntegerString
 >;
 
-type EncodeTilde<S extends string> =
+export type EncodeTilde<S extends string> =
   S extends `${infer Head}~${infer Tail}` ?
     `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}`
   : S;
 
-type EncodeSlash<S extends string> =
+export type EncodeSlash<S extends string> =
   S extends `${infer Head}/${infer Tail}` ?
     `${EncodeSlash<Head>}~1${EncodeSlash<Tail>}`
   : S;
 
-type EncodePointerSegment<S extends string> = EncodeSlash<EncodeTilde<S>>;
+export type EncodePointerSegment<S extends string> = EncodeSlash<
+  EncodeTilde<S>
+>;
 
 type DecodePointerSegment<S extends string> =
   S extends `${infer Head}~1${infer Tail}` ?
@@ -46,12 +48,12 @@ type DecodePointerSegment<S extends string> =
     `${DecodePointerSegment<Head>}~${DecodePointerSegment<Tail>}`
   : S;
 
-type PointerForArray<T, Current extends Depth> =
+export type PointerForArray<T, Current extends Depth> =
   | `/${NonNegativeIntegerString}`
   | (Current extends 1 ? never
     : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
 
-type PointerForObject<T, Current extends Depth> = {
+export type PointerForObject<T, Current extends Depth> = {
   [K in ObjectPointerKey<T>]:
     | `/${EncodePointerSegment<K>}`
     | (Current extends 1 ? never
@@ -67,12 +69,12 @@ export type JsonPointerFor<T, Current extends Depth = 5> =
     : T extends Record<string, unknown> ? PointerForObject<T, Current>
     : never);
 
-type PointerSegmentsForArray<T, Current extends Depth> =
+export type PointerSegmentsForArray<T, Current extends Depth> =
   | readonly [number]
   | (Current extends 1 ? readonly [number]
     : readonly [number, ...JsonPointerSegmentsFor<T, Decrement<Current>>]);
 
-type PointerSegmentsForObject<T, Current extends Depth> = {
+export type PointerSegmentsForObject<T, Current extends Depth> = {
   [K in ObjectPointerKey<T>]:
     | readonly [K]
     | (Current extends 1 ? readonly [K]

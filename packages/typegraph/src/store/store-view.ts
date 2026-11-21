@@ -946,7 +946,7 @@ function recordedSearch<G extends GraphDef>(
  * that genuinely differ — collections, search, and the coordinate-changing
  * helpers — live on the subclasses.
  */
-abstract class CoordinatePinnedView<G extends GraphDef> {
+export abstract class CoordinatePinnedView<G extends GraphDef> {
   protected readonly store: Store<G>;
   protected readonly coordinate: ReadCoordinate;
   #algorithmFacade: StoreViewGraphAlgorithms<G> | undefined;
@@ -1181,7 +1181,7 @@ abstract class CoordinatePinnedView<G extends GraphDef> {
 // ============================================================
 
 /** The runtime half of {@link StoreView}; see that alias for the contract. */
-class StoreViewImplementation<
+export class StoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
   #nodes: StoreViewNodeCollections<G> | undefined;
@@ -1326,7 +1326,7 @@ export const StoreView = StoreViewImplementation as unknown as new <
  * The runtime half of {@link RecordedStoreView}; see that alias for the
  * contract.
  */
-class RecordedStoreViewImplementation<
+export class RecordedStoreViewImplementation<
   G extends GraphDef,
 > extends CoordinatePinnedView<G> {
   #nodes: RecordedStoreViewNodeCollections<G> | undefined;

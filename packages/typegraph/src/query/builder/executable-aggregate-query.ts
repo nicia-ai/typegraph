@@ -53,15 +53,17 @@ export type AggregateAliasMap = Readonly<
   >
 >;
 
-type AliasValue<Aliases extends AggregateAliasMap, Alias extends string> =
-  Alias extends keyof Aliases ? Aliases[Alias] : never;
+export type AliasValue<
+  Aliases extends AggregateAliasMap,
+  Alias extends string,
+> = Alias extends keyof Aliases ? Aliases[Alias] : never;
 
-type AliasSchemaValue<
+export type AliasSchemaValue<
   Aliases extends AggregateAliasMap,
   Alias extends string,
 > = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
 
-type WithAliasOptionality<
+export type WithAliasOptionality<
   Value,
   Aliases extends AggregateAliasMap,
   Alias extends string,
@@ -69,7 +71,7 @@ type WithAliasOptionality<
   AliasValue<Aliases, Alias>["optional"] extends true ? Value | undefined
   : Value;
 
-type PropertyValue<Value, Path extends readonly string[]> =
+export type PropertyValue<Value, Path extends readonly string[]> =
   Path extends readonly [] ? Value
   : Path extends (
     readonly [
@@ -82,7 +84,10 @@ type PropertyValue<Value, Path extends readonly string[]> =
     : unknown
   : unknown;
 
-type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> =
+export type FieldResult<
+  Field extends FieldRef,
+  Aliases extends AggregateAliasMap,
+> =
   Field extends (
     FieldRef<infer Declared, infer Alias, readonly string[], infer PropsPath>
   ) ?
@@ -104,7 +109,7 @@ type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> =
     : Declared
   : never;
 
-type AggregateFieldResult<
+export type AggregateFieldResult<
   Expression extends AggregateExpr,
   Aliases extends AggregateAliasMap,
 > =

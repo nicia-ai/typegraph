@@ -136,7 +136,7 @@ export type CompareAndSetExpected<Props> = Readonly<{
  * update the row mapper functions as well (since their return type is
  * NodeMeta/EdgeMeta, which is derived from this mapping).
  */
-type TemporalMetaFieldMap = Readonly<{
+export type TemporalMetaFieldMap = Readonly<{
   valid_from: "validFrom";
   valid_to: "validTo";
   created_at: "createdAt";
@@ -147,7 +147,7 @@ type TemporalMetaFieldMap = Readonly<{
 /**
  * Maps row fields to their camelCase meta counterparts, preserving types.
  */
-type MapRowToMeta<
+export type MapRowToMeta<
   R extends Readonly<Record<string, unknown>>,
   M extends Readonly<Record<string, string>>,
 > = Readonly<{
@@ -423,7 +423,10 @@ export type HeterogeneousNodeUpsertInput<
   : never;
 }[K];
 
-type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> =
+export type HeterogeneousNodeForKind<
+  G extends GraphDef,
+  K extends NodeKinds<G>,
+> =
   G["nodes"][K] extends Readonly<{ type: infer N extends NodeType }> ? Node<N>
   : never;
 
@@ -1217,7 +1220,7 @@ export type PolymorphicNodeReference<N extends NodeType> =
 export type GraphNodeReferenceInput<G extends GraphDef> =
   GraphNodeReference<G> | PolymorphicNodeReference<AllNodeTypes<G>>;
 
-type NodeReferenceGroup<R> =
+export type NodeReferenceGroup<R> =
   R extends Readonly<{ kind: infer K extends string; id: infer I }> ?
     Readonly<{ kind: K; ids: readonly I[] }>
   : never;
@@ -2041,10 +2044,10 @@ export type NodeCollection<
 export type NodeRef<N extends NodeType = NodeType> =
   Node<N> | Readonly<{ kind: N["kind"]; id: string }>;
 
-type KindNodeTypes<G extends GraphDef, K> =
+export type KindNodeTypes<G extends GraphDef, K> =
   K extends keyof G["nodes"] ? G["nodes"][K]["type"] : never;
 
-type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
+export type AssignableNodeTypes<G extends GraphDef, N extends NodeType> =
   N extends NodeType ?
     KindNodeTypes<G, Exclude<AssignableNodeKinds<G, N["kind"]>, N["kind"]>>
   : never;
@@ -2083,7 +2086,7 @@ export type EdgeInGraph<
  * collection type named without a graph, where nothing widens or admits
  * anything beyond the declared kinds.
  */
-type GraphWithoutOntology = GraphDef<
+export type GraphWithoutOntology = GraphDef<
   Record<string, NodeRegistration>,
   Record<string, EdgeRegistration>,
   readonly []
@@ -2092,7 +2095,7 @@ type GraphWithoutOntology = GraphDef<
 /**
  * Options for creating an edge.
  */
-type EdgeCreateOptions = Readonly<{
+export type EdgeCreateOptions = Readonly<{
   id?: string;
   validFrom?: string | null;
   validTo?: string;
@@ -2104,7 +2107,7 @@ type EdgeCreateOptions = Readonly<{
  * Uses `{}` to check if an empty object literal satisfies the schema input type.
  */
 /* eslint-disable @typescript-eslint/no-empty-object-type -- {} is intentional: checking if empty object satisfies schema */
-type EdgeCreateArguments<E extends AnyEdgeType> =
+export type EdgeCreateArguments<E extends AnyEdgeType> =
   {} extends z.input<E["schema"]> ?
     [props?: z.input<E["schema"]>, options?: EdgeCreateOptions]
   : [props: z.input<E["schema"]>, options?: EdgeCreateOptions];
@@ -2132,12 +2135,12 @@ type EdgeCreateArguments<E extends AnyEdgeType> =
  * const edges = await store.edges.worksAt.findFrom(alice);
  * ```
  */
-type EdgeEndpointPairTypes = Readonly<{
+export type EdgeEndpointPairTypes = Readonly<{
   from: NodeType;
   to: NodeType;
 }>;
 
-type EdgeBulkCreateItem<
+export type EdgeBulkCreateItem<
   Pairs extends EdgeEndpointPairTypes,
   Schema extends z.ZodObject<z.ZodRawShape>,
   G extends GraphDef,
@@ -2153,7 +2156,7 @@ type EdgeBulkCreateItem<
     }>
   : never;
 
-type EdgeBulkUpsertItem<
+export type EdgeBulkUpsertItem<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
   Id extends string,
@@ -2170,7 +2173,7 @@ type EdgeBulkUpsertItem<
       ValidityEndMutation
   : never;
 
-type EdgeBulkInsertItem<
+export type EdgeBulkInsertItem<
   Pairs extends EdgeEndpointPairTypes,
   Schema extends z.ZodObject<z.ZodRawShape>,
   G extends GraphDef,
@@ -2186,7 +2189,7 @@ type EdgeBulkInsertItem<
     }>
   : never;
 
-type EdgeBulkGetOrCreateItem<
+export type EdgeBulkGetOrCreateItem<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
   G extends GraphDef,
@@ -2202,7 +2205,7 @@ type EdgeBulkGetOrCreateItem<
       ValidityEndMutation
   : never;
 
-type EdgeCreateArgumentsTuple<
+export type EdgeCreateArgumentsTuple<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
   G extends GraphDef,
@@ -2215,7 +2218,7 @@ type EdgeCreateArgumentsTuple<
     ]
   : never;
 
-type EdgeFindByEndpointsArguments<
+export type EdgeFindByEndpointsArguments<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
   G extends GraphDef,
@@ -2229,7 +2232,7 @@ type EdgeFindByEndpointsArguments<
     ]
   : never;
 
-type EdgeGetOrCreateByEndpointsArguments<
+export type EdgeGetOrCreateByEndpointsArguments<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
   G extends GraphDef,
@@ -2651,10 +2654,10 @@ export type ConstraintNames<R extends NodeRegistration> =
 /**
  * Extract the union of 'from' node types from an EdgeRegistration.
  */
-type EdgeFromTypes<R extends EdgeRegistration> =
+export type EdgeFromTypes<R extends EdgeRegistration> =
   R["from"] extends readonly (infer N)[] ? N : never;
 
-type ExtractTargets<T> =
+export type ExtractTargets<T> =
   T extends readonly (infer N extends NodeType)[] ? N
   : T extends Record<string, readonly (infer N extends NodeType)[]> ? N
   : never;
@@ -2662,9 +2665,9 @@ type ExtractTargets<T> =
 /**
  * Extract the union of 'to' node types from an EdgeRegistration.
  */
-type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
+export type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
 
-type ExtractAllowedPairs<From, To> =
+export type ExtractAllowedPairs<From, To> =
   To extends readonly (infer ToNode extends NodeType)[] ?
     {
       from: From extends readonly (infer FromNode extends NodeType)[] ? FromNode
@@ -2688,15 +2691,15 @@ type ExtractAllowedPairs<From, To> =
 /**
  * Extract the allowed endpoint pairs from an EdgeRegistration.
  */
-type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<
+export type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<
   R["from"],
   R["to"]
 >;
 
-type EdgeFromNodeTypes<R extends EdgeRegistration> =
+export type EdgeFromNodeTypes<R extends EdgeRegistration> =
   EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType;
 
-type EdgeToNodeTypes<R extends EdgeRegistration> =
+export type EdgeToNodeTypes<R extends EdgeRegistration> =
   EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType;
 
 /**
@@ -3072,7 +3075,7 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 export type SqlAvailability =
   "available" | "history" | "revisionTracking" | "unavailable";
 
-type AdapterTransactionSqlAccess<TNativeTransaction> =
+export type AdapterTransactionSqlAccess<TNativeTransaction> =
   | Readonly<{
       sql: TNativeTransaction;
       sqlAvailability: "available";
@@ -3171,7 +3174,7 @@ export type TransactionRuntime = Readonly<{
  * });
  * ```
  */
-type TransactionCollections<G extends GraphDef> = Readonly<{
+export type TransactionCollections<G extends GraphDef> = Readonly<{
   [TRANSACTION_RUNTIME]: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
@@ -3457,14 +3460,14 @@ export type DynamicNodeReference<K extends string = string> = Readonly<{
  * 2. `readonly NodeId[]` / `readonly EdgeId[]` → `readonly string[]`
  * 3. Branded IDs nested one level inside bulk-item object arrays
  */
-type WidenBrandedIds<T> = {
+export type WidenBrandedIds<T> = {
   readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R ?
     (...args: { [P in keyof A]: UnbrandParam<A[P]> }) => R
   : T[K];
 };
 
 /** Replace a branded ID with `string`, recursing one level into arrays. */
-type UnbrandParam<T> =
+export type UnbrandParam<T> =
   T extends NodeId<NodeType> ? string
   : T extends EdgeId<AnyEdgeType> ? string
   : T extends readonly NodeId<NodeType>[] ? readonly string[]
@@ -3474,7 +3477,7 @@ type UnbrandParam<T> =
   : T;
 
 /** Replace branded ID values in object properties (does not recurse into nested structures). */
-type UnbrandRecord<T extends Record<string, unknown>> = {
+export type UnbrandRecord<T extends Record<string, unknown>> = {
   readonly [K in keyof T]: T[K] extends NodeId<NodeType> ? string
   : T[K] extends EdgeId<AnyEdgeType> ? string
   : T[K];

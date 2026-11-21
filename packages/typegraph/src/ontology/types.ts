@@ -145,7 +145,7 @@ export type TypedOntologyRelation<
  * at all. `string extends K` is true exactly for the generic index-key
  * (where `K` is itself `string`), false for every concrete literal key.
  */
-type LiteralKeysOf<T> = {
+export type LiteralKeysOf<T> = {
   [K in keyof T]-?: string extends K ? never : K;
 }[keyof T] &
   string;
@@ -157,7 +157,7 @@ type LiteralKeysOf<T> = {
  * construction, so the compile-time check grants them to the child's value
  * rather than refusing a child whose own schema never stated them.
  */
-type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (
+export type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (
   Readonly<Record<typeof z.core.$brand, infer Tag>>
 ) ?
   Readonly<Record<typeof z.core.$brand, Tag>>
@@ -169,7 +169,7 @@ type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (
  * is an intersection with an object type, so it must stop here before the
  * object arm), and built-ins whose members are methods.
  */
-type OpaqueTypeLevelValue =
+export type OpaqueTypeLevelValue =
   | string
   | number
   | bigint
@@ -183,7 +183,7 @@ type OpaqueTypeLevelValue =
   | ReadonlySet<unknown>
   | ((...args: never[]) => unknown);
 
-type TypeLevelElement<Parent> =
+export type TypeLevelElement<Parent> =
   NonNullable<Parent> extends readonly (infer Element)[] ? Element : unknown;
 
 /**
@@ -205,7 +205,7 @@ type TypeLevelElement<Parent> =
  * erase it, and a child that may omit what the parent requires would then
  * pass.
  */
-type TypeLevelChild<Child, Parent> =
+export type TypeLevelChild<Child, Parent> =
   Child extends null | undefined ? Child
   : (Child extends OpaqueTypeLevelValue ? Child
     : Child extends readonly (infer Element)[] ?
@@ -265,7 +265,7 @@ export type IncompatibleKeys<Child, Parent> = {
  * still hold as a `subClassOf` in the other, while a subclass that is no
  * structural subtype is a taxonomy, which `broader` models.
  */
-type StructuralSubtypeMismatchWording = Readonly<{
+export type StructuralSubtypeMismatchWording = Readonly<{
   subClassOf: Readonly<{
     requirement: "the child's schema must extend the parent's";
     fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";

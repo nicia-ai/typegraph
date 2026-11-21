@@ -14,13 +14,17 @@
  * recovers on the next save — so the one-shot compile, whose non-zero exit is
  * fatal, runs only for a non-watch build. Every argument other than `--watch`
  * is forwarded to tsup unchanged.
+ *
+ * After tsup writes the entry declarations, this script writes each entry's
+ * declaration loads into them (`scripts/declaration-loads.ts`). A watch
+ * session re-applies them whenever tsup rewrites an entry's declarations.
  */
 import {
   type ChildProcess,
   spawn,
   type SpawnOptions,
 } from "node:child_process";
-import { access, rm } from "node:fs/promises";
+import { access, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -31,6 +35,7 @@ import {
   DECLARATION_TSCONFIG,
   PACKAGE_ROOT,
 } from "./declaration-emit";
+import { writeDeclarationLoads } from "./declaration-loads";
 
 const WATCH_FLAG = "--watch";
 
@@ -155,6 +160,72 @@ async function waitForFirstDeclarationEmit(): Promise<void> {
   }
 }
 
+type PackageManifest = Readonly<{
+  exports: Readonly<Record<string, Readonly<{ types: string }>>>;
+}>;
+
+async function readPackageExports(): Promise<PackageManifest["exports"]> {
+  const manifest = JSON.parse(
+    await readFile(path.join(PACKAGE_ROOT, "package.json"), "utf8"),
+  ) as PackageManifest;
+  return manifest.exports;
+}
+
+/** How often a watch session checks for entry declarations tsup rewrote. */
+const LOADS_POLL_MS = 500;
+/** How long an entry's declarations must sit unmodified before a rewrite. */
+const LOADS_SETTLE_MS = 1000;
+
+async function newestEntryDeclarationMtime(
+  exports: PackageManifest["exports"],
+): Promise<number | undefined> {
+  let newest = 0;
+  for (const exported of Object.values(exports)) {
+    for (const file of [
+      exported.types,
+      exported.types.replace(/\.d\.ts$/, ".d.cts"),
+    ]) {
+      try {
+        newest = Math.max(
+          newest,
+          (await stat(path.join(PACKAGE_ROOT, file))).mtimeMs,
+        );
+      } catch {
+        // tsup has not (re)written every entry yet.
+        return undefined;
+      }
+    }
+  }
+  return newest;
+}
+
+/**
+ * Keeps a watch session's entry declarations carrying their loads: once every
+ * entry's declarations exist and none changed for `LOADS_SETTLE_MS` (tsup's
+ * rollup finished writing), re-applies the loads. The write is idempotent, so
+ * a settled tree that already carries them is left untouched.
+ */
+function superviseDeclarationLoads(
+  exports: PackageManifest["exports"],
+): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    let appliedThrough = 0;
+    const timer = setInterval(() => {
+      void (async () => {
+        const newest = await newestEntryDeclarationMtime(exports);
+        if (newest === undefined || newest <= appliedThrough) return;
+        if (Date.now() - newest < LOADS_SETTLE_MS) return;
+        await writeDeclarationLoads(PACKAGE_ROOT, exports);
+        appliedThrough =
+          (await newestEntryDeclarationMtime(exports)) ?? appliedThrough;
+      })().catch((error: unknown) => {
+        clearInterval(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    }, LOADS_POLL_MS);
+  });
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   assertNoDeclarationOverride(args);
@@ -169,6 +240,7 @@ async function main(): Promise<void> {
       declarationEmitArguments(false),
     );
     await runToCompletion("Bundle (tsup)", TSUP_BIN, args);
+    await writeDeclarationLoads(PACKAGE_ROOT, await readPackageExports());
     return;
   }
 
@@ -178,6 +250,7 @@ async function main(): Promise<void> {
   await Promise.race([
     runToCompletion("Bundle (tsup)", TSUP_BIN, args),
     watcherClosed,
+    superviseDeclarationLoads(await readPackageExports()),
   ]);
 }
 

@@ -225,7 +225,7 @@ export type NodeAlias<
  * Distributes over an endpoint UNION (`typeof Audio | typeof Video`), so a
  * union is erased exactly when one of its members is.
  */
-type EndpointKindErased<Endpoint> =
+export type EndpointKindErased<Endpoint> =
   Endpoint extends string ? false
   : Endpoint extends { kind: infer Kind extends string } ?
     string extends Kind ?
@@ -246,7 +246,7 @@ type EndpointKindErased<Endpoint> =
  * and {@link SubsumptionElementNamesKind} (does it name `K`?) — read their
  * endpoints from here, so the two cannot drift.
  */
-type MatchedEndpoints<Name extends string, From, To> =
+export type MatchedEndpoints<Name extends string, From, To> =
   | ([Extract<Name, "subClassOf">] extends [never] ? never : To)
   | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never
     : From | To);
@@ -269,7 +269,7 @@ type MatchedEndpoints<Name extends string, From, To> =
  * Distributes over the element union, so `true extends
  * SubsumptionLiteralsErased<...>` is "at least one element is undecidable".
  */
-type SubsumptionLiteralsErased<Relation> =
+export type SubsumptionLiteralsErased<Relation> =
   Relation extends unknown ?
     Relation extends (
       {
@@ -284,7 +284,10 @@ type SubsumptionLiteralsErased<Relation> =
     : true
   : never;
 
-type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
+export type EndpointKinds<Endpoint> = Extract<
+  Endpoint,
+  { kind: string }
+>["kind"];
 
 /**
  * True for an ontology-tuple element that NAMES kind `K` at one of the
@@ -320,7 +323,7 @@ type EndpointKinds<Endpoint> = Extract<Endpoint, { kind: string }>["kind"];
  * endpoint filter drops it — exactly the soundness
  * {@link EndpointKindErased} describes.
  */
-type SubsumptionElementNamesKind<Relation, K extends string> =
+export type SubsumptionElementNamesKind<Relation, K extends string> =
   Relation extends unknown ?
     Relation extends (
       {
@@ -377,7 +380,7 @@ type SubsumptionElementNamesKind<Relation, K extends string> =
  * over so every kind the union can hold is decided. A relation added at
  * runtime is a separate, documented limitation — see {@link AliasNodeType}.
  */
-type SubsumptionAffected<G extends GraphDef, K extends string> =
+export type SubsumptionAffected<G extends GraphDef, K extends string> =
   true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true
   : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true
   : false;
@@ -402,7 +405,7 @@ export type SubsumedNodeType<G extends GraphDef, N extends NodeType> =
 
 declare const IRI_ENDPOINT: unique symbol;
 
-type IriEndpointKey = Readonly<{ [IRI_ENDPOINT]: true }>;
+export type IriEndpointKey = Readonly<{ [IRI_ENDPOINT]: true }>;
 
 /**
  * The closure key an ontology endpoint contributes to
@@ -413,7 +416,7 @@ type IriEndpointKey = Readonly<{ [IRI_ENDPOINT]: true }>;
  * any IRI joins one class) rather than missing a kind two relations really
  * route through the same IRI.
  */
-type SubsumptionEndpointKeys<Endpoint> =
+export type SubsumptionEndpointKeys<Endpoint> =
   Endpoint extends string ? IriEndpointKey
   : Endpoint extends { kind: infer Kind extends string } ? Kind
   : never;
@@ -426,7 +429,7 @@ type SubsumptionEndpointKeys<Endpoint> =
  *
  * Distributes over the element union.
  */
-type DirectlyAssignableKeys<Relation, Reached> =
+export type DirectlyAssignableKeys<Relation, Reached> =
   Relation extends unknown ?
     Relation extends (
       {
@@ -446,7 +449,7 @@ type DirectlyAssignableKeys<Relation, Reached> =
     : never
   : never;
 
-type AssignableKeyClosure<Relation, Reached> =
+export type AssignableKeyClosure<Relation, Reached> =
   [Exclude<DirectlyAssignableKeys<Relation, Reached>, Reached>] extends (
     [never]
   ) ?
@@ -482,9 +485,9 @@ export type AssignableNodeKinds<G extends GraphDef, K extends string> =
  * (`KindRegistry.isAssignableTo`): a declared composition pair then also
  * admits every kind assignable to its part or whole endpoint.
  */
-type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
+export type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
 
-type CompositionMetaEdgeName = "partOf" | "hasPart";
+export type CompositionMetaEdgeName = "partOf" | "hasPart";
 
 /**
  * True for an ontology-tuple element that stops {@link CompositionWholeKinds}
@@ -500,7 +503,7 @@ type CompositionMetaEdgeName = "partOf" | "hasPart";
  *
  * Distributes over the element union.
  */
-type CompositionWholeKindsUndecidable<Relation> =
+export type CompositionWholeKindsUndecidable<Relation> =
   Relation extends unknown ?
     Relation extends (
       {
@@ -525,7 +528,7 @@ type CompositionWholeKindsUndecidable<Relation> =
  *
  * Distributes over the element union.
  */
-type DeclaredCompositionWholeKinds<Relation, K extends string> =
+export type DeclaredCompositionWholeKinds<Relation, K extends string> =
   Relation extends unknown ?
     Relation extends (
       {
@@ -735,7 +738,7 @@ export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 /**
  * Resolves a recursive alias marker to its runtime value type.
  */
-type RequiredRecursiveAliasValue<RA> =
+export type RequiredRecursiveAliasValue<RA> =
   RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number
   : RA extends RecursiveAlias<"path", "qualified", boolean> ?
     QualifiedRecursivePath
@@ -750,7 +753,7 @@ export type RecursiveAliasValue<RA> =
  * Resolves the depth alias name from the recursive config.
  * If a string is provided, uses it directly. If `true`, defaults to `${A}_depth`.
  */
-type ResolveDepthAlias<DC, A extends string> =
+export type ResolveDepthAlias<DC, A extends string> =
   DC extends string ? DC
   : DC extends true ? `${A}_depth`
   : never;
@@ -759,7 +762,7 @@ type ResolveDepthAlias<DC, A extends string> =
  * Resolves the path alias name from the recursive config.
  * If a string is provided, uses it directly. If `true`, defaults to `${A}_path`.
  */
-type ResolvePathAlias<PC, A extends string> =
+export type ResolvePathAlias<PC, A extends string> =
   PC extends string ? PC
   : PC extends true ? `${A}_path`
   : PC extends QualifiedRecursivePathOption ?
@@ -768,7 +771,7 @@ type ResolvePathAlias<PC, A extends string> =
     : `${A}_path`
   : never;
 
-type ResolvePathFormat<PC> =
+export type ResolvePathFormat<PC> =
   PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
 
 /**
@@ -815,7 +818,7 @@ export type PropsAccessor<N extends NodeType> = Readonly<{
 export type NodePropsFor<N extends Readonly<{ schema: z.ZodType }>> =
   N extends Readonly<{ schema: z.ZodType }> ? z.infer<N["schema"]> : never;
 
-type FieldCategory<T> =
+export type FieldCategory<T> =
   T extends unknown ?
     [NonNullable<T>] extends [never] ? never
     : [NonNullable<T>] extends [EmbeddingValue] ? "embedding"
@@ -853,17 +856,17 @@ export type CommonPropertyKeys<Props, Keys extends keyof Props = keyof Props> =
 export type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
 /** A value accepted by equality predicates for a schema field. */
-type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
+export type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
 /** Values accepted by membership predicates for a schema field. */
-type MembershipOperand<T> = readonly T[] | ParameterRef;
+export type MembershipOperand<T> = readonly T[] | ParameterRef;
 
-type NullFieldAccessor = Readonly<{
+export type NullFieldAccessor = Readonly<{
   isNull: () => Predicate;
   isNotNull: () => Predicate;
 }>;
 
-type FieldAccessorForType<T> =
+export type FieldAccessorForType<T> =
   [T] extends [EmbeddingValue] ? EmbeddingFieldAccessor
   : [T] extends [string] ? StringFieldAccessor<T>
   : [T] extends [number] ? NumberFieldAccessor<T>
@@ -966,7 +969,7 @@ export type EmbeddingFieldAccessor = NullFieldAccessor &
     ) => Predicate;
   }>;
 
-type ObjectComparisonAccessor<T> =
+export type ObjectComparisonAccessor<T> =
   string extends keyof T ? BaseFieldAccessor<T> : NullFieldAccessor;
 
 export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> &
@@ -1047,7 +1050,7 @@ export type NodeAccessor<N extends NodeType> =
 /**
  * Creates typed field accessors for an edge kind's properties.
  */
-type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
+export type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
   // Remove optional modifier so optional fields still have accessor methods.
   [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
 }>;

@@ -13,6 +13,12 @@
  * 2. A type that a covered entrypoint's public declarations reference is
  *    importable from some covered entrypoint, rather than only from an
  *    authoring entrypoint whose shape may change in any release.
+ * 3. A type that a covered entrypoint's public declarations reference is
+ *    nameable by a consumer that imports ONLY that entrypoint. Declaration
+ *    emit can spell a type only through a module already in the consumer's
+ *    program, so contract 2 is not enough: the type must be exported by the
+ *    entrypoint itself or by a covered entrypoint whose declarations that
+ *    entrypoint loads (`scripts/declaration-loads.ts`).
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -21,51 +27,15 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { reportNameForExport } from "../scripts/api-report-names";
+import { DECLARATION_LOADS } from "../scripts/declaration-loads";
+import {
+  AUTHORING_ENTRYPOINTS,
+  COVERED_ENTRYPOINTS,
+} from "../scripts/entrypoint-stability";
 import { extractApiReportBody } from "../scripts/api-surface-compat";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const PACKAGE_NAME = "@nicia-ai/typegraph";
-
-/**
- * The semver-covered entrypoints, in the order the README's Stability
- * paragraph lists them. This order is the move map's tie-break: when several
- * covered entrypoints export a moved name, the map names the first one here.
- * The vocabulary subpaths created to own the moved names (`/store`, `/query`,
- * `/errors`, `/identity`, `/maintenance`) come before the older concept
- * subpaths, which come before feature and runtime-specific subpaths, so the
- * earliest exporter is the entrypoint that owns the concept.
- */
-const COVERED_ENTRYPOINTS = [
-  ".",
-  "./store",
-  "./query",
-  "./errors",
-  "./identity",
-  "./maintenance",
-  "./core",
-  "./schema",
-  "./indexes",
-  "./graph-extension",
-  "./graph-merge",
-  "./interchange",
-  "./profiler",
-  "./provenance",
-  "./sqlite/local",
-  "./postgres/pglite",
-  "./adapters/drizzle/sqlite",
-  "./adapters/drizzle/sqlite/local",
-  "./adapters/drizzle/sqlite/libsql",
-  "./adapters/drizzle/postgres",
-  "./adapters/drizzle/postgres/working-copy",
-  "./adapters/drizzle/postgres/pglite",
-  "./adapters/drizzle/indexes",
-] as const;
-
-/** The backend-authoring entrypoints semver does not cover. */
-const AUTHORING_ENTRYPOINTS = [
-  "./backend",
-  "./adapters/drizzle/engine",
-] as const;
 
 /**
  * Covered exports whose BODY is the backend-authoring contract. #869 kept
@@ -379,6 +349,243 @@ function sorted(values: Iterable<string>): string[] {
   return [...values].toSorted((left, right) => left.localeCompare(right));
 }
 
+/**
+ * The entrypoints whose declarations `entrypoint`'s declarations load
+ * (`scripts/declaration-loads.ts`, which the build writes into each entry's
+ * emitted declarations).
+ */
+function declarationLoadsOf(entrypoint: string): readonly string[] {
+  return DECLARATION_LOADS[entrypoint] ?? [];
+}
+
+/** An entrypoint and every entrypoint its declarations load, transitively. */
+function loadedEntrypoints(entrypoint: string): ReadonlySet<string> {
+  const loaded = new Set<string>();
+  const pending = [entrypoint];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (loaded.has(next)) continue;
+    loaded.add(next);
+    pending.push(...declarationLoadsOf(next));
+  }
+  return loaded;
+}
+
+/**
+ * A report statement's text with the parts API Extractor varies per report
+ * removed: the `export` keyword (a name is exported from one report and
+ * rendered as a local in another) and the `$1` / `_2` suffixes it appends to
+ * disambiguate two declarations of one name.
+ */
+function normalizedDeclaration(
+  statement: ts.Statement,
+  source: string,
+): string {
+  return source
+    .slice(statement.getStart(), statement.getEnd())
+    .replace(/^export\s+/, "")
+    .replaceAll(/(\w)(?:\$\d+|_\d+)\b/g, "$1");
+}
+
+/** A report-local name without the suffix API Extractor disambiguates it with. */
+function sourceName(name: string): string {
+  return name.replace(/(?:\$\d+|_\d+)$/, "");
+}
+
+/**
+ * Whether `exporter`'s report exports the declaration `report` renders as
+ * `name`. API Extractor renames the second of two colliding declarations in
+ * each report (`TraversalDirection$1`), and which one it renames differs per
+ * report, so the exporter is searched by the source name and the declarations
+ * compared by text: exporting a different declaration of the same source
+ * name does not make this one nameable.
+ */
+function exportsSameDeclaration(
+  exporter: ParsedReport,
+  report: ParsedReport,
+  name: string,
+): boolean {
+  const exportedName = sourceName(name);
+  if (!exporter.exported.has(exportedName)) return false;
+  const ours = (report.declarations.get(name) ?? []).map((statement) =>
+    normalizedDeclaration(statement, report.source),
+  );
+  const theirs = new Set(
+    (exporter.declarations.get(exportedName) ?? []).map((statement) =>
+      normalizedDeclaration(statement, exporter.source),
+    ),
+  );
+  return ours.length > 0 && ours.every((text) => theirs.has(text));
+}
+
+/**
+ * Whether a `typeof name` query needs `name` itself to be nameable. Declaration
+ * emit writes `typeof f` for a function only when `f` is accessible and
+ * otherwise spells out its signature, and it resolves `typeof c` for a
+ * constant to the constant's type; only a `unique symbol` constant has no
+ * spelling but its own name. The types inside the declaration still surface,
+ * so the walk descends into it either way.
+ */
+function typeQueryNeedsName(report: ParsedReport, name: string): boolean {
+  const statements = report.declarations.get(name) ?? [];
+  return statements.some((statement) => {
+    if (ts.isFunctionDeclaration(statement)) return false;
+    if (ts.isVariableStatement(statement)) {
+      return statement.declarationList.declarations.some(
+        (declaration) =>
+          declaration.type !== undefined &&
+          ts.isTypeOperatorNode(declaration.type) &&
+          declaration.type.operator === ts.SyntaxKind.UniqueKeyword,
+      );
+    }
+    return true;
+  });
+}
+
+type Reference = Readonly<{ name: string; viaTypeQuery: boolean }>;
+
+/**
+ * The local names a declaration's consumer-visible shape references, each
+ * marked when the reference is only a `typeof` query. Skips what
+ * `referencedNames` skips.
+ */
+function referencesOf(
+  statement: ts.Statement,
+  source: string,
+  exportedAnywhere: ReadonlySet<string>,
+): readonly Reference[] {
+  const references = new Map<string, boolean>();
+  function record(name: string, viaTypeQuery: boolean): void {
+    references.set(name, (references.get(name) ?? true) && viaTypeQuery);
+  }
+  function visit(node: ts.Node): void {
+    if (
+      (ts.isTypeElement(node) || ts.isClassElement(node)) &&
+      (isInternal(node, source) ||
+        hasUnexportedSymbolKey(node, exportedAnywhere))
+    ) {
+      return;
+    }
+    if (ts.isTypeReferenceNode(node))
+      record(leftmostIdentifier(node.typeName), false);
+    if (ts.isTypeQueryNode(node))
+      record(leftmostIdentifier(node.exprName), true);
+    if (
+      ts.isExpressionWithTypeArguments(node) &&
+      ts.isIdentifier(node.expression)
+    ) {
+      record(node.expression.text, false);
+    }
+    ts.forEachChild(node, (child) => {
+      visit(child);
+    });
+  }
+  visit(statement);
+  return [...references].map(([name, viaTypeQuery]) => ({
+    name,
+    viaTypeQuery,
+  }));
+}
+
+type Unnameable = Readonly<{
+  entrypoint: string;
+  name: string;
+  /** The declaration the walk reached `name` through. */
+  namedBy: string;
+}>;
+
+/**
+ * Every name `entrypoint`'s consumer-visible declarations reference that the
+ * entrypoint does not export itself, each with the declaration the walk first
+ * reached it through. The walk starts at the entrypoint's exported
+ * declarations and descends through every declaration they reference. It
+ * treats the authoring-only names and the opaque backend handle exactly as
+ * `findAuthoringOnlyLeaks` does (those are contract 2's ledger), and a
+ * `typeof` query as `typeQueryNeedsName` describes.
+ */
+function namesNeededFromElsewhere(
+  entrypoint: string,
+): ReadonlyMap<string, string> {
+  const report = reportFor(entrypoint);
+  const covered = new Set(
+    COVERED_ENTRYPOINTS.flatMap((candidate) => [
+      ...reportFor(candidate).exported,
+    ]),
+  );
+  const authoring = new Set(
+    AUTHORING_ENTRYPOINTS.flatMap((candidate) => [
+      ...reportFor(candidate).exported,
+    ]),
+  );
+  const exportedAnywhere = new Set([...covered, ...authoring]);
+  const needed = new Map<string, string>();
+  const visited = new Set<string>();
+  const pending = [...report.exported];
+  for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
+    if (visited.has(name) || OPAQUE_BACKEND_HANDLES.has(name)) continue;
+    visited.add(name);
+    const statements = (report.declarations.get(name) ?? []).filter(
+      (statement) => !isInternal(statement, report.source),
+    );
+    for (const statement of statements) {
+      for (const reference of referencesOf(
+        statement,
+        report.source,
+        exportedAnywhere,
+      )) {
+        if (!report.declarations.has(reference.name)) continue;
+        if (!covered.has(reference.name) && authoring.has(reference.name)) {
+          continue;
+        }
+        const needsName =
+          !reference.viaTypeQuery || typeQueryNeedsName(report, reference.name);
+        if (
+          needsName &&
+          !report.exported.has(reference.name) &&
+          !needed.has(reference.name)
+        ) {
+          needed.set(reference.name, name);
+        }
+        pending.push(reference.name);
+      }
+    }
+  }
+  return needed;
+}
+
+/**
+ * Whether a covered entrypoint other than `entrypoint` exports `name` as the
+ * declaration `entrypoint`'s report renders under it.
+ */
+function exportedBy(
+  candidates: Iterable<string>,
+  entrypoint: string,
+  name: string,
+): boolean {
+  const report = reportFor(entrypoint);
+  return [...candidates].some(
+    (candidate) =>
+      candidate !== entrypoint &&
+      exportsSameDeclaration(reportFor(candidate), report, name),
+  );
+}
+
+/**
+ * Each name a consumer importing only one covered entrypoint could not name:
+ * needed from elsewhere, and exported by no entrypoint that entrypoint's
+ * declarations load.
+ */
+function findUnnameableTypes(): readonly Unnameable[] {
+  return COVERED_ENTRYPOINTS.flatMap((entrypoint) => {
+    const loaded = loadedEntrypoints(entrypoint);
+    return [...namesNeededFromElsewhere(entrypoint)].flatMap(
+      ([name, namedBy]) =>
+        exportedBy(loaded, entrypoint, name) ?
+          []
+        : [{ entrypoint, name, namedBy }],
+    );
+  });
+}
+
 describe("public type reachability", () => {
   it("classifies every package entrypoint as covered or authoring", () => {
     expect(sorted(packageExportKeys())).toEqual(sorted(ENTRYPOINTS));
@@ -429,5 +636,50 @@ describe("public type reachability", () => {
         ),
     );
     expect(unmatched.map(([name]) => name)).toEqual([]);
+  });
+});
+
+describe("per-entrypoint declaration emit", () => {
+  it("loads only covered entrypoints, from covered entrypoints", () => {
+    const covered: readonly string[] = COVERED_ENTRYPOINTS;
+    const invalid = Object.entries(DECLARATION_LOADS).flatMap(
+      ([entrypoint, loads]) => [
+        ...(covered.includes(entrypoint) ?
+          []
+        : [`${entrypoint} is not a covered entrypoint`]),
+        ...loads.flatMap((loaded) =>
+          covered.includes(loaded) && loaded !== entrypoint ?
+            []
+          : [
+              `${entrypoint} loads ${loaded}, which is itself or not semver-covered, so a consumer's declarations must not name types through it`,
+            ],
+        ),
+      ],
+    );
+    expect(invalid).toEqual([]);
+  });
+
+  it("loads an entrypoint only when it supplies a name the loader needs", () => {
+    const idle = COVERED_ENTRYPOINTS.flatMap((entrypoint) => {
+      const needed = [...namesNeededFromElsewhere(entrypoint).keys()];
+      return declarationLoadsOf(entrypoint).flatMap((loaded) =>
+        (
+          needed.some((name) =>
+            exportedBy(loadedEntrypoints(loaded), entrypoint, name),
+          )
+        ) ?
+          []
+        : [`${entrypoint} loads ${loaded} but needs nothing from it`],
+      );
+    });
+    expect(idle).toEqual([]);
+  });
+
+  it("names only types the entrypoint or an entrypoint it loads exports", () => {
+    const unnameable = findUnnameableTypes().map(
+      (finding) =>
+        `${finding.entrypoint}: ${finding.name} (named by ${finding.namedBy})`,
+    );
+    expect(unnameable).toEqual([]);
   });
 });

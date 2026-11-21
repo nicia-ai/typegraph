@@ -88,3 +88,29 @@ export type {
 } from "./types";
 export { NODE_SYSTEM_COLUMN_NAMES } from "./types";
 export { andWhere, notWhere, orWhere } from "./where";
+
+/**
+ * Types the public declarations name without being everyday API: exported so
+ * a consumer's declaration emit can spell an inferred type through a public
+ * specifier. Entrypoints whose declarations name them load this entrypoint's
+ * declarations (contract 3 in `tests/public-type-reachability.test.ts`).
+ */
+export type {
+  EdgeIndexTable,
+  NamedSqlWrapper,
+  NodeIndexTable,
+} from "./drizzle";
+export type {
+  LiveColumn,
+  LiveEdgeColumn,
+  RecordedColumn,
+  RecordedEdgeColumn,
+  SystemIndexColumnsFor,
+  SystemIndexDeclarationFor,
+} from "./system";
+export type {
+  IndexFieldInput,
+  IndexWhereComparableValue,
+  NonEmptyJsonPointerFor,
+  NonEmptyJsonPointerSegmentsFor,
+} from "./types";

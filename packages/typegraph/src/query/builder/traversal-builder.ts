@@ -83,12 +83,13 @@ import { validateSqlIdentifier } from "./validation";
  * Store-issued runtime-kind evidence overrides that fallback through the
  * `TraversalBuilder`'s `ET` parameter.
  */
-type EdgeTypeForKey<G extends GraphDef, EK> =
+export type EdgeTypeForKey<G extends GraphDef, EK> =
   string extends EK ? DynamicEdgeType
   : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"]
   : DynamicEdgeType;
 
-type DynamicNodeTypeFor<T> =
+/** The node type a runtime node kind resolves to, or the dynamic node type. */
+export type DynamicNodeTypeFor<T> =
   T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // Forward declaration - actual import would cause circular dependency
@@ -111,7 +112,7 @@ export function setQueryBuilderClass(cls: QueryBuilderConstructor): void {
 /**
  * State for variable-length traversal configuration.
  */
-interface VariableLengthState {
+export interface VariableLengthState {
   enabled: boolean;
   minDepth: number;
   maxDepth: number;

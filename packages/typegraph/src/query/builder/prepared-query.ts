@@ -501,7 +501,7 @@ function substituteParameters(
 // PreparedQuery
 // ============================================================
 
-type PreparedQueryConfig<R> = Readonly<{
+export type PreparedQueryConfig<R> = Readonly<{
   ast: QueryAst;
   unoptimizedAst: QueryAst;
   backend: GraphBackend;
