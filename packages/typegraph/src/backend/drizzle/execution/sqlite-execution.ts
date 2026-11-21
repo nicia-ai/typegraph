@@ -11,7 +11,7 @@ import {
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
-import { createTransactionView } from "./transaction-view";
+import { createTransactionView, type TransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -801,6 +801,11 @@ const SQLITE_ADAPTER_MEMBER_ROLES = {
 /** A transaction's execution adapter and the hook that ends its view. */
 export type SqliteTransactionExecutionView = Readonly<{
   adapter: SqliteExecutionAdapter;
+  /**
+   * Admits work that reaches the connection by another route than
+   * `adapter` (the shared contribution marker reads) through the same view.
+   */
+  admit: TransactionView["admit"];
   /** Ends the view: see `TransactionView.drainAndClose` in `./transaction-view`. */
   drainAndClose: () => Promise<void>;
 }>;
@@ -846,6 +851,7 @@ export function createSqliteTransactionExecutionView(
   );
   return {
     adapter: members as unknown as SqliteExecutionAdapter,
+    admit: view.admit,
     drainAndClose: view.drainAndClose,
   };
 }

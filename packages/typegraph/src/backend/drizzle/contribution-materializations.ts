@@ -835,10 +835,23 @@ export type ContributionMaterializer = Readonly<{
   ) => Promise<ContributionRebuildResult>;
 }>;
 
-function transactionGateAdministrationError(): ConfigurationError {
+/**
+ * THE refusal of contribution administration — creating or dropping a
+ * contribution's storage, or writing its durable marker — through a
+ * transaction. Storage is provisioned by the privileged root backend only:
+ * a transaction-scoped marker gate refuses it (both dialects' gates), and so
+ * does a transaction backend's `createVectorIndex`, named by `member`.
+ */
+export function transactionContributionAdministrationError(
+  member?: string,
+): ConfigurationError {
   return new ConfigurationError(
-    "Contribution administration is unavailable through a transaction-scoped marker gate",
-    { capability: "contributionAdministration", scope: "transaction" },
+    "Contribution administration is unavailable through a transaction-scoped backend; run it on the root backend.",
+    {
+      capability: "contributionAdministration",
+      scope: "transaction",
+      ...(member === undefined ? {} : { member }),
+    },
   );
 }
 
@@ -2424,18 +2437,18 @@ export function createContributionMaterializer(
         // other methods must never fall through to the root session captured
         // by the source materializer, even if a transaction backend exposes
         // an administrative member.
-        execDdl: () => Promise.reject(transactionGateAdministrationError()),
+        execDdl: () => Promise.reject(transactionContributionAdministrationError()),
         ensureMarkerTable: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
         getMarkerBatch,
         getMarkers: (graphId) => getMarkerBatch([graphId]),
         recordMarker: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
         deleteMarker: () =>
-          Promise.reject(transactionGateAdministrationError()),
-        tableExists: () => Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
+        tableExists: () => Promise.reject(transactionContributionAdministrationError()),
         schemaWriteTransaction: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
       });
     },
     ensureRuntimeContributions,
@@ -2456,6 +2469,75 @@ export function createContributionMaterializer(
     probeContributions,
     rebuildContribution,
   };
+}
+
+/**
+ * How a transaction-scoped view of a materializer treats each member. A
+ * `Record` over every key, so a member added to {@link ContributionMaterializer}
+ * cannot reach a transaction backend unclassified: `read` members may read
+ * markers and are admitted through the transaction's view, `administration`
+ * members create, drop, or attest storage and are refused, `local` members
+ * touch no connection.
+ */
+const TRANSACTION_MATERIALIZER_MEMBER_ROLES = {
+  bindReadSession: "local",
+  ensureRuntimeContributions: "administration",
+  assertInitialized: "read",
+  refuseUnavailableFulltext: "local",
+  refuseUnavailableNodeInsertProjections: "read",
+  ensureVectorSlot: "administration",
+  ensureVectorSlots: "administration",
+  assertVectorSlot: "read",
+  assertVectorSlots: "read",
+  assertNodeInsertProjections: "read",
+  resolveNodeProjectionEvidence: "local",
+  diagnoseNodeProjectionEvidence: "read",
+  dropVectorSlot: "administration",
+  evictVectorSlot: "local",
+  verifyContributions: "read",
+  repairContributions: "administration",
+  probeContributions: "read",
+  rebuildContribution: "administration",
+} as const satisfies Record<
+  keyof ContributionMaterializer,
+  "administration" | "local" | "read"
+>;
+
+/**
+ * `materializer` as a transaction backend that shares its marker cache sees
+ * it: every member that may read runs through `admit` (the transaction's
+ * view, so it settles before the boundary and is refused after it), and every
+ * administrative member is refused with
+ * {@link transactionContributionAdministrationError}.
+ *
+ * For an engine whose root session reads the same committed markers as its
+ * transactions (SQLite: one writer, no snapshot older than the root's
+ * confirmation), sharing the root cache is sound and saves a marker read per
+ * transaction; an engine whose transaction snapshot can predate the root's
+ * confirmation binds a fresh cache with
+ * {@link ContributionMaterializer.bindReadSession} instead.
+ */
+export function admitContributionReadsThroughView(
+  materializer: ContributionMaterializer,
+  admit: <T>(task: () => Promise<T>) => Promise<T>,
+): ContributionMaterializer {
+  function viewMember(
+    role: (typeof TRANSACTION_MATERIALIZER_MEMBER_ROLES)[keyof ContributionMaterializer],
+    member: unknown,
+  ): unknown {
+    if (role === "local" || typeof member !== "function") return member;
+    if (role === "administration") {
+      return () => Promise.reject(transactionContributionAdministrationError());
+    }
+    return (...args: readonly unknown[]) =>
+      admit(() => Reflect.apply(member, materializer, args) as Promise<unknown>);
+  }
+  return Object.fromEntries(
+    Object.entries(TRANSACTION_MATERIALIZER_MEMBER_ROLES).map(([key, role]) => [
+      key,
+      viewMember(role, materializer[key as keyof ContributionMaterializer]),
+    ]),
+  ) as unknown as ContributionMaterializer;
 }
 
 /**

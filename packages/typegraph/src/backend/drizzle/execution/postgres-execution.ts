@@ -642,9 +642,11 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   interactiveAtomicBatch?: boolean;
   /**
-   * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
-   * this on its private adapter; ordinary transaction backends deliberately do
-   * not expose a new raw-execution surface that would change routing behavior.
+   * @internal Resolve Drizzle's pinned transaction client. A transaction
+   * session builds its compiled-text adapter with this (atomic programs and
+   * trusted import run there, inside the session queue's exclusive slot);
+   * ordinary transaction backends deliberately do not expose a new
+   * raw-execution surface that would change routing behavior.
    */
   useTransactionClient?: boolean;
 }>;
