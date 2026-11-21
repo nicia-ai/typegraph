@@ -1,13 +1,13 @@
-import type { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
-import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   isLiveNodeRow,
   isTombstonedNodeRow,
   type LiveNodeRow,
   type NodeRow,
+  type TransactionOptions,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
+import { cascadeDeletionOrder } from "../store/operations/composition-cascade";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
   transactionBackend,
@@ -28,8 +28,11 @@ import {
   uniqueNodeReferences,
 } from "./keys";
 import { acquireCapabilityWriteLocks } from "./locks";
+import { type CapabilityScope, type TransactionScopeResolver } from "./scope";
 import {
   availableSourceKeys,
+  compositionDepthRounds,
+  type CompositionExistenceDependencies,
   computeSupportSnapshot,
   type SourceRetractedState,
   sourceRetractedState,
@@ -136,51 +139,76 @@ const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
 };
 
 /**
- * Brings fact currency in line with the post-transition support snapshot —
- * but only for the facts the transition could have affected (those reachable
- * from the flipped sources through justification edges). Facts outside that
- * set are never touched: an unsupported live fact elsewhere in the graph
+ * The close half of bringing fact currency in line with the post-transition
+ * support snapshot: tombstones exactly the rows the caller resolved once
+ * through {@link closingFactRows} and hands the report too, so every tombstone
+ * written here is named in `died`. Only facts the transition could have
+ * affected (those reachable from the flipped sources through justification
+ * edges) are ever touched: an unsupported live fact elsewhere in the graph
  * (e.g. one whose justification edges have not been linked yet) is not this
  * transition's business, and silently tombstoning it would be invisible data
  * loss the report cannot even mention.
  *
- * Closes run before reopens: a reopen re-checks uniqueness, and the unique
- * key it needs may still be held by a fact this same transition is about to
- * close — closing first makes a legal transition order-independent.
- *
- * Which rows the close pass writes is NOT decided here: the caller resolves
- * them once through {@link closingFactRows} and hands the same map to the
- * report, so every tombstone this pass writes is named in `died`.
- *
- * Both passes go through the transaction's own node operations — the one
+ * Both halves go through the transaction's own node operations — the one
  * in-frame delete and revive owners — so each fact takes exactly the steps
  * any node delete or revival owes (uniqueness, embeddings, fulltext, identity
  * detach on close and restore on reopen) under the transaction's buffered
- * hook runner, which defers every success hook until the transition's COMMIT.
+ * hook runner, which defers every success hook until the transaction commits —
+ * the transaction's own, or the caller's when it runs on one.
  * One fact at a time: the writes share the transaction's one connection.
+ *
+ * Every required part closes before its whole — at any depth, across fact
+ * kinds — in the composition cascade's own leaf-first order
+ * ({@link cascadeDeletionOrder}), never in configured fact-kind order: the
+ * verb takes no savepoint, so a caller that catches a failure between two
+ * closes and commits keeps the first, and a closed whole above a still-live
+ * required part is a `compositionExistence` violation.
  */
-async function synchronizeFactCurrency<G extends GraphDef>(
+async function closeFacts<G extends GraphDef>(
   tx: TransactionContext<G>,
-  snapshot: SupportSnapshot,
-  affected: ReadonlySet<string>,
+  dependencies: CompositionExistenceDependencies,
   closing: ReadonlyMap<string, LiveNodeRow>,
 ): Promise<void> {
-  // The rows the caller already resolved through `closingFactRows`, so the
-  // pass that writes and the report that names them cannot disagree.
-  for (const row of closing.values()) {
+  const partsFirst = cascadeDeletionOrder(
+    compositionDepthRounds(dependencies, closing),
+  );
+  for (const row of partsFirst) {
     await transactionDeleteNodeWithPolicy(
       tx,
       { kind: row.kind, id: row.id },
       FACT_CURRENCY_CLOSE_POLICY,
     );
   }
+}
+
+/**
+ * The reopen half ({@link closeFacts} states what both halves share): revives
+ * every affected fact that is supported in the post-transition snapshot and
+ * still tombstoned. It runs after the close pass, because a reopen re-checks
+ * uniqueness and the unique key it needs may still be held by a fact this
+ * same transition closes — closing first makes a legal transition
+ * order-independent.
+ *
+ * Every whole reopens before its required parts: the exact reverse of the
+ * close pass's leaf-first order, so a caught failure between two reopens
+ * leaves a part closed under a live whole, never live under a closed one.
+ */
+async function reopenFacts<G extends GraphDef>(
+  tx: TransactionContext<G>,
+  dependencies: CompositionExistenceDependencies,
+  snapshot: SupportSnapshot,
+  affected: ReadonlySet<string>,
+): Promise<void> {
   const reopening = selectAffectedFactRows(
     snapshot,
     affected,
     (key) => snapshot.supportedFactKeys.has(key),
     isTombstonedNodeRow,
   );
-  for (const row of reopening.values()) {
+  const wholesFirst = cascadeDeletionOrder(
+    compositionDepthRounds(dependencies, reopening),
+  ).toReversed();
+  for (const row of wholesFirst) {
     await transactionReviveNode(tx, { kind: row.kind, id: row.id });
   }
 }
@@ -207,6 +235,70 @@ async function setSourceRetractionState<G extends GraphDef>(
   await collection.update(source.id, { [config.retractedField]: retracted });
 }
 
+/**
+ * What one retraction verb asks for: the sources to flip, the state to flip
+ * them to, and the transaction to run in — `undefined` for one the transition
+ * opens and commits itself — with the operation name a refusal on the
+ * caller's transaction reports.
+ */
+export type TransitionRequest<
+  G extends GraphDef,
+  SourceKind extends NodeKind<G>,
+> = Readonly<{
+  sources: readonly ProvenanceSourceInput<G, SourceKind>[];
+  retracted: boolean;
+  tx: TransactionContext<G> | undefined;
+  operation: string;
+}>;
+
+/** What the write-lock refusal names when the transition owns its transaction. */
+const OWN_TRANSACTION_OPERATION = "provenance retraction transition";
+
+/**
+ * The isolation a transition opens its own transaction at. The support reads
+ * must observe every transition committed before this one took the graph
+ * lock, and only an isolation that takes a fresh snapshot per statement does:
+ * asked for explicitly, so a server or role default of repeatable read or
+ * serializable cannot leave the transition reading a snapshot older than the
+ * lock. The write locks still verify the isolation the lock statement
+ * observed, so a wrapper that drops this option is refused, not trusted.
+ * SQLite ignores the option; its single writer needs none.
+ */
+const OWN_TRANSACTION_OPTIONS = {
+  isolationLevel: "read_committed",
+} as const satisfies TransactionOptions;
+
+function assertSourceKinds(
+  config: NormalizedConfig,
+  sources: readonly ProvenanceNodeRef[],
+): void {
+  for (const source of sources) {
+    if (config.sourceKinds.includes(source.kind)) continue;
+    throw new ConfigurationError(
+      `Provenance retraction source must be one of: ${config.sourceKinds.join(", ")}.`,
+      { expectedKinds: config.sourceKinds, actualKind: source.kind },
+    );
+  }
+}
+
+/**
+ * Runs one retraction transition, in a transaction of its own or in the
+ * caller's.
+ *
+ * With no `tx` it opens a transaction on `store` and commits it. With a `tx`
+ * the transaction is first resolved through `resolveScope`, the one owner of
+ * the decision every caller-transaction entry point of the capability makes
+ * (another store's or graph's transaction, or one kept past its callback, is
+ * refused before any statement), and the transition runs on it without
+ * committing or rolling back: its writes are the caller's, under the caller's
+ * buffered hooks, receipt and recorded revision, and the caller's commit or
+ * rollback decides them.
+ *
+ * The refusals that need no read come first either way — the transaction's
+ * ownership, then a source of a kind outside the configured source kinds —
+ * and both paths then run {@link transitionInTransaction}, so the locks,
+ * reads, writes and report are one implementation.
+ */
 export async function runTransition<
   G extends GraphDef,
   SourceKind extends NodeKind<G>,
@@ -214,85 +306,135 @@ export async function runTransition<
   JustificationKind extends NodeKind<G>,
 >(
   store: HistoryStore<G>,
-  config: NormalizedConfig,
-  sources: readonly ProvenanceSourceInput<G, SourceKind>[],
-  retracted: boolean,
-  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
+  storeScope: CapabilityScope,
+  resolveScope: TransactionScopeResolver<G>,
+  request: TransitionRequest<G, SourceKind>,
 ): Promise<RetractionReport<G, FactKind, JustificationKind>> {
-  const uniqueSources = uniqueNodeReferences(sources);
-  for (const source of uniqueSources) {
-    if (config.sourceKinds.includes(source.kind)) continue;
-    throw new ConfigurationError(
-      `Provenance retraction source must be one of: ${config.sourceKinds.join(", ")}.`,
-      { expectedKinds: config.sourceKinds, actualKind: source.kind },
+  const uniqueSources = uniqueNodeReferences(request.sources);
+  const { tx } = request;
+  if (tx === undefined) {
+    assertSourceKinds(storeScope.config, uniqueSources);
+    return store.transaction(
+      (ownTransaction) =>
+        transitionInTransaction<G, FactKind, JustificationKind>(
+          storeScope,
+          ownTransaction,
+          uniqueSources,
+          request.retracted,
+          OWN_TRANSACTION_OPERATION,
+        ),
+      OWN_TRANSACTION_OPTIONS,
     );
   }
+  const scope = resolveScope(tx, request.operation);
+  assertSourceKinds(scope.config, uniqueSources);
+  return transitionInTransaction<G, FactKind, JustificationKind>(
+    scope,
+    tx,
+    uniqueSources,
+    request.retracted,
+    request.operation,
+  );
+}
 
-  return store.transaction(async (tx) => {
-    const backend = transactionBackend(tx);
-    // Serialize the whole read-compute-write transition per graph BEFORE the
-    // first read. `store.transaction` itself takes no lock (write operations
-    // acquire it at their own boundaries), but a transition's support
-    // snapshot must not race a concurrent transition or history write, so
-    // the capability's write locks are acquired explicitly up front.
-    await acquireCapabilityWriteLocks(tx, "provenance retraction transition");
-    const rows = await Promise.all(
-      uniqueSources.map((source) =>
-        backend.getNode(store.graphId, source.kind, source.id),
-      ),
-    );
-    const sourceRows = uniqueSources.map((source, index): SourceRow => {
-      const sourceRow = rows[index];
-      if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
-        throw new NodeNotFoundError(source.kind, source.id);
-      }
-      return { source, row: sourceRow };
-    });
-
-    // Load the provenance graph once. Its structure (justifications, facts,
-    // premise/derive edges) is identical before and after the transition — only
-    // source availability changes — so the pre- and post-flip snapshots share
-    // this read instead of scanning the whole graph twice per retraction.
-    const supportGraph = await loadSupportGraph(
-      backend,
-      store.registry,
-      store.graphId,
-      config,
-      batchPointRead,
-    );
-    const availableBefore = availableSourceKeys(
-      supportGraph.sourceRows,
-      config.retractedField,
-    );
-    const before = computeSupportSnapshot(supportGraph, availableBefore);
-
-    const nextState: SourceRetractedState =
-      retracted ? "retracted" : "available";
-    const availableAfter = new Set(availableBefore);
-    for (const { source, row } of sourceRows) {
-      const currentState = sourceRetractedState(row, config.retractedField);
-      if (currentState === nextState) continue;
-      await setSourceRetractionState(tx, config, source, retracted);
-      // Mirror the flip in the in-memory availability so `after` matches the
-      // source rows now persisted, without re-reading the whole graph.
-      if (nextState === "available") {
-        availableAfter.add(refKey(source));
-      } else {
-        availableAfter.delete(refKey(source));
-      }
+async function transitionInTransaction<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+  uniqueSources: readonly ProvenanceNodeRef[],
+  retracted: boolean,
+  operation: string,
+): Promise<RetractionReport<G, FactKind, JustificationKind>> {
+  const { config } = scope;
+  const backend = transactionBackend(tx);
+  // Serialize the whole read-compute-write transition per graph BEFORE the
+  // first read. A transaction takes no lock until a write needs one (write
+  // operations acquire it at their own boundaries), but a transition's
+  // support snapshot must not race a concurrent transition or history write,
+  // so the capability's write locks — the schema-version fence, then the
+  // graph write lock — are acquired explicitly up front. A read-only
+  // transaction is refused there, before any statement, and a session whose
+  // reads could miss a transition committed before the lock (a PostgreSQL
+  // snapshot isolation) before the first read.
+  await acquireCapabilityWriteLocks(tx, operation);
+  const rows = await Promise.all(
+    uniqueSources.map((source) =>
+      backend.getNode(scope.graphId, source.kind, source.id),
+    ),
+  );
+  const sourceRows = uniqueSources.map((source, index): SourceRow => {
+    const sourceRow = rows[index];
+    if (sourceRow === undefined || sourceRow.deleted_at !== undefined) {
+      throw new NodeNotFoundError(source.kind, source.id);
     }
-    const after = computeSupportSnapshot(supportGraph, availableAfter);
-    const affected = after.affectedFactKeys(
-      uniqueSources,
-      before.supportedFactKeys,
-    );
-    const closing = closingFactRows(after, affected);
-    await synchronizeFactCurrency(tx, after, affected, closing);
-    return buildReport<G, FactKind, JustificationKind>(
-      before,
-      after,
-      affected,
-      closing,
-    );
+    return { source, row: sourceRow };
   });
+
+  // Load the provenance graph once. Its structure (justifications, facts,
+  // premise/derive edges) is identical before and after the transition — only
+  // source availability changes — so the pre- and post-flip snapshots share
+  // this read instead of scanning the whole graph twice per retraction.
+  const supportGraph = await loadSupportGraph(
+    backend,
+    scope.registry,
+    scope.graphId,
+    config,
+    scope.batchPointRead,
+  );
+  const availableBefore = availableSourceKeys(
+    supportGraph.sourceRows,
+    config.retractedField,
+  );
+  const before = computeSupportSnapshot(supportGraph, availableBefore);
+
+  // Decide the whole transition from the one read before writing anything:
+  // the sources that flip, the availability they leave, and the facts whose
+  // currency changes with it.
+  const nextState: SourceRetractedState = retracted ? "retracted" : "available";
+  const flipping = sourceRows.filter(
+    ({ row }) => sourceRetractedState(row, config.retractedField) !== nextState,
+  );
+  const availableAfter = new Set(availableBefore);
+  for (const { source } of flipping) {
+    if (nextState === "available") {
+      availableAfter.add(refKey(source));
+    } else {
+      availableAfter.delete(refKey(source));
+    }
+  }
+  const after = computeSupportSnapshot(supportGraph, availableAfter);
+  const affected = after.affectedFactKeys(
+    uniqueSources,
+    before.supportedFactKeys,
+  );
+  const closing = closingFactRows(after, affected);
+
+  // Write in the one order whose every prefix leaves no fact live without
+  // live support, because the verb takes no savepoint (a TypeGraph-owned one's
+  // rollback would undo overlapping calls' writes): a caller that catches a
+  // failure partway and commits keeps the prefix. The facts that lose their
+  // support close first, while their sources still stand; then the source
+  // flags flip — any subset of the flips leaves a fact at least as supported
+  // as all of them do, so a fact a retraction leaves without support is
+  // already closed, and a restoration only adds support to facts still
+  // closed; then the facts that regain support reopen. Within the close pass
+  // every required part closes before its whole, and within the reopen pass
+  // every whole reopens before its parts. A prefix can leave a fact closed
+  // whose support stands, never one live without it nor a required part live
+  // under a closed whole, and re-running the verb completes the transition.
+  const dependencies = supportGraph.compositionDependencies;
+  await closeFacts(tx, dependencies, closing);
+  for (const { source } of flipping) {
+    await setSourceRetractionState(tx, config, source, retracted);
+  }
+  await reopenFacts(tx, dependencies, after, affected);
+  return buildReport<G, FactKind, JustificationKind>(
+    before,
+    after,
+    affected,
+    closing,
+  );
 }

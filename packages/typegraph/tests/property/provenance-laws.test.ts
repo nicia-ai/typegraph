@@ -16,6 +16,10 @@
  *   behind the named facts) returns or refuses exactly as the whole-graph
  *   support snapshot says, with the same `via`, over graphs with fact-premise
  *   cycles, required composition parts, and sources in every currency state.
+ *
+ * The retraction laws run twice: with each verb in a transaction of its own,
+ * and with each verb on a caller's transaction (`retract(s, tx)` inside
+ * `store.transaction`), so both forms satisfy every law.
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -236,11 +240,43 @@ function modelReachableFacts(
   return reachable;
 }
 
-async function seedWorld(world: World): Promise<{
+/**
+ * Where a law's verbs run: in a transaction each verb opens itself, or on a
+ * transaction the caller opened for that one call.
+ */
+const TRANSACTION_MODES = ["own transaction", "caller's transaction"] as const;
+type TransactionMode = (typeof TRANSACTION_MODES)[number];
+
+type LawProvenance = ReturnType<
+  typeof createRetractionCapability<typeof graph, typeof config>
+>;
+
+/** `provenance` with every verb run in `mode`. */
+function inTransactionMode(
+  store: LawStore,
+  provenance: LawProvenance,
+  mode: TransactionMode,
+): LawProvenance {
+  if (mode === "own transaction") return provenance;
+  return {
+    ...provenance,
+    retract: (source) =>
+      store.transaction((tx) => provenance.retract(source, tx)),
+    retractMany: (sources) =>
+      store.transaction((tx) => provenance.retractMany(sources, tx)),
+    unRetract: (source) =>
+      store.transaction((tx) => provenance.unRetract(source, tx)),
+    unRetractMany: (sources) =>
+      store.transaction((tx) => provenance.unRetractMany(sources, tx)),
+  };
+}
+
+async function seedWorld(
+  world: World,
+  mode: TransactionMode,
+): Promise<{
   store: LawStore;
-  provenance: ReturnType<
-    typeof createRetractionCapability<typeof graph, typeof config>
-  >;
+  provenance: LawProvenance;
 }> {
   const [store] = await createStoreWithSchema(graph, createTestBackend(), {
     history: true,
@@ -313,7 +349,7 @@ async function seedWorld(world: World): Promise<{
   }
 
   const provenance = createRetractionCapability(store, config);
-  return { store, provenance };
+  return { store, provenance: inTransactionMode(store, provenance, mode) };
 }
 
 function sourceRef(index: number): { kind: "Source"; id: string } {
@@ -339,11 +375,11 @@ async function stabilize(
   await provenance.unRetractMany(allSources);
 }
 
-describe("provenance retraction laws", () => {
+describe.each(TRANSACTION_MODES)("provenance retraction laws, %s", (mode) => {
   it("inverse law: unRetract ∘ retract restores the observable state", async () => {
     await fc.assert(
       fc.asyncProperty(worldArb, fc.nat(), async (world, sourcePick) => {
-        const { store, provenance } = await seedWorld(world);
+        const { store, provenance } = await seedWorld(world, mode);
         await stabilize(provenance, world);
         const sourceIndex = sourcePick % world.sourceCount;
 
@@ -361,7 +397,7 @@ describe("provenance retraction laws", () => {
   it("frame law: retract never touches edges or anything outside the source's reach", async () => {
     await fc.assert(
       fc.asyncProperty(worldArb, fc.nat(), async (world, sourcePick) => {
-        const { store, provenance } = await seedWorld(world);
+        const { store, provenance } = await seedWorld(world, mode);
         await stabilize(provenance, world);
         const sourceIndex = sourcePick % world.sourceCount;
         const reach = modelReachableFacts(world, new Set([sourceIndex]));
@@ -427,7 +463,7 @@ describe("provenance retraction laws", () => {
               provenance: Awaited<ReturnType<typeof seedWorld>>["provenance"],
             ) => Promise<void>,
           ) => {
-            const { store, provenance } = await seedWorld(world);
+            const { store, provenance } = await seedWorld(world, mode);
             await stabilize(provenance, world);
             await transition(provenance);
             return dumpObservableState(store);
@@ -463,13 +499,13 @@ describe("provenance retraction laws", () => {
           ];
           const references = indexes.map((index) => sourceRef(index));
 
-          const serialWorld = await seedWorld(world);
+          const serialWorld = await seedWorld(world, mode);
           await stabilize(serialWorld.provenance, world);
           for (const ref of references)
             await serialWorld.provenance.retract(ref);
           const serial = await dumpObservableState(serialWorld.store);
 
-          const concurrentWorld = await seedWorld(world);
+          const concurrentWorld = await seedWorld(world, mode);
           await stabilize(concurrentWorld.provenance, world);
           await Promise.all(
             references.map((ref) => concurrentWorld.provenance.retract(ref)),
@@ -492,7 +528,7 @@ describe("provenance retraction laws", () => {
           maxLength: 5,
         }),
         async (world, transitions) => {
-          const { store, provenance } = await seedWorld(world);
+          const { store, provenance } = await seedWorld(world, mode);
 
           const retracted = new Set<number>();
           for (const transition of transitions) {

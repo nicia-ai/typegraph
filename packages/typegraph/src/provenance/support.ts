@@ -58,6 +58,49 @@ export const NO_COMPOSITION_EXISTENCE_DEPENDENCIES: CompositionExistenceDependen
     liveWholeKeys: new Set<string>(),
   };
 
+/**
+ * The selected fact rows grouped into composition rounds, shallowest first:
+ * round `n` holds the rows whose required-part chain through
+ * `wholeKeyByPartKey` is `n` steps long, so a part always sits in a later
+ * round than its whole, its whole's whole, and so on — across fact kinds,
+ * and whether or not an intermediate whole is itself selected. Rows that are
+ * not required parts (or whose whole is not found) sit in round 0.
+ *
+ * The rounds feed `cascadeDeletionOrder` (`composition-cascade.ts`), the one
+ * owner of "every part before the whole it belongs to, then by kind and id
+ * within a level", exactly as a cascade's breadth-first discovery rounds do.
+ * Each part hangs from at most one whole, so its depth is the length of one
+ * chain: no ordering between unrelated rows is needed or implied. The chain
+ * walk stops at a revisited key, so a composition cycle (refused at write
+ * time; reachable only through rows written around that check) cannot hang
+ * it.
+ */
+export function compositionDepthRounds<Row>(
+  dependencies: CompositionExistenceDependencies,
+  rows: ReadonlyMap<string, Row>,
+): readonly (readonly Row[])[] {
+  const rounds: Row[][] = [];
+  for (const [key, row] of rows) {
+    const depth = compositionDepth(dependencies, key);
+    while (rounds.length <= depth) rounds.push([]);
+    rounds[depth]?.push(row);
+  }
+  return rounds;
+}
+
+function compositionDepth(
+  dependencies: CompositionExistenceDependencies,
+  factKey: string,
+): number {
+  const visited = new Set<string>([factKey]);
+  let current = dependencies.wholeKeyByPartKey.get(factKey);
+  while (current !== undefined && !visited.has(current)) {
+    visited.add(current);
+    current = dependencies.wholeKeyByPartKey.get(current);
+  }
+  return visited.size - 1;
+}
+
 export type SupportSnapshot = Readonly<{
   facts: ReadonlyMap<string, NodeRow>;
   supportedFactKeys: ReadonlySet<string>;

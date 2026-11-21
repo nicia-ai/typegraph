@@ -457,10 +457,16 @@ async function liveDiscoveredMembers(
  * Rounds arrive deepest-LAST (breadth-first discovery) and are reversed here;
  * each round is sorted on the way out, so the sort is ascending in the
  * FINAL order rather than in discovery order.
+ *
+ * Exported for the other writer that must respect composition when it closes
+ * a set of nodes one at a time: the provenance transition, which groups the
+ * facts it closes by composition depth (`compositionDepthRounds`,
+ * `src/provenance/support.ts`) and closes them in this order — and reopens
+ * them in its exact reverse, every whole before its parts.
  */
-function cascadeDeletionOrder(
-  discoveryRounds: readonly (readonly DiscoveredCascadeMember[])[],
-): readonly DiscoveredCascadeMember[] {
+export function cascadeDeletionOrder<
+  Member extends Readonly<{ kind: string; id: string }>,
+>(discoveryRounds: readonly (readonly Member[])[]): readonly Member[] {
   return discoveryRounds
     .toReversed()
     .flatMap((round) =>

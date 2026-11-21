@@ -394,6 +394,24 @@ function pendingGraphWriteLockAcquisition(): GraphWriteLockAcquisition {
   return { promise, ...settle };
 }
 
+/**
+ * What a write frame on an ADOPTED `engine-serialized` session raises when
+ * it cannot take the writer slot before its first statement. The frame's
+ * caller names both refusals; {@link ensureAdoptedWriterSlot} owns when the
+ * slot is taken and how.
+ *
+ * - `unsupported` — the session exposes no transaction-scoped statement
+ *   execution, so the slot cannot be taken at all.
+ * - `stale` — SQLite refused the slot (`SQLITE_BUSY_SNAPSHOT`): the adopted
+ *   transaction was begun DEFERRED, already read, and another connection
+ *   committed after that read fixed its snapshot. `cause` is the driver
+ *   error.
+ */
+export type AdoptedWriterSlotRefusals = Readonly<{
+  unsupported: () => Error;
+  stale: (cause: unknown) => Error;
+}>;
+
 function adoptedConstraintWriterSlotError(
   ctx: Pick<WriteTransactionContext, "graphId">,
   cause: unknown,
@@ -412,22 +430,60 @@ function adoptedConstraintWriterSlotError(
   );
 }
 
+/** The refusals a constrained write raises for its adopted writer slot. */
+function constraintWriterSlotRefusals(
+  ctx: WriteTransactionContext,
+  fenceReason: ConstraintFenceReason,
+): AdoptedWriterSlotRefusals {
+  return {
+    unsupported: () =>
+      new ConfigurationError(
+        "This engine-serialized transaction cannot prove that it holds its writer slot before a constrained write.",
+        {
+          code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+          graphId: ctx.graphId,
+          constraint: fenceReason,
+        },
+        {
+          suggestion:
+            "Expose transaction-scoped statement execution, or run the constrained write through a backend transaction TypeGraph opens.",
+        },
+      ),
+    stale: (cause) => adoptedConstraintWriterSlotError(ctx, cause),
+  };
+}
+
 /**
- * Makes SQLite's engine-serialized fence true for a transaction TypeGraph did
- * not open. A zero-row write takes the writer slot without changing data; it
- * must run before the schema fence, graph lock, or any constraint probe fixes
- * a read snapshot. Caller-adopted backends do not expose transaction-lifetime
- * identity, so this proof deliberately runs at every constrained write rather
- * than caching connection-scoped evidence across unrelated transactions.
+ * THE one owner of taking SQLite's writer slot on a transaction TypeGraph did
+ * not open, for every write frame whose decision must not be made from a
+ * snapshot another connection can overtake: a constrained write's probe and
+ * provenance's support reads.
+ *
+ * SQLite's `engine-serialized` fence is true by construction for a
+ * transaction TypeGraph opens — `BEGIN IMMEDIATE` holds the slot before its
+ * first statement, and that transaction's write session is registered, so it
+ * is skipped here and issues exactly the statements it always has. An adopted
+ * transaction may have been begun DEFERRED: a reader until its first write,
+ * whose snapshot another connection can overtake. A zero-row write takes the
+ * slot without changing data; it must run before the schema fence, graph
+ * lock, or any decision-driving read. Taking it either succeeds — no other
+ * connection can commit from here on, and SQLite grants the slot only to a
+ * snapshot no commit has overtaken, so every later read is current — or SQLite
+ * refuses the upgrade of an overtaken snapshot, raised as `refusals.stale`.
+ * Caller-adopted backends do not expose transaction-lifetime identity, so this
+ * proof deliberately runs at every such frame rather than caching
+ * connection-scoped evidence across unrelated transactions.
+ *
+ * `refusals` is `undefined` for a frame that decides nothing from its reads.
  */
-async function ensureAdoptedConstraintWriterSlot(
+async function ensureAdoptedWriterSlot(
   ctx: WriteTransactionContext,
   target: GraphBackend | TransactionBackend,
   transactionMode: WriteTransactionMode,
-  fenceReason: ConstraintFenceReason | undefined,
+  refusals: AdoptedWriterSlotRefusals | undefined,
 ): Promise<void> {
   if (
-    fenceReason === undefined ||
+    refusals === undefined ||
     transactionMode !== "existing" ||
     writeTransactionSessions.has(target) ||
     resolveWriteFencePlan(target).kind !== "engine-serialized"
@@ -435,20 +491,7 @@ async function ensureAdoptedConstraintWriterSlot(
     return;
   }
   const statementExecution = ctx.statementExecution;
-  if (statementExecution?.supported !== true) {
-    throw new ConfigurationError(
-      "This engine-serialized transaction cannot prove that it holds its writer slot before a constrained write.",
-      {
-        code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
-        graphId: ctx.graphId,
-        constraint: fenceReason,
-      },
-      {
-        suggestion:
-          "Expose transaction-scoped statement execution, or run the constrained write through a backend transaction TypeGraph opens.",
-      },
-    );
-  }
+  if (statementExecution?.supported !== true) throw refusals.unsupported();
   try {
     await ensureEngineSerializedWriterSlot(
       target,
@@ -457,7 +500,7 @@ async function ensureAdoptedConstraintWriterSlot(
     );
   } catch (error) {
     if (!isSqliteStaleSnapshotError(error)) throw error;
-    throw adoptedConstraintWriterSlotError(ctx, error);
+    throw refusals.stale(error);
   }
 }
 
@@ -644,6 +687,14 @@ export type WriteTransactionOptions<T> = Readonly<{
    * ordinary fence diagnostic before handling a zero-row result.
    */
   schemaFenceInFirstWrite?: boolean | undefined;
+  /**
+   * The frame decides from reads it makes after its fences, so on an adopted
+   * `engine-serialized` session it takes the writer slot first
+   * ({@link ensureAdoptedWriterSlot}), refusing with these errors when it
+   * cannot. A constrained write (`fencesConstraintProbe`) needs no entry
+   * here: it takes the slot with the constraint refusals.
+   */
+  adoptedWriterSlot?: AdoptedWriterSlotRefusals | undefined;
 }>;
 
 /**
@@ -1103,11 +1154,14 @@ function runInWriteTransactionAttempt<T>(
   const needsGraphWriteLock = writeNeedsGraphWriteFence(ctx, fenceReason);
   const decidesUnderLockOnly = writeDecidesUnderLockOnly(fenceReason);
   return runOptionallyInTransaction(backend, async (target) => {
-    await ensureAdoptedConstraintWriterSlot(
+    await ensureAdoptedWriterSlot(
       ctx,
       target,
       transactionMode,
-      fenceReason,
+      options?.adoptedWriterSlot ??
+        (fenceReason === undefined ? undefined : (
+          constraintWriterSlotRefusals(ctx, fenceReason)
+        )),
     );
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
@@ -1252,19 +1306,31 @@ function runInWriteTransactionAttempt<T>(
  * owns. The caller's reads need the exclusion either way, so in that case the
  * lock is taken here, behind the schema fence the frame has just taken; on a
  * serialized engine that is no statement.
+ *
+ * Resolves to the graph lock's evidence — the frame's own when it carries a
+ * keyed acquisition, the one taken here otherwise — so a caller that must
+ * prove what its reads observe judges the acquisition that excluded the
+ * writers, not a second one.
+ *
+ * The caller decides from those reads, so on a transaction TypeGraph did not
+ * open on an `engine-serialized` engine the frame first takes the writer slot
+ * ({@link ensureAdoptedWriterSlot}), refusing with `writerSlotRefusals` when
+ * it cannot. A transaction TypeGraph opened already holds it and issues no
+ * statement for it.
  */
 export function acquireManagedWriteFences(
   ctx: WriteTransactionContext,
   backend: TransactionBackend,
-): Promise<void> {
+  writerSlotRefusals: AdoptedWriterSlotRefusals,
+): Promise<GraphWriteLock> {
   return runInWriteTransaction(
     ctx,
     backend,
     async (target, lock) => {
-      if (lock.coordination !== undefined) return;
-      await lockRecordedGraphWrite(target, ctx.graphId);
+      if (lock.coordination !== undefined) return lock;
+      return lockRecordedGraphWrite(target, ctx.graphId);
     },
-    { didWrite: () => false },
+    { didWrite: () => false, adoptedWriterSlot: writerSlotRefusals },
   );
 }
 
