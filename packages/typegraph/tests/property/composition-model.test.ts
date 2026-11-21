@@ -1331,6 +1331,17 @@ type RowState = Readonly<{
   edges: readonly string[];
 }>;
 
+/** One stored edge row as {@link readRows} reports it. */
+type StoredEdgeRow = Readonly<{
+  id: string;
+  kind: EdgeKind;
+  fromId: string;
+  toId: string;
+  validFrom: number | undefined;
+  validTo: number | undefined;
+  deleted: boolean;
+}>;
+
 function instantOf(value: string | undefined): number | undefined {
   return value === undefined ? undefined : Date.parse(value);
 }
@@ -1338,15 +1349,7 @@ function instantOf(value: string | undefined): number | undefined {
 async function readRows(real: Real): Promise<
   Readonly<{
     nodes: readonly Readonly<{ id: string; kind: string; live: boolean }>[];
-    edges: readonly Readonly<{
-      id: string;
-      kind: EdgeKind;
-      fromId: string;
-      toId: string;
-      validFrom: number | undefined;
-      validTo: number | undefined;
-      deleted: boolean;
-    }>[];
+    edges: readonly StoredEdgeRow[];
     raw: unknown;
   }>
 > {
@@ -1424,44 +1427,89 @@ function describeModel(model: Model): RowState {
   };
 }
 
-function describeEdge(
-  id: string,
-  edge: Readonly<{
-    kind: EdgeKind;
-    partId: string;
-    wholeId: string;
-    validFrom: number | undefined;
-    validTo: number | undefined;
-    deleted: boolean;
-  }>,
-): string {
-  return `${id}:${edge.kind}:${edge.partId}<${edge.wholeId}:from=${edge.validFrom}:to=${edge.validTo ?? "open"}:${edge.deleted ? "deleted" : "live"}`;
+/** The fields of an edge the row comparison reads, model side or stored side. */
+type EdgeShape = Readonly<{
+  kind: EdgeKind;
+  partId: string;
+  wholeId: string;
+  validFrom: number | undefined;
+  validTo: number | undefined;
+  deleted: boolean;
+}>;
+
+function describeEdge(id: string, edge: EdgeShape): string {
+  return `${id}:${edgeSignature(edge)}`;
 }
 
-/** Gives every pending model edge the id the store assigned the row it wrote. */
+/**
+ * Everything {@link describeEdge} compares except the id: the one projection
+ * both the row comparison and {@link reconcileEdgeIds} read, so a field the
+ * comparison gains is a field the id match gains.
+ */
+function edgeSignature(edge: EdgeShape): string {
+  return `${edge.kind}:${edge.partId}<${edge.wholeId}:from=${edge.validFrom}:to=${edge.validTo ?? "open"}:${edge.deleted ? "deleted" : "live"}`;
+}
+
+/** A stored row in the model's part/whole orientation. */
+function edgeShapeOfRow(row: StoredEdgeRow): EdgeShape {
+  const pair = PAIRS[row.kind];
+  return {
+    kind: row.kind,
+    partId: pair.partSide === "from" ? row.fromId : row.toId,
+    wholeId: pair.partSide === "from" ? row.toId : row.fromId,
+    validFrom: row.validFrom,
+    validTo: row.validTo,
+    deleted: row.deleted,
+  };
+}
+
+/**
+ * Gives every pending model edge the id the store assigned the row it wrote.
+ *
+ * A pending edge pairs only with an unclaimed row of the same
+ * {@link edgeSignature} — every field the row comparison reads — so a pairing
+ * can never hand an edge the id of a row that differs from it in any compared
+ * field. Pending edges that share a signature (two zero-width history rows of
+ * one part at one instant) are equal in every field the model holds, so every
+ * later check and command treats them alike and they take that signature's
+ * rows in turn. When the unclaimed rows of a signature do not number exactly
+ * its pending edges there is no pairing to make, and the match fails rather
+ * than guess.
+ */
 function reconcileEdgeIds(
   model: Model,
-  rows: Awaited<ReturnType<typeof readRows>>,
+  rows: Readonly<{ edges: readonly StoredEdgeRow[] }>,
 ): void {
-  const unclaimed = rows.edges.filter((row) => !model.edges.has(row.id));
-  for (const [pendingId, edge] of model.edges) {
-    if (!pendingId.startsWith(PENDING_PREFIX)) continue;
-    const pair = PAIRS[edge.kind];
-    const index = unclaimed.findIndex((row) => {
-      const partId = pair.partSide === "from" ? row.fromId : row.toId;
-      const wholeId = pair.partSide === "from" ? row.toId : row.fromId;
-      return (
-        row.kind === edge.kind &&
-        partId === edge.partId &&
-        wholeId === edge.wholeId &&
-        row.deleted === edge.deleted &&
-        row.validTo === edge.validTo
+  const unclaimedBySignature = new Map<string, string[]>();
+  for (const row of rows.edges) {
+    if (model.edges.has(row.id)) continue;
+    const signature = edgeSignature(edgeShapeOfRow(row));
+    unclaimedBySignature.set(signature, [
+      ...(unclaimedBySignature.get(signature) ?? []),
+      row.id,
+    ]);
+  }
+  const pendingBySignature = new Map<string, string[]>();
+  for (const [id, edge] of model.edges) {
+    if (!id.startsWith(PENDING_PREFIX)) continue;
+    const signature = edgeSignature(edge);
+    pendingBySignature.set(signature, [
+      ...(pendingBySignature.get(signature) ?? []),
+      id,
+    ]);
+  }
+  for (const [signature, pendingIds] of pendingBySignature) {
+    const rowIds = unclaimedBySignature.get(signature) ?? [];
+    if (rowIds.length !== pendingIds.length) {
+      throw new Error(
+        `Cannot pair pending model edges [${pendingIds.join(", ")}] with unclaimed stored rows [${rowIds.join(", ")}] of signature ${signature}: their counts differ.`,
       );
-    });
-    if (index === -1) continue;
-    const [row] = unclaimed.splice(index, 1);
-    model.edges.delete(pendingId);
-    model.edges.set(requireDefined(row).id, edge);
+    }
+    for (const [index, pendingId] of pendingIds.entries()) {
+      const edge = requireDefined(model.edges.get(pendingId));
+      model.edges.delete(pendingId);
+      model.edges.set(requireDefined(rowIds[index]), edge);
+    }
   }
 }
 
@@ -1471,17 +1519,7 @@ function describeRows(rows: Awaited<ReturnType<typeof readRows>>): RowState {
       .map((node) => `${node.id}:${node.kind}:${node.live ? "live" : "dead"}`)
       .toSorted(),
     edges: rows.edges
-      .map((row) => {
-        const pair = PAIRS[row.kind];
-        return describeEdge(row.id, {
-          kind: row.kind,
-          partId: pair.partSide === "from" ? row.fromId : row.toId,
-          wholeId: pair.partSide === "from" ? row.toId : row.fromId,
-          validFrom: row.validFrom,
-          validTo: row.validTo,
-          deleted: row.deleted,
-        });
-      })
+      .map((row) => describeEdge(row.id, edgeShapeOfRow(row)))
       .toSorted(),
   };
 }
@@ -2202,6 +2240,84 @@ const commandArbs = [
 ];
 
 const MAX_COMMANDS = 30;
+
+// ============================================================
+// Id reconciliation
+// ============================================================
+
+/**
+ * Pinned cases for {@link reconcileEdgeIds}, with fixed row ids so the order
+ * the store's random ids would leave to chance is the order that breaks a
+ * matcher reading fewer fields than the comparison.
+ */
+describe("composition model id reconciliation", () => {
+  const MID_OF = { kind: "cpMidOf", partId: "a2", wholeId: "a1" } as const;
+
+  function storedRow(
+    id: string,
+    validFrom: number,
+    validTo: number,
+  ): StoredEdgeRow {
+    return {
+      id,
+      kind: MID_OF.kind,
+      fromId: MID_OF.partId,
+      toId: MID_OF.wholeId,
+      validFrom,
+      validTo,
+      deleted: false,
+    };
+  }
+
+  // The rows seed -1494174856 left on the PGlite lane: two history rows of
+  // one part ending at one instant, one of them zero-width. The row whose id
+  // sorts first is the later-starting one, so an end-only match swaps them.
+  it("pairs rows that share endpoints and end by their start", () => {
+    const model = initialModel();
+    addEdge(model, { ...MID_OF, validFrom: 740_000, validTo: 830_000 });
+    addEdge(model, { ...MID_OF, validFrom: 830_000, validTo: 830_000 });
+    const rows = [
+      storedRow("row-a", 830_000, 830_000),
+      storedRow("row-b", 740_000, 830_000),
+    ];
+
+    reconcileEdgeIds(model, { edges: rows });
+
+    expect(describeModel(model).edges).toEqual(
+      describeRows({ nodes: [], edges: rows, raw: undefined }).edges,
+    );
+  });
+
+  it("pairs rows equal in every compared field one to one", () => {
+    const model = initialModel();
+    addEdge(model, { ...MID_OF, validFrom: 830_000, validTo: 830_000 });
+    addEdge(model, { ...MID_OF, validFrom: 830_000, validTo: 830_000 });
+    const rows = [
+      storedRow("row-a", 830_000, 830_000),
+      storedRow("row-b", 830_000, 830_000),
+    ];
+
+    reconcileEdgeIds(model, { edges: rows });
+
+    expect(describeModel(model).edges).toEqual(
+      describeRows({ nodes: [], edges: rows, raw: undefined }).edges,
+    );
+  });
+
+  it("refuses to pair when a signature's rows and pending edges differ in number", () => {
+    const model = initialModel();
+    addEdge(model, { ...MID_OF, validFrom: 830_000, validTo: 830_000 });
+    addEdge(model, { ...MID_OF, validFrom: 830_000, validTo: 830_000 });
+
+    expect(() => {
+      reconcileEdgeIds(model, {
+        edges: [storedRow("row-a", 830_000, 830_000)],
+      });
+    }).toThrow(
+      /Cannot pair pending model edges .* with unclaimed stored rows \[row-a\]/,
+    );
+  });
+});
 
 // ============================================================
 // Lanes

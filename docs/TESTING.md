@@ -557,7 +557,10 @@ multiplies every `propertyRuns` budget (`tests/property/run-budget.ts`). It is
 not a merge gate. Run it on demand from the Actions tab with a different
 multiplier, or locally with `TYPEGRAPH_PROPERTY_RUNS_SCALE=10 pnpm
 test:property`. A suite that passes a literal `numRuns` is not scaled; give it a
-`propertyRuns` budget to include it.
+`propertyRuns` budget to include it. The same multiplier stretches each Vitest
+project's default `testTimeout` (`propertyTestTimeout` in `vitest.config.ts`),
+so a test relying on that default gets its time scaled with its runs; a test
+that passes its own timeout keeps it unscaled.
 
 A separate [release workflow](../.github/workflows/release.yml) packs the npm
 tarball after CI passes and smoke-imports every public subpath (ESM + CJS)
