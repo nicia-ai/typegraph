@@ -14,8 +14,8 @@ import { getDialect } from "../dialect";
 import {
   aliasColumnName,
   bindGeneratedIdentifiers,
+  type GeneratedColumns,
   generatedColumnsOf,
-  restoreGeneratedColumns,
 } from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
@@ -32,10 +32,16 @@ export type SchemaCheckedReadInput = Readonly<{
   resultOrderBy?: SqlFragment;
 }>;
 
+/** The data rows of a checked read and the generated columns they carry. */
+export type SchemaCheckedReadResult = Readonly<{
+  rows: readonly Record<string, unknown>[];
+  columns: GeneratedColumns;
+}>;
+
 /** A version row survives even an empty data result; both reads share one SQL snapshot. */
 export async function executeSchemaCheckedRead(
   input: SchemaCheckedReadInput,
-): Promise<readonly Record<string, unknown>[]> {
+): Promise<SchemaCheckedReadResult> {
   const { backend, ast, graphId, expectedVersion } = input;
   if (
     expectedVersion !== undefined &&
@@ -96,10 +102,8 @@ export async function executeSchemaCheckedRead(
     FROM checked_version LEFT JOIN checked_rows ON 1 = 1
     ${orderBy ?? sql.raw("")}
   `);
-  const rows = restoreGeneratedColumns(
-    await backend.execute<Record<string, unknown>>(query),
-    generatedColumnsOf(compiled),
-  );
+  const rows = await backend.execute<Record<string, unknown>>(query);
+  const columns = generatedColumnsOf(compiled);
   const rawVersion = rows[0]?.[marker];
   const actual =
     rawVersion === null || rawVersion === undefined ?
@@ -112,18 +116,18 @@ export async function executeSchemaCheckedRead(
       actual,
     });
   // The start id is non-null for every real row. Only the left-join sentinel lacks it.
-  return rows
-    .filter(
-      (row) =>
-        row[
-          input.rowIdentityColumn ?? aliasColumnName(ast.start.alias, "id")
-        ] !== null &&
-        row[
-          input.rowIdentityColumn ?? aliasColumnName(ast.start.alias, "id")
-        ] !== undefined,
-    )
+  const identityColumn =
+    input.rowIdentityColumn ??
+    columns.columnOf(aliasColumnName(ast.start.alias, "id"));
+  const dataRows = rows
+    .filter((row) => {
+      const identity =
+        identityColumn === undefined ? undefined : row[identityColumn];
+      return identity !== null && identity !== undefined;
+    })
     .map((row) => {
       const { [marker]: _version, ...data } = row;
       return data;
     });
+  return { rows: dataRows, columns };
 }

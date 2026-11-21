@@ -33,6 +33,8 @@ import { type QueryBuilder } from "../../query/builder";
 import {
   aliasColumnName,
   generatedColumnName,
+  quotedName,
+  sealGeneratedIdentifiers,
 } from "../../query/generated-identifier";
 import { type Predicate } from "../../query/predicates";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
@@ -654,9 +656,14 @@ export function createNodeCollection<
         }
         const compiledCandidateQuery =
           candidateQuery.compileNodeCandidateIds(readInstant);
+        // `selection.idColumn` is the column the compiled candidates emit;
+        // the branch renames it to the generated candidate column every other
+        // branch projects, sealed so it can be read like theirs.
         compiledBranches.push(
-          asCompiledSelectSql(
-            sql`SELECT ${sql.identifier(generatedColumnName(compiledCandidateQuery, selection.idColumn))} AS ${sql.identifier(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+          sealGeneratedIdentifiers(
+            asCompiledSelectSql(
+              sql`SELECT ${sql.identifier(selection.idColumn)} AS ${quotedName(candidateIdColumn)} FROM (${compiledCandidateQuery}) AS ${sql.identifier("update_selected_candidates")}`,
+            ),
           ),
         );
       }
@@ -740,11 +747,15 @@ export function createNodeCollection<
       }
       const compiledCandidates = asCompiledSelectSql(combinedCandidates);
 
+      // An INTERSECT names its column after its first branch's.
       const result = await executeNodeSetUpdate(
         kind,
         params.patch,
         compiledCandidates,
-        candidateIdColumn,
+        generatedColumnName(
+          requireDefined(compiledBranches[0]),
+          candidateIdColumn,
+        ),
         backend,
         { operation: "updateWhere" },
       );

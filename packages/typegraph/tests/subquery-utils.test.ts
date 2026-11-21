@@ -8,6 +8,10 @@ import { describe, expect, it } from "vitest";
 
 import type { QueryAst, ValueType } from "../src/query/ast";
 import {
+  aliasColumnName,
+  type GeneratedName,
+} from "../src/query/generated-identifier";
+import {
   getSingleSubqueryColumnValueType,
   getSubqueryColumnCount,
   isInSubqueryTypeCompatible,
@@ -26,7 +30,7 @@ function makeSubqueryAst(
   selectiveFields?: {
     alias: string;
     field: string;
-    outputName: string;
+    outputName: GeneratedName;
     isSystemField: boolean;
     valueType?: ValueType;
   }[],
@@ -189,7 +193,7 @@ describe("getSubqueryColumnCount", () => {
         {
           alias: "q",
           field: "id",
-          outputName: "q_id",
+          outputName: aliasColumnName("q", "id"),
           isSystemField: true,
           valueType: "string",
         },
@@ -270,7 +274,7 @@ describe("getSingleSubqueryColumnValueType", () => {
         {
           alias: "q",
           field: "age",
-          outputName: "q_age",
+          outputName: aliasColumnName("q", "age"),
           isSystemField: false,
           valueType: "number",
         },

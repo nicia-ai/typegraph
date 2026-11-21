@@ -8,7 +8,7 @@ import type {
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type DatabaseExpression } from "../expressions";
-import { aliasCteName } from "../generated-identifier";
+import { aliasCteName, type SqlName } from "../generated-identifier";
 import {
   expressionContainsAggregate,
   visitExpressionChildren,
@@ -414,7 +414,7 @@ export function shouldMaterializeTraversalCte(
 
 type StandardQueryPassState = Readonly<{
   ast: QueryAst;
-  collapsedTraversalCteAlias: string | undefined;
+  collapsedTraversalCteAlias: SqlName | undefined;
   ctx: PredicateCompilerContext;
   effectiveLimit: number | undefined;
   fulltextPredicate: FulltextMatchPredicate | undefined;
@@ -545,7 +545,7 @@ export function runStandardQueryPassPipeline(
   const selectiveTraversalRowsetPass = runCompilerPass(state, {
     name: "linear_traversal_rowset",
     execute(currentState): Readonly<{
-      collapsedTraversalCteAlias: string | undefined;
+      collapsedTraversalCteAlias: SqlName | undefined;
       shouldCollapseLinearTraversalRowset: boolean;
     }> {
       const shouldCollapseLinearTraversalRowset =

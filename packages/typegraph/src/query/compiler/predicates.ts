@@ -40,7 +40,13 @@ import {
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
 import type { DatabaseExpression } from "../expressions";
-import { aliasColumnName, aliasCteName } from "../generated-identifier";
+import {
+  aliasCteName,
+  bareSqlName,
+  quotedSqlName,
+  rawAliasColumn,
+  type SqlName,
+} from "../generated-identifier";
 import {
   joinJsonPointers,
   type JsonPointer,
@@ -92,7 +98,7 @@ const COMPARISON_OP_SQL: Record<string, string> = {
  */
 export function compileFieldColumn(
   field: FieldRef,
-  cteAlias?: string,
+  cteAlias?: SqlName,
   cteColumnPrefix?: string,
 ): SqlFragment {
   // When cteColumnPrefix is defined (including empty string), use raw column names
@@ -114,22 +120,18 @@ export function compileFieldColumn(
   }
 
   // Default behavior: use aliased column names (e.g., "p_props")
-  const prefix = field.alias;
-  const qualifier = cteAlias ? `${cteAlias}.` : "";
+  const column = rawAliasColumn(field.alias, aliasedColumnSuffix(field));
+  return cteAlias === undefined || cteAlias === "" ?
+      column
+    : sql`${bareSqlName(cteAlias)}.${column}`;
+}
 
-  if (field.path.length === 1 && field.path[0] === "id") {
-    return sql.raw(`${qualifier}${aliasColumnName(prefix, "id")}`);
-  }
-  if (field.path.length === 1 && field.path[0] === "kind") {
-    return sql.raw(`${qualifier}${aliasColumnName(prefix, "kind")}`);
-  }
-  if (field.path.length > 0 && field.path[0] === "props") {
-    return sql.raw(`${qualifier}${aliasColumnName(prefix, "props")}`);
-  }
-
-  return sql.raw(
-    `${qualifier}${aliasColumnName(prefix, field.path.join("_"))}`,
-  );
+/** The column of a field's alias that holds it: `id`, `kind`, `props`, .... */
+function aliasedColumnSuffix(field: FieldRef): string {
+  if (field.path.length === 1 && field.path[0] === "id") return "id";
+  if (field.path.length === 1 && field.path[0] === "kind") return "kind";
+  if (field.path.length > 0 && field.path[0] === "props") return "props";
+  return field.path.join("_");
 }
 
 /**
@@ -191,7 +193,7 @@ export function compileFieldValue(
   field: FieldRef,
   dialect: DialectAdapter,
   valueType?: ValueType,
-  cteAlias?: string,
+  cteAlias?: SqlName,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
 ): SqlFragment {
@@ -255,7 +257,7 @@ export function compileFieldValueFromColumn(
 function compileFieldTextValue(
   field: FieldRef,
   dialect: DialectAdapter,
-  cteAlias?: string,
+  cteAlias?: SqlName,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
 ): SqlFragment {
@@ -278,7 +280,7 @@ function compileFieldTextValue(
 function compileFieldJsonValue(
   field: FieldRef,
   dialect: DialectAdapter,
-  cteAlias?: string,
+  cteAlias?: SqlName,
   pointerOverride?: JsonPointer,
   cteColumnPrefix?: string,
 ): SqlFragment {
@@ -615,7 +617,7 @@ export function assertRecursiveTraversalSupported(
   );
 }
 
-type FieldCteAliasResolver = (field: FieldRef) => string | undefined;
+type FieldCteAliasResolver = (field: FieldRef) => SqlName | undefined;
 
 /**
  * Compiles a predicate expression to SQL.
@@ -1288,7 +1290,7 @@ function dateTypedSubqueryValues(
     throw new CompilerInvariantError(
       "A date-typed IN/NOT IN subquery has no projected column",
     );
-  const column = sql`${sql.identifier(DATE_TYPED_SUBQUERY_ALIAS)}.${sql.identifier(projected.outputName)}`;
+  const column = sql`${sql.identifier(DATE_TYPED_SUBQUERY_ALIAS)}.${quotedSqlName(projected.outputName)}`;
   return sql`SELECT ${dialect.dateValue(column)} FROM (${compiled}) AS ${sql.identifier(DATE_TYPED_SUBQUERY_ALIAS)}`;
 }
 

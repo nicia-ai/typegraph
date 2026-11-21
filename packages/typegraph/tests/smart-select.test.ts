@@ -23,6 +23,7 @@ import {
   FieldAccessTracker,
 } from "../src/query/execution/field-tracker";
 import { mapSelectiveResults } from "../src/query/execution/selective-result-mapper";
+import { aliasColumnName } from "../src/query/generated-identifier";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
 import { type SqlFragment } from "../src/query/sql-fragment";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
@@ -290,7 +291,10 @@ describe("createTrackingContext", () => {
     );
     const postgresJsTimestamp = "2026-08-09 11:52:09.617+00";
     const row = Object.fromEntries(
-      selectiveFields.map((field) => [field.outputName, postgresJsTimestamp]),
+      selectiveFields.map((field) => [
+        field.outputName.spelling,
+        postgresJsTimestamp,
+      ]),
     );
 
     const results = mapSelectiveResults(
@@ -307,6 +311,9 @@ describe("createTrackingContext", () => {
           updatedAt: node.meta.updatedAt,
           deletedAt: node.meta.deletedAt,
         };
+      },
+      {
+        columnOf: (name) => (typeof name === "string" ? name : name.spelling),
       },
     );
 
@@ -333,10 +340,15 @@ describe("buildSelectiveFields", () => {
       {
         alias: "p",
         field: "email",
-        outputName: "p_email",
+        outputName: aliasColumnName("p", "email"),
         isSystemField: false,
       },
-      { alias: "p", field: "id", outputName: "p_id", isSystemField: true },
+      {
+        alias: "p",
+        field: "id",
+        outputName: aliasColumnName("p", "id"),
+        isSystemField: true,
+      },
     ]);
   });
 });

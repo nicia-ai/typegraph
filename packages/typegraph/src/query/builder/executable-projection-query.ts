@@ -6,6 +6,7 @@ import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
+import { generatedColumnName } from "../generated-identifier";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
@@ -231,17 +232,20 @@ export class ExecutableProjectionQuery<
     const ast = this.toAst();
     this.#assertBound(ast);
     const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
+    const query = compileQuery(
+      envelope,
+      this.#config.graphId,
+      buildCompileOptions(this.#config),
+    );
     return {
-      query: compileQuery(
-        envelope,
-        this.#config.graphId,
-        buildCompileOptions(this.#config),
-      ),
+      query,
       provenance: {
         graphId: this.#config.graphId,
         executionTarget: backendDerivationRoot(backend),
       },
-      outputNames: envelope.projection.fields.map((field) => field.outputName),
+      outputNames: envelope.projection.fields.map((field) =>
+        generatedColumnName(query, field.outputName),
+      ),
       orderBy,
       mapRows: (rows: readonly Record<string, unknown>[]) =>
         rows.map((row) => this.#decodeRow(row)),
@@ -347,7 +351,7 @@ export class ExecutableProjectionQuery<
           asCompiledSelectSql(
             sql`SELECT projected.*, 1 AS __tg_projection_row FROM (${ordered}) AS projected`,
           ),
-      }),
+      }).then((checkedRead) => checkedRead.rows),
       backend,
     );
   }
@@ -401,7 +405,7 @@ export class ExecutableProjectionQuery<
           expectedVersion: checked.value,
           rowIdentityColumn: "__tg_scalar",
           compile: () => this.#compileScalar(ast, operation),
-        }),
+        }).then((checkedRead) => checkedRead.rows),
     );
     return Number(rows[0]?.["__tg_scalar"] ?? 0);
   }

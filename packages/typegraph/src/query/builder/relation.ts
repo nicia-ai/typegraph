@@ -1297,23 +1297,24 @@ export function createProjectionRelation<
   ]);
   const columns = relationColumns(input.fields, { nodeAliases });
   const ordering = input.ast.orderBy ?? [];
-  const orderOutputNames = ordering.map(
-    (order) =>
-      input.ast.projection.fields.find(
-        (projected) =>
-          projected.source === order.field ||
-          (projected.source.__type === "database_expression" &&
-            order.field.__type === "database_expression" &&
-            projected.source.node.kind === "field" &&
-            order.field.node.kind === "field" &&
-            projected.source.node.field.alias ===
-              order.field.node.field.alias &&
-            projected.source.node.field.path.join("\u0000") ===
-              order.field.node.field.path.join("\u0000") &&
-            projected.source.node.field.jsonPointer ===
-              order.field.node.field.jsonPointer),
-      )?.outputName,
-  );
+  // A relation reads its source's columns by their caller-chosen keys; an
+  // ordering field without one is projected under an order key below.
+  const orderOutputNames = ordering.map((order) => {
+    const outputName = input.ast.projection.fields.find(
+      (projected) =>
+        projected.source === order.field ||
+        (projected.source.__type === "database_expression" &&
+          order.field.__type === "database_expression" &&
+          projected.source.node.kind === "field" &&
+          order.field.node.kind === "field" &&
+          projected.source.node.field.alias === order.field.node.field.alias &&
+          projected.source.node.field.path.join("\u0000") ===
+            order.field.node.field.path.join("\u0000") &&
+          projected.source.node.field.jsonPointer ===
+            order.field.node.field.jsonPointer),
+    )?.outputName;
+    return typeof outputName === "string" ? outputName : undefined;
+  });
   const {
     limit: sourceLimit,
     offset: sourceOffset,

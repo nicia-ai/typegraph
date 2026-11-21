@@ -60,9 +60,11 @@ import {
   aliasColumnName,
   aliasCteName,
   generatedColumnName,
+  type GeneratedColumns,
   generatedColumnsOf,
-  generatedIdentifier,
-  restoreGeneratedColumns,
+  resultColumnName,
+  type SqlName,
+  sqlNameKey,
 } from "../generated-identifier";
 import { parseJsonPointer } from "../json-pointer";
 import { resolveNullOrdering } from "../order";
@@ -110,6 +112,12 @@ import {
 } from "./validation";
 
 const NOT_COMPUTED = Symbol("NOT_COMPUTED");
+
+/** Rows of one compiled statement and the generated columns they carry. */
+type FetchedRows = Readonly<{
+  rows: readonly Record<string, unknown>[];
+  columns: GeneratedColumns;
+}>;
 
 // Forward declaration for UnionableQuery to avoid circular imports
 type UnionableQueryConstructor = new (
@@ -586,7 +594,7 @@ export class ExecutableQuery<
     ast: QueryAst,
     slot: "full" | "selective",
     surface: string,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<FetchedRows> {
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#templateFor(ast, slot);
@@ -599,11 +607,16 @@ export class ExecutableQuery<
         ),
         surface,
       );
-      return transformPathColumns(
-        restoreGeneratedColumns(rawRows, template.generatedColumns),
-        this.#state,
-        this.#dialect(),
-      );
+      const columns = template.generatedColumns;
+      return {
+        rows: transformPathColumns(
+          rawRows,
+          this.#state,
+          this.#dialect(),
+          columns,
+        ),
+        columns,
+      };
     }
     const compiled = compileQuery(
       ast,
@@ -615,11 +628,16 @@ export class ExecutableQuery<
       backend.execute<Record<string, unknown>>(compiled),
       surface,
     );
-    return transformPathColumns(
-      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
-      this.#state,
-      this.#dialect(),
-    );
+    const columns = generatedColumnsOf(compiled);
+    return {
+      rows: transformPathColumns(
+        rawRows,
+        this.#state,
+        this.#dialect(),
+        columns,
+      ),
+      columns,
+    };
   }
 
   /**
@@ -662,7 +680,12 @@ export class ExecutableQuery<
 
     // Phase 2: Fall back to full fetch (cached template + executeRaw, or a
     // fresh literal compile on backends without raw execution).
-    const rows = await this.#fetchRows(backend, ast, "full", "recorded-query");
+    const { rows, columns } = await this.#fetchRows(
+      backend,
+      ast,
+      "full",
+      "recorded-query",
+    );
 
     // Cast: runtime context includes recursive aliases; type erasure in mapResults is safe
     return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
@@ -670,6 +693,7 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     );
   }
 
@@ -688,7 +712,7 @@ export class ExecutableQuery<
       const rows = await query.executeChecked(checked.value);
       return rows[0];
     }
-    const rows = await query.#fetchRows(
+    const { rows, columns } = await query.#fetchRows(
       query.#requireBackend(),
       query.toAst(),
       "full",
@@ -699,6 +723,7 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     )[0];
   }
 
@@ -731,7 +756,7 @@ export class ExecutableQuery<
     }
     const ast = this.toAst();
     const backend = this.#requireBackend();
-    const rows = await this.#executeOnBackend(
+    const { rows, columns } = await this.#executeOnBackend(
       backend,
       executeSchemaCheckedRead({
         backend,
@@ -748,6 +773,7 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     );
   }
 
@@ -779,7 +805,7 @@ export class ExecutableQuery<
       this.#config,
     ).expectedSchemaVersion;
     if (checked !== undefined) {
-      const rows = await executeSchemaCheckedRead({
+      const { rows, columns } = await executeSchemaCheckedRead({
         backend,
         ast,
         graphId: this.#config.graphId,
@@ -792,6 +818,7 @@ export class ExecutableQuery<
         this.#state.startAlias,
         this.#state.traversals,
         this.#selectFn,
+        columns,
       );
     }
 
@@ -803,7 +830,7 @@ export class ExecutableQuery<
 
     // Fall back to full fetch (cached template + executeRaw on the provided
     // backend, or a fresh literal compile when it can't run raw SQL).
-    const rows = await this.#fetchRows(
+    const { rows, columns } = await this.#fetchRows(
       backend,
       ast,
       "full",
@@ -815,6 +842,7 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     );
   }
 
@@ -900,7 +928,14 @@ export class ExecutableQuery<
           undefined
         : backendDerivationRoot(this.#config.backend),
       kind,
-      idColumn: aliasColumnName(ast.start.alias, "id"),
+      // The column `compileNodeCandidateIds()` emits, as that statement spells
+      // it. Physical names depend only on the statement's generated names,
+      // which a read instant does not change, so one compile answers for
+      // every instant the candidates are later compiled at.
+      idColumn: generatedColumnName(
+        this.compileNodeCandidateIds(),
+        aliasColumnName(ast.start.alias, "id"),
+      ),
       temporalMode: ast.temporalMode.mode,
       recordedAsOf: ast.recordedAsOf,
     };
@@ -986,7 +1021,7 @@ export class ExecutableQuery<
           []
         : [variableLength.depthAlias, variableLength.pathAlias]
             .filter((name): name is string => name !== undefined)
-            .map((name) => generatedIdentifier(name));
+            .map((name) => resultColumnName(name));
     });
     const query = compileQuery(
       batchAst,
@@ -995,13 +1030,15 @@ export class ExecutableQuery<
     );
     const generatedColumns = generatedColumnsOf(query);
     // The batch wrapper selects these columns by name, so it gets the
-    // physical names the sealed statement allocated; result decoding reads
-    // the rows back under the logical names.
+    // physical names the sealed statement allocated, and result decoding
+    // reads the rows back under the same names.
+    const projectedKeys = new Set(
+      ast.projection.fields.map((field) => sqlNameKey(field.outputName)),
+    );
     const outputNames = [
-      ...ast.projection.fields.map((field) => field.outputName),
+      ...ast.projection.fields.map((field): SqlName => field.outputName),
       ...recursiveOutputNames.filter(
-        (name) =>
-          !ast.projection.fields.some((field) => field.outputName === name),
+        (name) => !projectedKeys.has(sqlNameKey(name)),
       ),
     ].map((name) => generatedColumnName(query, name));
     return {
@@ -1017,13 +1054,15 @@ export class ExecutableQuery<
       mapRows: (rows) =>
         mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
           transformPathColumns(
-            restoreGeneratedColumns(rows, generatedColumns),
+            rows,
             this.#state,
             this.#dialect(),
+            generatedColumns,
           ),
           this.#state.startAlias,
           this.#state.traversals,
           this.#selectFn,
+          generatedColumns,
         ),
     };
   }
@@ -1047,7 +1086,7 @@ export class ExecutableQuery<
     const selectiveAst = { ...baseAst, selectiveFields };
 
     const backend = this.#requireBackend();
-    const rows = await this.#fetchRows(
+    const { rows, columns } = await this.#fetchRows(
       backend,
       selectiveAst,
       "selective",
@@ -1062,6 +1101,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        columns,
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1093,7 +1133,7 @@ export class ExecutableQuery<
     const baseAst = this.toAst();
     const selectiveAst = { ...baseAst, selectiveFields };
 
-    const rows = await this.#fetchRows(
+    const { rows, columns } = await this.#fetchRows(
       backend,
       selectiveAst,
       "selective",
@@ -1107,6 +1147,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        columns,
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1271,11 +1312,14 @@ export class ExecutableQuery<
       return undefined;
     }
 
-    let rows: readonly Record<string, unknown>[];
+    let fetched: FetchedRows;
     try {
-      rows = await this.#executeWithCursor(cursorData, direction, fetchLimit, {
-        selectiveFields,
-      });
+      fetched = await this.#executeWithCursor(
+        cursorData,
+        direction,
+        fetchLimit,
+        { selectiveFields },
+      );
     } catch (error) {
       if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForPagination = undefined;
@@ -1284,6 +1328,7 @@ export class ExecutableQuery<
       throw error;
     }
 
+    const { rows, columns } = fetched;
     const hasMore = rows.length > pageLimit;
     const resultRows = hasMore ? rows.slice(0, pageLimit) : rows;
     const paginationDialect = this.#config.dialect ?? "sqlite";
@@ -1291,6 +1336,7 @@ export class ExecutableQuery<
       isBackward ? resultRows.toReversed() : resultRows,
       this.#state,
       paginationDialect,
+      columns,
     );
 
     let data: readonly R[];
@@ -1302,6 +1348,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        columns,
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1326,6 +1373,7 @@ export class ExecutableQuery<
           this.#buildCursorFromSelectiveRow(
             row,
             selectiveFields,
+            columns,
             cursorDirection,
           ),
       );
@@ -1379,11 +1427,13 @@ export class ExecutableQuery<
   #buildCursorFromSelectiveRow(
     row: Record<string, unknown>,
     selectiveFields: readonly SelectiveField[],
+    columns: GeneratedColumns,
     direction: "f" | "b",
   ): string {
     const contextRow = this.#buildCursorContextFromSelectiveRow(
       row,
       selectiveFields,
+      columns,
     );
     return buildCursorFromRow(contextRow, this.#paginationOrderBy(), direction);
   }
@@ -1391,13 +1441,15 @@ export class ExecutableQuery<
   #buildCursorContextFromSelectiveRow(
     row: Record<string, unknown>,
     selectiveFields: readonly SelectiveField[],
+    columns: GeneratedColumns,
   ): Record<string, unknown> {
+    // Each selected field's row key: the physical name its statement
+    // allocated to the (alias, field) pair.
     const outputNameByAliasField = new Map<string, string>();
     for (const field of selectiveFields) {
-      outputNameByAliasField.set(
-        `${field.alias}\u0000${field.field}`,
-        field.outputName,
-      );
+      const column = columns.columnOf(field.outputName);
+      if (column === undefined) continue;
+      outputNameByAliasField.set(`${field.alias}\u0000${field.field}`, column);
     }
 
     const optionalNodeAliases = new Set<string>();
@@ -1703,7 +1755,7 @@ export class ExecutableQuery<
     }
 
     // Build and execute query with cursor condition
-    const rows = await this.#executeWithCursor(
+    const { rows, columns } = await this.#executeWithCursor(
       cursorData,
       direction,
       fetchLimit,
@@ -1722,6 +1774,7 @@ export class ExecutableQuery<
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     );
 
     // Build paginated result with cursors
@@ -1738,6 +1791,7 @@ export class ExecutableQuery<
           row,
           this.#state.startAlias,
           this.#state.traversals,
+          columns,
         ),
     );
   }
@@ -1934,7 +1988,7 @@ export class ExecutableQuery<
     direction: "forward" | "backward",
     limit: number,
     options?: Readonly<{ selectiveFields?: readonly SelectiveField[] }>,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<FetchedRows> {
     const ast = this.toAst();
 
     const orderBy = adjustOrderByForDirection(
@@ -1963,10 +2017,10 @@ export class ExecutableQuery<
     const rawRows =
       await this.#requireBackend().execute<Record<string, unknown>>(compiled);
     const dialect = this.#config.dialect ?? "sqlite";
-    return transformPathColumns(
-      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
-      this.#state,
-      dialect,
-    );
+    const columns = generatedColumnsOf(compiled);
+    return {
+      rows: transformPathColumns(rawRows, this.#state, dialect, columns),
+      columns,
+    };
   }
 }

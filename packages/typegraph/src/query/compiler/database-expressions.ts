@@ -19,6 +19,7 @@ import {
   resolveCollectOrder,
   resolveCollectRecordFields,
 } from "../expressions";
+import { type SqlName } from "../generated-identifier";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { isAggregateExpression } from "./expression-inspection";
@@ -35,7 +36,7 @@ export type DatabaseExpressionCompilerContext = Readonly<{
     field: FieldRef,
     expression: DatabaseExpression,
   ) => SqlFragment | undefined;
-  resolveFieldCteAlias?: (field: FieldRef) => string | undefined;
+  resolveFieldCteAlias?: (field: FieldRef) => SqlName | undefined;
   compileSubquery?: (
     subquery: QueryAst,
     kind: "exists" | "scalar",

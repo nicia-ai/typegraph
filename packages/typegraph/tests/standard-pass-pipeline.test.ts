@@ -23,6 +23,10 @@ import {
 } from "../src/query/compiler/standard-pass-pipeline";
 import { getDialect } from "../src/query/dialect";
 import type { DialectAdapter } from "../src/query/dialect/types";
+import {
+  aliasColumnName,
+  aliasCteName,
+} from "../src/query/generated-identifier";
 import { sql } from "../src/query/sql-fragment";
 import { toSqlString } from "./sql-test-utils";
 
@@ -97,7 +101,7 @@ function makeSelectiveField(
   return {
     alias,
     field,
-    outputName: `${alias}_${field}`,
+    outputName: aliasColumnName(alias, field),
     isSystemField,
     ...(valueType === undefined ?
       {}
@@ -496,7 +500,7 @@ describe("linear traversal rowset collapsing", () => {
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
     expect(state.shouldCollapseLinearTraversalRowset).toBe(true);
-    expect(state.collapsedTraversalCteAlias).toBe("cte_c");
+    expect(state.collapsedTraversalCteAlias).toEqual(aliasCteName("c"));
   });
 
   it("does not collapse when traversals have optional joins", () => {
@@ -528,7 +532,7 @@ describe("linear traversal rowset collapsing", () => {
     const ctx = makePipelineContext();
     const state = runStandardQueryPassPipeline(ast, "test_graph", ctx);
     expect(state.shouldCollapseLinearTraversalRowset).toBe(true);
-    expect(state.collapsedTraversalCteAlias).toBe("cte_c");
+    expect(state.collapsedTraversalCteAlias).toEqual(aliasCteName("c"));
   });
 
   it("does not collapse when traversal chain is non-linear", () => {

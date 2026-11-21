@@ -3075,6 +3075,13 @@ type GatedBundleVerdict<MCore extends OptionalGraphBackendMember, X extends Capa
 }>;
 
 // @public
+type GeneratedName = Readonly<{
+    __type: "generated_name";
+    key: string;
+    spelling: string;
+}>;
+
+// @public
 type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 
 // @public
@@ -5466,9 +5473,9 @@ type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly E
 
 // @public
 type ProjectedField = Readonly<{
-    outputName: string;
+    outputName: SqlName;
     source: AggregateExpr | DatabaseExpression | FieldRef;
-    cteAlias?: string;
+    cteAlias?: SqlName;
 }>;
 
 // @public (undocumented)
@@ -6515,7 +6522,7 @@ type SelectedNodeProps<N extends NodeType, Selection extends readonly string[] |
 type SelectiveField = Readonly<{
     alias: string;
     field: string;
-    outputName: string;
+    outputName: GeneratedName;
     isSystemField: boolean;
     valueType?: ValueType | undefined;
 }>;
@@ -6680,10 +6687,18 @@ const SQL_FRAGMENT_BRAND: unique symbol;
 const SQL_PLACEHOLDER_BRAND: unique symbol;
 
 // @public
-type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
+type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk | SqlDeferredIdentifierChunk;
 
 // @public (undocumented)
 type SqlCompilationBackend = Pick<GraphBackend, "compileSql">;
+
+// @public
+type SqlDeferredIdentifierChunk = Readonly<{
+    kind: "deferred-identifier";
+    key: string;
+    spelling: string;
+    quoted: boolean;
+}>;
 
 // @public
 type SqlDialect = "sqlite" | "postgres";
@@ -6706,6 +6721,9 @@ type SqlIntent = "rows" | "statement" | "temporary-statement";
 
 // @public (undocumented)
 const SqlIntentBrand: unique symbol;
+
+// @public
+type SqlName = string | GeneratedName;
 
 // @public (undocumented)
 type SqlParameterChunk = Readonly<{

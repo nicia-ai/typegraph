@@ -12,6 +12,7 @@ import type {
 } from "../../ast";
 import type { SqlDialect } from "../../dialect";
 import type { DatabaseExpression } from "../../expressions";
+import type { SqlName } from "../../generated-identifier";
 
 export type LogicalPlanNode =
   | ScanPlanNode
@@ -136,7 +137,7 @@ export type SetOpPlanNode = Readonly<{
 }>;
 
 export type ProjectPlanNode = Readonly<{
-  collapsedTraversalAlias?: string;
+  collapsedTraversalAlias?: SqlName;
   fields: readonly ProjectedField[];
   id: string;
   input: LogicalPlanNode;

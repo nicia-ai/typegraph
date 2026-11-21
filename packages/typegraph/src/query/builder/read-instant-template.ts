@@ -43,9 +43,9 @@ type RenderedTemplate = Readonly<{
 }>;
 
 /**
- * A {@link RenderedTemplate} plus the physical-to-logical map of its long
- * generated column names: rows read through `executeRaw` are re-keyed with
- * it before any decoder sees them.
+ * A {@link RenderedTemplate} plus the generated columns of its statement:
+ * rows read through `executeRaw` are decoded by the physical names it
+ * allocated.
  */
 export type CompiledTemplate = RenderedTemplate &
   Readonly<{ generatedColumns: GeneratedColumns }>;

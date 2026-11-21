@@ -14,6 +14,7 @@ import {
   type SqlDialect,
   type VectorStrategy,
 } from "../../dialect";
+import { type SqlName } from "../../generated-identifier";
 import {
   runFulltextPredicatePass,
   runRecursiveTraversalSelectionPass,
@@ -31,7 +32,7 @@ import type {
 
 export type LowerStandardQueryToLogicalPlanInput = Readonly<{
   ast: QueryAst;
-  collapsedTraversalCteAlias?: string;
+  collapsedTraversalCteAlias?: SqlName;
   dialect: SqlDialect;
   effectiveLimit?: number;
   fulltextPredicate?: FulltextMatchPredicate;
@@ -123,7 +124,7 @@ function appendAggregateSortLimitAndProjectNodes(
   ast: QueryAst,
   nextPlanNodeId: () => string,
   limit: number | undefined,
-  collapsedTraversalCteAlias?: string,
+  collapsedTraversalCteAlias?: SqlName,
 ): LogicalPlanNode {
   let node: LogicalPlanNode =
     ast.resultPredicate === undefined ?

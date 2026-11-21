@@ -24,6 +24,8 @@ import {
   ValidationError,
 } from "../../../src";
 import { shortenedIdentifier } from "../../../src/query/generated-identifier";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -77,6 +79,15 @@ const TABLE_SHORT_ALIAS = shortenedNameTail(
   `lm_${CLASH_LONG_ALIAS}`,
 ) as "tableShortAlias";
 
+/**
+ * A field whose name holds the private-use characters U+E000 and U+E001, and
+ * one holding a double quote. Caller text must reach SQL unchanged whatever
+ * it contains: neither a JSON path literal nor a quoted projection name may
+ * be read as a generated-identifier placeholder or re-escaped by allocation.
+ */
+const PRIVATE_USE_FIELD = "tag" as "privateUseField";
+const QUOTE_FIELD = 'quote"field' as "quoteField";
+
 const LongAliasItem = defineNode("LongAliasItem", {
   schema: z.object({
     name: z.string(),
@@ -89,6 +100,8 @@ const LongAliasItem = defineNode("LongAliasItem", {
     [SEVEN_TWO_BYTE_CHARACTERS]: z.string().optional(),
     [CLASH_LONG_FIELD]: z.string().optional(),
     [CLASH_SHORT_FIELD]: z.string().optional(),
+    [PRIVATE_USE_FIELD]: z.string().optional(),
+    [QUOTE_FIELD]: z.string().optional(),
   }),
 });
 
@@ -96,8 +109,12 @@ const longAliasLink = defineEdge("longAliasLink", {
   schema: z.object({ note: z.string() }),
 });
 
+/**
+ * After a part alias, `edge_id` spells the same text as the `id` column of
+ * the derived `<alias>_edge` alias: `<alias>_edge_id` either way.
+ */
 const LongAliasPart = defineNode("LongAliasPart", {
-  schema: z.object({ name: z.string() }),
+  schema: z.object({ name: z.string(), edge_id: z.string().optional() }),
 });
 
 const longAliasPartOf = defineEdge("longAliasPartOf", {
@@ -168,6 +185,10 @@ type SeededItems = Readonly<{
   first: SeededItem;
   second: SeededItem;
   third: SeededItem;
+  part: Awaited<ReturnType<LongAliasStore["nodes"]["LongAliasPart"]["create"]>>;
+  partEdge: Awaited<
+    ReturnType<LongAliasStore["edges"]["longAliasPartOf"]["create"]>
+  >;
 }>;
 
 async function seedItems(store: LongAliasStore): Promise<SeededItems> {
@@ -182,6 +203,8 @@ async function seedItems(store: LongAliasStore): Promise<SeededItems> {
     [SEVEN_TWO_BYTE_CHARACTERS]: "seven",
     [CLASH_LONG_FIELD]: "long-field",
     [CLASH_SHORT_FIELD]: "short-field",
+    [PRIVATE_USE_FIELD]: "tagged",
+    [QUOTE_FIELD]: "quoted-first",
   });
   const second = await store.nodes.LongAliasItem.create({
     name: "second",
@@ -198,12 +221,36 @@ async function seedItems(store: LongAliasStore): Promise<SeededItems> {
     category: "odd",
     rank: 3,
     [MULTI_BYTE_FIELD]: "troisième",
+    [PRIVATE_USE_FIELD]: "tagged",
   });
-  const part = await store.nodes.LongAliasPart.create({ name: "first-part" });
-  await store.edges.longAliasPartOf.create(part, first, { position: 7 });
+  const part = await store.nodes.LongAliasPart.create({
+    name: "first-part",
+    edge_id: "part-property",
+  });
+  const partEdge = await store.edges.longAliasPartOf.create(part, first, {
+    position: 7,
+  });
   await store.edges.longAliasLink.create(first, second, { note: "1-2" });
   await store.edges.longAliasLink.create(second, third, { note: "2-3" });
-  return { first, second, third };
+  return { first, second, third, part, partEdge };
+}
+
+/**
+ * Whether the engine's JSON path syntax can address a key holding a double
+ * quote. PostgreSQL's and better-sqlite3's (SQLite 3.53) can; libSQL's
+ * bundled SQLite 3.45 cannot.
+ */
+async function jsonPathAddressesQuotedKeys(
+  context: IntegrationTestContext,
+): Promise<boolean> {
+  const backend = context.getBackend();
+  if (backend.dialect !== "sqlite") return true;
+  const rows = await backend.execute<Readonly<{ value: unknown }>>(
+    asCompiledRowsSql(
+      sql`SELECT json_extract('{"a\\"b": 1}', '$."a\\"b"') AS value`,
+    ),
+  );
+  return rows[0]?.value === 1;
 }
 
 export function registerLongAliasIntegrationTests(
@@ -664,6 +711,179 @@ export function registerLongAliasIntegrationTests(
             ["updated", 2],
           ],
         });
+      });
+    });
+
+    // A two-character alias keeps every generated name short, so these cases
+    // also pin queries whose SQL needs no allocation at all.
+    describe.each([2, ...ALIAS_LENGTHS])(
+      "caller text and logical names at %i characters",
+      (length) => {
+        const alias = aliasOfLength(length, "x", "root");
+        const otherAlias = aliasOfLength(length, "y", "target");
+
+        it("filters on a field path holding the placeholder characters", async () => {
+          const rows = await store
+            .query()
+            .from("LongAliasItem", alias)
+            .whereNode(alias, (item) => item[PRIVATE_USE_FIELD].eq("tagged"))
+            .select((ctx) => requireDefined(ctx[alias]).name)
+            .execute();
+
+          expect(rows.toSorted()).toEqual(["first", "third"]);
+        });
+
+        it("projects a field whose name holds the placeholder characters", async () => {
+          const rows = await store
+            .query()
+            .from("LongAliasItem", alias)
+            .whereNode(alias, (item) => item.name.eq("first"))
+            .select((ctx) => {
+              const item = requireDefined(ctx[alias]);
+              return { tag: item[PRIVATE_USE_FIELD], name: item.name };
+            })
+            .execute();
+
+          expect(rows).toEqual([{ tag: "tagged", name: "first" }]);
+        });
+
+        it("projects a field whose name holds a double quote", async () => {
+          // A long `<alias>_<field>` name holding `"` is allocated and
+          // quoted like any other. Reading the field itself needs a JSON path
+          // that addresses a quoted key, which libSQL's bundled SQLite
+          // (3.45) cannot do: there the value reads as missing, as it did
+          // before generated names were allocated.
+          const expected =
+            (await jsonPathAddressesQuotedKeys(context)) ? "quoted-first" : (
+              undefined
+            );
+          const rows = await store
+            .query()
+            .from("LongAliasItem", alias)
+            .whereNode(alias, (item) => item.name.eq("first"))
+            .select((ctx) => {
+              const item = requireDefined(ctx[alias]);
+              return { quote: item[QUOTE_FIELD], name: item.name };
+            })
+            .execute();
+
+          expect(rows).toEqual([{ quote: expected, name: "first" }]);
+        });
+
+        it("keeps a part's edge_id apart from the derived edge's id", async () => {
+          // `(<alias>, edge_id)` and `(<alias>_edge, id)` both spell
+          // `<alias>_edge_id`; a projection is identified by the pair.
+          const derivedEdgeAlias = `${otherAlias}_edge` as const;
+          const rows = await store
+            .query()
+            .from("LongAliasItem", alias)
+            .whereNode(alias, (item) => item.name.eq("first"))
+            .parts(otherAlias, { maxHops: 1 })
+            .select((ctx) => ({
+              partEdgeId: requireDefined(ctx[otherAlias])["edge_id"],
+              edgeId: requireDefined(ctx[derivedEdgeAlias]).id,
+            }))
+            .execute();
+
+          expect(rows).toEqual([
+            { partEdgeId: "part-property", edgeId: items.partEdge.id },
+          ]);
+        });
+
+        it("names the compiled candidate id column in the public candidate selection", async () => {
+          const query = store
+            .query()
+            .from("LongAliasItem", alias)
+            .whereNode(alias, (item) => item.category.eq("odd"))
+            .select((ctx) => requireDefined(ctx[alias]).id);
+
+          const selection = query.toNodeCandidateSelection();
+          const backend = context.getBackend();
+          const current = await backend.execute<Record<string, unknown>>(
+            query.compileNodeCandidateIds(),
+          );
+          const asOf = await backend.execute<Record<string, unknown>>(
+            query.compileNodeCandidateIds(new Date().toISOString()),
+          );
+
+          const expected = [items.first.id, items.third.id].toSorted();
+          expect({
+            current: current.map((row) => row[selection.idColumn]).toSorted(),
+            asOf: asOf.map((row) => row[selection.idColumn]).toSorted(),
+          }).toEqual({ current: expected, asOf: expected });
+        });
+      },
+    );
+
+    describe("names the engines compare as one identifier", () => {
+      it("keeps whole-node columns apart when alias and column split the same text", async () => {
+        // The edge's `from_id` and `to_id` columns spell the same names as
+        // the `id` columns of the nodes aliased `e_from` and `e_to`.
+        const rows = await store
+          .query()
+          .from("LongAliasItem", "e_to")
+          .whereNode("e_to", (item) => item.name.eq("first"))
+          .traverse("longAliasLink", "e")
+          .to("LongAliasItem", "e_from")
+          .select((ctx) => ({
+            from: requireDefined(ctx.e_to),
+            link: requireDefined(ctx.e),
+            to: requireDefined(ctx.e_from),
+          }))
+          .execute();
+
+        expect(
+          rows.map((row) => ({
+            from: [row.from.id, row.from.name],
+            link: [row.link.fromId, row.link.toId, row.link.note],
+            to: [row.to.id, row.to.name],
+          })),
+        ).toEqual([
+          {
+            from: [items.first.id, "first"],
+            link: [items.first.id, items.second.id, "1-2"],
+            to: [items.second.id, "second"],
+          },
+        ]);
+      });
+
+      it("keeps two aliases differing only in case apart", async () => {
+        const rows = await store
+          .query()
+          .from("LongAliasItem", "item")
+          .whereNode("item", (item) => item.name.eq("first"))
+          .traverse("longAliasLink", "link")
+          .to("LongAliasItem", "Item")
+          .select((ctx) => ({
+            from: requireDefined(ctx.item).name,
+            to: requireDefined(ctx.Item).name,
+          }))
+          .execute();
+
+        expect(rows).toEqual([{ from: "first", to: "second" }]);
+      });
+
+      it("keeps a CTE name apart from a long name's shortened form in another case", async () => {
+        const caseFlippedAlias =
+          `${CTE_SHORT_ALIAS.charAt(0).toUpperCase()}${CTE_SHORT_ALIAS.slice(1)}` as "cteCaseFlippedAlias";
+        expect(`cte_${caseFlippedAlias}`.toLowerCase()).toBe(
+          shortenedIdentifier(`cte_${CLASH_LONG_ALIAS}`),
+        );
+        expect(caseFlippedAlias).not.toBe(CTE_SHORT_ALIAS);
+
+        const rows = await store
+          .query()
+          .from("LongAliasItem", caseFlippedAlias)
+          .whereNode(caseFlippedAlias, (item) => item.name.eq("first"))
+          .traverse("longAliasLink", "link")
+          .to("LongAliasItem", CLASH_LONG_ALIAS)
+          .select((ctx) => ({
+            from: requireDefined(ctx[caseFlippedAlias]).name,
+            to: requireDefined(ctx[CLASH_LONG_ALIAS]).name,
+          }))
+          .execute();
+
+        expect(rows).toEqual([{ from: "first", to: "second" }]);
       });
     });
 

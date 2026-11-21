@@ -43,6 +43,7 @@ import {
   MAX_EXPLICIT_RECURSIVE_DEPTH,
 } from "../src/query/compiler";
 import { buildLateMaterializedOuterOrderBy } from "../src/query/compiler/emitter/standard-builders";
+import { resultColumnName } from "../src/query/generated-identifier";
 import { compileOrderTerm } from "../src/query/order";
 import { sql as querySql } from "../src/query/sql-fragment";
 import { countDistinctEdges, countEdges, fieldRef } from "../src/query-entry";
@@ -746,7 +747,7 @@ describe("Query Compilation to SQL", () => {
         {
           alias: "friend",
           field: "name",
-          outputName: "friend_name",
+          outputName: resultColumnName("friend_name"),
           isSystemField: false,
           valueType: "string" as const,
         },
@@ -785,13 +786,13 @@ describe("Query Compilation to SQL", () => {
         {
           alias: "friend",
           field: "id",
-          outputName: "friend_id",
+          outputName: resultColumnName("friend_id"),
           isSystemField: true,
         },
         {
           alias: "friend",
           field: "name",
-          outputName: "friend_name",
+          outputName: resultColumnName("friend_name"),
           isSystemField: false,
           valueType: "string" as const,
         },
@@ -849,14 +850,14 @@ describe("Query Compilation to SQL", () => {
         {
           alias: "p_full",
           field: "name",
-          outputName: "a",
+          outputName: resultColumnName("a"),
           isSystemField: false,
           valueType: "string" as const,
         },
         {
           alias: "p",
           field: "full_name",
-          outputName: "b",
+          outputName: resultColumnName("b"),
           isSystemField: false,
           valueType: "string" as const,
         },
@@ -899,14 +900,14 @@ describe("Query Compilation to SQL", () => {
         {
           alias: aliasOne,
           field: "name",
-          outputName: "a",
+          outputName: resultColumnName("a"),
           isSystemField: false,
           valueType: "string" as const,
         },
         {
           alias: aliasTwo,
           field: "name",
-          outputName: "b",
+          outputName: resultColumnName("b"),
           isSystemField: false,
           valueType: "string" as const,
         },

@@ -30,10 +30,13 @@ const results = await store
 
 An alias is an identifier: a letter or underscore followed by letters, digits, or underscores, at
 most 63 characters, and not starting with `cte_`. Every alias up to that limit behaves the same on
-every backend. The SQL names TypeGraph derives from an alias (`<alias>_id`, `cte_<alias>`, and so
-on) are shortened with a hash suffix when they would exceed PostgreSQL's 63-byte identifier limit.
-Shortened names are allocated per SQL statement, so a shortened name never takes the name of another
-column, CTE, or table alias in the same statement, and the same SQL is emitted on SQLite.
+every backend. TypeGraph derives SQL names from an alias (`<alias>_id`, `cte_<alias>`,
+`<alias>_<field>`, and so on) and identifies each by its alias and field rather than by the text they
+spell, so an edge aliased `e` and a node aliased `e_from` never share `e_from_id`. Names are
+allocated per SQL statement: a name keeps its spelling unless another name in the statement already
+holds it, compared case-insensitively as both engines compare identifiers, and a name that would
+exceed PostgreSQL's 63-byte identifier limit is shortened with a hash suffix. The same SQL is emitted
+on SQLite.
 
 ## Multiple kinds in one query
 

@@ -24,8 +24,9 @@ import {
 import { mapResults } from "../execution";
 import {
   generatedColumnName,
+  type GeneratedColumns,
   generatedColumnsOf,
-  restoreGeneratedColumns,
+  type SqlName,
 } from "../generated-identifier";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildCompileOptions } from "./compile-options";
@@ -322,7 +323,7 @@ export class UnionableQuery<G extends GraphDef, R> {
     backend: GraphBackend | TransactionBackend,
     ast: SetOperation,
     surface: string,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<SetOperationRows> {
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
@@ -340,7 +341,7 @@ export class UnionableQuery<G extends GraphDef, R> {
         ),
         surface,
       );
-      return restoreGeneratedColumns(rows, template.generatedColumns);
+      return { rows, columns: template.generatedColumns };
     }
     const compiled = compileSetOperation(
       ast,
@@ -353,17 +354,18 @@ export class UnionableQuery<G extends GraphDef, R> {
       backend.execute<Record<string, unknown>>(compiled),
       surface,
     );
-    return restoreGeneratedColumns(rows, generatedColumnsOf(compiled));
+    return { rows, columns: generatedColumnsOf(compiled) };
   }
 
   /** Applies the select-function transformation, if one is attached. */
-  #mapRows(rows: readonly Record<string, unknown>[]): readonly R[] {
+  #mapRows({ rows, columns }: SetOperationRows): readonly R[] {
     if (this.#state.selectFn && this.#state.startAlias) {
       return mapResults(
         rows,
         this.#state.startAlias,
         this.#state.traversals ?? [],
         this.#state.selectFn,
+        columns,
       ) as readonly R[];
     }
     return rows as readonly R[];
@@ -454,8 +456,7 @@ export class UnionableQuery<G extends GraphDef, R> {
         generatedColumnName(query, name),
       ),
       orderBy: [],
-      mapRows: (rows) =>
-        this.#mapRows(restoreGeneratedColumns(rows, generatedColumns)),
+      mapRows: (rows) => this.#mapRows({ rows, columns: generatedColumns }),
     };
   }
 
@@ -473,7 +474,13 @@ export class UnionableQuery<G extends GraphDef, R> {
   }
 }
 
-function projectionOutputNames(query: ComposableQuery): readonly string[] {
+/** Rows of one set-operation statement and the generated columns they carry. */
+type SetOperationRows = Readonly<{
+  rows: readonly Record<string, unknown>[];
+  columns: GeneratedColumns;
+}>;
+
+function projectionOutputNames(query: ComposableQuery): readonly SqlName[] {
   if ("__type" in query) return projectionOutputNames(query.left);
   return query.projection.fields.map((field) => field.outputName);
 }

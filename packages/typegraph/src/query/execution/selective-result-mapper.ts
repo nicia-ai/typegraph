@@ -19,7 +19,10 @@ import type {
   QueryBuilderState,
   SelectContext,
 } from "../builder/types";
-import { generatedIdentifier } from "../generated-identifier";
+import {
+  type GeneratedColumns,
+  resultColumnName,
+} from "../generated-identifier";
 import {
   type FieldTypeInfo,
   type SchemaIntrospector,
@@ -52,19 +55,24 @@ export class MissingSelectiveFieldError extends Error {
 
 type AliasKind = KindEntity;
 
+/*
+ * Each plan's `outputName` is the row key the statement returns the field
+ * under: the physical name allocated to its (alias, field) pair.
+ */
+
 type SystemFieldPlan = Readonly<{
   field: string;
-  outputName: string;
+  outputName: string | undefined;
 }>;
 
 type MetaFieldPlan = Readonly<{
   metaKey: string;
-  outputName: string;
+  outputName: string | undefined;
 }>;
 
 type PropsFieldPlan = Readonly<{
   field: string;
-  outputName: string;
+  outputName: string | undefined;
   typeInfo: FieldTypeInfo | undefined;
 }>;
 
@@ -76,10 +84,14 @@ type AliasPlan = Readonly<{
   metaFields: readonly MetaFieldPlan[];
   propsFields: readonly PropsFieldPlan[];
   idOutputName: string | undefined;
-  metaOutputNames: ReadonlySet<string>;
-  propsOutputNames: ReadonlySet<string>;
-  systemOutputNames: ReadonlySet<string>;
 }>;
+
+function readKey(
+  row: Readonly<Record<string, unknown>>,
+  key: string | undefined,
+): unknown {
+  return key === undefined ? undefined : row[key];
+}
 
 function normalizeMetaValue(
   value: unknown,
@@ -112,14 +124,34 @@ export function mapSelectiveResults<
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
   selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
+  columns: GeneratedColumns,
 ): readonly R[] {
-  const plans = buildAliasPlans(state, selectiveFields, schemaIntrospector);
+  const plans = buildAliasPlans(
+    state,
+    selectiveFields,
+    schemaIntrospector,
+    columns,
+  );
+  const recursiveKeys = state.traversals.map((traversal) => {
+    const vl = traversal.variableLength;
+    return {
+      depth:
+        vl?.depthAlias === undefined ?
+          undefined
+        : columns.columnOf(resultColumnName(vl.depthAlias)),
+      path:
+        vl?.pathAlias === undefined ?
+          undefined
+        : columns.columnOf(resultColumnName(vl.pathAlias)),
+    };
+  });
 
   return rows.map((row) => {
     const context = buildSelectiveContext<Aliases, EdgeAliases>(
       row,
       plans,
       state.traversals,
+      recursiveKeys,
     );
     const result = selectFunction(context);
 
@@ -144,6 +176,7 @@ function buildAliasPlans(
   state: QueryBuilderState,
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
+  columns: GeneratedColumns,
 ): readonly AliasPlan[] {
   const aliasInfo = new Map<
     string,
@@ -199,12 +232,12 @@ function buildAliasPlans(
         if (field.field.startsWith("meta.")) {
           metaFields.push({
             metaKey: field.field.slice(5),
-            outputName: field.outputName,
+            outputName: columns.columnOf(field.outputName),
           });
         } else {
           systemFields.push({
             field: field.field,
-            outputName: field.outputName,
+            outputName: columns.columnOf(field.outputName),
           });
         }
       } else {
@@ -221,7 +254,7 @@ function buildAliasPlans(
 
         propsFields.push({
           field: field.field,
-          outputName: field.outputName,
+          outputName: columns.columnOf(field.outputName),
           typeInfo,
         });
       }
@@ -238,9 +271,6 @@ function buildAliasPlans(
       metaFields,
       propsFields,
       idOutputName,
-      metaOutputNames: new Set(metaFields.map((f) => f.outputName)),
-      propsOutputNames: new Set(propsFields.map((f) => f.outputName)),
-      systemOutputNames: new Set(systemFields.map((f) => f.outputName)),
     });
   }
 
@@ -259,6 +289,10 @@ function buildSelectiveContext<
   row: Record<string, unknown>,
   plans: readonly AliasPlan[],
   traversals: readonly Traversal[],
+  recursiveKeys: readonly Readonly<{
+    depth: string | undefined;
+    path: string | undefined;
+  }>[],
 ): SelectContext<Aliases, EdgeAliases> {
   // Data-keyed: alias names chosen by the caller's query.
   const context = createDataKeyedBag<unknown>();
@@ -272,16 +306,17 @@ function buildSelectiveContext<
   }
 
   // Extract recursive depth/path values from the row
-  for (const traversal of traversals) {
+  for (const [index, traversal] of traversals.entries()) {
     const vl = traversal.variableLength;
+    const keys = recursiveKeys[index];
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
-        const depth = row[generatedIdentifier(vl.depthAlias)];
+        const depth = readKey(row, keys?.depth);
         context[vl.depthAlias] =
           traversal.optional && depth === null ? undefined : depth;
       }
       if (vl.pathAlias !== undefined) {
-        context[vl.pathAlias] = row[generatedIdentifier(vl.pathAlias)];
+        context[vl.pathAlias] = readKey(row, keys?.path);
       }
     }
   }
@@ -298,7 +333,7 @@ function buildOptionalAliasValue(
   if (plan.idOutputName === undefined) {
     return undefined;
   }
-  const idValue = row[plan.idOutputName];
+  const idValue = readKey(row, plan.idOutputName);
 
   if (idValue === null || idValue === undefined) {
     return undefined;
@@ -324,14 +359,14 @@ function buildRequiredAliasValue(
   } satisfies SelectableAliasMarker;
 
   for (const field of plan.systemFields) {
-    base[field.field] = nullToUndefined(row[field.outputName]);
+    base[field.field] = nullToUndefined(readKey(row, field.outputName));
   }
 
   if (plan.metaFields.length > 0) {
     const meta = createDataKeyedBag<unknown>();
     for (const field of plan.metaFields) {
       meta[field.metaKey] = normalizeMetaValue(
-        row[field.outputName],
+        readKey(row, field.outputName),
         field.metaKey,
         plan.alias,
       );
@@ -340,7 +375,10 @@ function buildRequiredAliasValue(
   }
 
   for (const field of plan.propsFields) {
-    const decoded = decodeSelectedValue(row[field.outputName], field.typeInfo);
+    const decoded = decodeSelectedValue(
+      readKey(row, field.outputName),
+      field.typeInfo,
+    );
     base[field.field] = decoded;
   }
 

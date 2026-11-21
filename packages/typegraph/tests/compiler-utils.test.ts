@@ -21,6 +21,7 @@ import {
   quoteIdentifier,
   shouldProjectColumn,
 } from "../src/query/compiler/utils";
+import { resultColumnName } from "../src/query/generated-identifier";
 import { jsonPointer } from "../src/query/json-pointer";
 import { toSqlString } from "./sql-test-utils";
 
@@ -183,7 +184,7 @@ describe("markSelectiveFieldAsRequired", () => {
     const field: SelectiveField = {
       alias: "p",
       field: "id",
-      outputName: "p_id",
+      outputName: resultColumnName("p_id"),
       isSystemField: true,
     };
     markSelectiveFieldAsRequired(map, field);
@@ -195,7 +196,7 @@ describe("markSelectiveFieldAsRequired", () => {
     const field: SelectiveField = {
       alias: "e",
       field: "fromId",
-      outputName: "e_fromId",
+      outputName: resultColumnName("e_fromId"),
       isSystemField: true,
     };
     markSelectiveFieldAsRequired(map, field);
@@ -207,7 +208,7 @@ describe("markSelectiveFieldAsRequired", () => {
     const field: SelectiveField = {
       alias: "e",
       field: "toId",
-      outputName: "e_toId",
+      outputName: resultColumnName("e_toId"),
       isSystemField: true,
     };
     markSelectiveFieldAsRequired(map, field);
@@ -219,7 +220,7 @@ describe("markSelectiveFieldAsRequired", () => {
     const field: SelectiveField = {
       alias: "p",
       field: "meta.createdAt",
-      outputName: "p_meta_createdAt",
+      outputName: resultColumnName("p_meta_createdAt"),
       isSystemField: true,
     };
     markSelectiveFieldAsRequired(map, field);
@@ -231,7 +232,7 @@ describe("markSelectiveFieldAsRequired", () => {
     const field: SelectiveField = {
       alias: "p",
       field: "name",
-      outputName: "p_name",
+      outputName: resultColumnName("p_name"),
       isSystemField: false,
     };
     markSelectiveFieldAsRequired(map, field);

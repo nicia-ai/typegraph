@@ -22,8 +22,14 @@ import {
 import type { DatabaseExpression } from "../expressions";
 import {
   aliasColumnName,
-  generatedIdentifier,
+  aliasDirectedEdgesCteName,
+  bareName,
+  displayName,
+  quotedName,
+  quotedSqlName,
   rawAliasColumn,
+  resultColumnName,
+  sqlNameKey,
 } from "../generated-identifier";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -69,7 +75,6 @@ import {
   markFieldRefAsRequired,
   markSelectiveFieldAsRequired,
   NODE_COLUMNS,
-  quoteIdentifier,
   type RequiredColumnsByAlias,
   shouldProjectColumn,
 } from "./utils";
@@ -345,29 +350,33 @@ export function assertRecursiveOutputSupported(ast: QueryAst): void {
     throw new UnsupportedPredicateError(
       "Aggregating recursive traversals is not yet supported; project nodes as a relation before aggregating.",
     );
+  // A depth or path output key is refused when it reads as the name of
+  // another result column, so a result row never offers one key for two
+  // values.
   const materialized = new Set(
     [
       ast.start.alias,
       ...ast.traversals.map((traversal) => traversal.nodeAlias),
     ].flatMap((alias) =>
-      NODE_COLUMNS.map((column) => aliasColumnName(alias, column)),
+      NODE_COLUMNS.map((column) => aliasColumnName(alias, column).spelling),
     ),
   );
-  for (const field of ast.projection.fields) materialized.add(field.outputName);
+  for (const field of ast.projection.fields)
+    materialized.add(displayName(field.outputName));
   for (const field of ast.selectiveFields ?? [])
-    materialized.add(field.outputName);
+    materialized.add(field.outputName.spelling);
   for (const traversal of ast.traversals) {
     for (const alias of [
       traversal.variableLength?.depthAlias,
       traversal.variableLength?.pathAlias,
     ]) {
       if (alias === undefined) continue;
-      if (materialized.has(generatedIdentifier(alias))) {
+      if (materialized.has(alias)) {
         throw new UnsupportedPredicateError(
           `Recursive traversal output alias "${alias}" collides with another result column`,
         );
       }
-      materialized.add(generatedIdentifier(alias));
+      materialized.add(alias);
     }
   }
 }
@@ -841,9 +850,7 @@ function compileRecursiveCte(
   // PostgreSQL allows one recursive reference per recursive term, so both
   // orientations are normalized into this single CTE before recursion starts.
   const mixesOrientations = inverseEdgeKinds.length > 0;
-  const directedEdgesCteName = generatedIdentifier(
-    `${traversal.edgeAlias}_directed_edges`,
-  );
+  const directedEdgesCteName = aliasDirectedEdgesCteName(traversal.edgeAlias);
 
   function compileRecursiveDirectedEdgesCte(): SqlFragment {
     // A self-loop of a kind in both lists would yield two identical rows; the
@@ -924,7 +931,7 @@ function compileRecursiveCte(
     );
 
     return sql`
-      ${sql.raw(directedEdgesCteName)} AS (
+      ${bareName(directedEdgesCteName)} AS (
         ${directArm}
         UNION ALL
         ${inverseArm}
@@ -945,7 +952,7 @@ function compileRecursiveCte(
         // bind a duplicate parameter in the emitted `IN` list.
         edgeKinds: [...new Set([...directEdgeKinds, ...inverseEdgeKinds])],
         pathDirection: sql.raw(`e.${QUALIFIED_PATH_DIRECTION_COLUMN}`),
-        edgeSource: sql.raw(directedEdgesCteName),
+        edgeSource: bareName(directedEdgesCteName),
       })
     : compileRecursiveBranch({
         ...directColumns,
@@ -1104,7 +1111,7 @@ function compileNodeSelectColumnsFromTable(
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map(
     (column) =>
-      sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${sql.raw(aliasColumnName(alias, column))}`,
+      sql`${sql.raw(tableAlias)}.${sql.raw(column)} AS ${bareName(aliasColumnName(alias, column))}`,
   );
 }
 
@@ -1117,7 +1124,7 @@ function compileNodeSelectColumnsFromRecursiveRow(
     shouldProjectColumn(requiredColumns, column, alwaysRequiredColumns),
   ).map((column) => {
     const projected = aliasColumnName(alias, column);
-    return sql`r.${sql.raw(projected)} AS ${sql.raw(projected)}`;
+    return sql`r.${bareName(projected)} AS ${bareName(projected)}`;
   });
 }
 
@@ -1155,19 +1162,17 @@ function compileRecursiveProjection(
     : [startAlias, nodeAlias].flatMap((alias) =>
         NODE_COLUMNS.map((column) => {
           const name = aliasColumnName(alias, column);
-          return sql`${sql.raw(name)} AS ${quoteIdentifier(name)}`;
+          return sql`${bareName(name)} AS ${quotedName(name)}`;
         }),
       );
 
   if (vl.depthAlias !== undefined) {
-    fields.push(
-      sql`depth AS ${quoteIdentifier(generatedIdentifier(vl.depthAlias))}`,
-    );
+    fields.push(sql`depth AS ${quotedName(resultColumnName(vl.depthAlias))}`);
   }
 
   if (vl.pathAlias !== undefined) {
     fields.push(
-      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(generatedIdentifier(vl.pathAlias))}`,
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quotedName(resultColumnName(vl.pathAlias))}`,
     );
   }
 
@@ -1177,7 +1182,9 @@ function compileRecursiveProjection(
         ast,
         new Set(
           [startAlias, nodeAlias].flatMap((alias) =>
-            NODE_COLUMNS.map((column) => aliasColumnName(alias, column)),
+            NODE_COLUMNS.map((column) =>
+              sqlNameKey(aliasColumnName(alias, column)),
+            ),
           ),
         ),
         ctx,
@@ -1205,7 +1212,7 @@ function compileRecursiveSelectiveProjection(
   columns.push(
     ...compileAdditionalRecursiveProjectionFields(
       ast,
-      new Set(fields.map((field) => field.outputName)),
+      new Set(fields.map((field) => sqlNameKey(field.outputName))),
       ctx,
       undefined,
       new Set([traversal.edgeAlias]),
@@ -1215,13 +1222,11 @@ function compileRecursiveSelectiveProjection(
   // Include recursive depth/path columns when present
   const vl = traversal.variableLength;
   if (vl.depthAlias !== undefined) {
-    columns.push(
-      sql`depth AS ${quoteIdentifier(generatedIdentifier(vl.depthAlias))}`,
-    );
+    columns.push(sql`depth AS ${quotedName(resultColumnName(vl.depthAlias))}`);
   }
   if (vl.pathAlias !== undefined) {
     columns.push(
-      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quoteIdentifier(generatedIdentifier(vl.pathAlias))}`,
+      sql`${sql.raw(vl.pathFormat === "qualified" ? "qualified_path" : "path")} AS ${quotedName(resultColumnName(vl.pathAlias))}`,
     );
   }
 
@@ -1254,16 +1259,20 @@ export function compileRecursiveSelectiveField(
   );
   const reference =
     resultAlias === undefined ?
-      sql.raw(column)
-    : sql`${sql.identifier(resultAlias)}.${sql.identifier(column)}`;
+      bareName(column)
+    : sql`${sql.identifier(resultAlias)}.${quotedName(column)}`;
   const value =
     field.isSystemField ? reference : (
       compileSelectivePropsExtraction(field, reference, dialect)
     );
-  return sql`${value} AS ${quoteIdentifier(field.outputName)}`;
+  return sql`${value} AS ${quotedSqlName(field.outputName)}`;
 }
 
-/** Emits envelope-only projection fields that selective decoding did not request. */
+/**
+ * Emits envelope-only projection fields that selective decoding did not
+ * request. `emittedOutputNames` holds the {@link sqlNameKey} of every output
+ * already emitted.
+ */
 export function compileAdditionalRecursiveProjectionFields(
   ast: QueryAst,
   emittedOutputNames: ReadonlySet<string>,
@@ -1272,7 +1281,7 @@ export function compileAdditionalRecursiveProjectionFields(
   edgeAliases: ReadonlySet<string> = new Set(),
 ): SqlFragment[] {
   return ast.projection.fields
-    .filter((field) => !emittedOutputNames.has(field.outputName))
+    .filter((field) => !emittedOutputNames.has(sqlNameKey(field.outputName)))
     .map((field) => {
       const source = field.source;
       const sourceAlias =
@@ -1291,7 +1300,7 @@ export function compileAdditionalRecursiveProjectionFields(
         // Compatibility select() carries structural edge columns even when the
         // callback never reads an edge. Only these synthetic columns are empty.
         if (field.cteAlias !== undefined)
-          return sql`NULL AS ${quoteIdentifier(field.outputName)}`;
+          return sql`NULL AS ${quotedSqlName(field.outputName)}`;
         throw new UnsupportedPredicateError(
           "Scalar recursive-edge projection is not supported; request a qualified path instead.",
         );
@@ -1312,7 +1321,7 @@ export function compileAdditionalRecursiveProjectionFields(
         : resultAlias === undefined ?
           compileFieldValue(source, ctx.dialect, source.valueType)
         : compileRecursiveResultField(source, ctx.dialect, resultAlias);
-      return sql`${value} AS ${quoteIdentifier(field.outputName)}`;
+      return sql`${value} AS ${quotedSqlName(field.outputName)}`;
     });
 }
 
@@ -1357,7 +1366,7 @@ export function compileRecursiveResultField(
     field.path[0] === "props" ?
       aliasColumnName(field.alias, "props")
     : aliasColumnName(field.alias, field.path.join("_"));
-  const column = sql`${sql.identifier(resultAlias)}.${sql.identifier(baseColumn)}`;
+  const column = sql`${sql.identifier(resultAlias)}.${quotedName(baseColumn)}`;
   return compileFieldValueFromColumn(field, dialect, valueType, column);
 }
 

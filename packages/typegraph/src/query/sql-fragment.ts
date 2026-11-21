@@ -1,4 +1,4 @@
-import { ConfigurationError } from "../errors";
+import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import {
   bindSqlValue,
@@ -33,9 +33,32 @@ export type SqlPlaceholderChunk = Readonly<{
   value: Placeholder;
 }>;
 
+/**
+ * An identifier the query compiler generated, whose physical name is chosen
+ * only once the whole statement is known.
+ *
+ * `key` is the identity: two chunks with one key are the same identifier,
+ * and two with different keys are different identifiers even when they spell
+ * the same text. `spelling` is the name as written when nothing else in the
+ * statement holds it. `quoted` says whether the name is rendered as a
+ * double-quoted identifier or bare. A compiled statement never contains this
+ * chunk: the compiler resolves every one to a text or identifier chunk before
+ * the statement leaves it, so rendering one is an internal error.
+ */
+export type SqlDeferredIdentifierChunk = Readonly<{
+  kind: "deferred-identifier";
+  key: string;
+  spelling: string;
+  quoted: boolean;
+}>;
+
 /** One immutable unit in a database-independent SQL fragment. */
 export type SqlChunk =
-  SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
+  | SqlTextChunk
+  | SqlParameterChunk
+  | SqlIdentifierChunk
+  | SqlPlaceholderChunk
+  | SqlDeferredIdentifierChunk;
 
 /**
  * An immutable, database-independent SQL expression.
@@ -128,6 +151,19 @@ export function throwUnsupportedSqlChunk(chunk: never): never {
   throw new ConfigurationError("Unsupported SQL fragment chunk", { chunk });
 }
 
+/**
+ * @internal Refuses to render a generated identifier whose statement never
+ * allocated it a physical name.
+ */
+export function throwUnresolvedDeferredIdentifier(
+  chunk: SqlDeferredIdentifierChunk,
+): never {
+  throw new CompilerInvariantError(
+    "A generated SQL identifier was rendered before its statement allocated it a physical name",
+    { spelling: chunk.spelling },
+  );
+}
+
 function textNode(value: string): SqlTextChunk {
   return Object.freeze({ kind: "text", value });
 }
@@ -142,6 +178,24 @@ function identifierNode(value: string): SqlIdentifierChunk {
 
 function placeholderNode(value: Placeholder): SqlPlaceholderChunk {
   return Object.freeze({ kind: "placeholder", value });
+}
+
+/**
+ * @internal A fragment holding one generated identifier, allocated a
+ * physical name when its statement is sealed.
+ */
+export function deferredIdentifierSql(
+  name: Readonly<{ key: string; spelling: string }>,
+  quoted: boolean,
+): SqlFragment {
+  return createFragment([
+    Object.freeze({
+      kind: "deferred-identifier",
+      key: name.key,
+      spelling: name.spelling,
+      quoted,
+    }),
+  ]);
 }
 
 /**
@@ -253,34 +307,45 @@ export const sql: SqlTag = Object.assign(templateSql, {
 });
 
 /**
- * @internal Rewrites the value of every text and identifier chunk. Bound
- * parameters, named placeholders, and compiler intents are carried over
- * unchanged; a fragment whose text the rewrite leaves alone is returned as is.
+ * @internal Writes a physical name into every generated identifier of
+ * `fragment`: a bare one becomes text, a quoted one an identifier chunk.
+ * Only deferred-identifier chunks are read; text, identifiers, bound values,
+ * placeholders, and compiler intents are carried over unchanged, and a
+ * fragment without generated identifiers is returned as is.
  */
-export function rewriteSqlText(
+export function resolveDeferredIdentifiers(
   fragment: SqlFragment,
-  rewrite: (value: string) => string,
+  physicalName: (chunk: SqlDeferredIdentifierChunk) => string,
 ): SqlFragment {
   const original = getChunks(fragment);
+  if (!original.some((chunk) => chunk.kind === "deferred-identifier"))
+    return fragment;
   const chunks = original.map((chunk): SqlChunk => {
-    switch (chunk.kind) {
-      case "text":
-      case "identifier": {
-        const value = rewrite(chunk.value);
-        if (value === chunk.value) return chunk;
-        return chunk.kind === "text" ? textNode(value) : identifierNode(value);
-      }
-      case "parameter":
-      case "placeholder": {
-        return chunk;
-      }
-      default: {
-        return throwUnsupportedSqlChunk(chunk);
-      }
-    }
+    if (chunk.kind !== "deferred-identifier") return chunk;
+    const physical = physicalName(chunk);
+    return chunk.quoted ? identifierNode(physical) : textNode(physical);
   });
-  const changed = chunks.some((chunk, index) => chunk !== original[index]);
-  return changed ? createFragment(chunks, [fragment]) : fragment;
+  return createFragment(chunks, [fragment]);
+}
+
+/** @internal The generated identifiers of a fragment, in order of use. */
+export function deferredIdentifiersOf(
+  fragment: SqlFragment,
+): readonly SqlDeferredIdentifierChunk[] {
+  const deferred: SqlDeferredIdentifierChunk[] = [];
+  for (const chunk of getChunks(fragment)) {
+    if (chunk.kind === "deferred-identifier") deferred.push(chunk);
+  }
+  return deferred;
+}
+
+/** @internal The names of a fragment's quoted identifier chunks. */
+export function identifierNamesOf(fragment: SqlFragment): readonly string[] {
+  const names: string[] = [];
+  for (const chunk of getChunks(fragment)) {
+    if (chunk.kind === "identifier") names.push(chunk.value);
+  }
+  return names;
 }
 
 /** A rendered statement and its ordered bound parameters. */
@@ -344,6 +409,9 @@ export function renderSql(
         params.push(resolvedPlaceholder(node.value, bindings, dialect));
         parts.push(profile.placeholder(params.length));
         break;
+      }
+      case "deferred-identifier": {
+        return throwUnresolvedDeferredIdentifier(node);
       }
       default: {
         throwUnsupportedSqlChunk(node);
@@ -428,6 +496,9 @@ export function renderSqlInline(
           `Cannot inline unresolved SQL placeholder "${node.value.name}"`,
           { parameterName: node.value.name },
         );
+      }
+      case "deferred-identifier": {
+        return throwUnresolvedDeferredIdentifier(node);
       }
       default: {
         throwUnsupportedSqlChunk(node);

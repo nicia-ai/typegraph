@@ -14,6 +14,7 @@ import { type RowMembership } from "../registry/row-membership";
 import { type Assert, type Equal } from "../utils/type-assert";
 import { type AliasExpansionAxis } from "./builder/alias-expansion";
 import { type DatabaseExpression } from "./expressions";
+import { type GeneratedName, type SqlName } from "./generated-identifier";
 import { type JsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -568,10 +569,14 @@ export type GroupBySpec = Readonly<{
  * Can be either a direct field reference or an aggregate expression.
  */
 export type ProjectedField = Readonly<{
-  outputName: string;
+  /**
+   * The output column: a caller-chosen key, or a name the compiler generates
+   * for a whole-node or whole-edge selection.
+   */
+  outputName: SqlName;
   source: AggregateExpr | DatabaseExpression | FieldRef;
   /** Override the CTE alias for this field (used for edge fields in node CTEs) */
-  cteAlias?: string;
+  cteAlias?: SqlName;
 }>;
 
 /**
@@ -593,8 +598,11 @@ export type SelectiveField = Readonly<{
   alias: string;
   /** The field name (e.g., "email", "name", "id") */
   field: string;
-  /** The output column name in the result (e.g., "p_email") */
-  outputName: string;
+  /**
+   * The output column, identified by `alias` and `field` together (written
+   * `p_email` when nothing else in the statement holds that name).
+   */
+  outputName: GeneratedName;
   /** True if this is a system field (id, kind, etc.), false for props */
   isSystemField: boolean;
   /**

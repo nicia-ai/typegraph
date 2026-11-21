@@ -62,8 +62,8 @@ import {
   normalizeDatabaseLiteral,
 } from "../expressions";
 import {
+  type GeneratedColumns,
   generatedColumnsOf,
-  restoreGeneratedColumns,
 } from "../generated-identifier";
 import {
   comparedOperandLiteral,
@@ -616,13 +616,14 @@ export class PreparedQuery<R> {
       !this.#selectiveExecutionDisabled
     ) {
       try {
-        const rows = await this.#executeSelectiveRows(bindings);
+        const { rows, columns } = await this.#executeSelectiveRows(bindings);
         return mapSelectiveResults<AliasMap, EdgeAliasMap, R>(
           rows,
           this.#state,
           this.#selectiveFields,
           this.#schemaIntrospector,
           this.#selectFn,
+          columns,
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {
@@ -647,25 +648,26 @@ export class PreparedQuery<R> {
 
   async #executeSelectiveRows(
     bindings: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<PreparedRows> {
     return this.#executeRows(this.#ast, bindings);
   }
 
   async #executeUnoptimized(
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly R[]> {
-    const rows = await this.#executeUnoptimizedRows(bindings);
+    const { rows, columns } = await this.#executeUnoptimizedRows(bindings);
     return mapResults<AliasMap, EdgeAliasMap, R>(
       rows,
       this.#state.startAlias,
       this.#state.traversals,
       this.#selectFn,
+      columns,
     );
   }
 
   async #executeUnoptimizedRows(
     bindings: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<PreparedRows> {
     return this.#executeRows(this.#unoptimizedAst, bindings);
   }
 
@@ -677,7 +679,7 @@ export class PreparedQuery<R> {
   async #executeRows(
     ast: QueryAst,
     bindings: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<PreparedRows> {
     const executeRaw = this.#backend.executeRaw;
     const template = executeRaw === undefined ? undefined : this.#template(ast);
     if (template !== undefined && executeRaw !== undefined) {
@@ -691,11 +693,16 @@ export class PreparedQuery<R> {
         template.sql,
         params,
       );
-      return transformPathColumns(
-        restoreGeneratedColumns(rawRows, template.generatedColumns),
-        this.#state,
-        this.#dialect,
-      );
+      const columns = template.generatedColumns;
+      return {
+        rows: transformPathColumns(
+          rawRows,
+          this.#state,
+          this.#dialect,
+          columns,
+        ),
+        columns,
+      };
     }
 
     const concreteAst = substituteParameters(ast, bindings);
@@ -706,13 +713,19 @@ export class PreparedQuery<R> {
     );
     const rawRows =
       await this.#backend.execute<Record<string, unknown>>(compiled);
-    return transformPathColumns(
-      restoreGeneratedColumns(rawRows, generatedColumnsOf(compiled)),
-      this.#state,
-      this.#dialect,
-    );
+    const columns = generatedColumnsOf(compiled);
+    return {
+      rows: transformPathColumns(rawRows, this.#state, this.#dialect, columns),
+      columns,
+    };
   }
 }
+
+/** Rows of one prepared execution and the generated columns they carry. */
+type PreparedRows = Readonly<{
+  rows: readonly Record<string, unknown>[];
+  columns: GeneratedColumns;
+}>;
 
 export type ParameterMetadata = Readonly<{
   names: ReadonlySet<string>;

@@ -7503,7 +7503,15 @@ const SQL_FRAGMENT_BRAND: unique symbol;
 const SQL_PLACEHOLDER_BRAND: unique symbol;
 
 // @public
-type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk;
+type SqlChunk = SqlTextChunk | SqlParameterChunk | SqlIdentifierChunk | SqlPlaceholderChunk | SqlDeferredIdentifierChunk;
+
+// @public
+type SqlDeferredIdentifierChunk = Readonly<{
+    kind: "deferred-identifier";
+    key: string;
+    spelling: string;
+    quoted: boolean;
+}>;
 
 // @public
 type SqlDialect = "sqlite" | "postgres";

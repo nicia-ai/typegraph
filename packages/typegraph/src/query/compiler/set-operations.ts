@@ -35,6 +35,7 @@ import {
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type VectorStrategy } from "../dialect/vector-strategy";
+import { displayName, quotedName } from "../generated-identifier";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -373,7 +374,7 @@ function buildSetOperationSuffixClauses(
             `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
           : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
         const availableFields = projection.fields
-          .map((f) => f.outputName)
+          .map((f) => displayName(f.outputName))
           .join(", ");
         throw new UnsupportedPredicateError(
           `Set operation ORDER BY field "${fieldDesc}" is not in the projection. ` +
@@ -383,7 +384,10 @@ function buildSetOperationSuffixClauses(
       }
 
       // Use output column name with proper quoting
-      const columnRef = sql.raw(dialect.quoteIdentifier(projected.outputName));
+      const columnRef =
+        typeof projected.outputName === "string" ?
+          sql.raw(dialect.quoteIdentifier(projected.outputName))
+        : quotedName(projected.outputName);
       // Default: ASC → NULLS LAST, DESC → NULLS FIRST
       const nulls = resolveNullOrdering(orderSpec);
       orderParts.push(compileOrderTerm(columnRef, orderSpec.direction, nulls));

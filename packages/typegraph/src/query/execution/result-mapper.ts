@@ -28,8 +28,8 @@ import { recursivePathTokenShape } from "../compiler/recursive-path-token";
 import { type SqlDialect } from "../dialect/types";
 import {
   aliasColumnName,
-  displayGeneratedIdentifier,
-  generatedIdentifier,
+  type GeneratedColumns,
+  resultColumnName,
 } from "../generated-identifier";
 
 /**
@@ -37,23 +37,31 @@ import {
  * `kind || SEP || id` wrapper the compiler emits for cycle detection.
  */
 type PathColumn = Readonly<{
+  /** The row key the path is read and written under. */
   alias: string;
   kindQualified: boolean;
   format: "ids" | "qualified";
   optional: boolean;
 }>;
 
-function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
+function collectPathColumns(
+  state: QueryBuilderState,
+  columns: GeneratedColumns,
+): readonly PathColumn[] {
   const scope = {
     start: { alias: state.startAlias, kinds: state.startKinds },
     traversals: state.traversals,
   };
-  const columns: PathColumn[] = [];
+  const pathColumns: PathColumn[] = [];
   for (const traversal of state.traversals) {
     const pathAlias = traversal.variableLength?.pathAlias;
-    if (pathAlias !== undefined) {
-      columns.push({
-        alias: generatedIdentifier(pathAlias),
+    const pathColumn =
+      pathAlias === undefined ? undefined : (
+        columns.columnOf(resultColumnName(pathAlias))
+      );
+    if (pathColumn !== undefined) {
+      pathColumns.push({
+        alias: pathColumn,
         kindQualified:
           recursivePathTokenShape(scope, traversal) === "kind_qualified",
         format:
@@ -64,7 +72,7 @@ function collectPathColumns(state: QueryBuilderState): readonly PathColumn[] {
       });
     }
   }
-  return columns;
+  return pathColumns;
 }
 
 /**
@@ -85,8 +93,9 @@ export function transformPathColumns(
   rows: readonly Record<string, unknown>[],
   state: QueryBuilderState,
   _dialect: SqlDialect,
+  columns: GeneratedColumns,
 ): readonly Record<string, unknown>[] {
-  const pathColumns = collectPathColumns(state);
+  const pathColumns = collectPathColumns(state, columns);
   if (pathColumns.length === 0) return rows;
 
   const result: Record<string, unknown>[] = [];
@@ -225,6 +234,64 @@ function propsExcludingReserved(
   return kept;
 }
 
+/** The row keys one statement returns a node or edge alias's columns under. */
+type AliasColumnKeys = Readonly<{
+  id: string | undefined;
+  kind: string | undefined;
+  props: string | undefined;
+  version: string | undefined;
+  validFrom: string | undefined;
+  validTo: string | undefined;
+  createdAt: string | undefined;
+  updatedAt: string | undefined;
+  deletedAt: string | undefined;
+  fromId: string | undefined;
+  toId: string | undefined;
+}>;
+
+/**
+ * Resolves an alias's columns once, so decoding a row reads each by the
+ * physical name its statement allocated to the (alias, column) pair.
+ */
+function aliasColumnKeys(
+  alias: string,
+  columns: GeneratedColumns,
+): AliasColumnKeys {
+  const keyOf = (column: string) =>
+    columns.columnOf(aliasColumnName(alias, column));
+  return {
+    id: keyOf("id"),
+    kind: keyOf("kind"),
+    props: keyOf("props"),
+    version: keyOf("version"),
+    validFrom: keyOf("valid_from"),
+    validTo: keyOf("valid_to"),
+    createdAt: keyOf("created_at"),
+    updatedAt: keyOf("updated_at"),
+    deletedAt: keyOf("deleted_at"),
+    fromId: keyOf("from_id"),
+    toId: keyOf("to_id"),
+  };
+}
+
+function readKey(
+  row: Readonly<Record<string, unknown>>,
+  key: string | undefined,
+): unknown {
+  return key === undefined ? undefined : row[key];
+}
+
+/** A column's name for decoding errors: the alias-derived name it reads as. */
+function columnLabel(alias: string, column: string): string {
+  return aliasColumnName(alias, column).spelling;
+}
+
+function parsedProps(propsRaw: unknown): Record<string, unknown> {
+  return typeof propsRaw === "string" ?
+      (JSON.parse(propsRaw) as Record<string, unknown>)
+    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+}
+
 /**
  * Builds a SelectableNode from row data for a given alias.
  *
@@ -235,37 +302,42 @@ function propsExcludingReserved(
 export function buildSelectableNode(
   row: Record<string, unknown>,
   alias: string,
+  columns: GeneratedColumns,
 ): SelectableNode<NodeType> {
-  const id = row[aliasColumnName(alias, "id")] as string;
-  const kind = row[aliasColumnName(alias, "kind")] as string;
-  const propsRaw: unknown = row[aliasColumnName(alias, "props")];
-  const rawProps: Record<string, unknown> =
-    typeof propsRaw === "string" ?
-      (JSON.parse(propsRaw) as Record<string, unknown>)
-    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+  return selectableNodeFromKeys(row, alias, aliasColumnKeys(alias, columns));
+}
+
+function selectableNodeFromKeys(
+  row: Record<string, unknown>,
+  alias: string,
+  keys: AliasColumnKeys,
+): SelectableNode<NodeType> {
+  const id = readKey(row, keys.id) as string;
+  const kind = readKey(row, keys.kind) as string;
+  const rawProps = parsedProps(readKey(row, keys.props));
 
   // Metadata columns - these are now always projected in CTEs
   // Normalize null → undefined for optional fields
-  const version = row[aliasColumnName(alias, "version")] as number;
+  const version = readKey(row, keys.version) as number;
   const validFrom = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "valid_from")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "valid_from")),
+    readKey(row, keys.validFrom),
+    columnLabel(alias, "valid_from"),
   );
   const validTo = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "valid_to")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "valid_to")),
+    readKey(row, keys.validTo),
+    columnLabel(alias, "valid_to"),
   );
   const createdAt = normalizeRequiredRowTimestamp(
-    row[aliasColumnName(alias, "created_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "created_at")),
+    readKey(row, keys.createdAt),
+    columnLabel(alias, "created_at"),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
-    row[aliasColumnName(alias, "updated_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "updated_at")),
+    readKey(row, keys.updatedAt),
+    columnLabel(alias, "updated_at"),
   );
   const deletedAt = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "deleted_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "deleted_at")),
+    readKey(row, keys.deletedAt),
+    columnLabel(alias, "deleted_at"),
   );
 
   const result: Record<string, unknown> = {
@@ -289,15 +361,16 @@ export function buildSelectableNode(
  * Builds a SelectableNode from row data, returning undefined when the node
  * doesn't exist (for optional traversals with LEFT JOIN).
  */
-function buildSelectableNodeOrUndefined(
+function selectableNodeOrUndefinedFromKeys(
   row: Record<string, unknown>,
   alias: string,
+  keys: AliasColumnKeys,
 ): SelectableNode<NodeType> | undefined {
-  const id = row[aliasColumnName(alias, "id")] as string | null | undefined;
+  const id = readKey(row, keys.id) as string | null | undefined;
   if (id === null || id === undefined) {
     return undefined;
   }
-  return buildSelectableNode(row, alias);
+  return selectableNodeFromKeys(row, alias, keys);
 }
 
 /**
@@ -308,48 +381,44 @@ function buildSelectableNodeOrUndefined(
  * Null values from database are normalized to undefined.
  * Returns undefined if the edge doesn't exist (for optional traversals with LEFT JOIN).
  */
-function buildSelectableEdge(
+function selectableEdgeFromKeys(
   row: Record<string, unknown>,
   alias: string,
+  keys: AliasColumnKeys,
 ): SelectableEdge | undefined {
-  const id = row[aliasColumnName(alias, "id")] as string | null | undefined;
+  const id = readKey(row, keys.id) as string | null | undefined;
 
   // For optional traversals, edge may be null (LEFT JOIN)
   if (id === null || id === undefined) {
     return undefined;
   }
 
-  const kind = row[aliasColumnName(alias, "kind")] as string;
-  const fromId = row[aliasColumnName(alias, "from_id")] as string;
-  const toId = row[aliasColumnName(alias, "to_id")] as string;
-
-  const propsRaw: unknown = row[aliasColumnName(alias, "props")];
-  const rawProps: Record<string, unknown> =
-    typeof propsRaw === "string" ?
-      (JSON.parse(propsRaw) as Record<string, unknown>)
-    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+  const kind = readKey(row, keys.kind) as string;
+  const fromId = readKey(row, keys.fromId) as string;
+  const toId = readKey(row, keys.toId) as string;
+  const rawProps = parsedProps(readKey(row, keys.props));
 
   // Metadata columns - these are always projected in traversal CTEs
   // Normalize null → undefined for optional fields
   const validFrom = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "valid_from")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "valid_from")),
+    readKey(row, keys.validFrom),
+    columnLabel(alias, "valid_from"),
   );
   const validTo = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "valid_to")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "valid_to")),
+    readKey(row, keys.validTo),
+    columnLabel(alias, "valid_to"),
   );
   const createdAt = normalizeRequiredRowTimestamp(
-    row[aliasColumnName(alias, "created_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "created_at")),
+    readKey(row, keys.createdAt),
+    columnLabel(alias, "created_at"),
   );
   const updatedAt = normalizeRequiredRowTimestamp(
-    row[aliasColumnName(alias, "updated_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "updated_at")),
+    readKey(row, keys.updatedAt),
+    columnLabel(alias, "updated_at"),
   );
   const deletedAt = normalizeRowTimestamp(
-    row[aliasColumnName(alias, "deleted_at")],
-    displayGeneratedIdentifier(aliasColumnName(alias, "deleted_at")),
+    readKey(row, keys.deletedAt),
+    columnLabel(alias, "deleted_at"),
   );
 
   const result: Record<string, unknown> = {
@@ -370,11 +439,43 @@ function buildSelectableEdge(
   return result as SelectableEdge;
 }
 
-/**
- * Builds a SelectContext from a raw database row.
- * Includes node aliases, edge aliases, and recursive metadata (depth/path).
- */
-export function buildSelectContext<
+/** The row keys of every alias and recursive output in a select context. */
+type SelectContextKeys = Readonly<{
+  start: AliasColumnKeys;
+  traversals: readonly Readonly<{
+    node: AliasColumnKeys;
+    edge: AliasColumnKeys;
+    depth: string | undefined;
+    path: string | undefined;
+  }>[];
+}>;
+
+function selectContextKeys(
+  startAlias: string,
+  traversals: readonly Traversal[],
+  columns: GeneratedColumns,
+): SelectContextKeys {
+  return {
+    start: aliasColumnKeys(startAlias, columns),
+    traversals: traversals.map((traversal) => {
+      const vl = traversal.variableLength;
+      return {
+        node: aliasColumnKeys(traversal.nodeAlias, columns),
+        edge: aliasColumnKeys(traversal.edgeAlias, columns),
+        depth:
+          vl?.depthAlias === undefined ?
+            undefined
+          : columns.columnOf(resultColumnName(vl.depthAlias)),
+        path:
+          vl?.pathAlias === undefined ?
+            undefined
+          : columns.columnOf(resultColumnName(vl.pathAlias)),
+      };
+    }),
+  };
+}
+
+function selectContextFromKeys<
   Aliases extends AliasMap,
   EdgeAliases extends EdgeAliasMap,
   // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
@@ -383,6 +484,7 @@ export function buildSelectContext<
   row: Record<string, unknown>,
   startAlias: string,
   traversals: readonly Traversal[],
+  keys: SelectContextKeys,
 ): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
   // Data-keyed: alias names chosen by the caller's query, which the kind-name
   // pattern admits `__proto__` for. (The computed-key literal this replaced was
@@ -396,32 +498,37 @@ export function buildSelectContext<
     | undefined
   >();
   // Build the start node as initial context entry
-  context[startAlias] = buildSelectableNode(row, startAlias);
+  context[startAlias] = selectableNodeFromKeys(row, startAlias, keys.start);
 
   // Build traversal nodes and edges
-  for (const traversal of traversals) {
+  for (const [index, traversal] of traversals.entries()) {
+    const traversalKeys = requireDefined(keys.traversals[index]);
     const nodeAlias = traversal.nodeAlias;
     const edgeAlias = traversal.edgeAlias;
 
     // Add node
     context[nodeAlias] =
       traversal.optional ?
-        buildSelectableNodeOrUndefined(row, nodeAlias)
-      : buildSelectableNode(row, nodeAlias);
+        selectableNodeOrUndefinedFromKeys(row, nodeAlias, traversalKeys.node)
+      : selectableNodeFromKeys(row, nodeAlias, traversalKeys.node);
 
     // Add edge (may be undefined for optional traversals)
-    context[edgeAlias] = buildSelectableEdge(row, edgeAlias);
+    context[edgeAlias] = selectableEdgeFromKeys(
+      row,
+      edgeAlias,
+      traversalKeys.edge,
+    );
 
     // Add recursive depth/path values
     const vl = traversal.variableLength;
     if (vl !== undefined) {
       if (vl.depthAlias !== undefined) {
-        const depth = row[generatedIdentifier(vl.depthAlias)];
+        const depth = readKey(row, traversalKeys.depth);
         context[vl.depthAlias] =
           traversal.optional && depth === null ? undefined : (depth as number);
       }
       if (vl.pathAlias !== undefined) {
-        const path = row[generatedIdentifier(vl.pathAlias)];
+        const path = readKey(row, traversalKeys.path);
         context[vl.pathAlias] =
           traversal.optional && path === null ?
             undefined
@@ -442,7 +549,32 @@ export function buildSelectContext<
 }
 
 /**
+ * Builds a SelectContext from a raw database row.
+ * Includes node aliases, edge aliases, and recursive metadata (depth/path).
+ * `columns` names the generated columns of the statement the row came from.
+ */
+export function buildSelectContext<
+  Aliases extends AliasMap,
+  EdgeAliases extends EdgeAliasMap,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty when no recursive aliases
+  RecursiveAliases extends RecursiveAliasMap = {},
+>(
+  row: Record<string, unknown>,
+  startAlias: string,
+  traversals: readonly Traversal[],
+  columns: GeneratedColumns,
+): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
+  return selectContextFromKeys<Aliases, EdgeAliases, RecursiveAliases>(
+    row,
+    startAlias,
+    traversals,
+    selectContextKeys(startAlias, traversals, columns),
+  );
+}
+
+/**
  * Maps raw database rows to typed results using a select function.
+ * `columns` names the generated columns of the statement the rows came from.
  */
 export function mapResults<
   Aliases extends AliasMap,
@@ -455,12 +587,15 @@ export function mapResults<
   startAlias: string,
   traversals: readonly Traversal[],
   selectFunction: (context: SelectContext<Aliases, EdgeAliases, RA>) => R,
+  columns: GeneratedColumns,
 ): readonly R[] {
+  const keys = selectContextKeys(startAlias, traversals, columns);
   return rows.map((row) => {
-    const context = buildSelectContext<Aliases, EdgeAliases, RA>(
+    const context = selectContextFromKeys<Aliases, EdgeAliases, RA>(
       row,
       startAlias,
       traversals,
+      keys,
     );
     return selectFunction(context);
   });

@@ -15,7 +15,16 @@ import {
   mapResults,
   transformPathColumns,
 } from "../src/query/execution/result-mapper";
+import type { GeneratedColumns } from "../src/query/generated-identifier";
 import { requireDefined } from "../src/utils/presence";
+
+/**
+ * Rows keyed by every generated name's spelling: the columns of a statement
+ * whose names all fit and differ, which these mapper cases construct.
+ */
+const SPELLED_COLUMNS: GeneratedColumns = {
+  columnOf: (name) => (typeof name === "string" ? name : name.spelling),
+};
 
 describe("transformPathColumns", () => {
   const baseState: QueryBuilderState = {
@@ -67,7 +76,14 @@ describe("transformPathColumns", () => {
       ],
     };
 
-    expect(transformPathColumns([{ route: value }], state, "sqlite")).toEqual([
+    expect(
+      transformPathColumns(
+        [{ route: value }],
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      ),
+    ).toEqual([
       {
         route: [
           { type: "node", kind: "Person", id: "p1" },
@@ -112,6 +128,7 @@ describe("transformPathColumns", () => {
         [{ route: ["Person", "p1", "knows"] }],
         state,
         "postgres",
+        SPELLED_COLUMNS,
       ),
     ).toThrow(/Invalid qualified recursive path/);
   });
@@ -140,9 +157,9 @@ describe("transformPathColumns", () => {
       ],
     };
 
-    expect(transformPathColumns([{ route: null }], state, "sqlite")).toEqual([
-      { route: undefined },
-    ]);
+    expect(
+      transformPathColumns([{ route: null }], state, "sqlite", SPELLED_COLUMNS),
+    ).toEqual([{ route: undefined }]);
 
     expect(
       transformPathColumns(
@@ -153,6 +170,7 @@ describe("transformPathColumns", () => {
         ],
         state,
         "sqlite",
+        SPELLED_COLUMNS,
       ),
     ).toEqual([
       {
@@ -190,7 +208,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "postgres");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "postgres",
+        SPELLED_COLUMNS,
+      );
 
       expect(result).toBe(rows);
       expect(requireDefined(result[0])["p_path"]).toBe("a|b|c");
@@ -221,7 +244,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       expect(requireDefined(result[0])["friend_path"]).toEqual([
         "id1",
@@ -235,7 +263,12 @@ describe("transformPathColumns", () => {
     it("returns rows unchanged when no variable-length traversals exist", () => {
       const rows = [{ some_data: "value" }];
 
-      const result = transformPathColumns(rows, baseState, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        baseState,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       expect(result).toBe(rows);
     });
@@ -263,7 +296,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       expect(result).toBe(rows);
     });
@@ -293,7 +331,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       expect(requireDefined(result[0])["custom_path"]).toEqual(["id1", "id2"]);
     });
@@ -330,7 +373,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       expect(requireDefined(result[0])["other_column"]).toBe("unchanged");
       expect(requireDefined(result[0])["numeric"]).toBe(42);
@@ -360,7 +408,12 @@ describe("transformPathColumns", () => {
         ],
       };
 
-      const result = transformPathColumns(rows, state, "sqlite");
+      const result = transformPathColumns(
+        rows,
+        state,
+        "sqlite",
+        SPELLED_COLUMNS,
+      );
 
       // Should return original row when path is not a string
       expect(requireDefined(result[0])["friend_path"]).toEqual([
@@ -386,21 +439,21 @@ describe("buildSelectableNode", () => {
 
   describe("basic field mapping", () => {
     it("extracts id and kind from prefixed columns", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", SPELLED_COLUMNS);
 
       expect(node.id).toBe("node-123");
       expect(node.kind).toBe("Person");
     });
 
     it("parses JSON props and spreads them at top level", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", SPELLED_COLUMNS);
 
       expect(node["name"]).toBe("Alice");
       expect(node["age"]).toBe(30);
     });
 
     it("builds meta object from metadata columns", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", SPELLED_COLUMNS);
 
       expect(node.meta).toEqual({
         version: 1,
@@ -415,13 +468,13 @@ describe("buildSelectableNode", () => {
 
   describe("null to undefined normalization", () => {
     it("converts null validFrom to undefined", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", SPELLED_COLUMNS);
 
       expect(node.meta.validFrom).toBeUndefined();
     });
 
     it("converts null deletedAt to undefined", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", SPELLED_COLUMNS);
 
       expect(node.meta.deletedAt).toBeUndefined();
     });
@@ -433,7 +486,7 @@ describe("buildSelectableNode", () => {
         p_deleted_at: "2024-06-01T00:00:00.000Z",
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.meta.validFrom).toBe("2024-01-01T00:00:00.000Z");
       expect(node.meta.deletedAt).toBe("2024-06-01T00:00:00.000Z");
@@ -450,7 +503,7 @@ describe("buildSelectableNode", () => {
         p_deleted_at: postgresJsTimestamp,
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.meta).toEqual({
         version: 1,
@@ -470,7 +523,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ id: "fake-id", name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.id).toBe("node-123"); // System field, not from props
       expect(node["name"]).toBe("Alice");
@@ -482,7 +535,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ kind: "FakeKind", name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.kind).toBe("Person"); // System field, not from props
     });
@@ -493,7 +546,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ meta: { fake: true }, name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.meta.version).toBe(1); // System meta, not from props
       expect((node.meta as Record<string, unknown>)["fake"]).toBeUndefined();
@@ -507,7 +560,7 @@ describe("buildSelectableNode", () => {
         p_props: { name: "Alice", age: 30 }, // Already an object
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node["name"]).toBe("Alice");
       expect(node["age"]).toBe(30);
@@ -519,7 +572,7 @@ describe("buildSelectableNode", () => {
         p_props: undefined,
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.id).toBe("node-123");
       expect(node.kind).toBe("Person");
@@ -531,7 +584,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({}),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", SPELLED_COLUMNS);
 
       expect(node.id).toBe("node-123");
     });
@@ -553,7 +606,7 @@ describe("buildSelectContext", () => {
 
   describe("start node only (no traversals)", () => {
     it("builds context with just the start node", () => {
-      const context = buildSelectContext(startRow, "p", []);
+      const context = buildSelectContext(startRow, "p", [], SPELLED_COLUMNS);
 
       expect(context["p"]).toBeDefined();
       expect(requireDefined(context["p"]).id).toBe("person-1");
@@ -601,7 +654,12 @@ describe("buildSelectContext", () => {
     ];
 
     it("includes traversed nodes in context", () => {
-      const context = buildSelectContext(traversalRow, "p", traversals);
+      const context = buildSelectContext(
+        traversalRow,
+        "p",
+        traversals,
+        SPELLED_COLUMNS,
+      );
 
       expect(context["friend"]).toBeDefined();
       expect(requireDefined(context["friend"]).id).toBe("person-2");
@@ -609,7 +667,12 @@ describe("buildSelectContext", () => {
     });
 
     it("includes edges in context", () => {
-      const context = buildSelectContext(traversalRow, "p", traversals);
+      const context = buildSelectContext(
+        traversalRow,
+        "p",
+        traversals,
+        SPELLED_COLUMNS,
+      );
 
       expect(context["e"]).toBeDefined();
       expect(requireDefined(context["e"]).id).toBe("edge-1");
@@ -629,7 +692,7 @@ describe("buildSelectContext", () => {
         e_deleted_at: postgresJsTimestamp,
       };
 
-      const context = buildSelectContext(row, "p", traversals);
+      const context = buildSelectContext(row, "p", traversals, SPELLED_COLUMNS);
 
       expect(requireDefined(context["e"]).meta).toEqual({
         validFrom: "2026-08-09T11:52:09.617Z",
@@ -685,6 +748,7 @@ describe("buildSelectContext", () => {
         nullTraversalRow,
         "p",
         optionalTraversals,
+        SPELLED_COLUMNS,
       );
 
       expect(context["friend"]).toBeUndefined();
@@ -695,6 +759,7 @@ describe("buildSelectContext", () => {
         nullTraversalRow,
         "p",
         optionalTraversals,
+        SPELLED_COLUMNS,
       );
 
       expect(context["e"]).toBeUndefined();
@@ -729,10 +794,16 @@ describe("mapResults", () => {
   ];
 
   it("applies select function to each row", () => {
-    const results = mapResults(rows, "p", [], (ctx) => ({
-      id: requireDefined(ctx["p"]).id,
-      name: requireDefined(ctx["p"])["name"],
-    }));
+    const results = mapResults(
+      rows,
+      "p",
+      [],
+      (ctx) => ({
+        id: requireDefined(ctx["p"]).id,
+        name: requireDefined(ctx["p"])["name"],
+      }),
+      SPELLED_COLUMNS,
+    );
 
     expect(results).toEqual([
       { id: "person-1", name: "Alice" },
@@ -746,6 +817,7 @@ describe("mapResults", () => {
       "p",
       [],
       (ctx) => requireDefined(ctx["p"]).id,
+      SPELLED_COLUMNS,
     );
 
     expect(results).toEqual([]);
@@ -757,6 +829,7 @@ describe("mapResults", () => {
       "p",
       [],
       (ctx) => requireDefined(ctx["p"])["name"],
+      SPELLED_COLUMNS,
     );
 
     expect(results).toEqual(["Alice", "Bob"]);

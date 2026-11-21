@@ -6,6 +6,7 @@ import {
   isSqlFragment,
   renderSql,
   type SqlFragment,
+  throwUnresolvedDeferredIdentifier,
   throwUnsupportedSqlChunk,
 } from "../../../query/sql-fragment";
 import type {
@@ -129,6 +130,9 @@ export function toDrizzleSql(
       }
       case "placeholder": {
         return drizzleSql.placeholder(chunk.value.name);
+      }
+      case "deferred-identifier": {
+        return throwUnresolvedDeferredIdentifier(chunk);
       }
       default: {
         return throwUnsupportedSqlChunk(chunk);

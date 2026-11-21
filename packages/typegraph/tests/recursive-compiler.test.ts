@@ -28,6 +28,10 @@ import {
   DEFAULT_SQL_SCHEMA,
 } from "../src/query/compiler/schema";
 import { postgresDialect, sqliteDialect } from "../src/query/dialect";
+import {
+  resultColumnName,
+  sealGeneratedIdentifiers,
+} from "../src/query/generated-identifier";
 import { renderSql, sql } from "../src/query/sql-fragment";
 import { KIND_QUALIFIED_PATH_TOKEN_SEPARATOR } from "../src/utils/path";
 import { requireDefined } from "../src/utils/presence";
@@ -147,7 +151,7 @@ function renderForDialect(ast: QueryAst, dialect: "sqlite" | "postgres") {
     "test-graph",
     createContext(dialect === "sqlite" ? sqliteDialect : postgresDialect),
   );
-  return renderSql(compiled, dialect);
+  return renderSql(sealGeneratedIdentifiers(compiled), dialect);
 }
 
 function getSqlString(ast: QueryAst, ctx = createContext()): string {
@@ -793,13 +797,13 @@ describe("compileVariableLengthQuery", () => {
           {
             alias: "source",
             field: "id",
-            outputName: "source_id_only",
+            outputName: resultColumnName("source_id_only"),
             isSystemField: true,
           },
           {
             alias: "target",
             field: "name",
-            outputName: "target_name_only",
+            outputName: resultColumnName("target_name_only"),
             isSystemField: false,
             valueType: "string",
           },
@@ -819,7 +823,7 @@ describe("compileVariableLengthQuery", () => {
           {
             alias: "target",
             field: "id",
-            outputName: "target_id_only",
+            outputName: resultColumnName("target_id_only"),
             isSystemField: true,
           },
         ],
@@ -841,7 +845,7 @@ describe("compileVariableLengthQuery", () => {
           {
             alias: "target",
             field: "id",
-            outputName: "target_id_only",
+            outputName: resultColumnName("target_id_only"),
             isSystemField: true,
           },
         ],
@@ -860,7 +864,7 @@ describe("compileVariableLengthQuery", () => {
           {
             alias: "e",
             field: "id",
-            outputName: "edge_id_only",
+            outputName: resultColumnName("edge_id_only"),
             isSystemField: true,
           },
         ],

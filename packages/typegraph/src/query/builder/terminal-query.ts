@@ -76,7 +76,7 @@ export async function executeQueryTerminal(
         expectedVersion: checked.value,
         rowIdentityColumn: column,
         compile: () => statement,
-      });
+      }).then((checkedRead) => checkedRead.rows);
   const rows = await (state.recordedAsOf === undefined ?
     rowsPromise
   : withRecordedRelationsPrecondition(rowsPromise, {

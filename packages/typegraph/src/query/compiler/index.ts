@@ -73,11 +73,15 @@ import { type VectorStrategy } from "../dialect/vector-strategy";
 import type { DatabaseExpression } from "../expressions";
 import {
   aliasColumnName,
+  aliasCountsCteName,
   aliasCteName,
   aliasTableName,
-  generatedIdentifier,
+  bareName,
+  type GeneratedName,
+  quotedSqlName,
   rawAliasCte,
   sealGeneratedIdentifiers,
+  type SqlName,
 } from "../generated-identifier";
 import { sql, type SqlFragment } from "../sql-fragment";
 import {
@@ -150,7 +154,6 @@ import {
   isAggregateExpr,
   isIdFieldRef,
   mapSelectiveSystemFieldToColumn,
-  quoteIdentifier,
   type RequiredColumnsByAlias,
 } from "./utils";
 
@@ -851,9 +854,7 @@ function compileCountAggregateFastPath(
   const previousAlias = traversal.joinFromAlias;
   const previousAliasIdColumn = aliasColumnName(previousAlias, "id");
   const previousAliasKindColumn = aliasColumnName(previousAlias, "kind");
-  const countCteAlias = generatedIdentifier(
-    `cte_${traversal.nodeAlias}_counts`,
-  );
+  const countCteAlias = aliasCountsCteName(traversal.nodeAlias);
   const nodeCountColumn = aliasColumnName(traversal.nodeAlias, "count");
   const nodeCountDistinctColumn = aliasColumnName(
     traversal.nodeAlias,
@@ -963,19 +964,19 @@ function compileCountAggregateFastPath(
 
   const aggregateColumns: SqlFragment[] = [];
   if (requiresNodeCount) {
-    aggregateColumns.push(sql`COUNT(n.id) AS ${sql.raw(nodeCountColumn)}`);
+    aggregateColumns.push(sql`COUNT(n.id) AS ${bareName(nodeCountColumn)}`);
   }
   if (requiresNodeCountDistinct) {
     aggregateColumns.push(
-      sql`COUNT(DISTINCT n.id) AS ${sql.raw(nodeCountDistinctColumn)}`,
+      sql`COUNT(DISTINCT n.id) AS ${bareName(nodeCountDistinctColumn)}`,
     );
   }
   if (requiresEdgeCount) {
-    aggregateColumns.push(sql`COUNT(e.id) AS ${sql.raw(edgeCountColumn)}`);
+    aggregateColumns.push(sql`COUNT(e.id) AS ${bareName(edgeCountColumn)}`);
   }
   if (requiresEdgeCountDistinct) {
     aggregateColumns.push(
-      sql`COUNT(DISTINCT e.id) AS ${sql.raw(edgeCountDistinctColumn)}`,
+      sql`COUNT(DISTINCT e.id) AS ${bareName(edgeCountDistinctColumn)}`,
     );
   }
 
@@ -1027,22 +1028,22 @@ function compileCountAggregateFastPath(
     : sql``;
 
   const countCte = sql`
-    ${sql.raw(countCteAlias)} AS (
+    ${bareName(countCteAlias)} AS (
       SELECT
-        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)} AS ${sql.raw(previousAliasIdColumn)},
-        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)} AS ${sql.raw(previousAliasKindColumn)},
+        ${rawAliasCte(previousAlias)}.${bareName(previousAliasIdColumn)} AS ${bareName(previousAliasIdColumn)},
+        ${rawAliasCte(previousAlias)}.${bareName(previousAliasKindColumn)} AS ${bareName(previousAliasKindColumn)},
         ${sql.join(aggregateColumns, sql`, `)}
       FROM ${rawAliasCte(previousAlias)}
-      JOIN ${ctx.schema.edgesTable} e ON ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)} = e.${sql.raw(joinField)}
-        AND ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}${targetNodeJoin}
+      JOIN ${ctx.schema.edgesTable} e ON ${rawAliasCte(previousAlias)}.${bareName(previousAliasIdColumn)} = e.${sql.raw(joinField)}
+        AND ${rawAliasCte(previousAlias)}.${bareName(previousAliasKindColumn)} = e.${sql.raw(joinKindField)}${targetNodeJoin}
       WHERE ${sql.join(whereClauses, sql` AND `)}
       GROUP BY
-        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)},
-        ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)}
+        ${rawAliasCte(previousAlias)}.${bareName(previousAliasIdColumn)},
+        ${rawAliasCte(previousAlias)}.${bareName(previousAliasKindColumn)}
     )
   `;
 
-  function resolveCountColumn(source: AggregateExpr): string {
+  function resolveCountColumn(source: AggregateExpr): GeneratedName {
     const isEdge = source.field.alias === traversal.edgeAlias;
     if (source.function === "countDistinct") {
       return isEdge ? edgeCountDistinctColumn : nodeCountDistinctColumn;
@@ -1067,15 +1068,15 @@ function compileCountAggregateFastPath(
           source.valueType,
           aliasCteName(source.alias),
         );
-        return sql`${value} AS ${quoteIdentifier(projectedField.outputName)}`;
+        return sql`${value} AS ${quotedSqlName(projectedField.outputName)}`;
       }
 
       const projectedCountColumn = resolveCountColumn(source);
-      const countValue = sql`${sql.raw(countCteAlias)}.${sql.raw(projectedCountColumn)}`;
+      const countValue = sql`${bareName(countCteAlias)}.${bareName(projectedCountColumn)}`;
       const aggregateValue =
         traversal.optional ? sql`COALESCE(${countValue}, 0)` : countValue;
 
-      return sql`${aggregateValue} AS ${quoteIdentifier(projectedField.outputName)}`;
+      return sql`${aggregateValue} AS ${quotedSqlName(projectedField.outputName)}`;
     }),
     sql`, `,
   );
@@ -1083,9 +1084,9 @@ function compileCountAggregateFastPath(
   const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
   const fromClause = sql`
     FROM ${rawAliasCte(startAlias)}
-    ${sql.raw(joinType)} ${sql.raw(countCteAlias)}
-      ON ${sql.raw(countCteAlias)}.${sql.raw(previousAliasIdColumn)} = ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasIdColumn)}
-      AND ${sql.raw(countCteAlias)}.${sql.raw(previousAliasKindColumn)} = ${rawAliasCte(previousAlias)}.${sql.raw(previousAliasKindColumn)}
+    ${sql.raw(joinType)} ${bareName(countCteAlias)}
+      ON ${bareName(countCteAlias)}.${bareName(previousAliasIdColumn)} = ${rawAliasCte(previousAlias)}.${bareName(previousAliasIdColumn)}
+      AND ${bareName(countCteAlias)}.${bareName(previousAliasKindColumn)} = ${rawAliasCte(previousAlias)}.${bareName(previousAliasKindColumn)}
   `;
 
   // Also picks up `ast.aggregateOrderBy` (ORDER BY output-alias entries
@@ -1348,8 +1349,8 @@ function buildLateMaterializedOuterFromClause(
 ): SqlFragment {
   const topk = sql.raw(LATE_MAT_TOPK_CTE_ALIAS);
   const joins = lateMaterializedProjectedNodeAliases(ast).map((alias) => {
-    const physical = sql.raw(aliasTableName(alias));
-    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${sql.raw(aliasColumnName(alias, "kind"))} AND ${physical}.id = ${topk}.${sql.raw(aliasColumnName(alias, "id"))}`;
+    const physical = bareName(aliasTableName(alias));
+    return sql`JOIN ${ctx.schema.nodesTable} ${physical} ON ${physical}.graph_id = ${graphId} AND ${physical}.kind = ${topk}.${bareName(aliasColumnName(alias, "kind"))} AND ${physical}.id = ${topk}.${bareName(aliasColumnName(alias, "id"))}`;
   });
   return joins.length === 0 ?
       sql`FROM ${topk}`
@@ -1363,7 +1364,7 @@ function compileLateMaterializedQuery(
   logicalPlan: LogicalPlan,
   predicateIndex: PredicateIndex,
   temporalFilterPass: TemporalFilterPass,
-  collapsedTraversalCteAlias: string | undefined,
+  collapsedTraversalCteAlias: SqlName | undefined,
   shouldCollapseLinearTraversalRowset: boolean,
 ): SqlFragment | undefined {
   const plan = resolveLateMaterializationPlan(ast);
@@ -1445,7 +1446,7 @@ function compileStandardQuery(
 
 type SelectStandardOrderByInput = Readonly<{
   ast: QueryAst;
-  collapsedTraversalCteAlias: string | undefined;
+  collapsedTraversalCteAlias: SqlName | undefined;
   dialect: DialectAdapter;
   fulltextPredicate: FulltextMatchPredicate | undefined;
   fusion: HybridFusionOptions | undefined;

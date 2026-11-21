@@ -3,12 +3,14 @@
  * and the ratchet that keeps it the only owner.
  *
  * PostgreSQL clips identifiers to 63 bytes. Every name the query layer builds
- * from caller text passes through the owner: a name that fits is emitted
- * verbatim, and a longer one is allocated a physical name per statement that
- * no other name in that statement holds. A second, inline spelling of
- * `${alias}_id` or `lm_${alias}` would compile or decode a name the owner
- * never allocated — the shape of the defect that made long aliases collide on
- * PostgreSQL while running on SQLite.
+ * from caller text passes through the owner as a structured name — identified
+ * by its components, written into a statement as a deferred-identifier chunk —
+ * and each statement allocates physical names once, from those chunks alone:
+ * a name that fits keeps its spelling unless an earlier name holds it, and
+ * every other name takes a hashed name nothing else in the statement holds. A
+ * second, inline spelling of `${alias}_id` or `lm_${alias}` would compile or
+ * decode a name the owner never allocated — the shape of the defect that made
+ * long aliases collide on PostgreSQL while running on SQLite.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -19,21 +21,27 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { CompilerInvariantError } from "../src/errors";
 import { createQueryBuilder } from "../src/query";
 import { compileQuery } from "../src/query/compiler/index";
 import {
   aliasColumnName,
   aliasCteName,
   aliasTableName,
+  bareName,
   bindGeneratedIdentifiers,
+  foldedIdentifier,
   generatedColumnName,
   generatedColumnsOf,
-  generatedIdentifier,
-  restoreGeneratedColumns,
+  type GeneratedName,
+  quotedName,
+  readGeneratedColumn,
+  resultColumnName,
   sealGeneratedIdentifiers,
+  selectivePropsColumnName,
   shortenedIdentifier,
 } from "../src/query/generated-identifier";
-import { renderSqlite, sql } from "../src/query/sql-fragment";
+import { renderPostgres, renderSqlite, sql } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 
 const MAX_IDENTIFIER_BYTES = 63;
@@ -49,16 +57,15 @@ function emittedNames(text: string, pattern: RegExp): string[] {
     .toSorted();
 }
 
-/** Renders `parts` as one sealed statement, the way the compiler emits it. */
-function sealedText(...parts: readonly string[]): string {
-  return renderSqlite(
-    sealGeneratedIdentifiers(
-      sql.join(
-        parts.map((part) => sql.raw(part)),
-        sql`, `,
-      ),
+/** The physical names a statement of bare `names` allocates, in order. */
+function sealedNames(...names: readonly GeneratedName[]): string[] {
+  const statement = sealGeneratedIdentifiers(
+    sql.join(
+      names.map((name) => bareName(name)),
+      sql`, `,
     ),
-  ).sql;
+  );
+  return names.map((name) => generatedColumnName(statement, name));
 }
 
 const LONG_ALIAS = `a${"b".repeat(62)}`;
@@ -76,66 +83,69 @@ const NODE_COLUMNS = [
   "to_id",
 ];
 
-describe("generatedIdentifier", () => {
-  it("returns every name of at most 63 bytes verbatim", () => {
-    for (const name of [
+describe("generated names", () => {
+  it("writes every name of at most 63 bytes as spelled", () => {
+    for (const spelling of [
       "p_id",
       "cte_p",
       `a${"b".repeat(62)}`,
       `a${"b".repeat(49)}_${"é".repeat(6)}`,
     ]) {
-      expect(utf8ByteLength(name)).toBeLessThanOrEqual(MAX_IDENTIFIER_BYTES);
-      expect(generatedIdentifier(name)).toBe(name);
+      expect(utf8ByteLength(spelling)).toBeLessThanOrEqual(
+        MAX_IDENTIFIER_BYTES,
+      );
+      expect(sealedNames(resultColumnName(spelling))).toEqual([spelling]);
     }
   });
 
-  it("names a longer name logically, for the statement to allocate", () => {
-    const name = aliasColumnName(LONG_ALIAS, "id");
+  it("identifies a name by its components, not by the text they spell", () => {
+    const partProperty = aliasColumnName("p", "edge_id");
+    const derivedEdgeId = aliasColumnName("p_edge", "id");
+    expect(partProperty.spelling).toBe(derivedEdgeId.spelling);
+    expect(partProperty.key).not.toBe(derivedEdgeId.key);
+    expect(aliasColumnName("p", "edge_id")).toEqual(partProperty);
+    // Roles are part of the identity: `cte_<alias>` is not a column.
+    expect(aliasCteName("x").key).not.toBe(resultColumnName("cte_x").key);
 
-    // Not a usable identifier until a statement allocates it.
-    expect(name).not.toMatch(/^\w+$/u);
-    expect(sealedText(name)).not.toBe(`${LONG_ALIAS}_id`);
-    expect(utf8ByteLength(sealedText(name))).toBeLessThanOrEqual(
-      MAX_IDENTIFIER_BYTES,
-    );
-    // The same logical name is the same logical token every time.
-    expect(aliasColumnName(LONG_ALIAS, "id")).toBe(name);
+    const [first, second] = sealedNames(partProperty, derivedEdgeId);
+    // The first keeps its spelling; the second is a different identifier.
+    expect(first).toBe("p_edge_id");
+    expect(second).toBe(shortenedIdentifier("p_edge_id"));
   });
 
   it("bounds a name that is under 63 characters but over 63 bytes", () => {
-    const name = `a${"b".repeat(50)}_${"é".repeat(7)}`;
-    expect(name.length).toBeLessThan(MAX_IDENTIFIER_BYTES);
-    expect(utf8ByteLength(name)).toBeGreaterThan(MAX_IDENTIFIER_BYTES);
+    const spelling = `a${"b".repeat(50)}_${"é".repeat(7)}`;
+    expect(spelling.length).toBeLessThan(MAX_IDENTIFIER_BYTES);
+    expect(utf8ByteLength(spelling)).toBeGreaterThan(MAX_IDENTIFIER_BYTES);
 
-    const emitted = sealedText(
-      `"${generatedIdentifier(name)}"`,
-      `"${generatedIdentifier(`a${"b".repeat(50)}_${"é".repeat(6)}`)}"`,
+    const names = sealedNames(
+      resultColumnName(spelling),
+      resultColumnName(`a${"b".repeat(50)}_${"é".repeat(6)}`),
     );
-    const names = emittedNames(emitted, /"([^"]+)"/gu);
 
-    expect(names).toHaveLength(2);
-    for (const emittedName of names) {
-      expect(utf8ByteLength(emittedName)).toBeLessThanOrEqual(
-        MAX_IDENTIFIER_BYTES,
-      );
-      expect(emittedName).not.toContain("�");
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) {
+      expect(utf8ByteLength(name)).toBeLessThanOrEqual(MAX_IDENTIFIER_BYTES);
+      expect(name).not.toContain("�");
     }
   });
 });
 
 describe("sealGeneratedIdentifiers", () => {
-  it("returns a statement without long names unchanged", () => {
-    const statement = sql`SELECT ${sql.raw(aliasColumnName("p", "id"))} FROM ${sql.raw(aliasCteName("p"))}`;
+  it("writes a statement whose names all fit and differ exactly as spelled", () => {
+    const statement = sealGeneratedIdentifiers(
+      sql`SELECT ${bareName(aliasColumnName("p", "id"))}, ${quotedName(aliasColumnName("p", "kind"))} FROM ${bareName(aliasCteName("p"))}`,
+    );
 
-    expect(sealGeneratedIdentifiers(statement)).toBe(statement);
-    expect(generatedColumnsOf(statement).size).toBe(0);
+    expect(renderSqlite(statement).sql).toBe(
+      'SELECT p_id, "p_kind" FROM cte_p',
+    );
   });
 
   it("keeps names sharing a 63-byte prefix distinct and within the limit", () => {
-    const columns = NODE_COLUMNS.map((column) =>
-      aliasColumnName(LONG_ALIAS, column),
+    const names = sealedNames(
+      ...NODE_COLUMNS.map((column) => aliasColumnName(LONG_ALIAS, column)),
     );
-    const names = sealedText(...columns).split(", ");
 
     expect(new Set(names).size).toBe(NODE_COLUMNS.length);
     for (const name of names) {
@@ -181,53 +191,107 @@ describe("sealGeneratedIdentifiers", () => {
   });
 
   it("never hands a long name the physical name a fitting one already owns", () => {
-    const longName = `cte_${LONG_ALIAS}`;
-    const firstChoice = shortenedIdentifier(longName);
+    const longName = aliasCteName(LONG_ALIAS);
+    const firstChoice = shortenedIdentifier(longName.spelling);
     expect(utf8ByteLength(firstChoice)).toBeLessThanOrEqual(
       MAX_IDENTIFIER_BYTES,
     );
 
-    // The fitting name is emitted verbatim whether it is used before or
-    // after the long one; the long one moves to its next candidate.
+    // A fitting generated name keeps its spelling whether it is used before
+    // or after the long one; the long one moves to its next candidate.
     for (const order of [
-      [firstChoice, generatedIdentifier(longName)],
-      [generatedIdentifier(longName), firstChoice],
+      [resultColumnName(firstChoice), longName],
+      [longName, resultColumnName(firstChoice)],
     ]) {
-      const names = sealedText(...order).split(", ");
+      const names = sealedNames(...order);
       expect(names).toContain(firstChoice);
-      expect(new Set(names).size).toBe(2);
-      expect(names).toContain(shortenedIdentifier(longName, 1));
+      expect(names).toContain(shortenedIdentifier(longName.spelling, 1));
     }
+
+    // So does a quoted identifier the compiler wrote, a caller's output key.
+    const statement = sealGeneratedIdentifiers(
+      sql`SELECT 1 AS ${sql.identifier(firstChoice)}, 2 AS ${quotedName(longName)}`,
+    );
+    expect(generatedColumnName(statement, longName)).toBe(
+      shortenedIdentifier(longName.spelling, 1),
+    );
+  });
+
+  it("compares names ASCII case-insensitively, as both engines do", () => {
+    expect(foldedIdentifier("Item_ID_É")).toBe("item_id_É");
+
+    // Two fitting names differing only in case are one identifier.
+    const [lower, upper] = sealedNames(
+      aliasColumnName("item", "id"),
+      aliasColumnName("Item", "id"),
+    );
+    expect(lower).toBe("item_id");
+    expect(upper).toBe(shortenedIdentifier("Item_id"));
+
+    // A long name's first choice taken by a fitting name in another case.
+    const longName = aliasCteName(LONG_ALIAS);
+    const firstChoice = shortenedIdentifier(longName.spelling);
+    const caseFlipped = firstChoice.toUpperCase();
+    expect(sealedNames(resultColumnName(caseFlipped), longName)).toEqual([
+      caseFlipped,
+      shortenedIdentifier(longName.spelling, 1),
+    ]);
+  });
+
+  it("never reads or rewrites caller text, identifiers, or bound values", () => {
+    // Characters an in-band placeholder scheme would act on: private-use
+    // markers and the double quote SQL escapes inside identifiers.
+    const callerText = 'x "q" ';
+    const longField = `field_${'"'.repeat(3)}_${"x".repeat(60)}`;
+    const generated = selectivePropsColumnName("p", longField);
+    const statement = sealGeneratedIdentifiers(
+      sql`SELECT json_extract(props, ${sql.raw(`'$."${callerText}"'`)}) AS ${sql.identifier(callerText)}, ${callerText} AS ${quotedName(generated)}`,
+    );
+    const physical = generatedColumnName(statement, generated);
+    const escapedPhysical = physical.replaceAll('"', '""');
+    const escapedCaller = callerText.replaceAll('"', '""');
+
+    expect(physical.startsWith(`__tg_1:p:${longField.length}:field_"""`)).toBe(
+      true,
+    );
+    expect(utf8ByteLength(physical)).toBeLessThanOrEqual(MAX_IDENTIFIER_BYTES);
+    expect(renderPostgres(statement)).toEqual({
+      sql: `SELECT json_extract(props, '$."${callerText}"') AS "${escapedCaller}", $1 AS "${escapedPhysical}"`,
+      params: [callerText],
+    });
   });
 
   it("allocates deterministically from the statement's names", () => {
-    const parts = NODE_COLUMNS.map((column) =>
+    const names = NODE_COLUMNS.map((column) =>
       aliasColumnName(LONG_ALIAS, column),
     );
-    expect(sealedText(...parts)).toBe(sealedText(...parts));
-    expect(sealedText(aliasTableName(LONG_ALIAS))).toBe(
+    expect(sealedNames(...names)).toEqual(sealedNames(...names));
+    expect(sealedNames(aliasTableName(LONG_ALIAS))).toEqual([
       shortenedIdentifier(`lm_${LONG_ALIAS}`),
-    );
+    ]);
   });
 
-  it("re-keys rows and binds wrappers to the names it allocated", () => {
+  it("reads columns and binds wrappers through the names it allocated", () => {
     const column = aliasColumnName(LONG_ALIAS, "id");
     const statement = sealGeneratedIdentifiers(
-      sql`SELECT 1 AS ${sql.identifier(column)}`,
+      sql`SELECT 1 AS ${quotedName(column)}`,
     );
     const physical = generatedColumnName(statement, column);
+    const columns = generatedColumnsOf(statement);
 
     expect(renderSqlite(statement).sql).toBe(`SELECT 1 AS "${physical}"`);
+    expect(columns.columnOf(column)).toBe(physical);
+    expect(columns.columnOf("fixed")).toBe("fixed");
+    expect(columns.columnOf(aliasColumnName(LONG_ALIAS, "kind"))).toBe(
+      undefined,
+    );
     expect(
-      restoreGeneratedColumns(
-        [{ [physical]: "x", other: 1 }],
-        generatedColumnsOf(statement),
-      ),
-    ).toEqual([{ [column]: "x", other: 1 }]);
+      readGeneratedColumn({ [physical]: "x", other: 1 }, columns, column),
+    ).toBe("x");
     expect(
       renderSqlite(
         bindGeneratedIdentifiers(
-          sql`SELECT ${sql.identifier(column)} FROM (${statement}) AS s`,
+          sql`SELECT ${quotedName(column)} FROM (${statement}) AS s`,
           statement,
         ),
       ).sql,
@@ -235,20 +299,15 @@ describe("sealGeneratedIdentifiers", () => {
     expect(() =>
       generatedColumnName(statement, aliasColumnName(LONG_ALIAS, "kind")),
     ).toThrow(/never allocated/u);
-    // A data key that names an Object.prototype accessor survives re-keying.
-    const protoRow = JSON.parse('{"__proto__": "kept"}') as Record<
-      string,
-      unknown
-    >;
-    const [restoredProtoRow] = restoreGeneratedColumns(
-      [{ ...protoRow, [physical]: "x" }],
-      generatedColumnsOf(statement),
-    );
-    expect(Object.hasOwn(restoredProtoRow ?? {}, "__proto__")).toBe(true);
-    expect(Object.getPrototypeOf(restoredProtoRow)).toBe(Object.prototype);
+  });
+
+  it("refuses to render a generated name no statement allocated", () => {
+    const unsealed = sql`SELECT ${bareName(aliasColumnName("p", "id"))}`;
+
+    expect(() => renderSqlite(unsealed)).toThrow(CompilerInvariantError);
+    expect(() => generatedColumnsOf(unsealed)).toThrow(/never sealed/u);
   });
 });
-
 // ============================================================
 // Ratchet: no inline spelling of an alias-derived identifier
 // ============================================================
@@ -325,16 +384,6 @@ function namesAlias(expression: ts.Node, file: ts.SourceFile): boolean {
 /** Text that continues an identifier when written directly against one. */
 const IDENTIFIER_JUNCTION_END = /[\p{L}\p{N}_$]$/u;
 const IDENTIFIER_JUNCTION_START = /^[\p{L}\p{N}_$]/u;
-
-/** Whether the expression is passed straight to the owner. */
-function isOwnerArgument(node: ts.Node): boolean {
-  const parent = node.parent;
-  return (
-    ts.isCallExpression(parent) &&
-    ts.isIdentifier(parent.expression) &&
-    parent.expression.text === "generatedIdentifier"
-  );
-}
 
 /**
  * Whether a template glues an alias substitution directly to identifier text
@@ -440,7 +489,6 @@ function findInlineAliasSpellings(source: ts.SourceFile): Spelling[] {
   function visit(node: ts.Node): void {
     if (
       ts.isTemplateExpression(node) &&
-      !isOwnerArgument(node) &&
       templateConcatenatesAlias(node, source)
     ) {
       record(node);
@@ -451,7 +499,6 @@ function findInlineAliasSpellings(source: ts.SourceFile): Spelling[] {
         ts.isBinaryExpression(node.parent) &&
         node.parent.operatorToken.kind === ts.SyntaxKind.PlusToken
       ) &&
-      !isOwnerArgument(node) &&
       operandsConcatenateAlias(concatenationOperands(node), source)
     ) {
       record(node);
@@ -459,7 +506,6 @@ function findInlineAliasSpellings(source: ts.SourceFile): Spelling[] {
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === "concat" &&
-      !isOwnerArgument(node) &&
       operandsConcatenateAlias(
         [node.expression.expression, ...node.arguments],
         source,
@@ -537,7 +583,6 @@ describe("generated identifier ratchet", () => {
 
   /** Spellings that join an alias with punctuation or name nothing. */
   const ALLOWED_FORMS = [
-    "const k = generatedIdentifier(`${edgeAlias}_directed_edges`);",
     "const l = `${count}_id`;",
     "const m = `${cteAlias}.${column}`;",
     'const n = `Alias "${alias}" is already in use`;',

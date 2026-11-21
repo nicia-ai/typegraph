@@ -4,6 +4,7 @@
  * Supports both TypeGraph-owned `SqlFragment` values and legacy Drizzle SQL objects
  * that remain in adapter-focused tests.
  */
+import { sealGeneratedIdentifiers } from "../src/query/generated-identifier";
 import {
   isSqlFragment,
   renderSql,
@@ -23,7 +24,9 @@ export function toSqlString(
   dialect: "sqlite" | "postgres" = "sqlite",
 ): string {
   if (isSqlFragment(sqlTemplate)) {
-    return renderSqlInline(sqlTemplate, dialect);
+    // A fragment under test is rendered as the statement it would end, so
+    // its generated names are allocated the way a compiled statement's are.
+    return renderSqlInline(sealGeneratedIdentifiers(sqlTemplate), dialect);
   }
 
   const parts: string[] = [];
@@ -68,7 +71,7 @@ export function toSqlWithParams(
   dialect: "sqlite" | "postgres" = "sqlite",
 ): { sql: string; params: unknown[] } {
   if (isSqlFragment(sqlTemplate)) {
-    const rendered = renderSql(sqlTemplate, dialect);
+    const rendered = renderSql(sealGeneratedIdentifiers(sqlTemplate), dialect);
     return { sql: rendered.sql, params: [...rendered.params] };
   }
 
