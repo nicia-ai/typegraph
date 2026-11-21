@@ -263,20 +263,21 @@ surfaces as the engine's own failure — neither is reshaped into this error.
 
 A query compiles each alias into SQL names: a WITH relation `cte_<alias>`, columns
 `<alias>_<column>`, and result columns named after the alias and field you select.
-PostgreSQL clips every name to its first 63 bytes, and both engines compare relation
-and column names without regard to letter case. When two different values of one
-query would end up with the same name under those rules, or a result column the
-library reads back by name would be longer than 63 bytes, the query fails on one
-engine (an error such as `column reference is ambiguous`) or returns another value's
-data on the other. Such a query is refused instead, on every backend, with a
-`ValidationError` raised by `execute()`, `compile()`, `toSQL()` or `prepare()` before
-any SQL is sent.
+PostgreSQL clips every name to its first 63 bytes, and both engines compare relation,
+column and output-key names without regard to letter case wherever SQL refers to
+them. When two different values of one statement would end up with the same name
+under those rules, or a result column the library reads back by name would be longer
+than 63 bytes, the statement fails on one engine (an error such as `column reference
+is ambiguous`) or returns another value's data on the other. Such a statement is
+refused instead, on every backend, with a `ValidationError` raised before any SQL is
+sent.
 
 - `SQL_IDENTIFIER_COLLISION`: two values share a name. Examples: node aliases `item`
   and `Item`; two 60-character aliases that share their first 59 characters; an edge
-  alias `e` beside a node alias `e_from` when whole rows are selected (the edge's
-  `from_id` and the node's `id` are both `e_from_id`); selecting a property `edge_id`
-  of alias `p` together with the id of alias `p_edge`.
+  alias `e` beside a node alias `e_from` when the statement reads the edge's `from_id`
+  and the node's `id` (both are `e_from_id`); selecting a property `edge_id` of alias
+  `p` together with the id of alias `p_edge`; `aggregate()` keys `total` and `Total`
+  with `.orderBy("Total")`, which SQLite resolves to whichever key comes first.
 - `SQL_IDENTIFIER_TOO_LONG`: a result column read back by name would exceed 63
   bytes. Examples: reading `id` under a 61-character alias (`<alias>_id` is 64
   bytes), or an `aggregate()` key longer than 63 bytes; bytes are counted, so 32
@@ -310,15 +311,36 @@ try {
 }
 ```
 
-The decision does not depend on the backend, so a query is accepted or refused the
-same way everywhere. `.execute()` sends a statement that reads only the selected
-fields when the selector reads plain fields, and that statement decides; `compile()`,
-`toSQL()` and `prepare()` reach the same verdict even though `compile()` returns the
-statement with every column. Two names that meet are not refused when nothing in the
-statement reads either of them. The check covers queries built with `from()`,
-`traverse()`, `select()`, `project()` and `aggregate()`, including `count()` and
-`exists()` on them. Recursive traversals, set operations, `asRelation()`, subqueries,
-`batchOnce()`, checked reads and cursor pages are not covered yet.
+The decision does not depend on the backend, so a statement is accepted or refused
+the same way everywhere. Every entry point checks the statement it actually sends or
+hands out, so no entry point returns or runs SQL that would be refused:
+
+- `execute()` checks the statement it sends. When the selector reads only plain
+  fields, that is a statement that selects just those fields; if `execute()` falls
+  back to the full statement, the full statement is checked before it is sent.
+- `compile()` and `toSQL()` check the SQL they return, which always selects every
+  column of every alias.
+- `prepare()` checks every statement the prepared query can run.
+
+The verdicts can therefore differ for one query. Node `k` beside edge `K` selecting
+only ids executes and returns the right rows, but its `compile()`, `toSQL()` and
+`prepare()` are refused: the SQL they would hand out reads both `k_id` and `K_id`,
+which SQLite resolves to the node's id and PostgreSQL rejects as ambiguous.
+
+Two names that meet are not refused when the statement never refers to that name in
+the relation that holds both: `.project((ctx) => ({ name: ctx.e_from.name }))` beside
+an edge `e` reads neither `e_from_id` and works. Where a statement is embedded in SQL
+that refers to its result columns by name (relations, checked reads, `batchOnce()`,
+set operations), result names that differ only by letter case are refused too.
+
+The check covers every terminal of queries built with `from()`, `traverse()`,
+`select()`, `project()` and `aggregate()`: `execute()`, `first()`, `count()`,
+`exists()`, `executeOn()`, `executeChecked()`, `compile()`, `toSQL()`, `prepare()`,
+`paginate()`, `stream()` and `page()`, the terminals `project()` and `aggregate()`
+queries run through `asRelation()`, `store.batch()`, `store.batchOnce()`,
+`withCheckedReads()`, the operands of `union()`, `intersect()` and `except()`, and
+`updateWhere()` candidate queries. Recursive traversals, subqueries, and the names a
+relation or set operation adds around its operands are not checked yet.
 
 ### `DisjointError`
 

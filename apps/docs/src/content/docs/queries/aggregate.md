@@ -69,6 +69,11 @@ identifier limit (bytes, not characters) and must not start with the reserved `_
 prefix in any letter case. A longer key is refused with a `ValidationError` carrying
 the code `SQL_IDENTIFIER_TOO_LONG`, and a reserved one with a `ConfigurationError`,
 before any SQL is sent. Keys need not be identifiers otherwise: `"total count"` works.
+Keys that differ only by letter case, such as `total` and `Total`, are refused with
+`SQL_IDENTIFIER_COLLISION` when SQL has to refer to them by name: when the query
+orders by one of them (SQLite resolves `ORDER BY "Total"` to whichever key comes
+first), and in `first()`, `count()`, `exists()`, `executeOn()`, `prepare()` and
+`store.batchOnce()`, which wrap the query in SQL that reads its keys.
 
 ## Aggregate Functions
 
