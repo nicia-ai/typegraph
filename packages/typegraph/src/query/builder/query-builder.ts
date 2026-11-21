@@ -54,6 +54,13 @@ import {
   type TraversalExpansion,
 } from "../ast";
 import { validateAggregateOperand } from "../compiler/aggregate-validation";
+import { aliasColumnName, aliasCteName } from "../compiler/alias-names";
+import {
+  exceedsSqlIdentifierLimit,
+  isReservedResultKey,
+  sqlIdentifierTooLongIssue,
+  sqlNameRefusal,
+} from "../compiler/sql-name-registry";
 import {
   createOuterReferenceExpression,
   type DatabaseExpression,
@@ -323,44 +330,63 @@ type CompositionNavigationResult<
 >;
 
 /**
+ * Refuses `aggregate()` keys the result row could not carry back on every
+ * engine: a key longer than 63 bytes (PostgreSQL clips it, so the value comes
+ * back under another name) or one in the reserved `__tg_` namespace, in any
+ * letter case. Keys need not be identifiers otherwise; `"total count"` works.
+ */
+function assertAggregateKeys(keys: readonly string[]): void {
+  for (const key of keys) {
+    if (isReservedResultKey(key))
+      throw new ConfigurationError("Projection output name is reserved.", {
+        outputName: key,
+      });
+  }
+  const tooLong = keys
+    .filter((key) => exceedsSqlIdentifierLimit(key))
+    .map((key) => sqlIdentifierTooLongIssue(key, `the aggregate key "${key}"`));
+  if (tooLong.length > 0) throw sqlNameRefusal(tooLong);
+}
+
+/**
  * Builds projected fields for a node alias (including all metadata columns).
  */
 function buildNodeFields(alias: string): ProjectedField[] {
   return [
     {
-      outputName: `${alias}_id`,
+      outputName: aliasColumnName(alias, "id"),
       source: fieldRef(alias, ["id"]),
     },
     {
-      outputName: `${alias}_kind`,
+      outputName: aliasColumnName(alias, "kind"),
       source: fieldRef(alias, ["kind"]),
     },
     {
-      outputName: `${alias}_props`,
+      outputName: aliasColumnName(alias, "props"),
       source: fieldRef(alias, ["props"]),
     },
     {
-      outputName: `${alias}_version`,
+      outputName: aliasColumnName(alias, "version"),
       source: fieldRef(alias, ["version"]),
     },
     {
-      outputName: `${alias}_valid_from`,
+      outputName: aliasColumnName(alias, "valid_from"),
       source: fieldRef(alias, ["valid_from"]),
     },
     {
-      outputName: `${alias}_valid_to`,
+      outputName: aliasColumnName(alias, "valid_to"),
       source: fieldRef(alias, ["valid_to"]),
     },
     {
-      outputName: `${alias}_created_at`,
+      outputName: aliasColumnName(alias, "created_at"),
       source: fieldRef(alias, ["created_at"]),
     },
     {
-      outputName: `${alias}_updated_at`,
+      outputName: aliasColumnName(alias, "updated_at"),
       source: fieldRef(alias, ["updated_at"]),
     },
     {
-      outputName: `${alias}_deleted_at`,
+      outputName: aliasColumnName(alias, "deleted_at"),
       source: fieldRef(alias, ["deleted_at"]),
     },
   ];
@@ -376,55 +402,55 @@ function buildEdgeFields(
   edgeAlias: string,
   nodeCteAlias: string,
 ): ProjectedField[] {
-  const cteAlias = `cte_${nodeCteAlias}`;
+  const cteAlias = aliasCteName(nodeCteAlias);
   return [
     {
-      outputName: `${edgeAlias}_id`,
+      outputName: aliasColumnName(edgeAlias, "id"),
       source: fieldRef(edgeAlias, ["id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_kind`,
+      outputName: aliasColumnName(edgeAlias, "kind"),
       source: fieldRef(edgeAlias, ["kind"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_from_id`,
+      outputName: aliasColumnName(edgeAlias, "from_id"),
       source: fieldRef(edgeAlias, ["from_id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_to_id`,
+      outputName: aliasColumnName(edgeAlias, "to_id"),
       source: fieldRef(edgeAlias, ["to_id"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_props`,
+      outputName: aliasColumnName(edgeAlias, "props"),
       source: fieldRef(edgeAlias, ["props"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_valid_from`,
+      outputName: aliasColumnName(edgeAlias, "valid_from"),
       source: fieldRef(edgeAlias, ["valid_from"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_valid_to`,
+      outputName: aliasColumnName(edgeAlias, "valid_to"),
       source: fieldRef(edgeAlias, ["valid_to"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_created_at`,
+      outputName: aliasColumnName(edgeAlias, "created_at"),
       source: fieldRef(edgeAlias, ["created_at"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_updated_at`,
+      outputName: aliasColumnName(edgeAlias, "updated_at"),
       source: fieldRef(edgeAlias, ["updated_at"]),
       cteAlias,
     },
     {
-      outputName: `${edgeAlias}_deleted_at`,
+      outputName: aliasColumnName(edgeAlias, "deleted_at"),
       source: fieldRef(edgeAlias, ["deleted_at"]),
       cteAlias,
     },
@@ -1907,7 +1933,7 @@ export class QueryBuilder<
     const projection = entries.map(([outputName, source]) => {
       validateSqlIdentifier(outputName);
       if (
-        outputName.startsWith("__tg_") ||
+        isReservedResultKey(outputName) ||
         outputName === "typegraphschemaversion"
       )
         throw new ConfigurationError("Projection output name is reserved.");
@@ -2018,6 +2044,7 @@ export class QueryBuilder<
       > {
     if (typeof fields === "function")
       return this.#project(fields(this.#expressionContext()));
+    assertAggregateKeys(Object.keys(fields));
 
     const resolvedFields = Object.fromEntries(
       Object.entries(fields).map(([outputName, source]) => {
@@ -2078,7 +2105,7 @@ export class QueryBuilder<
           : {
               outputName,
               source,
-              cteAlias: `cte_${edgeTraversal.nodeAlias}`,
+              cteAlias: aliasCteName(edgeTraversal.nodeAlias),
             };
       },
     );

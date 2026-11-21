@@ -3,7 +3,7 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
-import { compileQuery } from "../compiler";
+import { compileNameCheckedQuery, compileQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
@@ -166,10 +166,11 @@ export class ExecutableProjectionQuery<
   }
 
   compile() {
-    return compileQuery(
+    return compileNameCheckedQuery(
       this.toAst(),
       this.#config.graphId,
       buildCompileOptions(this.#config),
+      "decoded",
     );
   }
   toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
@@ -206,6 +207,14 @@ export class ExecutableProjectionQuery<
   }> {
     const ast = this.toAst();
     const backend = this.#requireBackend();
+    // Refuse at prepare() what every execute() would refuse: a query whose
+    // generated SQL names collide (see sql-name-registry.ts).
+    compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      buildCompileOptions(this.#config),
+      "decoded",
+    );
     return {
       execute: async (bindings) => {
         validateQueryBindings([ast], bindings);
@@ -297,10 +306,11 @@ export class ExecutableProjectionQuery<
             ),
           )
         : backend.execute<Record<string, unknown>>(
-            compileQuery(
+            compileNameCheckedQuery(
               bindings === undefined ? ast : bindQueryParameters(ast, bindings),
               this.#config.graphId,
               buildCompileOptions(this.#config),
+              "decoded",
             ),
           ),
         backend,
@@ -410,10 +420,13 @@ export class ExecutableProjectionQuery<
     operation: "count" | "exists",
     readInstant: "literal" | "placeholder" = "literal",
   ) {
-    const relation = compileQuery(ast, this.#config.graphId, {
-      ...buildCompileOptions(this.#config),
-      readInstant,
-    });
+    // The scalar wrapper reads no result column of the relation by name.
+    const relation = compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      { ...buildCompileOptions(this.#config), readInstant },
+      "embedded",
+    );
     return asCompiledSelectSql(
       operation === "count" ?
         sql`SELECT COUNT(*) AS __tg_scalar FROM (${relation}) AS projected`

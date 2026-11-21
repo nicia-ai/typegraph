@@ -26,7 +26,12 @@ import {
   type SelectiveField,
   type SortDirection,
 } from "../ast";
-import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import {
+  assertQuerySqlNames,
+  compileNameCheckedQuery,
+  compileQuery,
+  type CompileQueryOptions,
+} from "../compiler/index";
 import {
   buildCursorFromRow,
   buildCursorFromValues,
@@ -382,7 +387,27 @@ export class ExecutableQuery<
     // (a backend may execute the result directly), so this is not the
     // reusable placeholder template execute() caches — see #templateFor.
     const ast = this.toAst();
+    this.#assertExecuteSqlNames(ast);
     return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+  }
+
+  /**
+   * Refuses the query when the statement `execute()` would send first has
+   * generated SQL names that collide (see `sql-name-registry.ts`). That
+   * statement — the selective-field statement when the selector reads only
+   * fields, the full projection otherwise — decides for `compile()`,
+   * `toSQL()` and `prepare()` too, so all four agree on the same query
+   * even though `compile()` emits the full projection. A later fallback from
+   * the selective statement to the full one is checked again when it runs.
+   */
+  #assertExecuteSqlNames(baseAst: QueryAst): void {
+    const selectiveFields = this.#getSelectiveFieldsForExecute();
+    assertQuerySqlNames(
+      selectiveFields === undefined ? baseAst : { ...baseAst, selectiveFields },
+      this.#config.graphId,
+      this.#compileOptions(),
+      "decoded",
+    );
   }
 
   /**
@@ -394,7 +419,10 @@ export class ExecutableQuery<
   compileNodeCandidateIds(readInstant?: string): CompiledSelectSql {
     const ast = this.toAst();
     const idColumn = `${ast.start.alias}_id`;
-    return compileQuery(
+    // The candidate's id column is read inside the set update's SQL, where
+    // PostgreSQL clips the reference the same way as the declaration, so only
+    // collisions refuse it — not the column's length.
+    return compileNameCheckedQuery(
       {
         ...ast,
         ...(readInstant === undefined ?
@@ -421,6 +449,7 @@ export class ExecutableQuery<
       },
       this.#config.graphId,
       this.#compileOptions(),
+      "embedded",
     );
   }
 
@@ -483,8 +512,15 @@ export class ExecutableQuery<
     // caches its own reusable placeholder template (built lazily on first
     // execute), so this validation compile is safe to discard — it only exists
     // to surface a structural error at prepare() time rather than first use.
+    // The statement execute() sends first also decides whether the query's
+    // generated SQL names collide (see #assertExecuteSqlNames).
     const compileOptions = this.#compileOptions();
-    compileQuery(ast, this.#config.graphId, compileOptions);
+    compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      compileOptions,
+      "decoded",
+    );
     compileQuery(unoptimizedAst, this.#config.graphId, compileOptions);
 
     return new PreparedQuery({
@@ -590,7 +626,12 @@ export class ExecutableQuery<
           fillTemplateParams(template.params, {}, this.#dialect()),
         )
       : backend.execute<Record<string, unknown>>(
-          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+          compileNameCheckedQuery(
+            ast,
+            this.#config.graphId,
+            this.#compileOptions(),
+            "decoded",
+          ),
         ),
       surface,
     );

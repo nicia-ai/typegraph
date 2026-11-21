@@ -1,5 +1,4 @@
 import { UnsupportedPredicateError } from "../../../errors";
-import { boundPgIdentifier } from "../../../utils/identifier";
 import { requireDefined } from "../../../utils/presence";
 import {
   type AggregateExpr,
@@ -23,6 +22,12 @@ import { compileOrderTerm, resolveNullOrdering } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { validateAggregateOperand } from "../aggregate-validation";
 import {
+  aliasColumnName,
+  aliasCteName,
+  lateMaterializedPhysicalAlias,
+  selectivePropsColumnName,
+} from "../alias-names";
+import {
   compileDatabaseExpression,
   compileLegacyAggregateExpression,
 } from "../database-expressions";
@@ -44,12 +49,20 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
-  ALIAS_CTE_PREFIX,
   EMBEDDINGS_CTE_ALIAS,
   FULLTEXT_CTE_ALIAS,
   HYBRID_CANDIDATES_CTE_ALIAS,
   vectorSlotKey,
 } from "../schema";
+import {
+  declareAliasColumn,
+  declareAliasCte,
+  declareFixedCte,
+  declareResultColumn,
+  declareSelectivePropsColumn,
+  type SqlNameScope,
+  type SqlStatementNames,
+} from "../sql-name-registry";
 import { compileSelectivePropsExtraction } from "../typed-json-extract";
 import {
   EDGE_COLUMNS,
@@ -81,35 +94,17 @@ function qualifyColumn(owner: string, name: string): SqlFragment {
 
 const SCOPED_RELEVANCE_NODES_ALIAS = "scoped_relevance_nodes";
 
-/**
- * Builds a synthetic CTE column name for a selectively-extracted props field.
- *
- * Length-prefixes each component (`<length>:<value>`) rather than joining
- * `alias`/`field` on a bare `_`: alias and field are both attacker/user-controlled
- * strings that may themselves contain `_`, so naive concatenation lets two distinct
- * (alias, field) pairs collide on the same column name (e.g. alias="p_full",
- * field="name" vs. alias="p", field="full_name" would otherwise both produce
- * "__tg_p_full_name"). The length prefix makes the encoding unambiguous regardless
- * of what characters alias/field contain.
- *
- * The encoding is unbounded, but PostgreSQL truncates identifiers at 63 bytes,
- * so `boundPgIdentifier` hash-guards long names: two pairs whose encodings share
- * a >63-byte prefix would otherwise collapse onto the same physical column.
- * Short names are returned verbatim, preserving the readable `__tg_...` form.
- */
 function selectivePropsCteColumnName(field: SelectiveField): string {
-  const { alias, field: fieldName } = field;
-  const encoded = `__tg_${alias.length}:${alias}:${fieldName.length}:${fieldName}`;
-  return boundPgIdentifier(encoded, `${alias}\0${fieldName}`);
+  return selectivePropsColumnName(field.alias, field.field);
 }
 
 function buildScopedNodeIdsSubquery(nodeAlias: string): SqlFragment {
-  const cteAlias = `${ALIAS_CTE_PREFIX}${nodeAlias}`;
+  const cteAlias = aliasCteName(nodeAlias);
   return sql`
     (
         SELECT DISTINCT
-          ${qualifyColumn(cteAlias, `${nodeAlias}_id`)} AS node_id,
-          ${qualifyColumn(cteAlias, `${nodeAlias}_kind`)} AS node_kind
+          ${qualifyColumn(cteAlias, aliasColumnName(nodeAlias, "id"))} AS node_id,
+          ${qualifyColumn(cteAlias, aliasColumnName(nodeAlias, "kind"))} AS node_kind
         FROM ${quoteIdentifier(cteAlias)}
       ) AS ${sql.raw(SCOPED_RELEVANCE_NODES_ALIAS)}
   `;
@@ -117,6 +112,8 @@ function buildScopedNodeIdsSubquery(nodeAlias: string): SqlFragment {
 
 type CompileSelectivePropsSelectColumnsInput = Readonly<{
   alias: string;
+  /** The columns of the CTE these columns are declared in. */
+  columns: SqlNameScope;
   dialect: DialectAdapter;
   selectiveFields: readonly SelectiveField[] | undefined;
   tableAlias: string | undefined;
@@ -125,7 +122,7 @@ type CompileSelectivePropsSelectColumnsInput = Readonly<{
 function compileSelectivePropsSelectColumns(
   input: CompileSelectivePropsSelectColumnsInput,
 ): SqlFragment[] {
-  const { alias, dialect, selectiveFields, tableAlias } = input;
+  const { alias, columns, dialect, selectiveFields, tableAlias } = input;
   const propsFields =
     selectiveFields?.filter(
       (field) => !field.isSystemField && field.alias === alias,
@@ -139,7 +136,8 @@ function compileSelectivePropsSelectColumns(
       propsColumn,
       dialect,
     );
-    return sql`${extracted} AS ${quoteIdentifier(selectivePropsCteColumnName(field))}`;
+    const name = declareSelectivePropsColumn(columns, alias, field.field);
+    return sql`${extracted} AS ${quoteIdentifier(name)}`;
   });
 }
 
@@ -150,8 +148,10 @@ function appendSelectivePropsColumns(
   return [...baseColumns, ...compileSelectivePropsSelectColumns(input)];
 }
 
-type CompileNodeSelectColumnsInput = Readonly<{
+type CompileAliasSelectColumnsInput = Readonly<{
   alias: string;
+  /** The columns of the CTE these columns are declared in. */
+  columns: SqlNameScope;
   dialect: DialectAdapter;
   requiredColumns: ReadonlySet<string> | undefined;
   selectiveFields: readonly SelectiveField[] | undefined;
@@ -159,10 +159,9 @@ type CompileNodeSelectColumnsInput = Readonly<{
 }>;
 
 function compileNodeSelectColumns(
-  input: CompileNodeSelectColumnsInput,
+  input: CompileAliasSelectColumnsInput,
 ): SqlFragment[] {
-  const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
-    input;
+  const { alias, columns, requiredColumns, tableAlias } = input;
   const baseColumns = NODE_COLUMNS.filter(
     (column) =>
       column === "id" ||
@@ -170,47 +169,29 @@ function compileNodeSelectColumns(
       shouldProjectColumn(requiredColumns, column),
   ).map(
     (column) =>
-      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
+      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(declareAliasColumn(columns, alias, column))}`,
   );
-  return appendSelectivePropsColumns(baseColumns, {
-    alias,
-    dialect,
-    selectiveFields,
-    tableAlias,
-  });
+  return appendSelectivePropsColumns(baseColumns, input);
 }
 
-type CompileEdgeSelectColumnsInput = Readonly<{
-  alias: string;
-  dialect: DialectAdapter;
-  requiredColumns: ReadonlySet<string> | undefined;
-  selectiveFields: readonly SelectiveField[] | undefined;
-  tableAlias: string | undefined;
-}>;
-
 function compileEdgeSelectColumns(
-  input: CompileEdgeSelectColumnsInput,
+  input: CompileAliasSelectColumnsInput,
 ): SqlFragment[] {
-  const { alias, dialect, requiredColumns, selectiveFields, tableAlias } =
-    input;
+  const { alias, columns, requiredColumns, tableAlias } = input;
   const baseColumns = EDGE_COLUMNS.filter((column) =>
     shouldProjectColumn(requiredColumns, column),
   ).map(
     (column) =>
-      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(`${alias}_${column}`)}`,
+      sql`${compileColumnReference(tableAlias, column)} AS ${sql.raw(declareAliasColumn(columns, alias, column))}`,
   );
-  return appendSelectivePropsColumns(baseColumns, {
-    alias,
-    dialect,
-    selectiveFields,
-    tableAlias,
-  });
+  return appendSelectivePropsColumns(baseColumns, input);
 }
 
 type BuildStandardStartCteInput = Readonly<{
   ast: QueryAst;
   ctx: PredicateCompilerContext;
   graphId: string;
+  names: SqlStatementNames;
   predicateIndex: StandardEmitterPredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
   temporalFilterPass: TemporalFilterPass;
@@ -262,11 +243,13 @@ export function buildStandardStartCte(
       LIMIT ${input.limitOffset.limit} OFFSET ${input.limitOffset.offset}
     `;
 
+  const cteName = declareAliasCte(input.names, alias);
   return sql`
-    cte_${sql.raw(alias)} AS ${cteMaterialization}(
+    ${sql.raw(cteName)} AS ${cteMaterialization}(
       SELECT ${sql.join(
         compileNodeSelectColumns({
           alias,
+          columns: input.names.relationColumns(cteName),
           dialect: ctx.dialect,
           requiredColumns: effectiveRequiredColumns,
           selectiveFields: ast.selectiveFields,
@@ -286,6 +269,7 @@ type BuildStandardTraversalCteInput = Readonly<{
   ctx: PredicateCompilerContext;
   graphId: string;
   materializeCte: boolean;
+  names: SqlStatementNames;
   predicateIndex: StandardEmitterPredicateIndex;
   requiredColumnsByAlias: RequiredColumnsByAlias | undefined;
   temporalFilterPass: TemporalFilterPass;
@@ -302,6 +286,7 @@ export function buildStandardTraversalCte(
     ctx,
     graphId,
     materializeCte,
+    names,
     predicateIndex,
     requiredColumnsByAlias,
     temporalFilterPass,
@@ -363,17 +348,25 @@ export function buildStandardTraversalCte(
     requiredColumnsByAlias ?
       (requiredColumnsByAlias.get(edgeAlias) ?? EMPTY_REQUIRED_COLUMNS)
     : undefined;
+  const cteName = declareAliasCte(names, nodeAlias);
+  const columns = names.relationColumns(cteName);
+  const previousCteName = aliasCteName(previousAlias);
+  // `previous.*` brings every column of the previous CTE into this one, so
+  // those names are declared here too and meet this CTE's own columns.
+  if (carryForwardPreviousColumns)
+    columns.inherit(names.relationColumns(previousCteName));
   const previousRowColumns =
     carryForwardPreviousColumns ?
-      [sql`cte_${sql.raw(previousAlias)}.*`]
+      [sql`${sql.raw(previousCteName)}.*`]
     : [
-        sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AS ${sql.raw(previousAlias)}_id`,
-        sql`cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind AS ${sql.raw(previousAlias)}_kind`,
+        sql`${sql.raw(previousCteName)}.${sql.raw(aliasColumnName(previousAlias, "id"))} AS ${sql.raw(declareAliasColumn(columns, previousAlias, "id"))}`,
+        sql`${sql.raw(previousCteName)}.${sql.raw(aliasColumnName(previousAlias, "kind"))} AS ${sql.raw(declareAliasColumn(columns, previousAlias, "kind"))}`,
       ];
   const selectColumns = [
     ...previousRowColumns,
     ...compileEdgeSelectColumns({
       alias: edgeAlias,
+      columns,
       dialect: ctx.dialect,
       requiredColumns: requiredEdgeColumns,
       selectiveFields: ast.selectiveFields,
@@ -381,6 +374,7 @@ export function buildStandardTraversalCte(
     }),
     ...compileNodeSelectColumns({
       alias: nodeAlias,
+      columns,
       dialect: ctx.dialect,
       requiredColumns: requiredNodeColumns,
       selectiveFields: ast.selectiveFields,
@@ -404,11 +398,11 @@ export function buildStandardTraversalCte(
     carryForwardPreviousColumns || previousAlias === ast.start.alias;
   const frontierSource =
     frontierHoldsOneRowPerNode ?
-      sql`cte_${sql.raw(previousAlias)}`
-    : sql`(SELECT DISTINCT ${sql.raw(previousAlias)}_id, ${sql.raw(previousAlias)}_kind FROM cte_${sql.raw(previousAlias)}) AS cte_${sql.raw(previousAlias)}`;
+      sql`${sql.raw(aliasCteName(previousAlias))}`
+    : sql`(SELECT DISTINCT ${sql.raw(aliasColumnName(previousAlias, "id"))}, ${sql.raw(aliasColumnName(previousAlias, "kind"))} FROM ${sql.raw(aliasCteName(previousAlias))}) AS ${sql.raw(aliasCteName(previousAlias))}`;
 
-  const previousIdColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_id`)}`;
-  const previousKindColumn = sql`cte_${sql.raw(previousAlias)}.${sql.raw(`${previousAlias}_kind`)}`;
+  const previousIdColumn = sql`${sql.raw(aliasCteName(previousAlias))}.${sql.raw(aliasColumnName(previousAlias, "id"))}`;
+  const previousKindColumn = sql`${sql.raw(aliasCteName(previousAlias))}.${sql.raw(aliasColumnName(previousAlias, "kind"))}`;
   const identityFrontierExpansion =
     traversal.includeIdentityMembers === true ?
       planIdentityFrontierExpansion({
@@ -545,7 +539,7 @@ export function buildStandardTraversalCte(
   if (inverseEdgeKinds.length === 0) {
     if (traversalLimitValue !== undefined) {
       return sql`
-        cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
+        ${sql.raw(cteName)} AS ${cteMaterialization}(
           SELECT * FROM (
             ${directBranch}
           ) AS traversal_rows
@@ -555,7 +549,7 @@ export function buildStandardTraversalCte(
     }
 
     return sql`
-      cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
+      ${sql.raw(cteName)} AS ${cteMaterialization}(
         ${directBranch}
       )
     `;
@@ -587,7 +581,7 @@ export function buildStandardTraversalCte(
 
   if (traversalLimitValue !== undefined) {
     return sql`
-      cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
+      ${sql.raw(cteName)} AS ${cteMaterialization}(
         SELECT * FROM (
           ${directBranch}
           UNION ALL
@@ -599,7 +593,7 @@ export function buildStandardTraversalCte(
   }
 
   return sql`
-    cte_${sql.raw(nodeAlias)} AS ${cteMaterialization}(
+    ${sql.raw(cteName)} AS ${cteMaterialization}(
       ${directBranch}
       UNION ALL
       ${inverseBranch}
@@ -617,7 +611,7 @@ function compileAggregateExprFromSource(
   return compileLegacyAggregateExpression(expr, {
     dialect,
     resolveFieldCteAlias() {
-      return cteAliasOverride ?? `cte_${field.alias}`;
+      return cteAliasOverride ?? aliasCteName(field.alias);
     },
   });
 }
@@ -643,7 +637,7 @@ function compileProjectedSource(
     field.source,
     dialect,
     field.source.valueType,
-    cteAlias ?? `cte_${field.source.alias}`,
+    cteAlias ?? aliasCteName(field.source.alias),
   );
 }
 
@@ -651,22 +645,60 @@ type BuildStandardProjectionInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
   ctx: PredicateCompilerContext;
+  names: SqlStatementNames;
 }>;
+
+/** Describes the value a projected field reads, for a name-collision refusal. */
+export function describeProjectedField(
+  field: Readonly<{
+    outputName: string;
+    source: DatabaseExpression | FieldRef | AggregateExpr;
+  }>,
+): string {
+  const source = field.source;
+  if (source.__type === "field_ref") {
+    const path = [
+      ...source.path,
+      ...(source.jsonPointer === undefined ? [] : [source.jsonPointer]),
+    ].join(".");
+    return `${path} of alias "${source.alias}"`;
+  }
+  return `the value selected as "${field.outputName}"`;
+}
+
+/** Describes the value a selectively projected field reads, for a refusal. */
+export function describeSelectiveField(field: SelectiveField): string {
+  return `${field.isSystemField ? "" : "property "}${field.field} of alias "${field.alias}"`;
+}
 
 export function buildStandardProjection(
   input: BuildStandardProjectionInput,
 ): SqlFragment {
-  const { ast, collapsedTraversalCteAlias, ctx } = input;
+  const { ast, collapsedTraversalCteAlias, ctx, names } = input;
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
     return compileSelectiveProjection(
       ast.selectiveFields,
       ast,
+      names,
       collapsedTraversalCteAlias,
     );
   }
 
   const fields = ast.projection.fields;
   if (fields.length === 0) {
+    // `SELECT *` returns every column of every relation in the FROM clause.
+    const fromRelations =
+      collapsedTraversalCteAlias === undefined ?
+        [
+          aliasCteName(ast.start.alias),
+          ...ast.traversals.map((traversal) =>
+            aliasCteName(traversal.nodeAlias),
+          ),
+        ]
+      : [collapsedTraversalCteAlias];
+    for (const relation of fromRelations)
+      names.results.inherit(names.relationColumns(relation));
+    names.recordColumnReads("every column");
     return sql.raw("*");
   }
 
@@ -677,7 +709,12 @@ export function buildStandardProjection(
       ctx,
       collapsedTraversalCteAlias,
     );
-    return sql`${source} AS ${quoteIdentifier(field.outputName)}`;
+    const outputName = declareResultColumn(
+      names,
+      field.outputName,
+      describeProjectedField(field),
+    );
+    return sql`${source} AS ${quoteIdentifier(outputName)}`;
   });
   return sql.join(projectedFields, sql`, `);
 }
@@ -688,11 +725,11 @@ export function buildStandardProjection(
  */
 function buildAliasToCteMap(ast: QueryAst): Map<string, string> {
   const map = new Map<string, string>([
-    [ast.start.alias, `cte_${ast.start.alias}`],
+    [ast.start.alias, aliasCteName(ast.start.alias)],
   ]);
   for (const traversal of ast.traversals) {
-    map.set(traversal.nodeAlias, `cte_${traversal.nodeAlias}`);
-    map.set(traversal.edgeAlias, `cte_${traversal.nodeAlias}`);
+    map.set(traversal.nodeAlias, aliasCteName(traversal.nodeAlias));
+    map.set(traversal.edgeAlias, aliasCteName(traversal.nodeAlias));
   }
   return map;
 }
@@ -700,6 +737,7 @@ function buildAliasToCteMap(ast: QueryAst): Map<string, string> {
 function compileSelectiveProjection(
   fields: readonly SelectiveField[],
   ast: QueryAst,
+  names: SqlStatementNames,
   collapsedTraversalCteAlias?: string,
 ): SqlFragment {
   const aliasToCte = buildAliasToCteMap(ast);
@@ -708,15 +746,20 @@ function compileSelectiveProjection(
     const cteAlias =
       collapsedTraversalCteAlias ??
       aliasToCte.get(field.alias) ??
-      `cte_${field.alias}`;
+      aliasCteName(field.alias);
+    const outputName = declareResultColumn(
+      names,
+      field.outputName,
+      describeSelectiveField(field),
+    );
 
     if (field.isSystemField) {
       const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
 
-      return sql`${sql.raw(cteAlias)}.${sql.raw(`${field.alias}_${dbColumn}`)} AS ${quoteIdentifier(field.outputName)}`;
+      return sql`${sql.raw(cteAlias)}.${sql.raw(aliasColumnName(field.alias, dbColumn))} AS ${quoteIdentifier(outputName)}`;
     }
 
-    return sql`${sql.raw(cteAlias)}.${quoteIdentifier(selectivePropsCteColumnName(field))} AS ${quoteIdentifier(field.outputName)}`;
+    return sql`${sql.raw(cteAlias)}.${quoteIdentifier(selectivePropsCteColumnName(field))} AS ${quoteIdentifier(outputName)}`;
   });
 
   return sql.join(columns, sql`, `);
@@ -808,9 +851,9 @@ function buildRelevanceJoins(
 
 function buildHybridCandidateJoin(nodeAlias: string): SqlFragment {
   const candidateCte = sql.raw(HYBRID_CANDIDATES_CTE_ALIAS);
-  const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
-  const idColumn = sql.raw(`${nodeAlias}_id`);
-  const kindColumn = sql.raw(`${nodeAlias}_kind`);
+  const node = sql.raw(aliasCteName(nodeAlias));
+  const idColumn = sql.raw(aliasColumnName(nodeAlias, "id"));
+  const kindColumn = sql.raw(aliasColumnName(nodeAlias, "kind"));
   return sql`INNER JOIN ${candidateCte} ON ${candidateCte}.node_id = ${node}.${idColumn} AND ${candidateCte}.node_kind = ${node}.${kindColumn}`;
 }
 
@@ -820,9 +863,9 @@ function buildRelevanceJoin(
   joinType = "INNER JOIN",
 ): SqlFragment {
   const cte = sql.raw(cteAlias);
-  const node = sql.raw(`${ALIAS_CTE_PREFIX}${nodeAlias}`);
-  const idColumn = sql.raw(`${nodeAlias}_id`);
-  const kindColumn = sql.raw(`${nodeAlias}_kind`);
+  const node = sql.raw(aliasCteName(nodeAlias));
+  const idColumn = sql.raw(aliasColumnName(nodeAlias, "id"));
+  const kindColumn = sql.raw(aliasColumnName(nodeAlias, "kind"));
   return sql`${sql.raw(joinType)} ${cte} ON ${cte}.node_id = ${node}.${idColumn} AND ${cte}.node_kind = ${node}.${kindColumn}`;
 }
 
@@ -847,15 +890,15 @@ export function buildStandardFromClause(
   }
 
   const startAlias = ast.start.alias;
-  const fromClause = sql`FROM cte_${sql.raw(startAlias)}`;
+  const fromClause = sql`FROM ${sql.raw(aliasCteName(startAlias))}`;
 
   const joins: SqlFragment[] = [];
   for (const traversal of ast.traversals) {
-    const cteAlias = `cte_${traversal.nodeAlias}`;
+    const cteAlias = aliasCteName(traversal.nodeAlias);
     const previousAlias = traversal.joinFromAlias;
     const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
     joins.push(
-      sql`${sql.raw(joinType)} ${sql.raw(cteAlias)} ON ${sql.raw(cteAlias)}.${sql.raw(previousAlias)}_id = cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_id AND ${sql.raw(cteAlias)}.${sql.raw(previousAlias)}_kind = cte_${sql.raw(previousAlias)}.${sql.raw(previousAlias)}_kind`,
+      sql`${sql.raw(joinType)} ${sql.raw(cteAlias)} ON ${sql.raw(cteAlias)}.${sql.raw(aliasColumnName(previousAlias, "id"))} = ${sql.raw(aliasCteName(previousAlias))}.${sql.raw(aliasColumnName(previousAlias, "id"))} AND ${sql.raw(cteAlias)}.${sql.raw(aliasColumnName(previousAlias, "kind"))} = ${sql.raw(aliasCteName(previousAlias))}.${sql.raw(aliasColumnName(previousAlias, "kind"))}`,
     );
   }
 
@@ -906,7 +949,7 @@ export function buildStandardOrderBy(
       collapsedTraversalCteAlias ??
       (orderSpec.field.__type === "field_ref" ?
         (aliasToCte?.get(orderSpec.field.alias) ??
-        `cte_${orderSpec.field.alias}`)
+        aliasCteName(orderSpec.field.alias))
       : undefined) ??
       "";
     const field = compileOrderFieldValue(
@@ -949,12 +992,6 @@ export function buildStandardOrderBy(
 
 export const LATE_MAT_TOPK_CTE_ALIAS = "cte_lm_topk";
 const LATE_MAT_SORT_KEY_PREFIX = "__lm_sk";
-const LATE_MAT_PHYSICAL_ALIAS_PREFIX = "lm_";
-
-export function lateMaterializedPhysicalAlias(alias: string): string {
-  return `${LATE_MAT_PHYSICAL_ALIAS_PREFIX}${alias}`;
-}
-
 /** Node aliases in the query: the start alias plus each traversal's node. */
 function lateMaterializedNodeAliases(ast: QueryAst): readonly string[] {
   return [
@@ -985,6 +1022,7 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
   collapsedTraversalCteAlias?: string;
   dialect: DialectAdapter;
   fromClause: SqlFragment;
+  names: SqlStatementNames;
   where?: SqlFragment;
   limit: number;
   offset?: number | undefined;
@@ -1002,19 +1040,19 @@ type BuildLateMaterializedTopKCteInput = Readonly<{
 export function buildLateMaterializedTopKCte(
   input: BuildLateMaterializedTopKCteInput,
 ): SqlFragment {
-  const { ast, collapsedTraversalCteAlias, dialect, fromClause } = input;
+  const { ast, collapsedTraversalCteAlias, dialect, fromClause, names } = input;
+  const topKName = declareFixedCte(names, LATE_MAT_TOPK_CTE_ALIAS);
+  const topKColumns = names.relationColumns(topKName);
   const aliasToCte = buildAliasToCteMap(ast);
   const cteAliasFor = (alias: string): string =>
-    collapsedTraversalCteAlias ??
-    aliasToCte.get(alias) ??
-    `${ALIAS_CTE_PREFIX}${alias}`;
+    collapsedTraversalCteAlias ?? aliasToCte.get(alias) ?? aliasCteName(alias);
 
   const columns: SqlFragment[] = [];
   for (const alias of lateMaterializedNodeAliases(ast)) {
     const cteAlias = cteAliasFor(alias);
     columns.push(
-      sql`${qualifyColumn(cteAlias, `${alias}_id`)} AS ${sql.raw(`${alias}_id`)}`,
-      sql`${qualifyColumn(cteAlias, `${alias}_kind`)} AS ${sql.raw(`${alias}_kind`)}`,
+      sql`${qualifyColumn(cteAlias, aliasColumnName(alias, "id"))} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "id"))}`,
+      sql`${qualifyColumn(cteAlias, aliasColumnName(alias, "kind"))} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "kind"))}`,
     );
   }
   for (const [index, orderSpec] of (ast.orderBy ?? []).entries()) {
@@ -1026,9 +1064,13 @@ export function buildLateMaterializedTopKCte(
         cteAliasFor(orderSpec.field.alias)
       : (collapsedTraversalCteAlias ?? ""),
     );
-    columns.push(
-      sql`${value} AS ${sql.raw(`${LATE_MAT_SORT_KEY_PREFIX}${index}`)}`,
+    const sortKey = `${LATE_MAT_SORT_KEY_PREFIX}${index}`;
+    topKColumns.register(
+      sortKey,
+      `sort-key\u0000${index}`,
+      `sort key ${index}`,
     );
+    columns.push(sql`${value} AS ${sql.raw(sortKey)}`);
   }
 
   const innerOrderBy = buildStandardOrderBy({
@@ -1052,7 +1094,7 @@ export function buildLateMaterializedTopKCte(
   if (innerOrderBy !== undefined) parts.push(innerOrderBy);
   if (limitOffset !== undefined) parts.push(limitOffset);
 
-  return sql`${sql.raw(LATE_MAT_TOPK_CTE_ALIAS)} AS (${sql.join(parts, sql` `)})`;
+  return sql`${sql.raw(topKName)} AS (${sql.join(parts, sql` `)})`;
 }
 
 /**
@@ -1063,19 +1105,25 @@ export function buildLateMaterializedTopKCte(
 export function buildLateMaterializedOuterProjection(
   ast: QueryAst,
   dialect: DialectAdapter,
+  names: SqlStatementNames,
 ): SqlFragment {
   const columns = (ast.selectiveFields ?? []).map((field) => {
     const physicalAlias = lateMaterializedPhysicalAlias(field.alias);
+    const outputName = declareResultColumn(
+      names,
+      field.outputName,
+      describeSelectiveField(field),
+    );
     if (field.isSystemField) {
       const dbColumn = mapSelectiveSystemFieldToColumn(field.field);
-      return sql`${compileColumnReference(physicalAlias, dbColumn)} AS ${quoteIdentifier(field.outputName)}`;
+      return sql`${compileColumnReference(physicalAlias, dbColumn)} AS ${quoteIdentifier(outputName)}`;
     }
     const extracted = compileSelectivePropsExtraction(
       field,
       compileColumnReference(physicalAlias, "props"),
       dialect,
     );
-    return sql`${extracted} AS ${quoteIdentifier(field.outputName)}`;
+    return sql`${extracted} AS ${quoteIdentifier(outputName)}`;
   });
   return sql.join(columns, sql`, `);
 }
@@ -1171,7 +1219,7 @@ export function buildStandardGroupBy(
         field,
         dialect,
         field.valueType,
-        aliasToCte.get(field.alias) ?? `cte_${field.alias}`,
+        aliasToCte.get(field.alias) ?? aliasCteName(field.alias),
       ),
   );
 
@@ -1192,7 +1240,7 @@ export function buildStandardResultWhere(
     ...ctx,
     databaseExpressionAggregates: false,
     resolveFieldCteAlias: (field) =>
-      aliases.get(field.alias) ?? `cte_${field.alias}`,
+      aliases.get(field.alias) ?? aliasCteName(field.alias),
   });
   return sql`WHERE ${condition}`;
 }
@@ -1345,8 +1393,8 @@ export function buildStandardEmbeddingsCte(
       // The JOIN consumers (exact branch, fulltext CTE) keep
       // buildScopedNodeIdsSubquery's DISTINCT — a join DOES multiply
       // rows on duplicates.
-      const candidateCte = `${ALIAS_CTE_PREFIX}${field.alias}`;
-      const kindCandidates = sql`SELECT ${qualifyColumn(candidateCte, `${field.alias}_id`)} FROM ${quoteIdentifier(candidateCte)} WHERE ${qualifyColumn(candidateCte, `${field.alias}_kind`)} = ${kind}`;
+      const candidateCte = aliasCteName(field.alias);
+      const kindCandidates = sql`SELECT ${qualifyColumn(candidateCte, aliasColumnName(field.alias, "id"))} FROM ${quoteIdentifier(candidateCte)} WHERE ${qualifyColumn(candidateCte, aliasColumnName(field.alias, "kind"))} = ${kind}`;
       const annSql = vectorStrategy.buildSearch(
         {
           graphId,
@@ -1619,7 +1667,7 @@ function compileUserOrderBy(
     const cteAlias =
       orderSpec.field.__type === "field_ref" ?
         (aliasToCte.get(orderSpec.field.alias) ??
-        `${ALIAS_CTE_PREFIX}${orderSpec.field.alias}`)
+        aliasCteName(orderSpec.field.alias))
       : "";
     const field = compileOrderFieldValue(
       ast,
