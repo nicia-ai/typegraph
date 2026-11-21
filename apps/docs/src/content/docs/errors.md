@@ -259,6 +259,67 @@ This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration
 surfaces as the engine's own failure — neither is reshaped into this error.
 
+#### `SQL_IDENTIFIER_COLLISION` and `SQL_IDENTIFIER_TOO_LONG`
+
+A query compiles each alias into SQL names: a WITH relation `cte_<alias>`, columns
+`<alias>_<column>`, and result columns named after the alias and field you select.
+PostgreSQL clips every name to its first 63 bytes, and both engines compare relation
+and column names without regard to letter case. When two different values of one
+query would end up with the same name under those rules, or a result column the
+library reads back by name would be longer than 63 bytes, the query fails on one
+engine (an error such as `column reference is ambiguous`) or returns another value's
+data on the other. Such a query is refused instead, on every backend, with a
+`ValidationError` raised by `execute()`, `compile()`, `toSQL()` or `prepare()` before
+any SQL is sent.
+
+- `SQL_IDENTIFIER_COLLISION`: two values share a name. Examples: node aliases `item`
+  and `Item`; two 60-character aliases that share their first 59 characters; an edge
+  alias `e` beside a node alias `e_from` when whole rows are selected (the edge's
+  `from_id` and the node's `id` are both `e_from_id`); selecting a property `edge_id`
+  of alias `p` together with the id of alias `p_edge`.
+- `SQL_IDENTIFIER_TOO_LONG`: a result column read back by name would exceed 63
+  bytes. Examples: reading `id` under a 61-character alias (`<alias>_id` is 64
+  bytes), or an `aggregate()` key longer than 63 bytes; bytes are counted, so 32
+  two-byte characters are too long.
+
+Each issue's `path` names the SQL scope (`the WITH list`, `the columns of cte_<alias>`
+or `the result columns`) and its message names both generated names and the value
+each stands for. Fix the query by renaming: use aliases that differ in more than
+letter case and early in the name, keep aliases short enough that `<alias>_<field>`
+fits in 63 bytes, or pick a different `aggregate()` key.
+
+```typescript
+import { SQL_IDENTIFIER_COLLISION_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  await store
+    .query()
+    .from("Person", "item")
+    .traverse("knows", "e")
+    .to("Person", "Item")
+    .select((ctx) => ({ from: ctx.item.id, to: ctx.Item.id }))
+    .execute();
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === SQL_IDENTIFIER_COLLISION_CODE)
+  ) {
+    // Rename one alias, for example "item" and "related".
+  }
+}
+```
+
+The decision does not depend on the backend, so a query is accepted or refused the
+same way everywhere. `.execute()` sends a statement that reads only the selected
+fields when the selector reads plain fields, and that statement decides; `compile()`,
+`toSQL()` and `prepare()` reach the same verdict even though `compile()` returns the
+statement with every column. Two names that meet are not refused when nothing in the
+statement reads either of them. The check covers queries built with `from()`,
+`traverse()`, `select()`, `project()` and `aggregate()`, including `count()` and
+`exists()` on them. Recursive traversals, set operations, `asRelation()`, subqueries,
+`batchOnce()`, checked reads and cursor pages are not covered yet.
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.

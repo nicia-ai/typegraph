@@ -112,6 +112,16 @@ store
   .to("Company", "p")  // TypeScript error: alias "p" already in use
 ```
 
+Each alias also becomes part of the SQL names the query compiles to (`cte_<alias>`,
+`<alias>_<column>`), which PostgreSQL clips to 63 bytes and the engines compare without
+regard to letter case. A query whose generated names would collide under those rules —
+aliases `item` and `Item`, two long aliases that share their first 59 characters, an
+edge alias `e` beside a node alias `e_from` when whole rows are selected — or whose
+result column `<alias>_<field>` would exceed 63 bytes is refused before any SQL is sent
+with a `ValidationError` carrying the code `SQL_IDENTIFIER_COLLISION` or
+`SQL_IDENTIFIER_TOO_LONG` (see [Errors](/errors#sql_identifier_collision-and-sql_identifier_too_long)).
+Short, distinct aliases avoid both.
+
 ## Subclass Expansion
 
 A query against a kind that other kinds declare `subClassOf` (or that
