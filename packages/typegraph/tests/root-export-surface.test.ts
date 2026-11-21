@@ -290,25 +290,37 @@ describe("package root export surface", () => {
   });
 });
 
+/**
+ * Type-checking every destination entrypoint in one program takes several
+ * seconds on its own and has exceeded the default timeout under coverage
+ * instrumentation on a busy runner.
+ */
+const EXPORT_KIND_PROGRAM_TIMEOUT_MS = 60_000;
+
 describe("root export move map", () => {
-  it("names a subpath that exports each moved name at its recorded kind", () => {
-    const config = readPackageConfig();
-    const moves = readExportMoves().filter(
-      (move): move is ExportMove & Readonly<{ to: string }> => move.to !== null,
-    );
-    const entries = [
-      ...new Set(moves.map((move) => entryFileOf(config, move.to))),
-    ];
-    const kindsByEntry = readExportKinds(entries);
+  it(
+    "names a subpath that exports each moved name at its recorded kind",
+    () => {
+      const config = readPackageConfig();
+      const moves = readExportMoves().filter(
+        (move): move is ExportMove & Readonly<{ to: string }> =>
+          move.to !== null,
+      );
+      const entries = [
+        ...new Set(moves.map((move) => entryFileOf(config, move.to))),
+      ];
+      const kindsByEntry = readExportKinds(entries);
 
-    const stale = moves
-      .filter(
-        (move) =>
-          kindsByEntry.get(entryFileOf(config, move.to))?.get(move.symbol) !==
-          move.kind,
-      )
-      .map((move) => `${move.symbol} (${move.kind}) -> ${move.to}`);
+      const stale = moves
+        .filter(
+          (move) =>
+            kindsByEntry.get(entryFileOf(config, move.to))?.get(move.symbol) !==
+            move.kind,
+        )
+        .map((move) => `${move.symbol} (${move.kind}) -> ${move.to}`);
 
-    expect(stale).toEqual([]);
-  });
+      expect(stale).toEqual([]);
+    },
+    EXPORT_KIND_PROGRAM_TIMEOUT_MS,
+  );
 });

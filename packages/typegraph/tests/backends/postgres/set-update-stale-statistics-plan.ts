@@ -705,7 +705,7 @@ export function registerStaleStatisticsPlanCases(
   // the shared compiler emits an id predicate for every query, which is left
   // to that sibling work.
   it.for(["compareAndSet", "updateWhere"] as const)(
-    "%s of one id still scans the fresh kind to select it (known limitation)",
+    "%s of one id selects it by key or by one scan of the fresh kind (known limitation)",
     async (operation, ctx) => {
       const active = harness();
       if (active === undefined) {
@@ -714,13 +714,24 @@ export function registerStaleStatisticsPlanCases(
       }
       const measured = await measureStalePointMutation(active, operation);
 
-      expect(measured).toEqual({
-        written: 1,
-        // The write finds the target, and for updateWhere the version its
-        // snapshot read, by the id.
-        keyedLookups: operation === "updateWhere" ? 2 : 1,
-        otherScans: [{ rows: 1, removed: POINT_MUTATION_FRESH_ROWS - 1 }],
-      });
+      // The write finds the target, and for updateWhere the version its
+      // snapshot read, by the id.
+      const writeLookups = operation === "updateWhere" ? 2 : 1;
+      // PostgreSQL chooses how the candidate read finds the id from its
+      // estimate of the fresh kind, which varies with what ANALYZE sampled:
+      // usually it scans the kind's un-analyzed rows and filters the id (the
+      // limitation), sometimes it looks the id up by key as well. Both are
+      // correct, and neither rescans.
+      const candidateReadByKey = measured.otherScans.length === 0;
+      expect(measured).toEqual(
+        candidateReadByKey ?
+          { written: 1, keyedLookups: writeLookups + 1, otherScans: [] }
+        : {
+            written: 1,
+            keyedLookups: writeLookups,
+            otherScans: [{ rows: 1, removed: POINT_MUTATION_FRESH_ROWS - 1 }],
+          },
+      );
     },
   );
 
