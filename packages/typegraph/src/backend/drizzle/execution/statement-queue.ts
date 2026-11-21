@@ -25,7 +25,7 @@
  *
  * Edge-safe: no `node:*` imports (loaded on Workers via neon-serverless).
  */
-import { TransactionClosedError } from "../../../errors";
+import { createTransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
   type ExecutableSql,
@@ -42,7 +42,8 @@ export type SerialExecutionAdapter = SqlExecutionAdapter &
     runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
     /**
      * Waits for the statement currently on the wire, then refuses every
-     * later one with a {@link TransactionClosedError}.
+     * later one with a `TransactionClosedError`; `./transaction-view` owns
+     * that decision for both dialects.
      *
      * Callers invoke this at the transaction boundary, before the driver
      * emits `COMMIT` / `ROLLBACK` on the same connection. The driver's control
@@ -118,19 +119,18 @@ export function createSerialExecutionAdapter(
     transactionOwner === undefined ?
       createStatementQueue()
     : queueForTransaction(transactionOwner);
-  let closed = false;
+  const view = createTransactionView();
   const { executeCompiled, prepare } = adapter;
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
-    if (closed) return Promise.reject(new TransactionClosedError());
-    return queue.enqueue(task);
+    return view.admit(() => queue.enqueue(task));
   }
 
   return {
     async drainAndClose(): Promise<void> {
       // Close this transaction's view before draining the shared connection.
       // A later transaction may reuse that connection with a fresh view.
-      closed = true;
+      await view.drainAndClose();
       await queue.drain();
     },
 
