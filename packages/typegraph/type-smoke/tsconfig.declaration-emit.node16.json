@@ -7,10 +7,9 @@
     "strict": true,
     "declaration": true,
     "emitDeclarationOnly": true,
-    "outDir": "declaration-out/node16",
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true
-  },
-  "files": ["declaration-emit.ts"]
+    "exactOptionalPropertyTypes": true,
+    "rootDir": "declaration-emit"
+  }
 }
