@@ -2290,6 +2290,29 @@ await store.transaction(async (tx) => {
 });
 ```
 
+When `store.transaction()` resolves, the transaction committed. When it rejects, it did not:
+nothing the callback wrote was saved. That holds even for an error the callback catches. On
+PostgreSQL, a statement that fails inside a transaction (a duplicate id, a constraint violation, a
+read or a `tx.sql` statement the database refuses) aborts the whole transaction whether or not the
+callback catches the error, and the database answers the closing `COMMIT` with a rollback.
+TypeGraph checks the session before it commits, so such a transaction rejects with a
+`TransactionRolledBackError` whose `cause` is the engine error that aborted it; it never resolves
+as if it had committed. To carry on after an expected failure, run the failing statement inside a
+savepoint (for example a nested `tx.sql.transaction(...)`) that rolls back past it: the
+transaction is then healthy and commits. SQLite keeps a transaction usable after a failed
+statement, so on SQLite the same callback commits what it wrote.
+
+```typescript
+try {
+  await store.transaction(async (tx) => {
+    await tx.nodes.Person.create({ name: "Alice" });
+    await tx.edges.knows.create(alice, bob, {}, { id: existingEdgeId }).catch(() => undefined);
+  });
+} catch (error) {
+  // PostgreSQL: TransactionRolledBackError, cause = the duplicate-key error. Alice was not saved.
+}
+```
+
 #### Read-only transactions
 
 `store.transaction(fn, { accessMode: "read_only" })` opens a transaction for reads only. Every
@@ -2303,7 +2326,8 @@ store on every backend, so the transaction stays usable: reads after it run, and
 commits.
 
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
-not checked: PostgreSQL rejects a write there and aborts the transaction, while SQLite, whose
+not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
+`TransactionRolledBackError`, even if the callback caught the refusal), while SQLite, whose
 transaction is not read-only at the engine, runs it and commits it.
 
 #### Overlapping calls in one transaction
@@ -2639,7 +2663,10 @@ driver error as `cause`) instead of the raw error, and `details.attempts` is
 `1`.
 
 Pass `retry: { attempts }` to have TypeGraph re-run the callback itself, up to
-`attempts` times total, whenever a conflict is detected:
+`attempts` times total, whenever a conflict is detected. A conflict the callback
+catches still rolled the transaction back, so it is detected too: the attempt
+rejects with `TransactionRolledBackError` carrying the conflict as its `cause`,
+and is retried the same way:
 
 ```typescript
 import { TransactionConflictError } from "@nicia-ai/typegraph";

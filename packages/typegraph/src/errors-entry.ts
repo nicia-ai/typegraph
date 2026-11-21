@@ -121,6 +121,8 @@ export {
   TransactionClosedError,
   TransactionConflictError,
   type TransactionConflictErrorDetails,
+  TransactionRolledBackError,
+  type TransactionRolledBackErrorDetails,
   TrustedImportError,
   type TrustedImportErrorReason,
   TypeGraphError,

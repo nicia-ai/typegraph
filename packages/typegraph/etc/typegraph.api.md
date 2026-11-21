@@ -9009,6 +9009,20 @@ type TransactionReceipt = Readonly<{
     recorded?: RecordedInstant;
 }>;
 
+// @public
+export class TransactionRolledBackError extends TypeGraphError {
+    constructor(details: TransactionRolledBackErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionRolledBackErrorDetails;
+}
+
+// @public
+type TransactionRolledBackErrorDetails = Readonly<{
+    dialect: "postgres";
+}>;
+
 // @public (undocumented)
 type TransactionRuntime = Readonly<{
     backend: TransactionBackend;

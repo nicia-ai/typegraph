@@ -168,6 +168,7 @@ import {
   registerDriverSavepointScope,
   runSessionSavepoint,
 } from "../session-savepoint";
+import { registerTransactionCommitCheck } from "../transaction-commit-check";
 import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
@@ -256,12 +257,13 @@ import {
   type EngineOperationsContext,
   resolveSchemaProvisioning,
 } from "./engine/profile";
+import { runCommittingPostgresTransactionBody } from "./execution/postgres-commit-outcome";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
-  getPinnedPostgresTransactionClient,
+  getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
   isNeonHttpClient,
   isPgliteDatabase,
@@ -1336,7 +1338,7 @@ function buildPostgresEngineProfileInternal(
     : undefined;
   const queueOwner =
     transactionScoped ?
-      (getPinnedPostgresTransactionClient(db) ?? db)
+      (getPinnedPostgresTransactionConnection(db) ?? db)
     : bareClient;
   const executionAdapter =
     queueOwner === undefined ?
@@ -2413,7 +2415,9 @@ function buildPostgresEngineProfileInternal(
           SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
         : undefined;
       const attempt = (): Promise<T> =>
-        db.transaction(async (tx) => {
+        db.transaction(
+          (tx) =>
+            runCommittingPostgresTransactionBody(tx, async (observation) => {
           await acquireSchemaWriteFence(tx, graphId, fence, {
             kind: "read-with-lock",
           });
@@ -2441,12 +2445,20 @@ function buildPostgresEngineProfileInternal(
               recordedTime: provisioning.recordedTime,
               isFirstParty,
             });
+          if (observation !== undefined) {
+            registerTransactionCommitCheck(
+              txBackend,
+              observation.assertCommittable,
+            );
+          }
           try {
             return await fn(txBackend);
           } finally {
             await drainAndClose();
           }
-        }, transactionConfig);
+            }),
+          transactionConfig,
+        );
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
       return runRetriedUnit(
@@ -2568,9 +2580,21 @@ function buildPostgresEngineProfileInternal(
               }
             : undefined;
 
-          return db.transaction(async (tx) => {
+          return db.transaction(
+            (tx) =>
+              // Observation starts before anything binds to `tx`, so every
+              // statement on the session — the callback's native handle
+              // included — is seen, and the transaction can never report
+              // success after the database rolled it back.
+              runCommittingPostgresTransactionBody(tx, async (observation) => {
             const { backend: txBackend, drainAndClose } =
               bindTransactionBackend(tx, isFirstParty);
+            if (observation !== undefined) {
+              registerTransactionCommitCheck(
+                txBackend,
+                observation.assertCommittable,
+              );
+            }
             try {
               return await fn(
                 markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
@@ -2586,7 +2610,9 @@ function buildPostgresEngineProfileInternal(
               // the pool had already handed to somebody else.
               await drainAndClose();
             }
-          }, txConfig);
+              }),
+            txConfig,
+          );
         },
 
         adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
@@ -4270,7 +4296,7 @@ function createTransactionBackend(
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
     session.operation,
-    getPinnedPostgresTransactionClient(options.db) ?? options.db,
+    getPinnedPostgresTransactionConnection(options.db) ?? options.db,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =

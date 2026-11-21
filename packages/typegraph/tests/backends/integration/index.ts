@@ -123,6 +123,7 @@ export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids"
 export { registerTemporalIntegrationTests } from "./temporal";
 export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";
+export { registerTransactionCommitOutcomeIntegrationTests } from "./transaction-commit-outcome";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";

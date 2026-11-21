@@ -1251,9 +1251,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // (+2 apiece). The expression context's `$meta` keeps its one forgotten name,
   // `ExpressionMetadata`, now mapped over `SelectableNodeMeta` /
   // `SelectableEdgeMeta`.
+  // Transaction rollback outcome: the root entrypoint exports
+  // `TransactionRolledBackError` beside `TransactionConflictError` and, like
+  // it, leaves the details type to `./errors`, so `.` gains exactly
+  // `TransactionRolledBackErrorDetails` (+1). No other entrypoint changed.
   ".": {
-    count: 1080,
-    sha256: "ca4929027b392cbee081d23c63497ae9c96f2ed76fb6dab4068e94480bd5d96b",
+    count: 1081,
+    sha256: "efc932e7cdcb9430565d24a047df5030bcbafa0bb30819073c20e7dc8939d314",
   },
   "./adapters/drizzle/engine": {
     count: 353,

@@ -231,6 +231,57 @@ export function getPinnedPostgresTransactionClient(
   return client;
 }
 
+/**
+ * The driver client behind each observing wrapper
+ * {@link replacePinnedPostgresTransactionClient} installed, so connection
+ * identity never depends on whether a transaction is being observed.
+ */
+const OBSERVED_CLIENT_TARGETS = new WeakMap<object, object>();
+
+/**
+ * The connection this Drizzle transaction is pinned to: the driver client
+ * itself, never a wrapper installed around it. Use this, not
+ * {@link getPinnedPostgresTransactionClient}, wherever the client serves as
+ * the connection's identity (a per-connection statement queue).
+ */
+export function getPinnedPostgresTransactionConnection(
+  db: AnyPgDatabase,
+): object | undefined {
+  const client = getPinnedPostgresTransactionClient(db);
+  return client === undefined ? undefined : (
+      (OBSERVED_CLIENT_TARGETS.get(client) ?? client)
+    );
+}
+
+/**
+ * Installs `wrap(client)` as the pinned client of this Drizzle transaction's
+ * session, so every statement issued on the transaction — through Drizzle's
+ * session (prepared and relational queries, the native handle a caller holds)
+ * or through the compiled fast path, which reads the same field — runs
+ * through the wrapper. Returns the function that puts the driver client back,
+ * or `undefined` when the session exposes no inspectable client.
+ *
+ * Drizzle reads `session.client` each time it prepares a statement, so the
+ * replacement takes effect for every statement prepared after it, and must be
+ * installed before anything binds to the transaction.
+ */
+export function replacePinnedPostgresTransactionClient(
+  db: AnyPgDatabase,
+  wrap: (client: object) => object,
+): (() => void) | undefined {
+  const session = transactionSession(db as PgClientCarrier) as
+    | { client?: unknown }
+    | undefined;
+  const client = getPinnedPostgresTransactionClient(db);
+  if (session === undefined || client === undefined) return undefined;
+  const wrapped = wrap(client);
+  OBSERVED_CLIENT_TARGETS.set(wrapped, client);
+  session.client = wrapped;
+  return () => {
+    if (session.client === wrapped) session.client = client;
+  };
+}
+
 function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
 }
