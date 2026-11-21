@@ -271,12 +271,28 @@ Whether the check applies follows from the backend's declared write fence
 
 | Write fence | Can another writer commit after your snapshot, before the lock? | What is required |
 | --- | --- | --- |
-| `engine-serialized` (SQLite's default) | No: the write transaction takes the engine's single writer slot (`BEGIN IMMEDIATE`) before its first read | Nothing |
+| `engine-serialized` (SQLite's default) | No: a transaction TypeGraph opens takes the engine's single writer slot (`BEGIN IMMEDIATE`) before its first read, and in a transaction you adopted the call takes the slot before its first support read | Nothing; an adopted transaction whose snapshot another connection overtook is refused (see below) |
 | `caller-serialized` | No: the deployment runs every write unit alone, and adopted transactions are refused | Nothing |
 | `advisory` (PostgreSQL's default) | Yes, at a snapshot isolation level | Read committed, observed on the lock statement |
 | `row` | Yes, unless the session reads per statement | Read committed, observed on the fence-row statement; a fence that cannot report its session's isolation is refused, as the store already refuses an edge-acyclicity probe on it |
 
 The verbs, `assertHolds` and `holding(tx)` share this rule.
+
+A transaction you begin yourself and adopt with `withRecordedTransaction()`
+or `withEvolvedTransaction()` on SQLite may have been begun `DEFERRED`: it
+holds no writer slot until it writes, so another connection can commit after
+its first read fixed its snapshot. In such a transaction the verbs,
+`assertHolds` and `holding(tx)` (in a transaction that can write) take the
+writer slot before their first support read, with the same zero-row write a
+constrained store write uses there. If nothing committed since the
+transaction's snapshot, the slot is granted and every later read is current.
+If another connection did commit, SQLite refuses the slot
+(`SQLITE_BUSY_SNAPSHOT`), and the call throws `TransactionConflictError`
+(`TRANSACTION_CONFLICT`, naming the call, with the driver error as `cause`)
+before reading anything: SQLite cannot refresh the snapshot in place, so roll
+back and re-run the whole transaction. Begin the transaction with
+`BEGIN IMMEDIATE` to avoid the refusal. A transaction TypeGraph opens already
+holds the slot and issues no extra statement.
 `tx.assertUnchangedSince()` and a merge plan applied in your transaction keep
 their own, stricter rule: they also refuse a `caller-serialized` fence, which
 yields no lock evidence to judge.
@@ -298,11 +314,16 @@ the rule for any call that fails inside `store.transaction()` and is caught.
 A refusal before the verb's first write — the transaction refusals above, a
 source of a kind outside the configured source kinds, a source with no current
 row — leaves nothing behind. A failure after a write keeps the writes the verb
-already made: an `unRetract` that clears a source's flag and then cannot reopen
-a fact, because a live fact now holds that fact's unique key, leaves the flag
-cleared and the fact closed, and a commit keeps that state. To discard a
-partial transition, let the error leave the callback so the whole transaction
-rolls back.
+already made. The verb orders them so that no such prefix leaves a fact live
+without live support: it closes the facts that lose their support first, then
+updates the source flags, then reopens the facts that regain support. A
+partial transition can therefore leave a fact closed although its support
+still stands (a `retractMany` that closed its facts and flagged only some of
+its sources), or a source flag cleared while its fact is still closed (an
+`unRetract` that cannot reopen a fact because a live fact now holds that
+fact's unique key), and a commit keeps that state. Running the same verb again
+completes the transition. To discard a partial transition instead, let the
+error leave the callback so the whole transaction rolls back.
 
 In `withRecordedTransaction()` and `withEvolvedTransaction()`, an error that
 leaves the callback rejects the adoption call and reaches your native
@@ -493,6 +514,20 @@ reads in its own transaction.
   already requires of a merge: the graph lock it takes then orders every write
   after it. `assertHolds` and `holding(tx)` behaved this way before the verbs
   accepted a transaction.
+- With engine-native recorded time on PostgreSQL, an ordinary write is also
+  not excluded by a provenance decision. A retraction decides which facts lose
+  their support from what it reads under the graph write lock, and a
+  concurrent transaction that adds a justification of one of those facts takes
+  no graph lock, so the retraction neither waits for it nor sees it. Both can
+  commit, leaving the fact closed although the new justification derives it
+  from an available source. This holds for every form of the verbs, with or
+  without your transaction and wherever in it you call them. Under
+  TypeGraph-owned history capture every write takes the graph lock first, so
+  the retraction waits for such a write and reads it. On this
+  profile, serialize the writes that change provenance structure
+  (justifications, `premiseOf` and `derives` edges, fact rows) with your
+  retractions yourself, or check the facts you rely on again after both have
+  committed: `unRetract` of a source the fact is justified by reopens it.
 - Inside a transaction, pass it to the retraction verbs. Without it a verb
   opens a second transaction, which commits independently of yours and waits
   for the graph lock if yours already holds it.
