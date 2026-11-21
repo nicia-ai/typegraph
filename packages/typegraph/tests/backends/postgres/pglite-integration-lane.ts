@@ -13,6 +13,7 @@
  */
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
+import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
@@ -82,6 +83,9 @@ export function registerPgliteIntegrationLane(
           backend: engine.makeBackend(
             overrides?.capabilities,
             overrides?.schemaProvisioning,
+            overrides?.tableNames === undefined ?
+              undefined
+            : createPostgresTables(overrides.tableNames),
           ),
           close: () => Promise.resolve(),
         }),

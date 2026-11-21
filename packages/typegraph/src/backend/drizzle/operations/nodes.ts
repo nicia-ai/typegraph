@@ -44,6 +44,7 @@ import {
   sqlNull,
   type Tables,
 } from "./shared";
+import { statementRelationNames } from "./statement-relation-names";
 
 const INITIAL_NODE_VERSION = 1;
 const NODE_VERSION_INCREMENT = 1;
@@ -1083,12 +1084,21 @@ function buildNodeExpectationPredicate(
   return adapter.jsonScalarPathEquals(propsColumn, pointer, expectation.value);
 }
 
-/** The aliases of the set update's key subquery (see {@link buildUpdateNodeSet}). */
+/**
+ * The relations the set update introduces, by preferred name (see
+ * {@link buildUpdateNodeSet}). They are resolved per schema through
+ * {@link statementRelationNames}, so a configured table carrying one of these
+ * names is never shadowed.
+ */
 const SET_KEYS = "tg_set_keys";
+const SET_SELECTED = "tg_set_selected";
+const SET_CANDIDATES = "tg_set_candidates";
+const SET_RELATIONS = [SET_KEYS, SET_SELECTED, SET_CANDIDATES] as const;
+
+/** The column aliases of the set update's key CTE. */
 const SET_KEY_GRAPH_ID = "tg_set_key_graph_id";
 const SET_KEY_KIND = "tg_set_key_kind";
 const SET_KEY_ID = "tg_set_key_id";
-const SET_SELECTED = "tg_set_selected";
 
 /**
  * Builds one set-based update over candidate ids selected by the shared query
@@ -1153,7 +1163,12 @@ export function buildUpdateNodeSet(
       sql.empty()
     : sql` AND ${sql.join(expectedPredicates, sql` AND `)}`;
 
-  const keys = sql.identifier(SET_KEYS);
+  const relationNames = statementRelationNames(tables, SET_RELATIONS);
+  const selected = relationNames[SET_SELECTED];
+  // Resolved names are plain lowercase identifiers, emitted unquoted as the
+  // candidates alias always was.
+  const candidates = portableSql.raw(relationNames[SET_CANDIDATES]);
+  const keys = sql.identifier(relationNames[SET_KEYS]);
   const keyGraphId = sql`${keys}.${sql.identifier(SET_KEY_GRAPH_ID)}`;
   const keyKind = sql`${keys}.${sql.identifier(SET_KEY_KIND)}`;
   const keyId = sql`${keys}.${sql.identifier(SET_KEY_ID)}`;
@@ -1164,7 +1179,7 @@ export function buildUpdateNodeSet(
   // case-insensitive PostgreSQL collation would match a non-candidate twin.
   // The key column's own collation makes both use the primary key's equality.
   const candidateKeyId = adapter.keyText(
-    portableSql`tg_set_candidates.${portableSql.identifier(params.candidateIdColumn)}`,
+    portableSql`${candidates}.${portableSql.identifier(params.candidateIdColumn)}`,
   );
   // The keys are a CTE so that the candidate query is evaluated once on every
   // engine: SQLite codes the version-keyed row-value IN below twice (once to
@@ -1173,13 +1188,13 @@ export function buildUpdateNodeSet(
   // subquery it is, so its plan is unchanged.
   const keysCte = toDrizzleSql(
     adapter.singleEvaluationCte(
-      portableSql.identifier(SET_KEYS),
+      portableSql.identifier(relationNames[SET_KEYS]),
       portableSql`
               SELECT DISTINCT
                 CAST(${params.graphId} AS TEXT) AS ${portableSql.identifier(SET_KEY_GRAPH_ID)},
                 CAST(${params.kind} AS TEXT) AS ${portableSql.identifier(SET_KEY_KIND)},
                 ${candidateKeyId} AS ${portableSql.identifier(SET_KEY_ID)}
-              FROM (${params.candidateIds}) AS tg_set_candidates
+              FROM (${params.candidateIds}) AS ${candidates}
             `,
     ),
     dialect,
@@ -1214,12 +1229,12 @@ export function buildUpdateNodeSet(
       `
     : sql`
       (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${nodes.version}) IN (
-              SELECT ${qualifiedColumn(SET_SELECTED, nodes.graphId)}, ${qualifiedColumn(SET_SELECTED, nodes.kind)}, ${qualifiedColumn(SET_SELECTED, nodes.id)}, ${qualifiedColumn(SET_SELECTED, nodes.version)}
+              SELECT ${qualifiedColumn(selected, nodes.graphId)}, ${qualifiedColumn(selected, nodes.kind)}, ${qualifiedColumn(selected, nodes.id)}, ${qualifiedColumn(selected, nodes.version)}
               FROM ${keys}
-              JOIN ${nodes} AS ${sql.identifier(SET_SELECTED)}
-                ON ${qualifiedColumn(SET_SELECTED, nodes.graphId)} = ${keyGraphId}
-               AND ${qualifiedColumn(SET_SELECTED, nodes.kind)} = ${keyKind}
-               AND ${qualifiedColumn(SET_SELECTED, nodes.id)} = ${keyId}
+              JOIN ${nodes} AS ${sql.identifier(selected)}
+                ON ${qualifiedColumn(selected, nodes.graphId)} = ${keyGraphId}
+               AND ${qualifiedColumn(selected, nodes.kind)} = ${keyKind}
+               AND ${qualifiedColumn(selected, nodes.id)} = ${keyId}
             )
     `;
   return sql`

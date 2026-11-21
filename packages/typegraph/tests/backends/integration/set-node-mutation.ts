@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   ConfigurationError,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -25,7 +26,10 @@ import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write
 import { compareAndSetAbsent } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
-import { type IntegrationTestContext } from "./test-context";
+import {
+  type IntegrationTestContext,
+  type SerializedBackendTableNames,
+} from "./test-context";
 
 function compileCandidateIds(
   graphId: string,
@@ -172,6 +176,45 @@ async function caseInsensitiveColumn(
       );
     },
   };
+}
+
+/**
+ * The relations the set update introduces under their preferred names. A
+ * configured table carrying one of them must not be shadowed by it.
+ */
+const SET_UPDATE_RELATION_NAMES = [
+  "tg_set_keys",
+  "tg_set_selected",
+  "tg_set_candidates",
+] as const;
+
+const ShadowItem = defineNode("ShadowItem", {
+  schema: z.object({ name: z.string(), flagged: z.boolean().optional() }),
+});
+
+const shadowGraph = defineGraph({
+  id: "set_update_relation_shadowing",
+  nodes: { ShadowItem: { type: ShadowItem } },
+  edges: {},
+});
+
+/**
+ * A complete set of table names private to one case: the nodes table is
+ * `nodes`, and every other table is `<nodes>_<n>`, so one of them takes the
+ * first alternative a clashing statement name would fall back to.
+ */
+function shadowingTableNames(
+  backend: Pick<GraphBackend, "tableNames">,
+  nodes: string,
+): SerializedBackendTableNames {
+  return Object.fromEntries(
+    Object.entries(requireDefined(backend.tableNames)).flatMap(
+      ([key, name], index) =>
+        typeof name === "string" ?
+          [[key, key === "nodes" ? nodes : `${nodes}_${index}`]]
+        : [],
+    ),
+  );
 }
 
 /** The ids of two nodes that differ only by case. */
@@ -1812,6 +1855,71 @@ export function registerSetNodeMutationIntegrationTests(
         store.asOfRecorded(afterUpdate).nodes.Person.getById(bob.id),
       ).resolves.toHaveProperty("isActive", true);
     });
+
+    describe.for(SET_UPDATE_RELATION_NAMES)(
+      "with the nodes table named %s",
+      (nodesTable) => {
+        it("updateWhere and compareAndSet write exactly the selected rows", async () => {
+          const tableNames = shadowingTableNames(
+            context.getBackend(),
+            nodesTable,
+          );
+          const serialized = await context.createSerializedBackend({
+            tableNames,
+          });
+          const { backend } = serialized;
+          try {
+            expect(requireDefined(backend.tableNames).nodes).toBe(nodesTable);
+            await requireDefined(backend.bootstrapTables)();
+            const [store] = await createStoreWithSchema(shadowGraph, backend);
+            const items = [];
+            for (const name of ["match", "match", "other", "other"]) {
+              items.push(await store.nodes.ShadowItem.create({ name }));
+            }
+
+            const { affectedCount } = await store.nodes.ShadowItem.updateWhere({
+              where: (item) => item.name.eq("match"),
+              patch: { flagged: true },
+            });
+            const swapped = await store.nodes.ShadowItem.compareAndSet(
+              requireDefined(items[2]).id,
+              { expected: { name: "other" }, patch: { flagged: true } },
+            );
+            const stored = await Promise.all(
+              items.map(async (item) =>
+                requireDefined(await store.nodes.ShadowItem.getById(item.id)),
+              ),
+            );
+
+            expect({
+              affectedCount,
+              swapped,
+              stored: stored.map((item) => [item.flagged, item.meta.version]),
+            }).toEqual({
+              affectedCount: 2,
+              swapped: true,
+              stored: [
+                [true, 2],
+                [true, 2],
+                [true, 2],
+                [undefined, 1],
+              ],
+            });
+          } finally {
+            // The PostgreSQL lanes' serialized backends share the suite's
+            // database, so the case's own tables are dropped with it.
+            if (backend.dialect === "postgres") {
+              await requireDefined(backend.executeDdl)(
+                `DROP TABLE IF EXISTS ${Object.values(tableNames)
+                  .map((name) => `"${name}"`)
+                  .join(", ")} CASCADE`,
+              );
+            }
+            await serialized.close();
+          }
+        });
+      },
+    );
 
     it("rejects an empty patch before executing SQL", async () => {
       const store = context.getStore();

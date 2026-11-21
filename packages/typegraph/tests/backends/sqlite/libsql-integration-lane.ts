@@ -8,6 +8,7 @@
 import { createClient } from "@libsql/client";
 import { afterEach } from "vitest";
 
+import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
@@ -49,6 +50,9 @@ export function registerLibsqlIntegrationLane(
             serializedClient,
             {
               schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+              ...(overrides?.tableNames === undefined ?
+                {}
+              : { tables: createSqliteTables(overrides.tableNames) }),
             },
           );
           return {

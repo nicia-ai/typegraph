@@ -15,6 +15,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe } from "vitest";
 
+import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { requireDefined } from "../../../src/utils/presence";
@@ -81,6 +82,9 @@ export function registerPostgresIntegrationLane(
                   : { capabilities: overrides.capabilities }),
                   schemaProvisioning:
                     overrides?.schemaProvisioning ?? "dml-only",
+                  ...(overrides?.tableNames === undefined ?
+                    {}
+                  : { tables: createPostgresTables(overrides.tableNames) }),
                 }),
                 close: () => serializedPool.end(),
               });
