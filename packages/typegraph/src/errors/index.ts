@@ -1912,19 +1912,26 @@ export class TransactionConflictError extends TypeGraphError {
  * Details for TransactionRolledBackError.
  */
 export type TransactionRolledBackErrorDetails = Readonly<{
-  dialect: "postgres";
+  /**
+   * Whether any engine error the transaction observed was a serialization
+   * failure or a deadlock. Such a transaction is safe to re-run from the
+   * top, and `store.transaction(fn, { retry })` re-runs it.
+   */
+  conflict: boolean;
 }>;
 
 /**
- * Thrown when a transaction TypeGraph opened ended without committing although
- * its callback returned normally.
+ * Thrown when a transaction TypeGraph opened was rolled back although its
+ * callback returned normally.
  *
  * On PostgreSQL, a statement that fails inside a transaction aborts the whole
  * transaction even when the callback catches the error: every later statement
  * is refused, and the database answers the closing `COMMIT` with a rollback.
- * TypeGraph checks the session before it commits and rejects with this error
- * instead of reporting success. Nothing the transaction wrote was saved.
- * `cause` is the engine error that aborted the transaction.
+ * Before it commits, TypeGraph reads a marker it set on the session when it
+ * opened the transaction; an aborted transaction refuses that read, and
+ * TypeGraph rejects with this error instead of reporting success. Nothing the
+ * transaction wrote was saved. `cause` is the first engine error the
+ * transaction observed.
  */
 export class TransactionRolledBackError extends TypeGraphError {
   declare readonly details: TransactionRolledBackErrorDetails;
@@ -1945,6 +1952,53 @@ export class TransactionRolledBackError extends TypeGraphError {
       },
     );
     this.name = "TransactionRolledBackError";
+  }
+}
+
+/**
+ * Details for TransactionOutcomeUnknownError.
+ */
+export type TransactionOutcomeUnknownErrorDetails = Readonly<{
+  /**
+   * What TypeGraph found on the session before its `COMMIT`.
+   * `"transaction-ended"`: the marker it set when it opened the transaction
+   * was gone, so the session was no longer inside that transaction.
+   */
+  reason: "transaction-ended";
+}>;
+
+/**
+ * Thrown when the transaction TypeGraph opened was ended by a statement
+ * TypeGraph did not issue — a `COMMIT`, `ROLLBACK` or `BEGIN` sent through
+ * the native `tx.sql` handle, for instance — before TypeGraph could commit it.
+ *
+ * TypeGraph does not send its `COMMIT` to a session that is no longer inside
+ * the transaction it opened. What the callback wrote may or may not have been
+ * saved: a native `COMMIT` saved it, a native `ROLLBACK` discarded it, and a
+ * statement sent after either ran outside that transaction. This error is
+ * never retried automatically, because re-running the callback could repeat
+ * writes that were already committed. `cause` is the first engine error the
+ * transaction observed, if any.
+ */
+export class TransactionOutcomeUnknownError extends TypeGraphError {
+  declare readonly details: TransactionOutcomeUnknownErrorDetails;
+
+  constructor(
+    details: TransactionOutcomeUnknownErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      "Transaction outcome unknown: the transaction TypeGraph opened was ended by a statement TypeGraph did not issue, so TypeGraph did not commit it and cannot tell what was saved",
+      "TRANSACTION_OUTCOME_UNKNOWN",
+      {
+        details,
+        category: "system",
+        suggestion:
+          "Do not send COMMIT, ROLLBACK or BEGIN through tx.sql inside store.transaction(); use savepoints for a partial rollback. Check what the transaction wrote before running it again.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionOutcomeUnknownError";
   }
 }
 

@@ -494,12 +494,13 @@ export async function withWriteTransactionSession<T>(
     const result = await (fenceEvidence === "reusable" ?
       withTransactionSchemaFenceLease(ctx, target, fn)
     : fn());
-    // Before any write of the Store's own (the revision-clock advance below, a
-    // capture flush, a pre-commit hook) reaches the session: the backend that
-    // will COMMIT decides from its session whether the database has already
-    // aborted this transaction, and rejects with TransactionRolledBackError if
-    // so. A backend that registers no such check keeps the narrower probe
-    // below, armed only by a caught claim-compensation failure.
+    // Before any work of the Store's own (the revision-clock advance below, a
+    // capture flush, a pre-commit hook) reaches the session, the backend that
+    // will COMMIT runs its commit check: it rejects when the transaction it
+    // opened is aborted or no longer open. A transaction with no registered
+    // check — its backend declares no evidence that needs one, or TypeGraph
+    // did not open it — keeps the narrower probe below, armed only by a
+    // caught claim-compensation failure.
     const commitCheck = resolveTransactionCommitCheck(target);
     if (commitCheck !== undefined) {
       await commitCheck();

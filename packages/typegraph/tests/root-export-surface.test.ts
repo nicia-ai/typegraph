@@ -82,6 +82,7 @@ const ROOT_VALUE_EXPORTS = [
   "subClassOf",
   "sum",
   "TransactionConflictError",
+  "TransactionOutcomeUnknownError",
   "TransactionRolledBackError",
   "TypeGraphError",
   "UniquenessError",
@@ -132,7 +133,7 @@ const ROOT_TYPE_EXPORTS = [
   "TypedOntologyRelation",
 ] as const;
 
-const EXPECTED_ROOT_EXPORT_COUNT = 105;
+const EXPECTED_ROOT_EXPORT_COUNT = 106;
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const ROOT_ENTRY = path.join(PACKAGE_ROOT, "src/index.ts");

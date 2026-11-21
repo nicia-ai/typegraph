@@ -19,7 +19,11 @@
  * `.message`, which on Postgres is just the SQL string.
  */
 
-import { ConfigurationError } from "../errors";
+import {
+  ConfigurationError,
+  TransactionOutcomeUnknownError,
+  TransactionRolledBackError,
+} from "../errors";
 
 const SQLITE_MISSING_TABLE_PATTERN = "no such table";
 const SQLITE_GENERIC_ERROR_CODE = "SQLITE_ERROR";
@@ -68,7 +72,6 @@ const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
 const POSTGRES_NOT_NULL_VIOLATION_CODE = "23502";
 const POSTGRES_FAILED_TRANSACTION_CODE = "25P02";
-const POSTGRES_NO_ACTIVE_TRANSACTION_CODE = "25P01";
 
 /** A later statement was refused because an earlier PostgreSQL statement failed. */
 export function isPostgresFailedTransactionError(error: unknown): boolean {
@@ -76,21 +79,6 @@ export function isPostgresFailedTransactionError(error: unknown): boolean {
     if (
       canReadProperty(link) &&
       Reflect.get(link, "code") === POSTGRES_FAILED_TRANSACTION_CODE
-    )
-      return true;
-  }
-  return false;
-}
-
-/**
- * A PostgreSQL statement that needs a transaction block (`SAVEPOINT`, for
- * one) ran on a session that is not inside one.
- */
-export function isPostgresNoActiveTransactionError(error: unknown): boolean {
-  for (const link of errorChain(error)) {
-    if (
-      canReadProperty(link) &&
-      Reflect.get(link, "code") === POSTGRES_NO_ACTIVE_TRANSACTION_CODE
     )
       return true;
   }
@@ -872,6 +860,21 @@ const SERIALIZATION_FAILURE_SQL_STATES = ["40001", "40P01"] as const;
 const SQL_STATE_SHAPE = /^[0-9A-Z]{5}$/;
 
 /**
+ * Whether `error` (or anything in its `.cause` chain) carries a SQLSTATE: the
+ * engine received the statement and refused it. A driver's client-side
+ * refusal — a parameter it could not serialize, a closed connection — never
+ * reached the engine and carries none.
+ */
+export function carriesEngineSqlState(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code === "string" && SQL_STATE_SHAPE.test(code)) return true;
+  }
+  return false;
+}
+
+/**
  * Driver-message fallback for a serialization failure whose SQLSTATE was
  * dropped by a wrapper. Matches the fixed PostgreSQL texts for the two
  * SQLSTATEs above.
@@ -944,6 +947,25 @@ export function carrySerializationFailureClassifier(
 }
 
 /**
+ * The conflict verdict of a transaction outcome TypeGraph already decided,
+ * found anywhere in `error`'s chain: a rolled-back transaction is a conflict
+ * exactly when one of the engine errors it observed was, whichever of them is
+ * its `cause`; a transaction whose outcome is unknown is never one, whatever
+ * its `cause` says, because re-running it could repeat committed writes.
+ * `undefined` when the chain holds no such outcome. Consulted before any
+ * classifier, which could otherwise find a conflict in the `cause` below it.
+ */
+function decidedTransactionConflict(error: unknown): boolean | undefined {
+  for (const link of errorChain(error)) {
+    if (link instanceof TransactionRolledBackError) {
+      return link.details.conflict;
+    }
+    if (link instanceof TransactionOutcomeUnknownError) return false;
+  }
+  return undefined;
+}
+
+/**
  * Whether `error` (or anything in its `.cause` chain) is a PostgreSQL
  * transaction-conflict failure that the documented protocol says to retry by
  * re-running the whole transaction: a serialization failure or a deadlock.
@@ -965,6 +987,8 @@ export function isSerializationFailure(
   error: unknown,
   target?: object,
 ): boolean {
+  const decided = decidedTransactionConflict(error);
+  if (decided !== undefined) return decided;
   if (target !== undefined) {
     const classifier = SERIALIZATION_FAILURE_CLASSIFIERS.get(target);
     if (classifier?.(error)) return true;

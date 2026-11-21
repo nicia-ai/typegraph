@@ -1503,6 +1503,20 @@ export type TransactionConflictErrorDetails = Readonly<{
 }>;
 
 // @public
+export class TransactionOutcomeUnknownError extends TypeGraphError {
+    constructor(details: TransactionOutcomeUnknownErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionOutcomeUnknownErrorDetails;
+}
+
+// @public
+export type TransactionOutcomeUnknownErrorDetails = Readonly<{
+    reason: "transaction-ended";
+}>;
+
+// @public
 export class TransactionRolledBackError extends TypeGraphError {
     constructor(details: TransactionRolledBackErrorDetails, options?: {
         cause?: unknown;
@@ -1513,7 +1527,7 @@ export class TransactionRolledBackError extends TypeGraphError {
 
 // @public
 export type TransactionRolledBackErrorDetails = Readonly<{
-    dialect: "postgres";
+    conflict: boolean;
 }>;
 
 // @public

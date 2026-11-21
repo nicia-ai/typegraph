@@ -1,19 +1,16 @@
 /**
- * Shared driver wiring cases for the commit-outcome check, registered by
+ * Shared driver wiring cases for the commit-outcome marker, registered by
  * `pglite-commit-outcome.test.ts` (in-process) and
  * `postgres-commit-outcome.test.ts` (server drivers).
  *
- * Driver wiring of the commit-outcome check every TypeGraph-owned PostgreSQL
- * transaction runs before its `COMMIT` (`postgres-commit-outcome.ts`).
- *
  * The behaviour itself — a transaction the database rolled back rejects, one a
- * savepoint recovered commits — is the shared integration suite's
- * (`integration/transaction-commit-outcome.ts`). This file pins what differs
- * per driver: the check costs no statement when nothing failed, node-postgres
- * and PGlite ask the session with one probe after a recovered failure, and
- * postgres-js, whose driver rolls back any transaction scope with a failed
- * statement, needs no probe and cannot be recovered by savepoint statements
- * sent through the outer handle.
+ * savepoint recovered commits, one the callback ended has an unknown outcome —
+ * is the shared integration suite's (`integration/transaction-commit-outcome.ts`).
+ * This file pins what is per driver: the statements the marker costs on the
+ * clean path, that its read waits for a statement the callback left running,
+ * that a nested transaction plants no marker and shares the enclosing
+ * connection's statement queue, and how postgres-js — which rolls back a
+ * transaction scope in which any statement failed — is reported.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
@@ -50,14 +47,12 @@ const wiringGraph = defineGraph({
   edges: {},
 });
 
-const PROBE_SQL = "savepoint typegraph_commit_probe";
+const PLANT_PREFIX = "select set_config(";
+const READ_PREFIX = "select current_setting(";
 const MISSING_RELATION_SQL = "SELECT * FROM commit_outcome_missing_table";
 
 type NativeHandle = Readonly<{
   execute: (query: ReturnType<typeof drizzleSql.raw>) => Promise<unknown>;
-  transaction: (
-    body: (savepoint: NativeHandle) => Promise<unknown>,
-  ) => Promise<unknown>;
 }>;
 
 function nativeHandleOf(transactionContext: object): NativeHandle {
@@ -92,15 +87,16 @@ function backendWithSlowRead(
   });
 }
 
-/** Records every statement Drizzle sends, the probe included. */
+type SentStatement = Readonly<{ statement: string; at: number }>;
+
+/** Records every statement Drizzle sends, the marker's included. */
 function createStatementLog(): Readonly<{
   logger: Logger;
-  probes: () => number;
-  /** Every statement sent since the last reset, with when it was sent. */
-  sent: () => readonly Readonly<{ statement: string; at: number }>[];
+  sent: () => readonly SentStatement[];
+  count: (prefix: string) => number;
   reset: () => void;
 }> {
-  const statements: { statement: string; at: number }[] = [];
+  const statements: SentStatement[] = [];
   return {
     logger: {
       logQuery: (query) => {
@@ -110,13 +106,26 @@ function createStatementLog(): Readonly<{
         });
       },
     },
-    probes: () =>
-      statements.filter(({ statement }) => statement === PROBE_SQL).length,
     sent: () => [...statements],
+    count: (prefix) =>
+      statements.filter(({ statement }) => statement.startsWith(prefix)).length,
     reset: () => {
       statements.length = 0;
     },
   };
+}
+
+/** The statements sent while the slow read held the connection. */
+function sentDuringSlowRead(sent: readonly SentStatement[]): readonly string[] {
+  const readIndex = sent.findIndex(({ statement }) =>
+    statement.startsWith(SLOW_READ_SQL),
+  );
+  expect(readIndex).toBeGreaterThanOrEqual(0);
+  const read = requireDefined(sent[readIndex]);
+  return sent
+    .slice(readIndex + 1)
+    .filter(({ at }) => at - read.at < SLOW_READ_MILLISECONDS * 0.8)
+    .map(({ statement }) => statement);
 }
 
 export type DriverFixture = Readonly<{
@@ -185,7 +194,7 @@ export function postgresJsFixture(databaseUrl: string): DriverFixture {
 }
 
 export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
-  describe(`commit-outcome check on ${fixture.name}`, () => {
+  describe(`commit-outcome marker on ${fixture.name}`, () => {
     const statementLog = createStatementLog();
     // Opened in `beforeAll`, not at registration: the two server drivers
     // share this file's database and must not run its migration concurrently.
@@ -208,47 +217,50 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       await opened?.close();
     });
 
-    it("sends no probe for a transaction in which nothing failed", async () => {
+    it("costs one statement after BEGIN and one before COMMIT on the clean path", async () => {
       const store = await requireDefined(storePromise);
-      statementLog.reset();
+      const { backend } = requireDefined(opened);
 
+      statementLog.reset();
+      await backend.transaction(async (tx) => {
+        await tx.getNode(wiringGraph.id, "WiringNote", "absent");
+      });
+      expect([
+        statementLog.count(PLANT_PREFIX),
+        statementLog.count(READ_PREFIX),
+      ]).toEqual([1, 1]);
+
+      // The Store checks the marker as soon as the callback returns, before
+      // its own work; the backend's check before COMMIT then has nothing new
+      // to read, since no statement was sent in between.
+      statementLog.reset();
       await store.transaction(async (tx) => {
         await tx.nodes.WiringNote.create({ body: "clean" });
       });
-
-      expect(statementLog.probes()).toBe(0);
-    });
-
-    it("asks the session once after a failure a savepoint recovered, then commits", async () => {
-      const store = await requireDefined(storePromise);
-      statementLog.reset();
-
-      await store.transaction(async (tx) => {
-        const native = nativeHandleOf(tx);
-        await expect(
-          native.transaction((savepoint) =>
-            savepoint.execute(drizzleSql.raw(MISSING_RELATION_SQL)),
-          ),
-        ).rejects.toThrow();
-        await tx.nodes.WiringNote.create(
-          { body: "after recovery" },
-          { id: `${fixture.name}-recovered` },
-        );
-      });
-
-      // postgres-js attributes the failure to its own savepoint scope, so the
-      // transaction's scope saw no failure and nothing needs asking.
-      expect(statementLog.probes()).toBe(
-        fixture.driverTracksScopeFailures ? 0 : 1,
+      expect([
+        statementLog.count(PLANT_PREFIX),
+        statementLog.count(READ_PREFIX),
+      ]).toEqual([1, 1]);
+      const sent = statementLog.sent().map(({ statement }) => statement);
+      const plantIndex = sent.findIndex((statement) =>
+        statement.startsWith(PLANT_PREFIX),
       );
-      expect(
-        await store.nodes.WiringNote.getById(
-          `${fixture.name}-recovered` as never,
+      const readIndex = sent.findIndex((statement) =>
+        statement.startsWith(READ_PREFIX),
+      );
+      // Planted before the callback's first statement, read after its last.
+      expect(plantIndex).toBeLessThan(
+        sent.findIndex((statement) => statement.startsWith("insert")),
+      );
+      expect(readIndex).toBe(
+        sent.findLastIndex(
+          (statement) =>
+            statement !== "commit" && !statement.startsWith("commit"),
         ),
-      ).toMatchObject({ body: "after recovery" });
+      );
     });
 
-    it("asks the session only after a read the callback left running has finished", async () => {
+    it("reads the marker only after a read the callback left running has finished", async () => {
       await requireDefined(storePromise);
       const slowReadStore = createAdapterStore(
         wiringGraph,
@@ -257,37 +269,43 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       statementLog.reset();
       let leftRunning: Promise<unknown> | undefined;
 
-      await slowReadStore.transaction(async (tx) => {
-        const native = nativeHandleOf(tx);
-        await expect(
-          native.transaction((savepoint) =>
-            savepoint.execute(drizzleSql.raw(MISSING_RELATION_SQL)),
-          ),
-        ).rejects.toThrow();
+      await slowReadStore.transaction((tx) => {
         // Not awaited: the callback returns while the read is on the wire.
         leftRunning = tx.nodes.WiringNote.getById("in-flight" as never);
+        return Promise.resolve();
       });
       await leftRunning;
 
-      // The commit-outcome probe joins the connection's statement queue, so
-      // nothing is sent until the read in flight has finished.
-      const sent = statementLog.sent();
-      const readIndex = sent.findIndex(({ statement }) =>
-        statement.startsWith(SLOW_READ_SQL),
-      );
-      expect(readIndex).toBeGreaterThanOrEqual(0);
-      const read = requireDefined(sent[readIndex]);
-      const sentWhileReading = sent
-        .slice(readIndex + 1)
-        .filter(({ at }) => at - read.at < SLOW_READ_MILLISECONDS * 0.8)
-        .map(({ statement }) => statement);
-      expect(sentWhileReading).toEqual([]);
-      expect(statementLog.probes()).toBe(
-        fixture.driverTracksScopeFailures ? 0 : 1,
-      );
+      // The marker read joins the connection's statement queue, so nothing is
+      // sent until the read in flight has finished.
+      expect(sentDuringSlowRead(statementLog.sent())).toEqual([]);
+      expect(statementLog.count(READ_PREFIX)).toBe(1);
     });
 
-    it("treats savepoint statements on the outer handle by what the driver will do", async () => {
+    it("plants no marker in a nested transaction, which shares the enclosing connection's statement queue", async () => {
+      await requireDefined(storePromise);
+      const { backend } = requireDefined(opened);
+      statementLog.reset();
+
+      await backend.transactionWithNative(async (outer, native) => {
+        const nested = backendWithSlowRead(createPostgresBackend(native));
+        await nested.transactionWithNative(async (inner) => {
+          // Not awaited: the nested transaction's slow read holds the
+          // connection while the enclosing transaction sends a statement.
+          const slowRead = inner.getNode(wiringGraph.id, "WiringNote", "x");
+          await outer.execute(
+            asCompiledRowsSql(sql.raw("select 'enclosing statement'")),
+          );
+          await slowRead;
+        });
+      });
+
+      expect(statementLog.count(PLANT_PREFIX)).toBe(1);
+      expect(statementLog.count(READ_PREFIX)).toBe(1);
+      expect(sentDuringSlowRead(statementLog.sent())).toEqual([]);
+    });
+
+    it("reports what the driver does after raw savepoint statements on the outer handle recovered a failure", async () => {
       const store = await requireDefined(storePromise);
 
       const outcome = await store
@@ -311,15 +329,30 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
           return "committed";
         })
         .catch((error: unknown) =>
-          error instanceof TransactionRolledBackError ? "rolled back" : error,
+          error instanceof TransactionRolledBackError ?
+            {
+              rolledBack: Reflect.get(
+                requireDefined(error.cause as object),
+                "code",
+              ) as unknown,
+            }
+          : error,
         );
 
-      // The session is healthy either way; postgres-js still rolls back a
-      // transaction scope in which a statement failed, so the check reports
-      // the rollback the driver is about to perform instead of letting the
-      // driver's raw error through.
-      expect(outcome).toBe(
-        fixture.driverTracksScopeFailures ? "rolled back" : "committed",
+      // The session is healthy and the marker is found either way. postgres-js
+      // still rolls back a transaction scope in which a statement failed, and
+      // rethrows that failure in place of committing: reported as the
+      // rollback it is, with that failure as the cause.
+      expect(outcome).toEqual(
+        fixture.driverTracksScopeFailures ?
+          { rolledBack: "42P01" }
+        : "committed",
+      );
+      const recovered = await store.nodes.WiringNote.getById(
+        `${fixture.name}-raw-recovered` as never,
+      );
+      expect(recovered?.body).toBe(
+        fixture.driverTracksScopeFailures ? undefined : "after raw recovery",
       );
     });
   });

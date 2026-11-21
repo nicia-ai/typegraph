@@ -312,6 +312,7 @@ type BackendCapabilities = Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+        commitOutcome?: "session-marker" | "statement-scoped";
     }>;
     windowFunctions: boolean;
     orderedAggregates?: boolean;
@@ -8995,6 +8996,20 @@ type TransactionOutcome<T> = Readonly<{
 }>;
 
 // @public
+export class TransactionOutcomeUnknownError extends TypeGraphError {
+    constructor(details: TransactionOutcomeUnknownErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionOutcomeUnknownErrorDetails;
+}
+
+// @public
+type TransactionOutcomeUnknownErrorDetails = Readonly<{
+    reason: "transaction-ended";
+}>;
+
+// @public
 type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
 
 // @public
@@ -9020,7 +9035,7 @@ export class TransactionRolledBackError extends TypeGraphError {
 
 // @public
 type TransactionRolledBackErrorDetails = Readonly<{
-    dialect: "postgres";
+    conflict: boolean;
 }>;
 
 // @public (undocumented)

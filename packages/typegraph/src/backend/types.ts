@@ -400,6 +400,33 @@ export type BackendCapabilities = Readonly<{
      * never earned.
      */
     unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+    /**
+     * What tells this backend that a transaction it opened, whose callback
+     * returned normally, is still the open, healthy transaction it began —
+     * the evidence behind its decision to `COMMIT`. One of:
+     *
+     * - `"session-marker"`: right after opening the transaction the backend
+     *   sets a marker that lives exactly as long as that transaction, and
+     *   right before `COMMIT` reads it back on the same session. Present: the
+     *   transaction commits. Refused because the transaction is aborted (on
+     *   PostgreSQL, a caught statement failure aborts the whole
+     *   transaction): it rejects with `TransactionRolledBackError`. Absent:
+     *   something the backend did not issue ended or replaced the
+     *   transaction, and it rejects with `TransactionOutcomeUnknownError`,
+     *   which is never retried. The bundled PostgreSQL backends declare
+     *   this.
+     * - `"statement-scoped"`: a failed statement undoes only itself and
+     *   leaves the transaction usable, and an engine that ends a
+     *   transaction on its own refuses the closing `COMMIT`, so the
+     *   `COMMIT`'s own result is the outcome. The bundled SQLite backends
+     *   declare this.
+     *
+     * Absent: the backend supplies no such evidence. TypeGraph commits
+     * whatever its callback returned on, as it always has, apart from
+     * re-checking the session after a failure it caught itself while
+     * compensating a constraint claim.
+     */
+    commitOutcome?: "session-marker" | "statement-scoped";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -5093,6 +5120,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
     unitOfWork: "interactive",
+    commitOutcome: "statement-scoped",
   }),
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   clearValidTo: true,
@@ -5119,6 +5147,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
     unitOfWork: "interactive",
+    commitOutcome: "session-marker",
   }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   orderedAggregates: true,

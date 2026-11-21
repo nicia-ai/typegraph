@@ -102,6 +102,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
   isPostgresLockTimeout,
+  isSerializationFailure,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
 import {
@@ -257,7 +258,7 @@ import {
   type EngineOperationsContext,
   resolveSchemaProvisioning,
 } from "./engine/profile";
-import { runCommittingPostgresTransactionBody } from "./execution/postgres-commit-outcome";
+import { runMarkedPostgresTransaction } from "./execution/postgres-commit-outcome";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -1273,13 +1274,21 @@ function buildPostgresEngineProfileInternal(
       },
     );
   }
+  // A backend built over a transaction handle opens savepoints on that
+  // transaction, not transactions of its own: whether they commit is decided
+  // by whoever opened the enclosing transaction, so it declares no evidence.
+  const { commitOutcome: baseCommitOutcome, ...baseExecution } =
+    baseCapabilities.execution;
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({
       ...baseCapabilities,
       ...httpOnlyOverrides,
       ...options.capabilities,
       execution: {
-        ...baseCapabilities.execution,
+        ...baseExecution,
+        ...(transactionScoped || baseCommitOutcome === undefined ?
+          {}
+        : { commitOutcome: baseCommitOutcome }),
         ...httpOnlyOverrides.execution,
         ...options.capabilities?.execution,
       },
@@ -2160,6 +2169,55 @@ function buildPostgresEngineProfileInternal(
     const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
 
     /**
+     * The connection a transaction this backend opens runs on, when that
+     * transaction is a savepoint on the enclosing transaction this
+     * transaction-scoped backend was built over: the enclosing connection's
+     * own queue owner, so the nested transaction's statements and the
+     * enclosing transaction's share one statement queue. `undefined` on a
+     * root backend, whose transactions each pin a connection of their own.
+     */
+    const nestedTransactionConnection =
+      transactionScoped ? queueOwner : undefined;
+
+    /**
+     * Opens one transaction this backend will commit, and runs `body` in it.
+     * `body` receives the transaction and `registerCommitCheck`, which
+     * hands the transaction's commit check to the Store code that runs on
+     * `txBackend`.
+     *
+     * Under `commitOutcome: "session-marker"` the transaction carries the
+     * marker that decides its commit (`./execution/postgres-commit-outcome`).
+     * A transaction-scoped backend declares no such evidence: its
+     * `db.transaction` opens a savepoint on the enclosing transaction, whose
+     * commit is decided by whoever opened that transaction.
+     */
+    function openCommittingTransaction<T>(
+      config: PgTransactionConfig | undefined,
+      body: (
+        tx: AnyPgTransaction,
+        registerCommitCheck: (txBackend: object) => void,
+      ) => Promise<T>,
+    ): Promise<T> {
+      if (capabilities.execution.commitOutcome !== "session-marker") {
+        return db.transaction(
+          (tx) =>
+            body(tx, () => {
+              // No evidence to register: see above.
+            }),
+          config,
+        );
+      }
+      return runMarkedPostgresTransaction(
+        (markedBody) => db.transaction(markedBody, config),
+        (error) => isSerializationFailure(error, ctx.self()),
+        (tx, marker) =>
+          body(tx, (txBackend) => {
+            registerTransactionCommitCheck(txBackend, marker.assertCommittable);
+          }),
+      );
+    }
+
+    /**
      * THE one resolution of the PostgreSQL schema-commit fence, refusing an
      * unfenced backend. Shared by the transaction a schema write opens, whose
      * isolation it decides, and by {@link acquireSchemaWriteFence}, which takes
@@ -2415,9 +2473,9 @@ function buildPostgresEngineProfileInternal(
           SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
         : undefined;
       const attempt = (): Promise<T> =>
-        db.transaction(
-          (tx) =>
-            runCommittingPostgresTransactionBody(tx, async (observation) => {
+        openCommittingTransaction(
+          transactionConfig,
+          async (tx, registerCommitCheck) => {
           await acquireSchemaWriteFence(tx, graphId, fence, {
             kind: "read-with-lock",
           });
@@ -2428,6 +2486,7 @@ function buildPostgresEngineProfileInternal(
           const { backend: txBackend, drainAndClose } =
             createTransactionBackend({
               db: tx,
+              connection: nestedTransactionConnection,
               adapterOptions,
               operationStrategy,
               tableNames,
@@ -2445,19 +2504,13 @@ function buildPostgresEngineProfileInternal(
               recordedTime: provisioning.recordedTime,
               isFirstParty,
             });
-          if (observation !== undefined) {
-            registerTransactionCommitCheck(
-              txBackend,
-              observation.assertCommittable,
-            );
-          }
+          registerCommitCheck(txBackend);
           try {
             return await fn(txBackend);
           } finally {
             await drainAndClose();
           }
-            }),
-          transactionConfig,
+          },
         );
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
@@ -2482,6 +2535,7 @@ function buildPostgresEngineProfileInternal(
     function bindTransactionBackend(
       tx: AnyPgTransaction,
       txIsFirstParty: boolean,
+      connection?: object,
     ): Readonly<{
       backend: TransactionBackend;
       privilegedBackend: InternalOperationBackend;
@@ -2490,6 +2544,7 @@ function buildPostgresEngineProfileInternal(
       const { backend, contributionReadGate, drainAndClose } =
         createTransactionBackend({
           db: tx,
+          connection,
           adapterOptions,
           operationStrategy,
           tableNames,
@@ -2580,21 +2635,16 @@ function buildPostgresEngineProfileInternal(
               }
             : undefined;
 
-          return db.transaction(
-            (tx) =>
-              // Observation starts before anything binds to `tx`, so every
-              // statement on the session — the callback's native handle
-              // included — is seen, and the transaction can never report
-              // success after the database rolled it back.
-              runCommittingPostgresTransactionBody(tx, async (observation) => {
+          return openCommittingTransaction(
+            txConfig,
+            async (tx, registerCommitCheck) => {
             const { backend: txBackend, drainAndClose } =
-              bindTransactionBackend(tx, isFirstParty);
-            if (observation !== undefined) {
-              registerTransactionCommitCheck(
-                txBackend,
-                observation.assertCommittable,
+              bindTransactionBackend(
+                tx,
+                isFirstParty,
+                nestedTransactionConnection,
               );
-            }
+            registerCommitCheck(txBackend);
             try {
               return await fn(
                 markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
@@ -2610,8 +2660,7 @@ function buildPostgresEngineProfileInternal(
               // the pool had already handed to somebody else.
               await drainAndClose();
             }
-              }),
-            txConfig,
+            },
           );
         },
 
@@ -3420,6 +3469,15 @@ type CreatePostgresOperationBackendOptions = Readonly<{
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
   db: AnyPgDatabase;
+  /**
+   * The physical connection `db` runs on, the identity of its statement
+   * queue. Required when `db` is a savepoint scope on an enclosing
+   * transaction (a transaction opened by a transaction-scoped backend): the
+   * driver may hand that scope a client object of its own (postgres-js does),
+   * yet every statement still shares the enclosing transaction's connection
+   * and must share its queue. Absent: the client `db` itself is pinned to.
+   */
+  connection?: object | undefined;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
@@ -4296,7 +4354,9 @@ function createTransactionBackend(
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
     session.operation,
-    getPinnedPostgresTransactionConnection(options.db) ?? options.db,
+    options.connection ??
+      getPinnedPostgresTransactionConnection(options.db) ??
+      options.db,
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =

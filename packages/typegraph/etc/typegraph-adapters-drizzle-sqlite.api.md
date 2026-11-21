@@ -43,6 +43,7 @@ type BackendCapabilities = Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+        commitOutcome?: "session-marker" | "statement-scoped";
     }>;
     windowFunctions: boolean;
     orderedAggregates?: boolean;

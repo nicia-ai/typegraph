@@ -14,6 +14,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
+    "commitOutcome": "session-marker",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -252,6 +253,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
+    "commitOutcome": "session-marker",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -465,6 +467,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
+    "commitOutcome": "statement-scoped",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -677,6 +680,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
+    "commitOutcome": "statement-scoped",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -1630,6 +1634,13 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "-- BEGIN (native transaction) --",
   },
   {
+    "params": [
+      "typegraph.transaction_marker",
+      "<<MARKER NONCE>>",
+    ],
+    "sql": "SELECT set_config($1, $2, true)",
+  },
+  {
     "params": [],
     "sql": "LOCK TABLE "typegraph_nodes", "typegraph_edges" IN ACCESS EXCLUSIVE MODE",
   },
@@ -1810,6 +1821,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "ANALYZE "typegraph_edges"",
   },
   {
+    "params": [
+      "typegraph.transaction_marker",
+    ],
+    "sql": "SELECT current_setting($1, true) AS marker",
+  },
+  {
     "params": [],
     "sql": "-- COMMIT --",
   },
@@ -1842,6 +1859,13 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "set transaction isolation level read committed",
+  },
+  {
+    "params": [
+      "typegraph.transaction_marker",
+      "<<MARKER NONCE>>",
+    ],
+    "sql": "SELECT set_config($1, $2, true)",
   },
   {
     "params": [
@@ -1899,6 +1923,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     )
     RETURNING *
   ",
+  },
+  {
+    "params": [
+      "typegraph.transaction_marker",
+    ],
+    "sql": "SELECT current_setting($1, true) AS marker",
   },
   {
     "params": [],
@@ -2161,6 +2191,13 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [
+      "typegraph.transaction_marker",
+      "<<MARKER NONCE>>",
+    ],
+    "sql": "SELECT set_config($1, $2, true)",
+  },
+  {
+    "params": [
       "engine_profile_parity_script",
       "Document",
       "doc-1",
@@ -2254,6 +2291,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
           "language" = EXCLUDED."language",
           "updated_at" = EXCLUDED."updated_at"
       ",
+  },
+  {
+    "params": [
+      "typegraph.transaction_marker",
+    ],
+    "sql": "SELECT current_setting($1, true) AS marker",
   },
   {
     "params": [],
@@ -3227,6 +3270,13 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [
+      "typegraph.transaction_marker",
+      "<<MARKER NONCE>>",
+    ],
+    "sql": "SELECT set_config($1, $2, true)",
+  },
+  {
+    "params": [
       "engine_profile_parity_template_source",
     ],
     "sql": "SELECT pg_advisory_xact_lock(hashtext($1)), current_setting('transaction_isolation') AS transaction_isolation",
@@ -3281,6 +3331,12 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     )
     RETURNING *
   ",
+  },
+  {
+    "params": [
+      "typegraph.transaction_marker",
+    ],
+    "sql": "SELECT current_setting($1, true) AS marker",
   },
   {
     "params": [],
