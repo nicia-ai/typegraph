@@ -1102,16 +1102,20 @@ const SET_SELECTED = "tg_set_selected";
  * kind = ?` on the nodes table lets PostgreSQL estimate that range from its
  * column statistics, and statistics taken before a bulk load put a large
  * fresh kind at one row: the planner then drives a nested loop from that range
- * and rescans the candidates once per row, which is quadratic (main's version
+ * and rescans the candidates once per row, which is quadratic (a version
  * join made it cubic). Carried through a `DISTINCT` subquery — which the
  * planner does not flatten, so it cannot fold the constants back onto the
  * nodes table — the same fences reach the nodes table only as join keys. The
- * nodes table then has no range for stale statistics to shrink, every
- * alternative to a keyed lookup has to scan the whole table (costed from its
- * actual page count, not from column statistics), and the plan is the
- * candidates read once, each looked up by `(graph_id, id)` or the primary
- * key. The fences themselves are unchanged: a row is written only when its
- * graph, kind and id equal a key's.
+ * nodes table then has no range for stale statistics to shrink, and every
+ * alternative to keyed lookups has to scan the whole table once. The write
+ * phase is therefore bounded by one table scan plus constant work per
+ * candidate, and never rescans. Which side PostgreSQL takes follows its
+ * estimate of the candidate count: estimated small, each candidate is looked
+ * up by `(graph_id, id)` or the primary key; estimated large — as when the
+ * graph and the kind are each in the statistics but never together, so their
+ * frequencies are multiplied — the keys are hashed against one sequential
+ * scan, even for one actual candidate. The fences themselves are unchanged: a
+ * row is written only when its graph, kind and id equal a key's.
  */
 export function buildUpdateNodeSet(
   tables: Tables,
@@ -1129,7 +1133,6 @@ export function buildUpdateNodeSet(
     ),
     dialect,
   );
-  const candidateIds = toDrizzleSql(params.candidateIds, dialect);
   const propsColumn = portableSql.identifier(nodes.props.name);
   const expectedPredicates =
     params.operation === "compareAndSet" ?
@@ -1160,21 +1163,27 @@ export function buildUpdateNodeSet(
   // collapse two ids that differ only by case into one key, and a
   // case-insensitive PostgreSQL collation would match a non-candidate twin.
   // The key column's own collation makes both use the primary key's equality.
-  const candidateKeyId = toDrizzleSql(
-    adapter.keyText(
-      portableSql`tg_set_candidates.${portableSql.identifier(params.candidateIdColumn)}`,
+  const candidateKeyId = adapter.keyText(
+    portableSql`tg_set_candidates.${portableSql.identifier(params.candidateIdColumn)}`,
+  );
+  // The keys are a CTE so that the candidate query is evaluated once on every
+  // engine: SQLite codes the version-keyed row-value IN below twice (once to
+  // walk the primary key, once to test the whole row value) and would run an
+  // inlined candidate query once per coding. PostgreSQL inlines the CTE as the
+  // subquery it is, so its plan is unchanged.
+  const keysCte = toDrizzleSql(
+    adapter.singleEvaluationCte(
+      portableSql.identifier(SET_KEYS),
+      portableSql`
+              SELECT DISTINCT
+                CAST(${params.graphId} AS TEXT) AS ${portableSql.identifier(SET_KEY_GRAPH_ID)},
+                CAST(${params.kind} AS TEXT) AS ${portableSql.identifier(SET_KEY_KIND)},
+                ${candidateKeyId} AS ${portableSql.identifier(SET_KEY_ID)}
+              FROM (${params.candidateIds}) AS tg_set_candidates
+            `,
     ),
     dialect,
   );
-  const keySubquery = sql`
-    (
-              SELECT DISTINCT
-                CAST(${params.graphId} AS TEXT) AS ${sql.identifier(SET_KEY_GRAPH_ID)},
-                CAST(${params.kind} AS TEXT) AS ${sql.identifier(SET_KEY_KIND)},
-                ${candidateKeyId} AS ${sql.identifier(SET_KEY_ID)}
-              FROM (${candidateIds}) AS tg_set_candidates
-            ) AS ${keys}
-  `;
 
   // The candidate query is evaluated once, against the statement's snapshot,
   // and yields only ids. Under PostgreSQL READ COMMITTED a target row a
@@ -1200,13 +1209,13 @@ export function buildUpdateNodeSet(
       sql`
         (${nodes.graphId}, ${nodes.kind}, ${nodes.id}) IN (
                 SELECT ${keyGraphId}, ${keyKind}, ${keyId}
-                FROM ${keySubquery}
+                FROM ${keys}
               )
       `
     : sql`
       (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${nodes.version}) IN (
               SELECT ${qualifiedColumn(SET_SELECTED, nodes.graphId)}, ${qualifiedColumn(SET_SELECTED, nodes.kind)}, ${qualifiedColumn(SET_SELECTED, nodes.id)}, ${qualifiedColumn(SET_SELECTED, nodes.version)}
-              FROM ${keySubquery}
+              FROM ${keys}
               JOIN ${nodes} AS ${sql.identifier(SET_SELECTED)}
                 ON ${qualifiedColumn(SET_SELECTED, nodes.graphId)} = ${keyGraphId}
                AND ${qualifiedColumn(SET_SELECTED, nodes.kind)} = ${keyKind}
@@ -1214,6 +1223,7 @@ export function buildUpdateNodeSet(
             )
     `;
   return sql`
+    ${keysCte}
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${patchedProps},
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},

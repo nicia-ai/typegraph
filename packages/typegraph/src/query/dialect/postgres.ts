@@ -190,6 +190,10 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`${expression} COLLATE "default"`;
   },
 
+  singleEvaluationCte(name, body) {
+    return sql`WITH ${name} AS NOT MATERIALIZED (${body})`;
+  },
+
   analyzeTemporaryTable(table) {
     return sql`ANALYZE ${table}`;
   },

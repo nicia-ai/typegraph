@@ -133,6 +133,12 @@ async function installSetUpdatePoison(
   };
 }
 
+/** Rows a randomly picking candidate query chooses one of. */
+const RANDOM_PICK_ROWS = 32;
+
+/** Set updates run with a randomly picking candidate query. */
+const RANDOM_PICK_CALLS = 8;
+
 /** A PostgreSQL collation under which `Case` and `case` are equal. */
 const CASE_INSENSITIVE_COLLATION = "tg_case_insensitive";
 
@@ -1458,7 +1464,9 @@ export function registerSetNodeMutationIntegrationTests(
     // candidates projected a version, so an updateWhere-only case took the
     // atomic fallback there and passed, while compareAndSet committed the six
     // rows of its first chunk (as did updateWhere with a projected version,
-    // nine rows in three chunks).
+    // nine rows in three chunks). A backend that splits exactly the id-only
+    // updateWhere sent here into a key read and three-key UPDATEs fails this
+    // case on every driver, the first three chunks committed.
     it.for(["updateWhere", "compareAndSet"] as const)(
       "commits none of a direct %s that fails partway on an autocommit connection",
       async (operation) => {
@@ -1524,6 +1532,55 @@ export function registerSetNodeMutationIntegrationTests(
         expect(
           stored.map((person) => [person.meta.version, person.isActive]),
         ).toEqual(people.map(() => [1, undefined]));
+      },
+    );
+
+    // The candidate query picks one of RANDOM_PICK_ROWS rows at random, so a
+    // second evaluation picks another row with probability 31/32. A set update
+    // that evaluates it twice (SQLite coded the version-keyed row-value IN
+    // once to walk the primary key and once to test the row, each running the
+    // candidate query) writes a row only when both picks agree: one write in
+    // all RANDOM_PICK_CALLS calls has probability 2^-40. Evaluated once, every
+    // call writes exactly the row it picked.
+    it.for(["updateWhere", "compareAndSet"] as const)(
+      "evaluates a direct %s's candidate query once",
+      async (operation) => {
+        const store = context.getStore();
+        const backend = context.getBackend();
+        for (let index = 0; index < RANDOM_PICK_ROWS; index += 1) {
+          await store.nodes.Person.create({ name: "Random pick" });
+        }
+        const common = {
+          graphId: store.graphId,
+          kind: "Person",
+          patch: { isActive: true },
+          candidateIds: asCompiledSelectSql(sql`
+            SELECT id AS person_id
+            FROM ${createSqlSchema(backend.tableNames).nodesTable}
+            WHERE graph_id = ${store.graphId}
+              AND kind = 'Person'
+              AND deleted_at IS NULL
+            ORDER BY random()
+            LIMIT 1
+          `),
+          candidateIdColumn: "person_id",
+        };
+        const affected = [];
+        for (let call = 0; call < RANDOM_PICK_CALLS; call += 1) {
+          const result =
+            operation === "compareAndSet" ?
+              await compareAndSetNode(backend, {
+                ...common,
+                operation,
+                expected: { name: { kind: "value", value: "Random pick" } },
+              })
+            : await updateNodeSet(backend, { ...common, operation });
+          affected.push(result.affectedCount);
+        }
+
+        expect(affected).toEqual(
+          Array.from({ length: RANDOM_PICK_CALLS }, () => 1),
+        );
       },
     );
 

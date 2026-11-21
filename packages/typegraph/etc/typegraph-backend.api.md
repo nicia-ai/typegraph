@@ -1972,6 +1972,7 @@ export interface DialectAdapter {
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
+    readonly singleEvaluationCte: (this: void, name: SqlFragment, body: SqlFragment) => SqlFragment;
     readonly supportsVectors: boolean;
     readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
     unboundedLimit(): SqlFragment;

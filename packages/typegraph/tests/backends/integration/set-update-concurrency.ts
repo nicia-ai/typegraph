@@ -50,6 +50,14 @@ const RACE_CASES: readonly Readonly<{
 ];
 
 /**
+ * What a waiting set update's text in `pg_stat_activity` contains. The text
+ * is cut at `track_activity_query_size` (1 kB by default), and the set update
+ * opens with its key CTE, which embeds the whole candidate query, so the
+ * `UPDATE` keyword can fall past the cut; the CTE's name cannot.
+ */
+const SET_UPDATE_TEXT = "%tg_set_keys%";
+
+/**
  * Runs `operation` on one session while another session holds `patch` on the
  * row uncommitted, and releases that writer only once the operation's UPDATE
  * is observed waiting for the row lock. The operation's snapshot therefore
@@ -79,7 +87,7 @@ async function raceAgainstUncommittedUpdate<Result>(
             SELECT count(*) AS count FROM pg_stat_activity
             WHERE datname = current_database()
               AND wait_event_type = 'Lock'
-              AND query LIKE '%UPDATE%'
+              AND query LIKE ${SET_UPDATE_TEXT}
           `),
         );
         expect(Number(requireDefined(rows[0]).count)).toBe(1);
@@ -162,7 +170,7 @@ async function raceAgainstUncommittedReplacement<Result>(
             WHERE datname = current_database()
               AND wait_event_type = 'Lock'
               AND wait_event = ${REPLACEMENT_HOLD_WAIT_EVENTS[hold]}
-              AND query LIKE '%UPDATE%'
+              AND query LIKE ${SET_UPDATE_TEXT}
           `),
         );
         expect(Number(requireDefined(rows[0]).count)).toBe(1);

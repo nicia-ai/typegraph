@@ -201,6 +201,23 @@ export interface DialectAdapter {
   readonly keyText: (this: void, expression: SqlFragment) => SqlFragment;
 
   /**
+   * Builds `WITH name AS <hint>(body)` for a CTE whose rows the statement must
+   * compute once although the engine may code more than one reference to it.
+   * SQLite codes a row-value `IN (subquery)` that drives a prefix of an index
+   * twice, once to walk the index and once to test the whole row value, and
+   * evaluates an inlined subquery once per coding; it forces `MATERIALIZED`,
+   * so the CTE is computed once into an ephemeral table both codings read.
+   * PostgreSQL emits `NOT MATERIALIZED`, which inlines the CTE as the subquery
+   * it would otherwise be written as, so the plan is the subquery's plan and
+   * is costed from the statistics of what the subquery reads.
+   */
+  readonly singleEvaluationCte: (
+    this: void,
+    name: SqlFragment,
+    body: SqlFragment,
+  ) => SqlFragment;
+
+  /**
    * Builds the dialect's planner-statistics refresh for a temporary table.
    * Returns undefined when the engine plans temporary tables well enough
    * without an explicit refresh.
