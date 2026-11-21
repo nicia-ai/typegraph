@@ -22,6 +22,26 @@
  * graph-lock-taking call BEFORE its ordinary write makes the contender wait
  * on the graph lock instead, and both commit.
  *
+ * The same profile property also lets an ordinary write invalidate a
+ * provenance decision: a retraction decides which facts lose their support
+ * from what it reads under the graph lock, and an ordinary write that adds an
+ * independent justification takes no graph lock, so it is neither excluded
+ * by the retraction nor seen by it. The holder adds a second justification of
+ * a fact and parks uncommitted; the contender's retraction of the fact's only
+ * other source reads support without it and decides to close the fact. Its
+ * close waits on the fact's row, which the holder's edge insert locks, but
+ * the decision is already made: once the holder commits, the close proceeds
+ * and commits too. Both commit, and the fact is closed while a live
+ * justification with an available premise derives it. The own-transaction
+ * `retract(source)` has the race exactly as `retract(source, tx)` does — a
+ * verb that takes the graph lock first in the caller's transaction is still
+ * not excluded by a write that never takes it — so it is a property of the
+ * profile and of every provenance decision on it, documented as such, not of
+ * the verbs' transaction argument. The case also pins the documented repair:
+ * a verb reconciles the currency of every fact its sources reach, flipped or
+ * not, so `unRetract` of the new justification's available source reopens
+ * the fact.
+ *
  * Skipped unless `POSTGRES_URL` is set.
  */
 import { drizzle as drizzleNodePostgres } from "drizzle-orm/node-postgres";
@@ -241,6 +261,71 @@ async function seed(store: LockOrderStore): Promise<void> {
   }
 }
 
+const sourceOnly = { kind: "Source", id: "source-only" } as const;
+const sourceOther = { kind: "Source", id: "source-other" } as const;
+const lateFact = { kind: "Fact", id: "late-fact" } as const;
+
+/**
+ * `late-fact` holds through `source-only` alone; `source-other` is an
+ * available source no justification uses yet.
+ */
+async function seedSingleSupport(store: LockOrderStore): Promise<void> {
+  const only = await store.nodes.Source.create(
+    { label: "only", retracted: false },
+    { id: sourceOnly.id },
+  );
+  await store.nodes.Source.create(
+    { label: "other", retracted: false },
+    { id: sourceOther.id },
+  );
+  const fact = await store.nodes.Fact.create(
+    { label: "late" },
+    { id: lateFact.id },
+  );
+  const justification = await store.nodes.Justification.create(
+    { label: "via-only" },
+    { id: "via-only" },
+  );
+  await store.edges.premiseOf.create(only, justification, {});
+  await store.edges.derives.create(justification, fact, {});
+}
+
+/**
+ * An ordinary write: a second, independent justification of `late-fact`
+ * whose premise is the available `source-other`.
+ */
+async function addIndependentJustification(
+  tx: LockOrderTransaction,
+): Promise<void> {
+  const justification = await tx.nodes.Justification.create(
+    { label: "via-other" },
+    { id: "via-other" },
+  );
+  await tx.edges.premiseOf.create(sourceOther, justification, {});
+  await tx.edges.derives.create(justification, lateFact, {});
+}
+
+/** How the contender retracts `source-only`. */
+type RetractionForm = Readonly<{
+  name: string;
+  retract: (store: LockOrderStore) => Promise<unknown>;
+}>;
+
+const RETRACTION_FORMS: readonly RetractionForm[] = [
+  {
+    name: "retract(source) in its own transaction",
+    retract: (store) =>
+      createRetractionCapability(store, config).retract(sourceOnly),
+  },
+  {
+    name: "retract(source, tx) as the first graph call of a caller's transaction",
+    retract: (store) =>
+      store.transaction((tx) =>
+        createRetractionCapability(store, config).retract(sourceOnly, tx),
+      ),
+  },
+];
+
 /** The graph-lock-taking call a holder makes on its transaction. */
 type LockingCall = Readonly<{
   name: string;
@@ -375,6 +460,81 @@ describe.runIf(process.env["POSTGRES_URL"])(
           },
         );
       });
+
+      describe.each(RETRACTION_FORMS)(
+        "an ordinary write adding a justification while $name decides",
+        (form) => {
+          it(
+            "is neither excluded nor seen by the retraction: both commit and the fact is closed while a live justification with an available premise derives it (pinned limitation of this profile)",
+            { timeout: CONTENTION_TIMEOUT_MS },
+            async () => {
+              graphSequence += 1;
+              const graph = buildGraph(
+                `provenance_ordinary_write_${graphSequence}`,
+              );
+              const holderStore = await engineNativeStore(
+                graph,
+                openSession(driver, HOLDER_APPLICATION),
+              );
+              const contenderStore = await engineNativeStore(
+                graph,
+                openSession(driver, CONTENDER_APPLICATION),
+              );
+              await seedSingleSupport(holderStore);
+
+              const outcome = await raceAgainstHeldTransaction({
+                probe: openProbe(),
+                holderApplication: HOLDER_APPLICATION,
+                contenderApplication: CONTENDER_APPLICATION,
+                holder: (holdOpen) =>
+                  holderStore.transaction(async (tx) => {
+                    await addIndependentJustification(tx);
+                    await holdOpen();
+                  }),
+                contender: () => form.retract(contenderStore),
+              });
+
+              // The retraction read its support without the write, and waited
+              // only on the fact's row, which the write's edge insert locks:
+              // it closes the fact from that earlier read once the write
+              // commits.
+              expect(outcome.contenderState).toBe("blocked");
+              expect(outcome.holder.status).toBe("ok");
+              expect(outcome.contender.status).toBe("ok");
+              // The committed graph: the fact is closed ...
+              await expect(
+                holderStore.nodes.Fact.getById(lateFact.id as never),
+              ).resolves.toBeUndefined();
+              // ... although a live justification derives it from a source
+              // that is still available.
+              await expect(
+                holderStore.nodes.Source.getById(sourceOther.id as never),
+              ).resolves.toMatchObject({ retracted: false });
+              const derivations = await holderStore.edges.derives.find({
+                from: { kind: "Justification", id: "via-other" },
+              } as never);
+              expect(
+                derivations.map((edge) => [edge.fromId, edge.toId]),
+              ).toEqual([["via-other", lateFact.id]]);
+              const premises = await holderStore.edges.premiseOf.find({
+                to: { kind: "Justification", id: "via-other" },
+              } as never);
+              expect(premises.map((edge) => edge.fromId)).toEqual([
+                sourceOther.id,
+              ]);
+
+              // The documented repair: unRetract of a source the fact is
+              // justified by reopens it, though that source is not flagged.
+              await createRetractionCapability(holderStore, config).unRetract(
+                sourceOther,
+              );
+              await expect(
+                holderStore.nodes.Fact.getById(lateFact.id as never),
+              ).resolves.toMatchObject({ id: lateFact.id });
+            },
+          );
+        },
+      );
 
       it("tx.assertUnchangedSince() is refused on this profile before any lock, so it takes no part in the cycle", async () => {
         const { holderStore } = await holderAndContender(driver);
