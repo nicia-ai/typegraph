@@ -224,6 +224,328 @@ nothing: on PostgreSQL it takes the graph's advisory lock and no row, so it
 runs in a read-only transaction or under a `SELECT`-only role. On a standby
 the lock excludes nothing, since the primary's writers do not hold it there.
 
+## Relationships as fact nodes
+
+A justification points at the fact it supports through a `derives` edge, and in
+a property graph an edge connects two nodes: nothing can point at an edge. So a
+fact is always a node, and a relationship whose truth depends on its sources is
+modelled as a node of its own, with one edge to each participant.
+
+Promote a relationship to a node when any of these holds:
+
+- something refers to it: a justification, a document, a review, another fact
+- it has more than two participants
+- the same participants can be related several times, and each instance has a
+  lifecycle of its own, such as two stints at the same employer
+- each assertion of it needs its own provenance
+
+A relationship that needs none of that stays an edge. Plain attributes, such as
+a `since` date on a `knows` edge nobody tracks the sources of, belong on the
+edge.
+
+### Worked example
+
+Employment is a relationship between a person and an organization. As a fact
+it becomes an `Employment` node, and the two edges around it carry no claim of
+their own:
+
+```text
+(person:Person)-[:heldRole]->(employment:Employment)-[:atOrganization]->(organization:Organization)
+```
+
+`Employment` is the fact kind. Sources and justifications attach to it exactly
+as they would to any other fact:
+
+```typescript
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type Node,
+} from "@nicia-ai/typegraph";
+import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
+import {
+  createRetractionCapability,
+  type RetractionCapability,
+} from "@nicia-ai/typegraph/provenance";
+import type { HistoryStore } from "@nicia-ai/typegraph/store";
+import { z } from "zod";
+
+const Person = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const Organization = defineNode("Organization", {
+  schema: z.object({ name: z.string() }),
+});
+
+const Employment = defineNode("Employment", {
+  schema: z.object({
+    organizationId: z.string(),
+    role: z.string(),
+    startedOn: z.string(),
+    endedOn: z.string().optional(),
+  }),
+});
+
+const Source = defineNode("Source", {
+  schema: z.object({
+    label: z.string(),
+    retracted: z.boolean().default(false),
+  }),
+});
+
+const Justification = defineNode("Justification", {
+  schema: z.object({ rule: z.string() }),
+});
+
+const heldRole = defineEdge("heldRole");
+const atOrganization = defineEdge("atOrganization");
+const premiseOf = defineEdge("premiseOf");
+const derives = defineEdge("derives");
+
+const graph = defineGraph({
+  id: "employment_facts",
+  nodes: {
+    Person: { type: Person },
+    Organization: { type: Organization },
+    Employment: {
+      type: Employment,
+      unique: [
+        {
+          name: "one_current_holder",
+          fields: ["organizationId", "role"],
+          where: (props) => {
+            const endedOn = props["endedOn"];
+            if (endedOn === undefined) throw new Error("no endedOn field");
+            return endedOn.isNull();
+          },
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    Source: { type: Source },
+    Justification: { type: Justification },
+  },
+  edges: {
+    heldRole: {
+      type: heldRole,
+      from: [Person],
+      to: [Employment],
+      targetCardinality: "one",
+    },
+    atOrganization: {
+      type: atOrganization,
+      from: [Employment],
+      to: [Organization],
+      cardinality: "one",
+    },
+    premiseOf: { type: premiseOf, from: [Source], to: [Justification] },
+    derives: { type: derives, from: [Justification], to: [Employment] },
+  },
+});
+
+const { backend } = createLocalSqliteBackend();
+const [store] = await createStoreWithSchema(graph, backend, { history: true });
+
+const provenance = createRetractionCapability(store, {
+  source: { kind: "Source" },
+  justification: { kind: "Justification" },
+  fact: { kinds: ["Employment"] },
+  premiseOf: { kind: "premiseOf" },
+  derives: { kind: "derives" },
+});
+```
+
+Inside `defineGraph` the `where` callback's fields are typed through an index
+signature, so under `noPropertyAccessFromIndexSignature` and
+`noUncheckedIndexedAccess` the predicate reads `endedOn` by name and checks it
+is there. The constraints are explained [below](#constraints).
+
+Write the node, its two edges and one justification per source in one
+transaction, so no reader sees an employment without its holder or its grounds.
+The transaction ends with `assertHolds`, so an employment recorded with no
+sources, or only with sources that are already retracted, rolls back instead
+of committing a fact that `holding()` excludes and no retraction can reach:
+
+```typescript
+type EmploymentProvenance = RetractionCapability<
+  typeof graph,
+  "Source",
+  "Employment",
+  "Justification"
+>;
+
+async function recordEmployment(
+  store: HistoryStore<typeof graph>,
+  provenance: EmploymentProvenance,
+  person: Node<typeof Person>,
+  organization: Node<typeof Organization>,
+  stint: Readonly<{ role: string; startedOn: string; endedOn?: string }>,
+  sources: readonly Node<typeof Source>[],
+): Promise<Node<typeof Employment>> {
+  return store.transaction(async (tx) => {
+    const employment = await tx.nodes.Employment.create({
+      ...stint,
+      organizationId: organization.id,
+    });
+    await tx.edges.heldRole.create(person, employment, {});
+    await tx.edges.atOrganization.create(employment, organization, {});
+    for (const source of sources) {
+      const justification = await tx.nodes.Justification.create({
+        rule: `reported by ${source.label}`,
+      });
+      await tx.edges.premiseOf.create(source, justification, {});
+      await tx.edges.derives.create(justification, employment, {});
+    }
+    await provenance.assertHolds(tx, [employment]);
+    return employment;
+  });
+}
+
+const ada = await store.nodes.Person.create({ name: "Ada" });
+const acme = await store.nodes.Organization.create({ name: "Acme" });
+const registry = await store.nodes.Source.create({ label: "registry" });
+
+const employment = await recordEmployment(
+  store,
+  provenance,
+  ada,
+  acme,
+  { role: "Engineer", startedOn: "2024-01-01" },
+  [registry],
+);
+```
+
+### Querying through the fact node
+
+Read the relationship by traversing through the fact node. A retracted fact
+drops out of the traversal on its own, but an ended stint is still a believed
+fact, so filter on `endedOn` when you want the current employments:
+
+```typescript
+const employments = await store
+  .query()
+  .from("Person", "person")
+  .whereNode("person", (fields) => fields.id.eq(ada.id))
+  .traverse("heldRole", "held")
+  .to("Employment", "employment")
+  .whereNode("employment", (fields) => fields.endedOn.isNull())
+  .traverse("atOrganization", "at")
+  .to("Organization", "organization")
+  .select((ctx) => ({
+    employmentId: ctx.employment.id,
+    role: ctx.employment.role,
+    organization: ctx.organization.name,
+  }))
+  .execute();
+```
+
+`retract(registry)` closes the `Employment` node and names it in `died`. Its
+`heldRole` and `atOrganization` edges are not touched: they stay live, still
+pointing at the closed node, which is what lets `unRetract` restore the fact
+with its neighbourhood intact. Every read that goes through the node treats
+the fact as gone; a read of an edge collection alone does not look at the node
+and still returns the edges:
+
+| Read after `retract(registry)` | Returns |
+| --- | --- |
+| The traversal above, or one hop to `Employment` | no rows |
+| `optionalTraverse("heldRole", …)` from the person | the person, with the edge and the employment `undefined` |
+| An aggregate that counts `atOrganization` edges per organization | no group for Acme |
+| `store.countNeighbors(ada, { edges: ["heldRole"] })` | `0` |
+| `store.nodes.Employment.getById(employment.id)` | `undefined` |
+| `provenance.holding()` | no `Employment` |
+| `store.edges.heldRole.find()`, `findFrom(ada)`, `findTo(employment)` | the edge, live |
+| `store.edges.atOrganization.findTo(acme)` | the edge, live |
+| `store.edges.heldRole.count()` | `1` |
+| The traversal with `.temporal("includeTombstones")` | the employment, with `meta.deletedAt` set |
+
+So query the relationship through the fact node, and treat the edge
+collections of `heldRole` and `atOrganization` as storage, not as the list of
+current employments. To list closed facts, traverse with
+`.temporal("includeTombstones")` and read `meta.deletedAt`.
+
+`unRetract(registry)` reopens the node, and every read above returns what it
+returned before the retraction.
+
+Two stints at the same organization are two `Employment` nodes, each with its
+own justifications. Both are in `holding()`, only the one without `endedOn`
+is in the traversal above, and retracting the source of one leaves the other
+in `holding()`. An employment recorded with two sources has two
+justifications and survives the retraction of either one; the report lists it
+in `survivedVia` with the justification that still fires:
+
+```typescript
+const press = await store.nodes.Source.create({ label: "press" });
+const confirmed = await recordEmployment(
+  store,
+  provenance,
+  ada,
+  acme,
+  { role: "Advisor", startedOn: "2025-01-01" },
+  [registry, press],
+);
+
+const report = await provenance.retract(registry);
+// report.survivedVia: [{ fact: { kind: "Employment", id: confirmed.id },
+//                        via: [the justification from `press`] }]
+```
+
+On a store with `{ history: true }`, `store.asOfRecorded(T)` at an instant
+before the retraction returns the employment and the full traversal; at an
+instant after it, neither. The edges are live at both instants.
+
+### Constraints
+
+Constraints split the same way the reads do.
+
+Put rules about the shape of one fact on its edges. Cardinality is an upper
+bound: `targetCardinality: "one"` on `heldRole` gives each `Employment` at most
+one holder, and `cardinality: "one"` on `atOrganization` at most one
+organization; a second edge of either is refused with `CardinalityError`.
+Nothing in the schema requires either edge to exist, and either can be deleted
+later. That every employment starts with both is the job of the transaction in
+`recordEmployment`, so write employments through it.
+
+A closed fact takes no new edges. Creating a `heldRole` or `atOrganization`
+edge onto a retracted `Employment` whose slot is free is refused with
+`EndpointNotFoundError`.
+
+Put rules about which facts are current on the fact node, as a uniqueness
+constraint. A uniqueness constraint keys the node's own properties, so the
+organization the rule is about is copied onto the node (`organizationId`) and
+written by the same transaction that creates the `atOrganization` edge.
+`recordEmployment` assigns `organizationId` after spreading `stint`, so a
+caller's object that happens to carry its own `organizationId` cannot point
+the constraint at a different organization than the edge. With
+`one_current_holder` above:
+
+- a second current holder of the same role at the same organization is refused
+  with `UniquenessError`, and the transaction that tried it leaves nothing
+  behind
+- a stint with `endedOn` set falls outside the `where`, so history does not
+  hold the seat, and setting `endedOn` frees it
+- a retraction closes the fact and frees the seat for a new holder
+- an `unRetract` that would reopen a fact onto a seat someone else now holds is
+  refused with `UniquenessError`, and the whole transition rolls back: the
+  source stays retracted and the fact stays closed. End the other stint first
+
+Do not put a "current" rule on the edges. A closed fact's edges stay live, so
+they keep counting: with `cardinality: "oneActive"` on `heldRole`, "one current
+employment per person", a person whose employment was retracted still cannot
+take a new one.
+
+### Do not keep a claim node beside a live edge
+
+Do not model the relationship as a plain `worksAt` edge and record its
+provenance on a separate claim node that stands next to it. Retraction closes
+the claim and leaves the edge alone, so every query that follows `worksAt`
+still says Ada works at Acme. The edge has to be the fact's neighbourhood, not
+a copy of it: the relationship is the node, and queries go through it.
+
 ## Guarding a derivation at commit time
 
 `retract` reconciles the facts reachable from the sources it names. A fact
