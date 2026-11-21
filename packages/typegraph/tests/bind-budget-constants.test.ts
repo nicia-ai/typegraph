@@ -571,16 +571,34 @@ describe("identity read fixed-parameter budgets", () => {
   const Person = defineNode("Person", {
     schema: z.object({ name: z.string() }),
   });
+  const Organization = defineNode("Organization", {
+    schema: z.object({ name: z.string() }),
+  });
+  const Project = defineNode("Project", {
+    schema: z.object({ name: z.string() }),
+  });
   const graph = defineGraph({
     id: "bind-budget-identity-reads",
-    nodes: { Person: { type: Person } },
+    nodes: {
+      Person: { type: Person },
+      Organization: { type: Organization },
+      Project: { type: Project },
+    },
     edges: {},
     identity: { sameIdAcrossKinds: "fold" },
   });
   const schema = createSqlSchema();
-  // The kinds the identity reconstruction may cross: every kind the graph
-  // declares, as the store passes them.
+  // The kinds the identity reconstruction may cross. The fit table below
+  // holds this at one kind so each row reads as the coordinate's own cost;
+  // the ceiling check passes every kind the graph declares, as the store
+  // does, so the per-kind term of the reservation is exercised too.
   const ALLOWED_KINDS: ReadonlySet<string> = new Set(["Person"]);
+  const ALL_GRAPH_KINDS: ReadonlySet<string> = new Set(
+    Object.keys(graph.nodes),
+  );
+  const PLAIN_AS_OF_COORDINATE = {
+    valid: { mode: "asOf" as const, asOf: "2025-01-01T00:00:00.000Z" },
+  };
   const WORST_CASE_COORDINATE = {
     valid: { mode: "asOf" as const, asOf: "2025-01-01T00:00:00.000Z" },
     recorded: {
@@ -606,33 +624,51 @@ describe("identity read fixed-parameter budgets", () => {
   }
 
   describe("loadHistoricalClasses's fixedParameters constant (src/identity/service-read.ts)", () => {
-    it("keeps every chunk within the bind ceiling for more references than fit in one chunk", async () => {
-      const maxBindParameters = 30;
-      const { target, captured } = makeTarget(maxBindParameters);
-      const references = Array.from({ length: 20 }, (_, index) => ({
-        kind: "Person",
-        id: `p${index}`,
-      }));
-      await loadHistoricalClasses(
-        target,
-        schema,
-        graph.id,
-        references,
-        WORST_CASE_COORDINATE,
-        "fold",
-        ALLOWED_KINDS,
-      );
-      expect(captured.length).toBeGreaterThan(1);
-      for (const width of captured) {
-        expect(width).toBeLessThanOrEqual(maxBindParameters);
-      }
-    });
+    // The ceiling check runs at plain asOf, the widest coordinate (15 binds
+    // plus one per allowed kind, so 18 with the graph's three kinds), and
+    // at asOf+recorded (13 plus one per kind). At a ceiling of 30, a
+    // reservation below the real fixed cost overflows: reserving 14 sizes
+    // chunks of 8 references, and plain asOf then binds 18 + 16 = 34; a
+    // reservation that drops the per-kind term (15) sizes chunks of 7, and
+    // plain asOf binds 18 + 14 = 32. With a single allowed kind the second
+    // case would bind exactly 30 and pass.
+    it.each([
+      { label: "asOf", coordinate: PLAIN_AS_OF_COORDINATE },
+      { label: "asOf+recorded", coordinate: WORST_CASE_COORDINATE },
+    ] as const satisfies readonly Readonly<{
+      label: string;
+      coordinate: ReadCoordinate;
+    }>[])(
+      "keeps every $label chunk within the bind ceiling for more references than fit in one chunk, across every graph kind",
+      async ({ coordinate }) => {
+        const maxBindParameters = 30;
+        const { target, captured } = makeTarget(maxBindParameters);
+        const references = Array.from({ length: 20 }, (_, index) => ({
+          kind: "Person",
+          id: `p${index}`,
+        }));
+        await loadHistoricalClasses(
+          target,
+          schema,
+          graph.id,
+          references,
+          coordinate,
+          "fold",
+          ALL_GRAPH_KINDS,
+        );
+        expect(captured.length).toBeGreaterThan(1);
+        for (const width of captured) {
+          expect(width).toBeLessThanOrEqual(maxBindParameters);
+        }
+      },
+    );
 
     // Measured, not the source constant (24 + allowedKinds.size, so 25 for
-    // this one-kind graph): every cell includes one bind per allowed kind,
-    // and the widest fixed cost is 16 (asOf). Plain asOf is wider than
-    // asOf+recorded (14). The constant reserves 9 more binds than needed.
-    // This safely shrinks chunks, but is stale.
+    // one allowed kind): every cell includes one bind per allowed kind (the
+    // three-kind rows measure that term), and the widest fixed cost is 16
+    // (asOf, one kind). Plain asOf is wider than asOf+recorded (14). The
+    // constant reserves 9 more binds than needed. This safely shrinks
+    // chunks, but is stale.
     it.each([
       {
         label: "current",
@@ -683,13 +719,29 @@ describe("identity read fixed-parameter budgets", () => {
         coordinate: WORST_CASE_COORDINATE,
         expectedFixed: 14,
       },
+      {
+        label: "asOf, three allowed kinds",
+        coordinate: PLAIN_AS_OF_COORDINATE,
+        allowedKinds: ALL_GRAPH_KINDS,
+        expectedFixed: 18,
+      },
+      {
+        label: "asOf+recorded, three allowed kinds",
+        coordinate: WORST_CASE_COORDINATE,
+        allowedKinds: ALL_GRAPH_KINDS,
+        expectedFixed: 16,
+      },
     ] as const satisfies readonly Readonly<{
       label: string;
       coordinate: ReadCoordinate;
+      allowedKinds?: ReadonlySet<string>;
       expectedFixed: number;
     }>[])(
       "solves $label fixed binds from 1-reference and 2-reference calls",
-      async ({ coordinate, expectedFixed }) => {
+      async (row) => {
+        const { coordinate, expectedFixed } = row;
+        const allowedKinds =
+          "allowedKinds" in row ? row.allowedKinds : ALLOWED_KINDS;
         const { target, captured } = makeTarget(999);
         await loadHistoricalClasses(
           target,
@@ -698,7 +750,7 @@ describe("identity read fixed-parameter budgets", () => {
           [{ kind: "Person", id: "a" }],
           coordinate,
           "fold",
-          ALLOWED_KINDS,
+          allowedKinds,
         );
         const one = requireDefined(captured.at(-1));
         await loadHistoricalClasses(
@@ -711,7 +763,7 @@ describe("identity read fixed-parameter budgets", () => {
           ],
           coordinate,
           "fold",
-          ALLOWED_KINDS,
+          allowedKinds,
         );
         const two = requireDefined(captured.at(-1));
         const fixed = one - (two - one);
