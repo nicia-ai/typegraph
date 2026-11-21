@@ -90,6 +90,7 @@ export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-prope
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerProvenanceRelationshipFactRecipeTests } from "./provenance-relationship-fact-recipe";
 export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
