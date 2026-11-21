@@ -559,15 +559,11 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           let refusal: unknown;
           const committed = await store.transaction(
             async (tx) => {
-              await adoption.run(
-                store,
-                nativeHandle(tx),
-                async (adopted) => {
-                  counted.setCounting(true);
-                  refusal = await rejectionOf(invoke(adopted));
-                  counted.setCounting(false);
-                },
-              );
+              await adoption.run(store, nativeHandle(tx), async (adopted) => {
+                counted.setCounting(true);
+                refusal = await rejectionOf(invoke(adopted));
+                counted.setCounting(false);
+              });
               // Still usable: on PostgreSQL an engine-rejected write would
               // abort the transaction and fail this read.
               return tx.nodes.RotPerson.getById(asNodeId("p1"));
