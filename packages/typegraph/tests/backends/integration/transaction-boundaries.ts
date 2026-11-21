@@ -6,8 +6,11 @@
  * revision clock advances. Each cell runs three managed writes through one
  * boundary on a store with one recording mode and pins what it observes:
  * the receipt's write count, whether a recorded instant was stamped, when
- * `onOperationEnd` fired relative to the backend transaction, and the exact
- * schema-fence acquisitions at the port before, during and after the body.
+ * `onOperationEnd` fired relative to the backend transaction, and the
+ * ordered schema-fence acquisitions and node-row mutations at the port:
+ * before the callback, inside each of its three writes, and after it. Order,
+ * not only count: a fence that moved after the mutation it guards keeps
+ * every count and changes the timeline.
  *
  * Boundaries:
  * - `owned`: `transactionWithReceipt` on a portable store.
@@ -107,55 +110,132 @@ type Recording = (typeof RECORDINGS)[number];
  */
 type HookTiming = "immediate" | "buffer-until-commit";
 
-/** Schema-fence acquisitions at the port, split around the callback body. */
-type FenceCounts = Readonly<{ before: number; during: number; after: number }>;
-type DialectFences = Readonly<Record<SqlDialect, FenceCounts>>;
+/**
+ * The schema-fence acquisitions and node-row mutations at the port, in issue
+ * order, split by where they ran: before the callback, inside each of its
+ * three writes (create, update, delete), and after it.
+ */
+type WriteTimeline = Readonly<{
+  before: readonly string[];
+  create: readonly string[];
+  update: readonly string[];
+  delete: readonly string[];
+  after: readonly string[];
+}>;
+type DialectTimelines = Readonly<Record<SqlDialect, WriteTimeline>>;
 
 type CellObservation = Readonly<{
   writes: number;
   recorded: boolean;
   hooks: HookTiming;
-  fences: FenceCounts;
+  timeline: WriteTimeline;
 }>;
 
-/** An expected cell, whose fence counts may differ by dialect. */
-type ExpectedObservation = Omit<CellObservation, "fences"> &
-  Readonly<{ fences: FenceCounts | DialectFences }>;
+/** An expected cell, whose timeline may differ by dialect. */
+type ExpectedObservation = Omit<CellObservation, "timeline"> &
+  Readonly<{ timeline: WriteTimeline | DialectTimelines }>;
 
 const WRITES_PER_CELL = 3;
 
-/** One fence on the body's first write, leased to the rest. */
-const LEASE_ON_FIRST_WRITE: FenceCounts = { before: 0, during: 1, after: 0 };
-/** A fence on every write in the body. */
-const PER_WRITE: FenceCounts = {
-  before: 0,
-  during: WRITES_PER_CELL,
-  after: 0,
-};
+const FENCE = "lockSchemaVersionForWrite";
+/** PostgreSQL's fused schema-fence and graph-write-lock acquisition. */
+const FENCE_AND_GRAPH_LOCK = "lockSchemaVersionAndGraphWrite";
+/** An insert whose statement carries the schema fence itself. */
+const FENCED_INSERT = "insertNodeWithSchemaFence";
+/** The evolving boundary's exclusive schema-write fence. */
+const ADOPT_SCHEMA_WRITE = "adoptSchemaWriteTransaction";
+const INSERT = "insertNode";
+const UPDATE = "updateNode";
+const DELETE = "deleteNode";
+
+const SCHEMA_FENCE_MEMBERS: ReadonlySet<string> = new Set([
+  FENCE,
+  FENCE_AND_GRAPH_LOCK,
+  FENCED_INSERT,
+  ADOPT_SCHEMA_WRITE,
+]);
+const NODE_ROW_MUTATION_MEMBERS: ReadonlySet<string> = new Set([
+  FENCED_INSERT,
+  INSERT,
+  UPDATE,
+  DELETE,
+  "hardDeleteNode",
+]);
+
+function timeline(segments: Partial<WriteTimeline>): WriteTimeline {
+  return {
+    before: [],
+    create: [],
+    update: [],
+    delete: [],
+    after: [],
+    ...segments,
+  };
+}
+
+/** Every write takes `fence` immediately before its mutation. */
+function fenceBeforeEachWrite(fence: string): WriteTimeline {
+  return timeline({
+    create: [fence, INSERT],
+    update: [fence, UPDATE],
+    delete: [fence, DELETE],
+  });
+}
+
+/** The evolving boundary's adoption fence ahead of `body`'s timeline. */
+function afterAdoption(body: WriteTimeline): WriteTimeline {
+  return { ...body, before: [ADOPT_SCHEMA_WRITE, ...body.before] };
+}
+
+/** The create's insert carries the fence; the lease covers the rest. */
+const FENCED_INSERT_LEASED = timeline({
+  create: [FENCED_INSERT],
+  update: [UPDATE],
+  delete: [DELETE],
+});
+/**
+ * The create's insert carries the fence, which seeds no lease, so the update
+ * and the delete each take the fence before their mutation.
+ */
+const FENCED_INSERT_THEN_FENCE_EACH = timeline({
+  create: [FENCED_INSERT],
+  update: [FENCE, UPDATE],
+  delete: [FENCE, DELETE],
+});
+const FENCE_EACH = fenceBeforeEachWrite(FENCE);
 /** One fence before the callback, leased to every write in it. */
-const PRE_ACQUIRED: FenceCounts = { before: 1, during: 0, after: 0 };
+const PRE_ACQUIRED = timeline({
+  before: [FENCE],
+  create: [INSERT],
+  update: [UPDATE],
+  delete: [DELETE],
+});
 /**
  * An owned frame (portable or adapter store) when a write needs the graph
- * write lock. PostgreSQL: the first
- * write takes the fused schema-and-graph lock, which does not seed the lease,
- * so the second write takes the schema fence again and leases it to the
- * third. SQLite's engine-serialized fence has no fused lock to take.
+ * write lock. SQLite's engine-serialized fence has no fused lock to take: the
+ * create fences and leases it. PostgreSQL: the create takes the fused
+ * schema-and-graph lock, which does not seed the lease, so the update takes
+ * the schema fence again and leases it to the delete.
  */
-const OWNED_UNDER_GRAPH_WRITE_LOCK: DialectFences = {
-  sqlite: LEASE_ON_FIRST_WRITE,
-  postgres: { before: 0, during: 2, after: 0 },
+const OWNED_UNDER_GRAPH_WRITE_LOCK: DialectTimelines = {
+  sqlite: timeline({
+    create: [FENCE, INSERT],
+    update: [UPDATE],
+    delete: [DELETE],
+  }),
+  postgres: timeline({
+    create: [FENCE_AND_GRAPH_LOCK, INSERT],
+    update: [FENCE, UPDATE],
+    delete: [DELETE],
+  }),
 };
-/** The evolving boundary's adoption fence, then a fence on every write. */
-const ADOPTED_THEN_PER_WRITE: FenceCounts = {
-  before: 1,
-  during: WRITES_PER_CELL,
-  after: 0,
-};
-/** The evolving boundary's adoption fence, then capture's pre-acquired one. */
-const ADOPTED_THEN_PRE_ACQUIRED: FenceCounts = {
-  before: 2,
-  during: 0,
-  after: 0,
+/**
+ * An adopted frame when a write needs the graph write lock: every write
+ * fences, PostgreSQL through the fused schema-and-graph lock.
+ */
+const ADOPTED_UNDER_GRAPH_WRITE_LOCK: DialectTimelines = {
+  sqlite: FENCE_EACH,
+  postgres: fenceBeforeEachWrite(FENCE_AND_GRAPH_LOCK),
 };
 
 type BoundaryGraph = ReturnType<typeof boundaryGraph>;
@@ -185,30 +265,15 @@ type AdapterBoundaryStore = OwnedBoundaryStore &
     ) => Promise<EvolutionPlan>;
   }>;
 
-/** One schema-fence acquisition at the port, fused or standalone. */
-function isSchemaFence(call: PortCall): boolean {
-  return (
-    call.member === "lockSchemaVersionForWrite" ||
-    call.member === "lockSchemaVersionAndGraphWrite" ||
-    call.member === "insertNodeWithSchemaFence" ||
-    call.member === "adoptSchemaWriteTransaction"
-  );
-}
-
-function countFences(calls: readonly PortCall[]): number {
-  return calls.filter((call) => isSchemaFence(call)).length;
-}
-
-function fenceCounts(
-  calls: readonly PortCall[],
-  bodyStart: number,
-  bodyEnd: number,
-): FenceCounts {
-  return {
-    before: countFences(calls.slice(0, bodyStart)),
-    during: countFences(calls.slice(bodyStart, bodyEnd)),
-    after: countFences(calls.slice(bodyEnd)),
-  };
+/** The fence or row-mutation members among `calls`, in issue order. */
+function fencesAndMutations(calls: readonly PortCall[]): readonly string[] {
+  return calls
+    .map((call) => call.member)
+    .filter(
+      (member) =>
+        SCHEMA_FENCE_MEMBERS.has(member) ||
+        NODE_ROW_MUTATION_MEMBERS.has(member),
+    );
 }
 
 /** Where one `onOperationEnd` call landed. */
@@ -232,9 +297,9 @@ function hookTiming(samples: readonly HookSample[]): HookTiming {
 function applied(
   recorded: boolean,
   hooks: HookTiming,
-  fences: FenceCounts | DialectFences,
+  writeTimeline: WriteTimeline | DialectTimelines,
 ): ExpectedObservation {
-  return { writes: WRITES_PER_CELL, recorded, hooks, fences };
+  return { writes: WRITES_PER_CELL, recorded, hooks, timeline: writeTimeline };
 }
 
 /**
@@ -245,7 +310,7 @@ const EXPECTED: Readonly<
   Record<Boundary, Readonly<Record<Recording, ExpectedObservation>>>
 > = {
   owned: {
-    live: applied(false, "buffer-until-commit", LEASE_ON_FIRST_WRITE),
+    live: applied(false, "buffer-until-commit", FENCED_INSERT_LEASED),
     "live+revisions": applied(
       false,
       "buffer-until-commit",
@@ -257,10 +322,10 @@ const EXPECTED: Readonly<
       OWNED_UNDER_GRAPH_WRITE_LOCK,
     ),
     capture: applied(true, "buffer-until-commit", OWNED_UNDER_GRAPH_WRITE_LOCK),
-    "engine-native": applied(true, "buffer-until-commit", LEASE_ON_FIRST_WRITE),
+    "engine-native": applied(true, "buffer-until-commit", FENCED_INSERT_LEASED),
   },
   "owned-native": {
-    live: applied(false, "buffer-until-commit", PER_WRITE),
+    live: applied(false, "buffer-until-commit", FENCED_INSERT_THEN_FENCE_EACH),
     "live+revisions": applied(
       false,
       "buffer-until-commit",
@@ -272,21 +337,39 @@ const EXPECTED: Readonly<
       OWNED_UNDER_GRAPH_WRITE_LOCK,
     ),
     capture: applied(true, "buffer-until-commit", OWNED_UNDER_GRAPH_WRITE_LOCK),
-    "engine-native": applied(true, "buffer-until-commit", PER_WRITE),
+    "engine-native": applied(
+      true,
+      "buffer-until-commit",
+      FENCED_INSERT_THEN_FENCE_EACH,
+    ),
   },
   adopted: {
-    live: applied(false, "immediate", PER_WRITE),
-    "live+revisions": applied(false, "immediate", PER_WRITE),
-    "live+read+revisions": applied(false, "immediate", PER_WRITE),
+    live: applied(false, "immediate", FENCE_EACH),
+    "live+revisions": applied(
+      false,
+      "immediate",
+      ADOPTED_UNDER_GRAPH_WRITE_LOCK,
+    ),
+    "live+read+revisions": applied(
+      false,
+      "immediate",
+      ADOPTED_UNDER_GRAPH_WRITE_LOCK,
+    ),
     capture: applied(true, "immediate", PRE_ACQUIRED),
-    "engine-native": applied(true, "immediate", PER_WRITE),
+    "engine-native": applied(true, "immediate", FENCE_EACH),
   },
   "adopted-evolving": {
-    live: applied(false, "immediate", ADOPTED_THEN_PER_WRITE),
-    "live+revisions": applied(false, "immediate", ADOPTED_THEN_PER_WRITE),
-    "live+read+revisions": applied(false, "immediate", ADOPTED_THEN_PER_WRITE),
-    capture: applied(true, "immediate", ADOPTED_THEN_PRE_ACQUIRED),
-    "engine-native": applied(true, "immediate", ADOPTED_THEN_PER_WRITE),
+    live: applied(false, "immediate", afterAdoption(FENCE_EACH)),
+    "live+revisions": applied(false, "immediate", {
+      sqlite: afterAdoption(ADOPTED_UNDER_GRAPH_WRITE_LOCK.sqlite),
+      postgres: afterAdoption(ADOPTED_UNDER_GRAPH_WRITE_LOCK.postgres),
+    }),
+    "live+read+revisions": applied(false, "immediate", {
+      sqlite: afterAdoption(ADOPTED_UNDER_GRAPH_WRITE_LOCK.sqlite),
+      postgres: afterAdoption(ADOPTED_UNDER_GRAPH_WRITE_LOCK.postgres),
+    }),
+    capture: applied(true, "immediate", afterAdoption(PRE_ACQUIRED)),
+    "engine-native": applied(true, "immediate", afterAdoption(FENCE_EACH)),
   },
 };
 
@@ -344,10 +427,10 @@ function expectedCell(
   const expected = EXPECTED[boundary][recording];
   return {
     ...expected,
-    fences:
-      "during" in expected.fences ?
-        expected.fences
-      : expected.fences[backend.dialect],
+    timeline:
+      "create" in expected.timeline ?
+        expected.timeline
+      : expected.timeline[backend.dialect],
   };
 }
 
@@ -421,34 +504,43 @@ async function observeCell(
       },
     });
     const runStart = recorder.calls.length;
-    let bodyStart = runStart;
-    let bodyEnd = runStart;
+    /** Call positions at the body's start and after each of its writes. */
+    const marks: number[] = [];
     const body: CellBody = async (tx) => {
-      bodyStart = recorder.calls.length;
+      marks.push(recorder.calls.length);
       inCallback = true;
       try {
         const item = await tx.nodes.BoundaryItem.create({
           label: "created",
         });
+        marks.push(recorder.calls.length);
         await tx.nodes.BoundaryItem.update(item.id, { label: "updated" });
+        marks.push(recorder.calls.length);
         await tx.nodes.BoundaryItem.delete(item.id);
+        marks.push(recorder.calls.length);
       } finally {
         inCallback = false;
-        bodyEnd = recorder.calls.length;
       }
     };
 
     const outcome = await run(body);
 
+    const [bodyStart, afterCreate, afterUpdate, bodyEnd] = marks;
+    const between = (from: number | undefined, to: number | undefined) =>
+      fencesAndMutations(
+        recorder.calls.slice(requireDefined(from), requireDefined(to)),
+      );
     return {
       writes: outcome.receipt.writes.total,
       recorded: outcome.receipt.recorded !== undefined,
       hooks: hookTiming(hookSamples),
-      fences: fenceCounts(
-        recorder.calls.slice(runStart),
-        bodyStart - runStart,
-        bodyEnd - runStart,
-      ),
+      timeline: {
+        before: between(runStart, bodyStart),
+        create: between(bodyStart, afterCreate),
+        update: between(afterCreate, afterUpdate),
+        delete: between(afterUpdate, bodyEnd),
+        after: between(bodyEnd, recorder.calls.length),
+      },
     };
   } finally {
     recorder.restore();
