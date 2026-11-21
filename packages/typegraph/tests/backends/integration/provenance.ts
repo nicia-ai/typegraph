@@ -2597,58 +2597,146 @@ export function registerProvenanceIntegrationTests(
 
   /**
    * A caught failure at any of a verb's writes leaves no fact live without
-   * live support. The verb takes no savepoint (a TypeGraph-owned savepoint's
-   * rollback would undo overlapping calls' writes), so a caller that catches
-   * the failure and commits keeps the writes made before it. The verb orders
-   * them so every prefix is safe: it closes the facts that lose their support
-   * first, then flips the source flags, then reopens the facts that regain it.
-   * A prefix can leave a fact closed whose support stands (or a source flagged
-   * whose facts are already closed), never a live fact with no support, and
-   * re-running the verb completes it.
+   * live support and no required part live under a closed whole. The verb
+   * takes no savepoint (a TypeGraph-owned savepoint's rollback would undo
+   * overlapping calls' writes), so a caller that catches the failure and
+   * commits keeps the writes made before it. The verb orders them so every
+   * prefix is safe: it closes the facts that lose their support first, each
+   * required part before its whole, then flips the source flags, then reopens
+   * the facts that regain it, each whole before its parts. A prefix can leave
+   * a fact closed whose support stands (or a source flagged whose facts are
+   * already closed), never a live fact with no support nor a required part
+   * live under a closed whole, and re-running the verb completes it.
    *
-   * Revert check: flip the source flags before the close pass in
-   * `transitionInTransaction` (`src/provenance/transition.ts`) and every
-   * `retractMany` position after the first flag leaves `only-one-fact` or
-   * `only-two-fact` live and unsupported.
+   * The fixture runs with its fact kinds configured in both orders, so a
+   * write order that followed the configured kind order would close a whole
+   * before its part in one of them and reopen a part before its whole in the
+   * other.
+   *
+   * Revert checks: flip the source flags before the close pass in
+   * `transitionInTransaction` (`src/provenance/transition.ts`) and a
+   * `retractMany` rejection after the first flag leaves a fact held only by
+   * the flagged source live and unsupported; order the close and reopen
+   * passes by configured kind instead of by composition depth and a
+   * rejection between a whole's write and its part's leaves the part live
+   * under a closed whole, which `verifyConstraintFences()` reports as
+   * `compositionExistence`.
    */
   describe("provenance retraction: a failure caught at each of a verb's writes", () => {
+    type CompositionStore = HistoryStore<typeof compositionGraph>;
     type CallerTransaction = Parameters<
-      Parameters<ProvenanceStore["transaction"]>[0]
+      Parameters<CompositionStore["transaction"]>[0]
     >[0];
 
     const sourceOne = ref("Source", "source-one");
     const sourceTwo = ref("Source", "source-two");
+    const sourceOther = ref("Source", "source-other");
     const REJECTED_WRITE = "rejected verb write";
+    const report = (id: string) => ({ kind: "Report", id }) as const;
+    const section = (id: string) => ({ kind: "Section", id }) as const;
 
-    /** Facts held by one source, by either of two, and by a third. */
-    async function seedTwoSourceWorld(store: ProvenanceStore): Promise<void> {
-      const one = await createSource(store, sourceOne.id);
-      const two = await createSource(store, sourceTwo.id);
-      const other = await createSource(store, "source-other");
-      const onlyOne = await createFact(store, "only-one-fact");
-      const onlyTwo = await createFact(store, "only-two-fact");
-      const either = await createFact(store, "either-fact");
-      const unrelated = await createFact(store, "unrelated-fact");
-      await createJustification(store, "only-one-j", [one], onlyOne);
-      await createJustification(store, "only-two-j", [two], onlyTwo);
-      await createJustification(store, "either-one-j", [one], either);
-      await createJustification(store, "either-two-j", [two], either);
-      await createJustification(store, "unrelated-j", [other], unrelated);
+    /**
+     * Per source, a whole and the required part under it, both held by that
+     * source; a whole held by either source; and one held by a third.
+     */
+    async function seedTwoSourceWorld(store: CompositionStore): Promise<void> {
+      for (const { id } of [sourceOne, sourceTwo, sourceOther]) {
+        await store.nodes.Source.create(
+          { label: id, retracted: false },
+          { id },
+        );
+      }
+      for (const id of ["whole-one", "whole-two", "either", "unrelated"]) {
+        await store.nodes.Report.create({ label: id }, { id });
+      }
+      for (const [id, whole] of [
+        ["part-one", "whole-one"],
+        ["part-two", "whole-two"],
+      ] as const) {
+        await store.nodes.Section.create(
+          { label: id },
+          { id, partOf: { whole: report(whole) } },
+        );
+      }
+      const derive = async (
+        justificationId: string,
+        premises: readonly Readonly<{ kind: "Source"; id: string }>[],
+        derived: Readonly<{ kind: "Report" | "Section"; id: string }>,
+      ) => {
+        await store.nodes.Justification.create(
+          { label: justificationId },
+          { id: justificationId },
+        );
+        for (const premise of premises) {
+          await store.edges.premiseOf.create(
+            premise,
+            { kind: "Justification", id: justificationId },
+            {},
+          );
+        }
+        await store.edges.derives.create(
+          { kind: "Justification", id: justificationId },
+          derived,
+          {},
+        );
+      };
+      await derive("whole-one-j", [sourceOne], report("whole-one"));
+      await derive("part-one-j", [sourceOne], section("part-one"));
+      await derive("whole-two-j", [sourceTwo], report("whole-two"));
+      await derive("part-two-j", [sourceTwo], section("part-two"));
+      await derive("either-one-j", [sourceOne], report("either"));
+      await derive("either-two-j", [sourceTwo], report("either"));
+      await derive("unrelated-j", [sourceOther], report("unrelated"));
     }
 
-    type Capability = ReturnType<
-      typeof createRetractionCapability<typeof provenanceGraph, typeof config>
-    >;
+    function capabilityFor(
+      store: CompositionStore,
+      factKinds: readonly ("Report" | "Section")[],
+    ) {
+      return createRetractionCapability(store, {
+        ...config,
+        fact: { kinds: factKinds },
+      });
+    }
+
+    type Capability = ReturnType<typeof capabilityFor>;
+
+    const ALL_FACTS = [
+      "either",
+      "part-one",
+      "part-two",
+      "unrelated",
+      "whole-one",
+      "whole-two",
+    ];
 
     const VERBS = [
+      {
+        name: "retract",
+        prepare: (_provenance: Capability) => Promise.resolve(),
+        run: (provenance: Capability, tx?: CallerTransaction) =>
+          provenance.retract(sourceOne, tx),
+        // Two fact closes and one source flag.
+        writes: 3,
+        believedAfter: ["either", "part-two", "unrelated", "whole-two"],
+      },
       {
         name: "retractMany",
         prepare: (_provenance: Capability) => Promise.resolve(),
         run: (provenance: Capability, tx?: CallerTransaction) =>
           provenance.retractMany([sourceOne, sourceTwo], tx),
-        // Three fact closes and two source flags.
-        writes: 5,
-        believedAfter: ["unrelated-fact"],
+        // Five fact closes and two source flags.
+        writes: 7,
+        believedAfter: ["unrelated"],
+      },
+      {
+        name: "unRetract",
+        prepare: (provenance: Capability) => provenance.retract(sourceOne),
+        run: (provenance: Capability, tx?: CallerTransaction) =>
+          provenance.unRetract(sourceOne, tx),
+        // One source flag and two fact reopens.
+        writes: 3,
+        believedAfter: ALL_FACTS,
       },
       {
         name: "unRetractMany",
@@ -2656,30 +2744,41 @@ export function registerProvenanceIntegrationTests(
           provenance.retractMany([sourceOne, sourceTwo]),
         run: (provenance: Capability, tx?: CallerTransaction) =>
           provenance.unRetractMany([sourceOne, sourceTwo], tx),
-        // Two source flags and three fact reopens.
-        writes: 5,
-        believedAfter: [
-          "either-fact",
-          "only-one-fact",
-          "only-two-fact",
-          "unrelated-fact",
-        ],
+        // Two source flags and five fact reopens.
+        writes: 7,
+        believedAfter: ALL_FACTS,
       },
     ] as const;
 
-    const CASES = VERBS.flatMap((verb) =>
-      Array.from({ length: verb.writes }, (_unused, position) => ({
-        verb,
-        position,
-      })),
+    const KIND_ORDERS = [
+      { order: "whole kind first", factKinds: ["Report", "Section"] },
+      { order: "part kind first", factKinds: ["Section", "Report"] },
+    ] as const;
+
+    const CASES = KIND_ORDERS.flatMap(({ order, factKinds }) =>
+      VERBS.flatMap((verb) =>
+        Array.from({ length: verb.writes }, (_unused, position) => ({
+          order,
+          factKinds,
+          verb,
+          position,
+        })),
+      ),
     );
 
+    async function liveFactIds(store: CompositionStore): Promise<string[]> {
+      return sortedIds([
+        ...(await store.nodes.Report.find()),
+        ...(await store.nodes.Section.find()),
+      ]);
+    }
+
     it.each(CASES)(
-      "$verb.name rejected at write $position, caught and committed, leaves no live fact without support, and re-running it completes it",
-      async ({ verb, position }) => {
+      "$verb.name ($order) rejected at write $position, caught and committed, leaves no live fact without support and no constraint violation, and re-running it completes it",
+      async ({ factKinds, verb, position }) => {
         const armed = { on: false, started: 0 };
         const [store] = await createAdapterStoreWithSchema(
-          provenanceGraph,
+          compositionGraph,
           context.getBackend(),
           {
             history: true,
@@ -2695,7 +2794,7 @@ export function registerProvenanceIntegrationTests(
           },
         );
         await seedTwoSourceWorld(store);
-        const provenance = createRetractionCapability(store, config);
+        const provenance = capabilityFor(store, factKinds);
         await verb.prepare(provenance);
 
         const caught = await store.transaction(async (tx) => {
@@ -2709,29 +2808,33 @@ export function registerProvenanceIntegrationTests(
 
         expect(String(caught)).toContain(REJECTED_WRITE);
         expect(armed.started).toBe(position + 1);
-        const live = sortedIds(await store.nodes.Fact.find());
+        const live = await liveFactIds(store);
         const believed = sortedIds(await provenance.holding());
         expect(
           live.filter((id) => !believed.includes(id)),
           "live facts without live support",
         ).toEqual([]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
 
         await verb.run(provenance);
         expect(sortedIds(await provenance.holding())).toEqual(
           verb.believedAfter,
         );
-        expect(sortedIds(await store.nodes.Fact.find())).toEqual(
-          verb.believedAfter,
-        );
+        expect(await liveFactIds(store)).toEqual(verb.believedAfter);
+        expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
 
-    it.each(VERBS)(
-      "$name with no rejection makes exactly the writes the positions above cover (control)",
-      async (verb) => {
+    it.each(
+      KIND_ORDERS.flatMap(({ order, factKinds }) =>
+        VERBS.map((verb) => ({ order, factKinds, verb })),
+      ),
+    )(
+      "$verb.name ($order) with no rejection makes exactly the writes the positions above cover (control)",
+      async ({ factKinds, verb }) => {
         const armed = { on: false, started: 0 };
         const [store] = await createAdapterStoreWithSchema(
-          provenanceGraph,
+          compositionGraph,
           context.getBackend(),
           {
             history: true,
@@ -2743,7 +2846,7 @@ export function registerProvenanceIntegrationTests(
           },
         );
         await seedTwoSourceWorld(store);
-        const provenance = createRetractionCapability(store, config);
+        const provenance = capabilityFor(store, factKinds);
         await verb.prepare(provenance);
 
         await store.transaction(async (tx) => {
@@ -2759,6 +2862,8 @@ export function registerProvenanceIntegrationTests(
         expect(sortedIds(await provenance.holding())).toEqual(
           verb.believedAfter,
         );
+        expect(await liveFactIds(store)).toEqual(verb.believedAfter);
+        expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
   });

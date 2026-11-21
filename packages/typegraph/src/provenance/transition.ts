@@ -7,6 +7,7 @@ import {
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
+import { cascadeDeletionOrder } from "../store/operations/composition-cascade";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
   transactionBackend,
@@ -30,6 +31,8 @@ import { acquireCapabilityWriteLocks } from "./locks";
 import { type CapabilityScope, type TransactionScopeResolver } from "./scope";
 import {
   availableSourceKeys,
+  compositionDepthRounds,
+  type CompositionExistenceDependencies,
   computeSupportSnapshot,
   type SourceRetractedState,
   sourceRetractedState,
@@ -153,12 +156,23 @@ const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
  * hook runner, which defers every success hook until the transaction commits —
  * the transaction's own, or the caller's when it runs on one.
  * One fact at a time: the writes share the transaction's one connection.
+ *
+ * Every required part closes before its whole — at any depth, across fact
+ * kinds — in the composition cascade's own leaf-first order
+ * ({@link cascadeDeletionOrder}), never in configured fact-kind order: the
+ * verb takes no savepoint, so a caller that catches a failure between two
+ * closes and commits keeps the first, and a closed whole above a still-live
+ * required part is a `compositionExistence` violation.
  */
 async function closeFacts<G extends GraphDef>(
   tx: TransactionContext<G>,
+  dependencies: CompositionExistenceDependencies,
   closing: ReadonlyMap<string, LiveNodeRow>,
 ): Promise<void> {
-  for (const row of closing.values()) {
+  const partsFirst = cascadeDeletionOrder(
+    compositionDepthRounds(dependencies, closing),
+  );
+  for (const row of partsFirst) {
     await transactionDeleteNodeWithPolicy(
       tx,
       { kind: row.kind, id: row.id },
@@ -174,9 +188,14 @@ async function closeFacts<G extends GraphDef>(
  * uniqueness and the unique key it needs may still be held by a fact this
  * same transition closes — closing first makes a legal transition
  * order-independent.
+ *
+ * Every whole reopens before its required parts: the exact reverse of the
+ * close pass's leaf-first order, so a caught failure between two reopens
+ * leaves a part closed under a live whole, never live under a closed one.
  */
 async function reopenFacts<G extends GraphDef>(
   tx: TransactionContext<G>,
+  dependencies: CompositionExistenceDependencies,
   snapshot: SupportSnapshot,
   affected: ReadonlySet<string>,
 ): Promise<void> {
@@ -186,7 +205,10 @@ async function reopenFacts<G extends GraphDef>(
     (key) => snapshot.supportedFactKeys.has(key),
     isTombstonedNodeRow,
   );
-  for (const row of reopening.values()) {
+  const wholesFirst = cascadeDeletionOrder(
+    compositionDepthRounds(dependencies, reopening),
+  ).toReversed();
+  for (const row of wholesFirst) {
     await transactionReviveNode(tx, { kind: row.kind, id: row.id });
   }
 }
@@ -398,14 +420,17 @@ async function transitionInTransaction<
   // flags flip — any subset of the flips leaves a fact at least as supported
   // as all of them do, so a fact a retraction leaves without support is
   // already closed, and a restoration only adds support to facts still
-  // closed; then the facts that regain support reopen. A
-  // prefix can leave a fact closed whose support stands, never one live
-  // without it, and re-running the verb completes the transition.
-  await closeFacts(tx, closing);
+  // closed; then the facts that regain support reopen. Within the close pass
+  // every required part closes before its whole, and within the reopen pass
+  // every whole reopens before its parts. A prefix can leave a fact closed
+  // whose support stands, never one live without it nor a required part live
+  // under a closed whole, and re-running the verb completes the transition.
+  const dependencies = supportGraph.compositionDependencies;
+  await closeFacts(tx, dependencies, closing);
   for (const { source } of flipping) {
     await setSourceRetractionState(tx, config, source, retracted);
   }
-  await reopenFacts(tx, after, affected);
+  await reopenFacts(tx, dependencies, after, affected);
   return buildReport<G, FactKind, JustificationKind>(
     before,
     after,

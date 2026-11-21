@@ -442,6 +442,67 @@ describe("provenance composition existence", () => {
   // paragraph fall out of `affected`, so the reopen pass never reaches them
   // and `holding()` returns the annex and the report alone.
 
+  it.each([
+    {
+      order: "wholes configured first",
+      kinds: ["PcReport", "PcSection", "PcParagraph", "PcAnnex", "PcExhibit"],
+    },
+    {
+      order: "parts configured first",
+      kinds: ["PcParagraph", "PcSection", "PcReport", "PcAnnex", "PcExhibit"],
+    },
+  ] as const)(
+    "closes a depth-two chain leaf-first and reopens it whole-first ($order)",
+    async ({ kinds }) => {
+      const writes: string[] = [];
+      const backend = createTestBackend();
+      const [store] = await createStoreWithSchema(
+        buildGraph(`provenance_composition_write_order_${kinds[0]}`),
+        backend,
+        {
+          history: true,
+          hooks: {
+            onOperationStart: (ctx) => {
+              if (ctx.kind !== "PcSource") {
+                writes.push(`${ctx.operation} ${ctx.kind}`);
+              }
+            },
+          },
+        },
+      );
+      const { reportSource } = await seedComposedReport(store);
+      const provenance = createRetractionCapability(store, {
+        ...config,
+        fact: { kinds },
+      });
+
+      writes.length = 0;
+      await provenance.retract(reportSource);
+      const closes = writes.splice(0);
+      await provenance.unRetract(reportSource);
+      const reopens = writes.splice(0);
+
+      // Every required part closes before its whole and every whole reopens
+      // before its parts, at depth two, whatever order the fact kinds are
+      // configured in: a caught failure between two of these writes can then
+      // never leave a live part under a closed whole.
+      expect(closes).toEqual([
+        "delete PcParagraph",
+        "delete PcSection",
+        "delete PcReport",
+      ]);
+      expect(reopens.map((write) => write.split(" ")[1])).toEqual([
+        "PcReport",
+        "PcSection",
+        "PcParagraph",
+      ]);
+    },
+  );
+  // MUTATION CHECK: iterate `closing.values()` in `closeFacts`, or
+  // `reopening.values()` in `reopenFacts` (src/provenance/transition.ts),
+  // instead of the composition order. The configured kind order then drives
+  // the writes, and one of the two cases sees a whole before its part.
+
   it("keeps a part closed while its own source is retracted and its whole is not", async () => {
     const { store } = await createCompositionStore(
       "provenance_composition_part_source",
