@@ -21,7 +21,10 @@ import type { QueryAst } from "../../../src/query/ast";
 import { compileQuery } from "../../../src/query/compiler";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
-import { asCompiledSelectSql } from "../../../src/query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledSelectSql,
+} from "../../../src/query/sql-intent";
 import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write-pipeline";
 import { compareAndSetAbsent } from "../../../src/store-entry";
 import { requireDefined } from "../../../src/utils/presence";
@@ -151,29 +154,51 @@ const CASE_INSENSITIVE_COLLATION = "tg_case_insensitive";
  * built-in `NOCASE`, or on PostgreSQL a nondeterministic ICU collation this
  * creates. A direct caller of a set-update port may project its candidate ids
  * that way; the set update must still tell ids apart as the primary key does.
- * Returns the collated column and the teardown.
+ *
+ * An engine can accept the collation and still not apply it: PGlite takes the
+ * DDL, yet compares the twins as different. A case that projects through such
+ * a collation is byte-exact already and passes with the set update's key
+ * normalization removed, so `equatesTwins` reports what the engine actually
+ * decides for {@link CASE_TWIN_IDS} under the collation.
+ * Returns the collated column, that verdict, and the teardown.
  */
 async function caseInsensitiveColumn(
-  backend: Pick<GraphBackend, "dialect" | "executeDdl">,
+  backend: Pick<GraphBackend, "dialect" | "execute" | "executeDdl">,
   column: string,
-): Promise<Readonly<{ collated: string; drop: () => Promise<void> }>> {
-  if (backend.dialect !== "postgres") {
-    return {
-      collated: `${column} COLLATE NOCASE`,
-      drop: () => Promise.resolve(),
-    };
-  }
+): Promise<
+  Readonly<{
+    collated: string;
+    equatesTwins: boolean;
+    drop: () => Promise<void>;
+  }>
+> {
+  const isPostgres = backend.dialect === "postgres";
+  const collation = isPostgres ? CASE_INSENSITIVE_COLLATION : "NOCASE";
   const executeDdl = requireDefined(backend.executeDdl);
-  await executeDdl(
-    `CREATE COLLATION IF NOT EXISTS ${CASE_INSENSITIVE_COLLATION}
-     (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`,
+  if (isPostgres) {
+    await executeDdl(
+      `CREATE COLLATION IF NOT EXISTS ${CASE_INSENSITIVE_COLLATION}
+       (provider = icu, locale = 'und-u-ks-level2', deterministic = false)`,
+    );
+  }
+  const [upper, lower] = CASE_TWIN_IDS;
+  const [verdict] = await backend.execute<{ twins_equal: unknown }>(
+    asCompiledRowsSql(sql`
+      SELECT CASE
+        WHEN ${sql.raw(`'${upper}' COLLATE ${collation} = '${lower}'`)}
+        THEN 1 ELSE 0
+      END AS twins_equal
+    `),
   );
   return {
-    collated: `${column} COLLATE ${CASE_INSENSITIVE_COLLATION}`,
+    collated: `${column} COLLATE ${collation}`,
+    equatesTwins: Number(verdict?.twins_equal) === 1,
     drop: async () => {
-      await executeDdl(
-        `DROP COLLATION IF EXISTS ${CASE_INSENSITIVE_COLLATION}`,
-      );
+      if (isPostgres) {
+        await executeDdl(
+          `DROP COLLATION IF EXISTS ${CASE_INSENSITIVE_COLLATION}`,
+        );
+      }
     },
   };
 }
@@ -1680,6 +1705,7 @@ export function registerSetNodeMutationIntegrationTests(
       "%s through the backend port with case-insensitively projected candidates",
       (operation) => {
         async function writeCaseTwins(
+          skip: (note: string) => void,
           candidateIdsWhere: readonly string[],
         ): Promise<
           Readonly<{
@@ -1697,6 +1723,14 @@ export function registerSetNodeMutationIntegrationTests(
           }
           const column = await caseInsensitiveColumn(backend, "id");
           try {
+            // Not equated, the twins would pass this case with the set
+            // update's key normalization removed: it is skipped, so the lane
+            // does not count it as coverage.
+            if (!column.equatesTwins) {
+              skip(
+                "this engine's case-insensitive collation does not equate the twins",
+              );
+            }
             const candidateIds = asCompiledSelectSql(sql`
               SELECT ${sql.raw(column.collated)} AS person_id
               FROM ${createSqlSchema(backend.tableNames).nodesTable}
@@ -1736,15 +1770,15 @@ export function registerSetNodeMutationIntegrationTests(
           }
         }
 
-        it("writes both ids when both are candidates", async () => {
-          expect(await writeCaseTwins(CASE_TWIN_IDS)).toEqual({
+        it("writes both ids when both are candidates", async ({ skip }) => {
+          expect(await writeCaseTwins(skip, CASE_TWIN_IDS)).toEqual({
             affectedIds: [...CASE_TWIN_IDS].toSorted(),
             versions: [2, 2],
           });
         });
 
-        it("writes only the id that is a candidate", async () => {
-          expect(await writeCaseTwins([CASE_TWIN_IDS[0]])).toEqual({
+        it("writes only the id that is a candidate", async ({ skip }) => {
+          expect(await writeCaseTwins(skip, [CASE_TWIN_IDS[0]])).toEqual({
             affectedIds: [CASE_TWIN_IDS[0]],
             versions: [2, 1],
           });

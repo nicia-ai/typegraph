@@ -4,8 +4,13 @@
  * compete for one claim row; it used to compare every proposal with every
  * earlier one, re-encoding both claim keys per comparison, so 10,000 rows of a
  * uniquely constrained kind spent ~15 s in that loop alone. The count of
- * claim-key encodings is the deterministic measure: it doubles with the set
- * when the comparison is bucketed by claim row, and quadruples when it is not.
+ * proposal comparisons is the deterministic measure. Every comparison first
+ * asks whether the two proposals share an owner (`isSameClaimOwner`), so the
+ * calls to it count the comparisons whatever else a comparison reuses: they
+ * grow linearly with the set when a proposal is compared only with its own
+ * claim row's earlier proposals, and quadratically when it is compared with
+ * every earlier one — even when each proposal's encoded key is cached, which
+ * leaves the count of key encodings linear.
  *
  * The refusal of two members that compete for one claim must stay with that
  * in-set check: the persisted-claim probe and the claim rebuild that follow it
@@ -26,18 +31,18 @@ import {
   type ExactBackendOverlay,
 } from "../src/backend/derive-backend";
 import type { TransactionBackend } from "../src/backend/types";
-import type * as TupleKey from "../src/utils/tuple-key";
+import type * as ClaimAxis from "../src/store/claims/axis";
 import { createTestBackend } from "./test-utils";
 
-const encodings = vi.hoisted(() => ({ count: 0 }));
+const comparisons = vi.hoisted(() => ({ count: 0 }));
 
-vi.mock("../src/utils/tuple-key", async (importOriginal) => {
-  const actual = await importOriginal<typeof TupleKey>();
+vi.mock("../src/store/claims/axis", async (importOriginal) => {
+  const actual = await importOriginal<typeof ClaimAxis>();
   return {
     ...actual,
-    encodeTupleKey: (...args: Parameters<typeof actual.encodeTupleKey>) => {
-      encodings.count += 1;
-      return actual.encodeTupleKey(...args);
+    isSameClaimOwner: (...args: Parameters<typeof actual.isSameClaimOwner>) => {
+      comparisons.count += 1;
+      return actual.isSameClaimOwner(...args);
     },
   };
 });
@@ -125,27 +130,31 @@ function countingClaimMembers(backend: GraphBackend): Readonly<{
   };
 }
 
-async function encodingsForUpdateOf(count: number): Promise<number> {
+async function comparisonsForUpdateOf(count: number): Promise<number> {
   const store = await seededStore(createTestBackend(), count);
-  encodings.count = 0;
+  comparisons.count = 0;
   const { affectedCount } = await store.nodes.Ticket.updateWhere({
     all: true,
     patch: { status: "closed" },
   });
   expect(affectedCount).toBe(count);
-  return encodings.count;
+  return comparisons.count;
 }
 
 describe("set-update uniqueness validation", () => {
   beforeEach(() => {
-    encodings.count = 0;
+    comparisons.count = 0;
   });
 
-  it("encodes claim keys a number of times linear in the rows it rewrites", async () => {
-    const small = await encodingsForUpdateOf(500);
-    const large = await encodingsForUpdateOf(1000);
+  it("compares proposals a number of times linear in the rows it rewrites", async () => {
+    const small = await comparisonsForUpdateOf(500);
+    const large = await comparisonsForUpdateOf(1000);
 
-    // Linear work doubles; the pairwise comparison quadrupled it.
+    // Bucketed by claim row: one owner check per row (500, then 1,000), all
+    // outside the in-set comparison since no two codes share a row. Compared
+    // with every earlier proposal: 125,250, then 500,500.
+    expect(small).toBeLessThanOrEqual(2 * 500);
+    expect(large).toBeLessThanOrEqual(2 * 1000);
     expect(large / small).toBeLessThan(2.5);
   });
 
