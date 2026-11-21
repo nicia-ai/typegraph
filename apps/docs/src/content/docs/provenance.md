@@ -265,7 +265,10 @@ import {
   type Node,
 } from "@nicia-ai/typegraph";
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
-import { createRetractionCapability } from "@nicia-ai/typegraph/provenance";
+import {
+  createRetractionCapability,
+  type RetractionCapability,
+} from "@nicia-ai/typegraph/provenance";
 import type { HistoryStore } from "@nicia-ai/typegraph/store";
 import { z } from "zod";
 
@@ -313,7 +316,11 @@ const graph = defineGraph({
         {
           name: "one_current_holder",
           fields: ["organizationId", "role"],
-          where: (props) => props.endedOn.isNull(),
+          where: (props) => {
+            const endedOn = props["endedOn"];
+            if (endedOn === undefined) throw new Error("no endedOn field");
+            return endedOn.isNull();
+          },
           scope: "kind",
           collation: "binary",
         },
@@ -352,13 +359,28 @@ const provenance = createRetractionCapability(store, {
 });
 ```
 
-The constraints are explained [below](#constraints). Write the node, its two
-edges and one justification per source in one transaction, so no reader sees
-an employment without its holder or its grounds:
+Inside `defineGraph` the `where` callback's fields are typed through an index
+signature, so under `noPropertyAccessFromIndexSignature` and
+`noUncheckedIndexedAccess` the predicate reads `endedOn` by name and checks it
+is there. The constraints are explained [below](#constraints).
+
+Write the node, its two edges and one justification per source in one
+transaction, so no reader sees an employment without its holder or its grounds.
+The transaction ends with `assertHolds`, so an employment recorded with no
+sources, or only with sources that are already retracted, rolls back instead
+of committing a fact that `holding()` excludes and no retraction can reach:
 
 ```typescript
+type EmploymentProvenance = RetractionCapability<
+  typeof graph,
+  "Source",
+  "Employment",
+  "Justification"
+>;
+
 async function recordEmployment(
   store: HistoryStore<typeof graph>,
+  provenance: EmploymentProvenance,
   person: Node<typeof Person>,
   organization: Node<typeof Organization>,
   stint: Readonly<{ role: string; startedOn: string; endedOn?: string }>,
@@ -366,8 +388,8 @@ async function recordEmployment(
 ): Promise<Node<typeof Employment>> {
   return store.transaction(async (tx) => {
     const employment = await tx.nodes.Employment.create({
-      organizationId: organization.id,
       ...stint,
+      organizationId: organization.id,
     });
     await tx.edges.heldRole.create(person, employment, {});
     await tx.edges.atOrganization.create(employment, organization, {});
@@ -378,6 +400,7 @@ async function recordEmployment(
       await tx.edges.premiseOf.create(source, justification, {});
       await tx.edges.derives.create(justification, employment, {});
     }
+    await provenance.assertHolds(tx, [employment]);
     return employment;
   });
 }
@@ -388,6 +411,7 @@ const registry = await store.nodes.Source.create({ label: "registry" });
 
 const employment = await recordEmployment(
   store,
+  provenance,
   ada,
   acme,
   { role: "Engineer", startedOn: "2024-01-01" },
@@ -397,7 +421,9 @@ const employment = await recordEmployment(
 
 ### Querying through the fact node
 
-Read the relationship by traversing through the fact node:
+Read the relationship by traversing through the fact node. A retracted fact
+drops out of the traversal on its own, but an ended stint is still a believed
+fact, so filter on `endedOn` when you want the current employments:
 
 ```typescript
 const employments = await store
@@ -406,6 +432,7 @@ const employments = await store
   .whereNode("person", (fields) => fields.id.eq(ada.id))
   .traverse("heldRole", "held")
   .to("Employment", "employment")
+  .whereNode("employment", (fields) => fields.endedOn.isNull())
   .traverse("atOrganization", "at")
   .to("Organization", "organization")
   .select((ctx) => ({
@@ -445,8 +472,9 @@ current employments. To list closed facts, traverse with
 returned before the retraction.
 
 Two stints at the same organization are two `Employment` nodes, each with its
-own justifications, so retracting the source of one leaves the other in the
-traversal and in `holding()`. An employment recorded with two sources has two
+own justifications. Both are in `holding()`, only the one without `endedOn`
+is in the traversal above, and retracting the source of one leaves the other
+in `holding()`. An employment recorded with two sources has two
 justifications and survives the retraction of either one; the report lists it
 in `survivedVia` with the justification that still fires:
 
@@ -454,6 +482,7 @@ in `survivedVia` with the justification that still fires:
 const press = await store.nodes.Source.create({ label: "press" });
 const confirmed = await recordEmployment(
   store,
+  provenance,
   ada,
   acme,
   { role: "Advisor", startedOn: "2025-01-01" },
@@ -473,15 +502,25 @@ instant after it, neither. The edges are live at both instants.
 
 Constraints split the same way the reads do.
 
-Put rules about the shape of one fact on its edges. `targetCardinality: "one"`
-on `heldRole` gives each `Employment` exactly one holder, and
-`cardinality: "one"` on `atOrganization` gives it one organization; a second
-edge of either is refused with `CardinalityError`.
+Put rules about the shape of one fact on its edges. Cardinality is an upper
+bound: `targetCardinality: "one"` on `heldRole` gives each `Employment` at most
+one holder, and `cardinality: "one"` on `atOrganization` at most one
+organization; a second edge of either is refused with `CardinalityError`.
+Nothing in the schema requires either edge to exist, and either can be deleted
+later. That every employment starts with both is the job of the transaction in
+`recordEmployment`, so write employments through it.
+
+A closed fact takes no new edges. Creating a `heldRole` or `atOrganization`
+edge onto a retracted `Employment` whose slot is free is refused with
+`EndpointNotFoundError`.
 
 Put rules about which facts are current on the fact node, as a uniqueness
 constraint. A uniqueness constraint keys the node's own properties, so the
 organization the rule is about is copied onto the node (`organizationId`) and
-written by the same transaction that creates the `atOrganization` edge. With
+written by the same transaction that creates the `atOrganization` edge.
+`recordEmployment` assigns `organizationId` after spreading `stint`, so a
+caller's object that happens to carry its own `organizationId` cannot point
+the constraint at a different organization than the edge. With
 `one_current_holder` above:
 
 - a second current holder of the same role at the same organization is refused

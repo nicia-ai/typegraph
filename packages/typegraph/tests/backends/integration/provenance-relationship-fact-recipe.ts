@@ -2,8 +2,9 @@
  * The "Relationship as a fact node" recipe in the provenance guide
  * (apps/docs/src/content/docs/provenance.md), run against every backend so the
  * documented shape and every read the guide describes cannot drift from what
- * the store does. Keep the graph, the capability config and
- * `recordEmployment` below identical to the documented blocks.
+ * the store does. Keep the graph, the capability config, `recordEmployment`
+ * and the current-employment traversal in `employmentsOf` identical to the
+ * documented blocks.
  *
  * Only the public surface is used: the root entry point and the
  * `@nicia-ai/typegraph/provenance` subpath.
@@ -17,11 +18,16 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
   field,
   type Node,
   UniquenessError,
 } from "../../../src";
-import { createRetractionCapability } from "../../../src/provenance";
+import {
+  createRetractionCapability,
+  FactNotHoldingError,
+  type RetractionCapability,
+} from "../../../src/provenance";
 import type { HistoryStore } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
@@ -72,9 +78,11 @@ const graph = defineGraph({
         {
           name: "one_current_holder",
           fields: ["organizationId", "role"],
-          // The docs write `props.endedOn.isNull()`; this repo compiles with
-          // `noPropertyAccessFromIndexSignature`, so the test indexes it.
-          where: (props) => requireDefined(props["endedOn"]).isNull(),
+          where: (props) => {
+            const endedOn = props["endedOn"];
+            if (endedOn === undefined) throw new Error("no endedOn field");
+            return endedOn.isNull();
+          },
           scope: "kind",
           collation: "binary",
         },
@@ -110,6 +118,12 @@ const provenanceConfig = {
 } as const;
 
 type EmploymentStore = HistoryStore<typeof graph>;
+type EmploymentProvenance = RetractionCapability<
+  typeof graph,
+  "Source",
+  "Employment",
+  "Justification"
+>;
 
 /**
  * Not documented as a pattern: the same kinds with "one current employment
@@ -137,7 +151,8 @@ const perPersonCardinalityGraph = defineGraph({
 });
 
 async function recordEmployment(
-  store: EmploymentStore,
+  store: HistoryStore<typeof graph>,
+  provenance: EmploymentProvenance,
   person: Node<typeof Person>,
   organization: Node<typeof Organization>,
   stint: Readonly<{ role: string; startedOn: string; endedOn?: string }>,
@@ -145,8 +160,8 @@ async function recordEmployment(
 ): Promise<Node<typeof Employment>> {
   return store.transaction(async (tx) => {
     const employment = await tx.nodes.Employment.create({
-      organizationId: organization.id,
       ...stint,
+      organizationId: organization.id,
     });
     await tx.edges.heldRole.create(person, employment, {});
     await tx.edges.atOrganization.create(employment, organization, {});
@@ -157,6 +172,7 @@ async function recordEmployment(
       await tx.edges.premiseOf.create(source, justification, {});
       await tx.edges.derives.create(justification, employment, {});
     }
+    await provenance.assertHolds(tx, [employment]);
     return employment;
   });
 }
@@ -192,7 +208,7 @@ const claimBesideEdgeGraph = defineGraph({
 
 // --- Test helpers ---------------------------------------------------------
 
-/** The documented traversal: person -> Employment -> organization. */
+/** The documented traversal: person -> current Employment -> organization. */
 async function employmentsOf(
   store: EmploymentStore,
   person: Node<typeof Person>,
@@ -203,6 +219,7 @@ async function employmentsOf(
     .whereNode("person", (fields) => fields.id.eq(person.id))
     .traverse("heldRole", "held")
     .to("Employment", "employment")
+    .whereNode("employment", (fields) => fields.endedOn.isNull())
     .traverse("atOrganization", "at")
     .to("Organization", "organization")
     .select((ctx) => ({
@@ -217,6 +234,24 @@ function idsOf(rows: readonly Readonly<{ id: string }>[]): string[] {
   return rows
     .map((row) => row.id)
     .toSorted((left, right) => left.localeCompare(right));
+}
+
+/** Nothing a failed `recordEmployment` wrote is left, live or closed. */
+async function expectNothingRecorded(store: EmploymentStore) {
+  expect(await store.nodes.Employment.count()).toBe(0);
+  expect(await store.nodes.Justification.count()).toBe(0);
+  expect(await store.edges.heldRole.count()).toBe(0);
+  expect(await store.edges.atOrganization.count()).toBe(0);
+  expect(await store.edges.premiseOf.count()).toBe(0);
+  expect(await store.edges.derives.count()).toBe(0);
+  // Rolled back, not closed: no tombstone either.
+  const everRecorded = await store
+    .query()
+    .from("Employment", "employment")
+    .temporal("includeTombstones")
+    .select((ctx) => ({ id: ctx.employment.id }))
+    .execute();
+  expect(everRecorded).toEqual([]);
 }
 
 async function seed(context: IntegrationTestContext) {
@@ -236,6 +271,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const { store, provenance, ada, acme, registry } = await seed(context);
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
@@ -271,6 +307,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const { store, provenance, ada, acme, registry } = await seed(context);
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
@@ -355,6 +392,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const { store, provenance, ada, acme, registry } = await seed(context);
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
@@ -387,6 +425,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const press = await store.nodes.Source.create({ label: "press" });
       const first = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2019-01-01", endedOn: "2021-06-30" },
@@ -394,11 +433,18 @@ export function registerProvenanceRelationshipFactRecipeTests(
       );
       const second = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2023-03-01" },
         [press],
       );
+      // Both stints are believed, but only the one without `endedOn` is
+      // current, so the documented traversal returns only that one.
+      expect(idsOf(await provenance.holding())).toEqual(idsOf([first, second]));
+      expect(await employmentsOf(store, ada)).toEqual([
+        { employmentId: second.id, role: "Engineer", organization: "Acme" },
+      ]);
 
       const report = await provenance.retract(registry);
 
@@ -415,6 +461,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const { store, provenance, ada, acme, registry } = await seed(context);
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
@@ -424,6 +471,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const press = await store.nodes.Source.create({ label: "press" });
       const confirmed = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Advisor", startedOn: "2025-01-01" },
@@ -462,6 +510,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const press = await store.nodes.Source.create({ label: "press" });
       const adaAsChair = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Chair", startedOn: "2024-01-01" },
@@ -473,6 +522,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       await expect(
         recordEmployment(
           store,
+          provenance,
           grace,
           acme,
           { role: "Chair", startedOn: "2024-06-01" },
@@ -485,6 +535,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       // Ended stints sit outside the `where`, so history does not hold the seat.
       await recordEmployment(
         store,
+        provenance,
         grace,
         acme,
         { role: "Chair", startedOn: "2020-01-01", endedOn: "2023-12-31" },
@@ -495,6 +546,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       await provenance.retract(registry);
       const graceAsChair = await recordEmployment(
         store,
+        provenance,
         grace,
         acme,
         { role: "Chair", startedOn: "2024-06-01" },
@@ -522,12 +574,81 @@ export function registerProvenanceRelationshipFactRecipeTests(
       expect(reopened?.role).toBe("Chair");
     });
 
+    it("the organization on the fact node is the one its edge points at, whatever extra fields the stint carries", async () => {
+      const { store, provenance, ada, acme, registry } = await seed(context);
+      const grace = await store.nodes.Person.create({ name: "Grace" });
+      await recordEmployment(
+        store,
+        provenance,
+        ada,
+        acme,
+        { role: "Chair", startedOn: "2024-01-01" },
+        [registry],
+      );
+      // A wider object satisfies the `stint` parameter; its organizationId
+      // must not decide which seat the uniqueness constraint checks.
+      const stintNamingAnotherOrganization = {
+        role: "Chair",
+        startedOn: "2024-06-01",
+        organizationId: "another-organization",
+      };
+
+      await expect(
+        recordEmployment(
+          store,
+          provenance,
+          grace,
+          acme,
+          stintNamingAnotherOrganization,
+          [registry],
+        ),
+      ).rejects.toThrow(UniquenessError);
+      const employments = await store.nodes.Employment.find();
+      expect(employments.map((row) => row.organizationId)).toEqual([acme.id]);
+    });
+
+    it("an employment recorded with no sources is refused after its node and edges are written, and the transaction rolls all of it back", async () => {
+      const { store, provenance, ada, acme } = await seed(context);
+
+      await expect(
+        recordEmployment(
+          store,
+          provenance,
+          ada,
+          acme,
+          { role: "Engineer", startedOn: "2024-01-01" },
+          [],
+        ),
+      ).rejects.toThrow(FactNotHoldingError);
+      await expectNothingRecorded(store);
+      expect(await employmentsOf(store, ada)).toEqual([]);
+    });
+
+    it("an employment recorded from an already-retracted source is refused after its node, edges and justification are written, and the transaction rolls all of it back", async () => {
+      const { store, provenance, ada, acme, registry } = await seed(context);
+      await provenance.retract(registry);
+
+      await expect(
+        recordEmployment(
+          store,
+          provenance,
+          ada,
+          acme,
+          { role: "Engineer", startedOn: "2024-01-01" },
+          [registry],
+        ),
+      ).rejects.toThrow(FactNotHoldingError);
+      await expectNothingRecorded(store);
+      expect(await employmentsOf(store, ada)).toEqual([]);
+    });
+
     it("edge cardinality bounds each fact's own shape: one holder and one organization per Employment", async () => {
       const { store, provenance, ada, acme, registry } = await seed(context);
       const grace = await store.nodes.Person.create({ name: "Grace" });
       const globex = await store.nodes.Organization.create({ name: "Globex" });
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
@@ -540,15 +661,36 @@ export function registerProvenanceRelationshipFactRecipeTests(
       await expect(
         store.edges.atOrganization.create(employment, globex, {}),
       ).rejects.toThrow(CardinalityError);
+    });
 
-      // A new edge onto the closed fact is refused on every backend. Which
-      // error says so is backend-dependent (a CardinalityError on SQLite, an
-      // EndpointNotFoundError on PostgreSQL), so only the refusal is pinned.
+    it("a new edge onto a closed fact is refused because the endpoint is closed, with no cardinality slot in the way", async () => {
+      const { store, provenance, ada, acme, registry } = await seed(context);
+      const grace = await store.nodes.Person.create({ name: "Grace" });
+      const globex = await store.nodes.Organization.create({ name: "Globex" });
+      const employment = await recordEmployment(
+        store,
+        provenance,
+        ada,
+        acme,
+        { role: "Engineer", startedOn: "2024-01-01" },
+        [registry],
+      );
       await provenance.retract(registry);
+      // Free both cardinality slots, so the closed endpoint is the only
+      // reason left to refuse a new edge.
+      const [held] = await store.edges.heldRole.findTo(employment);
+      const [at] = await store.edges.atOrganization.findFrom(employment);
+      await store.edges.heldRole.delete(requireDefined(held).id);
+      await store.edges.atOrganization.delete(requireDefined(at).id);
+
       await expect(
         store.edges.heldRole.create(grace, employment, {}),
-      ).rejects.toThrow();
-      expect(await store.edges.heldRole.findTo(employment)).toHaveLength(1);
+      ).rejects.toThrow(EndpointNotFoundError);
+      await expect(
+        store.edges.atOrganization.create(employment, globex, {}),
+      ).rejects.toThrow(EndpointNotFoundError);
+      expect(await store.edges.heldRole.findTo(employment)).toEqual([]);
+      expect(await store.edges.atOrganization.findFrom(employment)).toEqual([]);
     });
 
     it("a per-person edge cardinality keeps counting a closed fact's live edge, so it cannot say 'current'", async () => {
@@ -590,6 +732,7 @@ export function registerProvenanceRelationshipFactRecipeTests(
       const { store, provenance, ada, acme, registry } = await seed(context);
       const employment = await recordEmployment(
         store,
+        provenance,
         ada,
         acme,
         { role: "Engineer", startedOn: "2024-01-01" },
