@@ -58,6 +58,8 @@ import {
   registerEdgeCardinalityTighteningIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
+  registerEdgeCreateDeclineIntegrationTests,
+  registerEdgeCreateRefusalMatrixIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerEdgeTargetCardinalityIntegrationTests,
@@ -300,6 +302,8 @@ export const INTEGRATION_REGISTRATIONS: readonly IntegrationRegistration[] = [
   { register: registerEdgeAcyclicityIntegrationTests, weight: 8 },
   { register: registerEdgeClaimSelfHealIntegrationTests, weight: 1 },
   { register: registerEdgeTargetCardinalityIntegrationTests, weight: 2 },
+  { register: registerEdgeCreateDeclineIntegrationTests, weight: 2 },
+  { register: registerEdgeCreateRefusalMatrixIntegrationTests, weight: 8 },
   { register: registerBatchWriteVerdictIntegrationTests, weight: 10 },
   {
     register: registerEdgeTargetCardinalityTemporalIntegrationTests,
