@@ -436,13 +436,15 @@ reads in its own transaction.
   transaction opened with `accessMode: "read_only"` is refused with
   `UnsupportedBackendCapabilityError` before any statement. On
   PostgreSQL it takes the schema-version fence and then the graph write lock, in
-  the store's canonical order, before it reads, so it is safe to call before or
-  after your first write. A `retract` that overlaps the transaction either is
+  the store's canonical order, before it reads. Under TypeGraph-owned history
+  capture that makes it safe to call before or after your first write; with
+  engine-native recorded time, call it first (see the lock-order item below).
+  A `retract` that overlaps the transaction either is
   seen by the assert, which refuses, or commits after it and closes the new
   fact and names it in `died`; the fact never ends up live and unsupported.
 - `holding(tx)` writes nothing. In a read-write transaction it takes the same
   locks as `assertHolds`, the schema-version fence and then the graph write
-  lock, so it is safe to call before or after your writes and `assertHolds`.
+  lock, so it orders against your writes exactly as `assertHolds` does.
   Two consequences: on a store handle whose schema version is no longer the
   active one it throws `StaleVersionError`, and a role that may only `SELECT`
   gets the database's own permission error, because the schema fence is a row
@@ -467,11 +469,30 @@ reads in its own transaction.
   holds.
 - `retract`, `retractMany`, `unRetract` and `unRetractMany` run in a
   transaction of their own, or in yours when you pass it, and take the
-  schema-version fence and then the graph write lock before their first read,
-  so they are safe to call before or after your own writes. On a store handle
-  whose schema version is no longer the active one they throw
-  `StaleVersionError`, even when the call would have changed nothing or would
-  have reported a missing source.
+  schema-version fence and then the graph write lock before their first read.
+  On a store handle whose schema version is no longer the active one they
+  throw `StaleVersionError`, even when the call would have changed nothing or
+  would have reported a missing source.
+- Lock order against your own writes depends on whether those writes take the
+  graph write lock. Under TypeGraph-owned history capture every write takes it
+  first, so a verb, `assertHolds` or `holding(tx)` is safe before or after your
+  writes. With
+  [engine-native recorded time](/queries/temporal#engine-native-recorded-time)
+  on PostgreSQL, an ordinary write takes only its row locks, so one of these
+  calls made after it takes the graph lock second: the reverse of a concurrent
+  retraction, which takes the graph lock and then the source rows. If that
+  retraction is waiting on a row your write locked, PostgreSQL detects the
+  deadlock and aborts one of the two transactions. Inside `store.transaction()`
+  the abort surfaces as `TransactionConflictError` (`TRANSACTION_CONFLICT`,
+  with the driver's `40P01` error as `cause`), retryable with
+  `store.transaction(fn, { retry: { attempts } })` or by re-running the
+  transaction yourself; a verb called without a transaction runs in a store
+  transaction of its own and surfaces it the same way. To avoid it, make the
+  verb, `assertHolds` or `holding(tx)` the first graph call in the transaction,
+  as [`applyMergePlanInTransaction`](/graph-merge#apply-a-plan-with-application-writes)
+  already requires of a merge: the graph lock it takes then orders every write
+  after it. `assertHolds` and `holding(tx)` behaved this way before the verbs
+  accepted a transaction.
 - Inside a transaction, pass it to the retraction verbs. Without it a verb
   opens a second transaction, which commits independently of yours and waits
   for the graph lock if yours already holds it.
