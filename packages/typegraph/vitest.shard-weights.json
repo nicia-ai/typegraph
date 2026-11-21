@@ -266,6 +266,7 @@
     "tests/edge-create-path-golden-sqlite-endpoint-declining.test.ts": 2340,
     "tests/edge-create-path-golden-sqlite-root.test.ts": 3865,
     "tests/edge-create-path-golden-sqlite-transaction.test.ts": 1818,
+    "tests/edge-create-two-claim-decline-statements.test.ts": 3930,
     "tests/edge-delete-bind-budget.test.ts": 354,
     "tests/edge-domain-range.test.ts": 110,
     "tests/edge-endpoint-bucketing.test.ts": 127,

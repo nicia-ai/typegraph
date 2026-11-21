@@ -30,6 +30,7 @@ export const PGLITE_TEST_FILES = [
   "tests/edge-create-path-golden-pglite-endpoint-declining.test.ts",
   "tests/edge-create-path-golden-pglite-root.test.ts",
   "tests/edge-create-path-golden-pglite-transaction.test.ts",
+  "tests/edge-create-two-claim-decline-statements.test.ts",
   "tests/edge-match-identity-ddl.test.ts",
   "tests/engine-catalog-probes.test.ts",
   "tests/engine-operation-layer-transaction-scope.test.ts",

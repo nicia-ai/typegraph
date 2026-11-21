@@ -13,6 +13,7 @@ const PGLITE_BOOT_MARKERS = [
   /\bcreateNeonHttpBatchEngineHarness\(/u,
   /\bregisterWriteShapeGoldenFile\("pglite"\)/u,
   /\bregisterEdgeCreatePathGoldenFile\("pglite",/u,
+  /\bopenWriteShapeEngine\(/u,
 ] as const;
 
 function discoverRootPgliteSuites(): readonly string[] {
