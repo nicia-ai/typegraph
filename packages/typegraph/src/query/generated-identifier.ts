@@ -39,6 +39,7 @@
 import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { fnv1a64Base36 } from "../utils/hash";
 import { truncateToBytes } from "../utils/identifier";
+import { createDataKeyedBag } from "../utils/object";
 import { rewriteSqlText, sql, type SqlFragment } from "./sql-fragment";
 
 /** PostgreSQL's identifier limit in bytes, the strictest of every backend. */
@@ -284,11 +285,13 @@ export function restoreGeneratedColumns<Row extends Record<string, unknown>>(
 ): readonly Row[] {
   if (columns.size === 0) return rows;
   return rows.map((row) => {
-    const restored: Record<string, unknown> = {};
+    // Row keys are data (a field may be named `__proto__`), so the
+    // accumulator has no prototype; the spread restores one at the boundary.
+    const restored = createDataKeyedBag<unknown>();
     for (const [key, value] of Object.entries(row)) {
       restored[columns.get(key) ?? key] = value;
     }
-    return restored as Row;
+    return { ...restored } as Row;
   });
 }
 

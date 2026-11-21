@@ -235,6 +235,17 @@ describe("sealGeneratedIdentifiers", () => {
     expect(() =>
       generatedColumnName(statement, aliasColumnName(LONG_ALIAS, "kind")),
     ).toThrow(/never allocated/u);
+    // A data key that names an Object.prototype accessor survives re-keying.
+    const protoRow = JSON.parse('{"__proto__": "kept"}') as Record<
+      string,
+      unknown
+    >;
+    const [restoredProtoRow] = restoreGeneratedColumns(
+      [{ ...protoRow, [physical]: "x" }],
+      generatedColumnsOf(statement),
+    );
+    expect(Object.hasOwn(restoredProtoRow ?? {}, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(restoredProtoRow)).toBe(Object.prototype);
   });
 });
 
