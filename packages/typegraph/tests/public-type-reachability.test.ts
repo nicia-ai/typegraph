@@ -20,7 +20,7 @@
  *    entrypoint itself or by a covered entrypoint whose declarations that
  *    entrypoint loads (`scripts/declaration-loads.ts`).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import ts from "typescript";
@@ -205,6 +205,23 @@ function reportFor(entrypoint: string): ParsedReport {
   return report;
 }
 
+/** Every name a covered entrypoint exports. */
+const COVERED_NAMES: ReadonlySet<string> = new Set(
+  COVERED_ENTRYPOINTS.flatMap((entrypoint) => [
+    ...reportFor(entrypoint).exported,
+  ]),
+);
+/** Every name an authoring entrypoint exports. */
+const AUTHORING_NAMES: ReadonlySet<string> = new Set(
+  AUTHORING_ENTRYPOINTS.flatMap((entrypoint) => [
+    ...reportFor(entrypoint).exported,
+  ]),
+);
+const EXPORTED_ANYWHERE: ReadonlySet<string> = new Set([
+  ...COVERED_NAMES,
+  ...AUTHORING_NAMES,
+]);
+
 function exportersOf(
   symbol: string,
   entrypoints: readonly string[],
@@ -349,23 +366,24 @@ function sorted(values: Iterable<string>): string[] {
   return [...values].toSorted((left, right) => left.localeCompare(right));
 }
 
-/**
- * The entrypoints whose declarations `entrypoint`'s declarations load
- * (`scripts/declaration-loads.ts`, which the build writes into each entry's
- * emitted declarations).
- */
-function declarationLoadsOf(entrypoint: string): readonly string[] {
-  return DECLARATION_LOADS[entrypoint] ?? [];
-}
+type DeclarationLoads = Readonly<Record<string, readonly string[]>>;
 
-/** An entrypoint and every entrypoint its declarations load, transitively. */
-function loadedEntrypoints(entrypoint: string): ReadonlySet<string> {
+/**
+ * An entrypoint and every entrypoint its declarations load under `loads`,
+ * transitively. `loads` defaults to the map the build writes into each
+ * entry's emitted declarations (`scripts/declaration-loads.ts`); the
+ * load-necessity test passes that map with one edge removed.
+ */
+function loadedEntrypoints(
+  entrypoint: string,
+  loads: DeclarationLoads = DECLARATION_LOADS,
+): ReadonlySet<string> {
   const loaded = new Set<string>();
   const pending = [entrypoint];
   for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
     if (loaded.has(next)) continue;
     loaded.add(next);
-    pending.push(...declarationLoadsOf(next));
+    pending.push(...(loads[next] ?? []));
   }
   return loaded;
 }
@@ -494,29 +512,34 @@ type Unnameable = Readonly<{
 }>;
 
 /**
+ * Whether `name`, referenced from `report`, is a backend-authoring contract:
+ * declared in the report and exported only by an authoring entrypoint.
+ */
+function isAuthoringOnly(
+  report: ParsedReport,
+  name: string,
+  covered: ReadonlySet<string>,
+  authoring: ReadonlySet<string>,
+): boolean {
+  return (
+    report.declarations.has(name) && !covered.has(name) && authoring.has(name)
+  );
+}
+
+/**
  * Every name `entrypoint`'s consumer-visible declarations reference that the
  * entrypoint does not export itself, each with the declaration the walk first
  * reached it through. The walk starts at the entrypoint's exported
  * declarations and descends through every declaration they reference. It
  * treats the authoring-only names and the opaque backend handle exactly as
- * `findAuthoringOnlyLeaks` does (those are contract 2's ledger), and a
+ * `findAuthoringOnlyLeaks` does — the signatures that reach them are the
+ * documented exception `findAuthoringTypeSignatures` enumerates — and a
  * `typeof` query as `typeQueryNeedsName` describes.
  */
 function namesNeededFromElsewhere(
   entrypoint: string,
 ): ReadonlyMap<string, string> {
   const report = reportFor(entrypoint);
-  const covered = new Set(
-    COVERED_ENTRYPOINTS.flatMap((candidate) => [
-      ...reportFor(candidate).exported,
-    ]),
-  );
-  const authoring = new Set(
-    AUTHORING_ENTRYPOINTS.flatMap((candidate) => [
-      ...reportFor(candidate).exported,
-    ]),
-  );
-  const exportedAnywhere = new Set([...covered, ...authoring]);
   const needed = new Map<string, string>();
   const visited = new Set<string>();
   const pending = [...report.exported];
@@ -530,10 +553,17 @@ function namesNeededFromElsewhere(
       for (const reference of referencesOf(
         statement,
         report.source,
-        exportedAnywhere,
+        EXPORTED_ANYWHERE,
       )) {
         if (!report.declarations.has(reference.name)) continue;
-        if (!covered.has(reference.name) && authoring.has(reference.name)) {
+        if (
+          isAuthoringOnly(
+            report,
+            reference.name,
+            COVERED_NAMES,
+            AUTHORING_NAMES,
+          )
+        ) {
           continue;
         }
         const needsName =
@@ -553,37 +583,262 @@ function namesNeededFromElsewhere(
 }
 
 /**
- * Whether a covered entrypoint other than `entrypoint` exports `name` as the
- * declaration `entrypoint`'s report renders under it.
+ * For each covered entrypoint, each name it needs from elsewhere mapped to
+ * the declaration the walk reached it through and to the covered entrypoints
+ * (other than itself) that export that same declaration. Independent of the
+ * load map, so the load-necessity test can re-judge many maps against it.
  */
-function exportedBy(
-  candidates: Iterable<string>,
-  entrypoint: string,
-  name: string,
-): boolean {
-  const report = reportFor(entrypoint);
-  return [...candidates].some(
-    (candidate) =>
-      candidate !== entrypoint &&
-      exportsSameDeclaration(reportFor(candidate), report, name),
-  );
-}
+const NEEDED_NAMES: ReadonlyMap<
+  string,
+  ReadonlyMap<
+    string,
+    Readonly<{ namedBy: string; exporters: ReadonlySet<string> }>
+  >
+> = new Map(
+  COVERED_ENTRYPOINTS.map((entrypoint) => {
+    const report = reportFor(entrypoint);
+    return [
+      entrypoint,
+      new Map(
+        [...namesNeededFromElsewhere(entrypoint)].map(([name, namedBy]) => [
+          name,
+          {
+            namedBy,
+            exporters: new Set(
+              COVERED_ENTRYPOINTS.filter(
+                (candidate) =>
+                  candidate !== entrypoint &&
+                  exportsSameDeclaration(reportFor(candidate), report, name),
+              ),
+            ),
+          },
+        ]),
+      ),
+    ];
+  }),
+);
 
 /**
- * Each name a consumer importing only one covered entrypoint could not name:
- * needed from elsewhere, and exported by no entrypoint that entrypoint's
- * declarations load.
+ * Each name a consumer importing only one covered entrypoint could not name
+ * under `loads`: needed from elsewhere, and exported by no entrypoint that
+ * entrypoint's declarations load.
  */
-function findUnnameableTypes(): readonly Unnameable[] {
+function findUnnameableTypes(
+  loads: DeclarationLoads = DECLARATION_LOADS,
+): readonly Unnameable[] {
   return COVERED_ENTRYPOINTS.flatMap((entrypoint) => {
-    const loaded = loadedEntrypoints(entrypoint);
-    return [...namesNeededFromElsewhere(entrypoint)].flatMap(
-      ([name, namedBy]) =>
-        exportedBy(loaded, entrypoint, name) ?
+    const loaded = loadedEntrypoints(entrypoint, loads);
+    return [...(NEEDED_NAMES.get(entrypoint) ?? [])].flatMap(
+      ([name, { namedBy, exporters }]) =>
+        [...exporters].some((exporter) => loaded.has(exporter)) ?
           []
         : [{ entrypoint, name, namedBy }],
     );
   });
+}
+
+/** `loads` without the single edge `entrypoint` → `loaded`. */
+function withoutLoad(
+  loads: DeclarationLoads,
+  entrypoint: string,
+  loaded: string,
+): DeclarationLoads {
+  return {
+    ...loads,
+    [entrypoint]: (loads[entrypoint] ?? []).filter(
+      (candidate) => candidate !== loaded,
+    ),
+  };
+}
+
+/**
+ * Each declared load whose removal leaves every covered entrypoint able to
+ * name every type it needs. Crediting a load with the needed names it can
+ * reach is not enough: a load that repeats names another load already
+ * supplies, directly or transitively, is redundant. Each edge is therefore
+ * judged by comparing reachability with and without it.
+ */
+function findRedundantLoads(loads: DeclarationLoads): readonly string[] {
+  const baseline = findUnnameableTypes(loads).length;
+  return Object.entries(loads).flatMap(([entrypoint, targets]) =>
+    targets.flatMap((loaded) =>
+      (
+        findUnnameableTypes(withoutLoad(loads, entrypoint, loaded)).length >
+        baseline
+      ) ?
+        []
+      : [
+          `${entrypoint} loads ${loaded}, but every needed name stays nameable without it`,
+        ],
+    ),
+  );
+}
+
+/**
+ * Where a reference sits in a report declaration, for the exception list: the
+ * outermost member (property, method, call or index signature) of the
+ * declaration that contains it, or `undefined` when it is in the
+ * declaration's own type (a function signature, a constant's type, a type
+ * alias outside any member).
+ */
+function memberNameOf(node: ts.Node): string | undefined {
+  if (!ts.isTypeElement(node) && !ts.isClassElement(node)) return undefined;
+  if (node.name !== undefined) return node.name.getText();
+  if (ts.isCallSignatureDeclaration(node)) return "(call)";
+  if (ts.isConstructSignatureDeclaration(node)) return "(new)";
+  if (ts.isIndexSignatureDeclaration(node)) return "[index]";
+  return "(member)";
+}
+
+/** How the exception list describes an opaque backend handle's members. */
+const OPAQUE_HANDLE_MEMBERS =
+  "every member (the backend contract; its vocabulary is exported only by `@nicia-ai/typegraph/backend`)";
+
+type AuthoringTypeSignature = Readonly<{
+  /** The covered declaration, by source name. */
+  declaration: string;
+  /** Its members whose types name an authoring-only type; `""` is the declaration's own type. */
+  members: ReadonlySet<string>;
+  /** The authoring-only types those signatures name. */
+  authoringTypes: ReadonlySet<string>;
+}>;
+
+/**
+ * The public signatures whose type closure contract 3 does not check: every
+ * covered declaration reachable from a covered entrypoint's exports whose own
+ * type, or one of whose members, names a backend-authoring contract only
+ * `/backend` or `/adapters/drizzle/engine` exports, plus each opaque backend
+ * handle (whose members the walk never enters). A consumer that exports a
+ * value inferred from one of these signatures cannot name its type through a
+ * covered entrypoint (TS2742 / TS2883). Walks exactly what
+ * `namesNeededFromElsewhere` walks, so every signature that walk skips is here.
+ */
+function findAuthoringTypeSignatures(): readonly AuthoringTypeSignature[] {
+  const members = new Map<string, Set<string>>();
+  const authoringTypes = new Map<string, Set<string>>();
+  function record(declaration: string, member: string, type: string): void {
+    members.set(
+      declaration,
+      new Set([...(members.get(declaration) ?? []), member]),
+    );
+    authoringTypes.set(
+      declaration,
+      new Set([...(authoringTypes.get(declaration) ?? []), type]),
+    );
+  }
+  for (const entrypoint of COVERED_ENTRYPOINTS) {
+    const report = reportFor(entrypoint);
+    const visited = new Set<string>();
+    const pending = [...report.exported];
+    for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
+      if (visited.has(name)) continue;
+      visited.add(name);
+      if (OPAQUE_BACKEND_HANDLES.has(name)) {
+        members.set(sourceName(name), new Set([OPAQUE_HANDLE_MEMBERS]));
+        authoringTypes.set(sourceName(name), new Set());
+        continue;
+      }
+      const statements = (report.declarations.get(name) ?? []).filter(
+        (statement) => !isInternal(statement, report.source),
+      );
+      for (const statement of statements) {
+        const visit = (node: ts.Node, member: string | undefined): void => {
+          if (
+            (ts.isTypeElement(node) || ts.isClassElement(node)) &&
+            (isInternal(node, report.source) ||
+              hasUnexportedSymbolKey(node, EXPORTED_ANYWHERE))
+          ) {
+            return;
+          }
+          const enclosing = member ?? memberNameOf(node);
+          const referenced =
+            ts.isTypeReferenceNode(node) ? leftmostIdentifier(node.typeName)
+            : ts.isTypeQueryNode(node) ? leftmostIdentifier(node.exprName)
+            : (
+              ts.isExpressionWithTypeArguments(node) &&
+              ts.isIdentifier(node.expression)
+            ) ?
+              node.expression.text
+            : undefined;
+          if (referenced !== undefined && report.declarations.has(referenced)) {
+            if (
+              isAuthoringOnly(
+                report,
+                referenced,
+                COVERED_NAMES,
+                AUTHORING_NAMES,
+              )
+            ) {
+              record(sourceName(name), enclosing ?? "", referenced);
+            } else {
+              pending.push(referenced);
+            }
+          }
+          ts.forEachChild(node, (child) => {
+            visit(child, enclosing);
+          });
+        };
+        visit(statement, undefined);
+      }
+    }
+  }
+  return sorted(members.keys()).map((declaration) => ({
+    declaration,
+    members: members.get(declaration) ?? new Set(),
+    authoringTypes: authoringTypes.get(declaration) ?? new Set(),
+  }));
+}
+
+/**
+ * The exception list as the docs and the changeset print it: one bullet per
+ * declaration, naming the members whose types name an authoring contract
+ * ("itself" for the declaration's own type) and the contracts they name.
+ */
+function renderAuthoringTypeSignatures(
+  signatures: readonly AuthoringTypeSignature[],
+): string {
+  return signatures
+    .map(({ declaration, members, authoringTypes }) => {
+      const where = sorted(members)
+        .map((member) =>
+          member === "" ? "itself"
+          : /^[A-Za-z_$][\w$]*$/.test(member) ? `\`${member}\``
+          : member,
+        )
+        .join(", ");
+      if (authoringTypes.size === 0) return `- \`${declaration}\`: ${where}`;
+      const names = sorted(authoringTypes)
+        .map((type) => `\`${type}\``)
+        .join(", ");
+      return `- \`${declaration}\`: ${where} (names ${names})`;
+    })
+    .join("\n");
+}
+
+const AUTHORING_LIST_START = "<!-- authoring-type-signatures:start -->";
+const AUTHORING_LIST_END = "<!-- authoring-type-signatures:end -->";
+
+/**
+ * The list a document carries between the exception-list markers, with runs
+ * of whitespace collapsed: the docs wrap long items for markdownlint, the
+ * changeset keeps one line per item, and both say the same thing.
+ */
+function documentedAuthoringTypeSignatures(relativePath: string): string {
+  const text = readFileSync(path.join(PACKAGE_ROOT, relativePath), "utf8");
+  const start = text.indexOf(AUTHORING_LIST_START);
+  const end = text.indexOf(AUTHORING_LIST_END);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(
+      `${relativePath} has no ${AUTHORING_LIST_START} … ${AUTHORING_LIST_END} block.`,
+    );
+  }
+  return collapseWhitespace(
+    text.slice(start + AUTHORING_LIST_START.length, end),
+  );
+}
+
+function collapseWhitespace(text: string): string {
+  return text.trim().replaceAll(/\s+/g, " ");
 }
 
 describe("public type reachability", () => {
@@ -659,20 +914,26 @@ describe("per-entrypoint declaration emit", () => {
     expect(invalid).toEqual([]);
   });
 
-  it("loads an entrypoint only when it supplies a name the loader needs", () => {
-    const idle = COVERED_ENTRYPOINTS.flatMap((entrypoint) => {
-      const needed = [...namesNeededFromElsewhere(entrypoint).keys()];
-      return declarationLoadsOf(entrypoint).flatMap((loaded) =>
-        (
-          needed.some((name) =>
-            exportedBy(loadedEntrypoints(loaded), entrypoint, name),
-          )
-        ) ?
-          []
-        : [`${entrypoint} loads ${loaded} but needs nothing from it`],
-      );
-    });
-    expect(idle).toEqual([]);
+  it("declares only loads whose removal leaves a needed name unnameable", () => {
+    expect(findRedundantLoads(DECLARATION_LOADS)).toEqual([]);
+  });
+
+  it("reports a load that only repeats names another load already supplies", () => {
+    // `/errors` reaches every `/graph-merge` name it needs through the root,
+    // so a direct edge supplies nothing new. Every edge it parallels becomes
+    // removable on its own too (the root reaches `/graph-merge` through
+    // `/errors`, and `/errors` reaches the root through `/graph-merge`), so
+    // the check names all three; a load-reachability check that credits an
+    // edge with names it can reach accepted this map.
+    const redundant: DeclarationLoads = {
+      ...DECLARATION_LOADS,
+      "./errors": [...(DECLARATION_LOADS["./errors"] ?? []), "./graph-merge"],
+    };
+    expect(findRedundantLoads(redundant)).toEqual([
+      ". loads ./graph-merge, but every needed name stays nameable without it",
+      "./errors loads ., but every needed name stays nameable without it",
+      "./errors loads ./graph-merge, but every needed name stays nameable without it",
+    ]);
   });
 
   it("names only types the entrypoint or an entrypoint it loads exports", () => {
@@ -681,5 +942,26 @@ describe("per-entrypoint declaration emit", () => {
         `${finding.entrypoint}: ${finding.name} (named by ${finding.namedBy})`,
     );
     expect(unnameable).toEqual([]);
+  });
+
+  // Every public signature the walk above does not check is documented, by
+  // name, as not exportable by inference. The list in the docs is the list
+  // the walk skips: neither may change without the other.
+  it("documents exactly the signatures whose type closure it skips", () => {
+    const expected = collapseWhitespace(
+      renderAuthoringTypeSignatures(findAuthoringTypeSignatures()),
+    );
+    // The changeset carries the same list until the release consumes it.
+    const changeset = "../../.changeset/declaration-emit-per-entrypoint.md";
+    const documents = [
+      "../../apps/docs/src/content/docs/project-structure.md",
+      ...(existsSync(path.join(PACKAGE_ROOT, changeset)) ? [changeset] : []),
+    ];
+    expect(
+      documents.map((document) => ({
+        document,
+        list: documentedAuthoringTypeSignatures(document),
+      })),
+    ).toEqual(documents.map((document) => ({ document, list: expected })));
   });
 });
