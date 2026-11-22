@@ -2488,23 +2488,39 @@ statement before the next write.
 
 ### `TransactionRolledBackError`
 
-Thrown when a PostgreSQL transaction that TypeGraph opened was rolled back even
-though its callback returned normally. On PostgreSQL, a statement that fails
-inside a transaction aborts the whole transaction, including when the callback
-catches the error: every later statement is refused, and the database answers
-the closing `COMMIT` with a rollback. TypeGraph observes every statement the
-transaction sends; before it commits, it checks the session when one of them
-failed. An aborted transaction refuses that check, and TypeGraph rejects with
-this error instead of reporting success. Nothing the transaction wrote was
-saved. `cause` is the first error the database reported during the transaction
-(for example a unique violation, `23505`); an error the driver raised without
-sending the statement, such as a parameter it could not serialize, is never the
-cause.
+Thrown when a PostgreSQL transaction that TypeGraph opened was rolled back by
+the database even though its callback returned normally. On PostgreSQL, a
+statement that fails inside a transaction aborts the whole transaction, even
+when the callback catches the error, and even when the client never saw the
+failure (a statement a node-postgres `query_timeout` gave up on, which then
+failed on the server). The database answers the closing `COMMIT` of an aborted
+transaction with `ROLLBACK` instead of `COMMIT`. TypeGraph reads that reply and
+rejects with this error instead of reporting success; it adds no statement to do
+so. Nothing the transaction wrote was saved.
 
-This error is only raised for a transaction whose callback never read the native
-`tx.sql` handle: only then can TypeGraph be sure that the transaction that rolled
-back is the one it opened. A transaction that read `tx.sql` reports the same
-failure as a [`TransactionOutcomeUnknownError`](#transactionoutcomeunknownerror).
+`details.detectedBy` says how TypeGraph learned of the rollback:
+
+- `"commit-reply"`: the `COMMIT` was answered with `ROLLBACK` (node-postgres,
+  neon-serverless, PGlite);
+- `"refused-statement"`: a statement sent before the `COMMIT` (work of
+  TypeGraph's own after the callback returned, such as a history store's capture
+  flush, or the callback's) was refused because the transaction was already
+  aborted (`25P02`);
+- `"driver"`: the driver refused to commit because a statement of the
+  transaction failed, and rolled back instead (postgres-js, which does not
+  expose the `COMMIT`'s reply).
+
+`cause` is the first error the database reported during the transaction (for
+example a unique violation, `23505`); an error the driver raised without the
+database, such as a parameter it could not serialize or a client-side timeout,
+is never the cause. When no database error reached the client,
+`details.causeObserved` is `false` and there is no `cause`.
+
+When the callback read the native `tx.sql` handle, an aborted transaction is
+reported as a [`TransactionOutcomeUnknownError`](#transactionoutcomeunknownerror)
+instead: through the handle the callback could have ended TypeGraph's
+transaction and begun another, which an aborted transaction cannot be queried to
+rule out.
 
 ```typescript
 try {
@@ -2527,14 +2543,14 @@ It is raised by `store.transaction()`, `store.transactionWithReceipt()`, and
 TypeGraph's own schema-write transactions, including a schema change whose data
 preflight caught a failed statement, on the bundled PostgreSQL backends
 (`createPostgresBackend` over any of its drivers, and PGlite), whose
-`capabilities.execution.commitOutcome` is `"session-marker"`. SQLite keeps a transaction usable
+`capabilities.execution.commitOutcome` is `"commit-reply"`. SQLite keeps a transaction usable
 after a failed statement, so the same callback commits there and this error is
 never raised. A savepoint that rolls back past the failure before the callback
 returns leaves the transaction healthy, and it commits.
 
 `details.conflict` is `true` when any error the database reported during the
 transaction was a serialization failure or deadlock, whichever error is the
-`cause`. Such a transaction is safe to re-run: `retry: { attempts }` re-runs the
+`cause`, and the callback never read `tx.sql`. Such a transaction is safe to re-run: `retry: { attempts }` re-runs the
 callback, and an exhausted budget raises `TransactionConflictError` with this
 error as its `cause`.
 
@@ -2572,6 +2588,9 @@ it is, and is never retried either. `details.reason` says which:
   transaction that failed is the one it opened rather than one the callback
   began after committing TypeGraph's. `cause` is the failure: the conflict the
   callback threw, or the first error the database reported.
+- `"commit-reply-unread"`: the driver resolved the `COMMIT`, but TypeGraph
+  could not read the database's reply to it where that reply is always
+  readable, so it cannot tell whether the transaction committed or rolled back.
 
 The outcome is unknown: a native `COMMIT` saved what the callback wrote before
 it, a native `ROLLBACK` discarded it, and statements sent after either ran

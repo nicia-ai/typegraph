@@ -1983,32 +1983,35 @@ unsafe per-unit retries, while interactive backends are unaffected and keep
 retrying (`store.transaction`'s own `retry` option) with no async-context
 support at all.
 
-`execution.commitOutcome?` states what tells the backend that a transaction it
-opened, whose callback returned normally, is still the healthy transaction it
-began, the evidence behind its decision to send `COMMIT`:
+`execution.commitOutcome?` states what tells the backend whether a transaction
+it opened, whose callback returned normally, committed:
 
-- `"session-marker"` (the bundled PostgreSQL backends, every driver): the
-  backend observes every statement the transaction sends, and adds none to a
-  transaction in which nothing failed and whose native handle was never read.
-  When control leaves TypeGraph (`tx.sql` is read, a `transactionWithNative`
-  callback receives the native handle, or a schema preflight calls
-  `executeSchemaDdl`, which forwards any SQL text), the backend first hands the
-  driver a transaction-local setting (`SET LOCAL`, which takes no snapshot)
-  whose value it generates for the attempt, ahead of anything sent through the
-  handle, and right before `COMMIT` reads it back on the same session, through
-  the connection's statement queue. From then on the attempt has exactly two
-  outcomes: the marker is found and the `COMMIT` succeeds, and the transaction
-  committed; or anything else (the marker is gone, the read is refused, the
-  callback throws, the `COMMIT` fails), and the backend rejects with
-  `TransactionOutcomeUnknownError`, never retried, because an aborted
-  transaction cannot be queried to prove it is the one TypeGraph opened. A
-  rollback to one of TypeGraph's own savepoints that undid the marker sets it
-  again. Without a release, a transaction in which a statement failed is probed
-  once before `COMMIT` instead (refused: `TransactionRolledBackError`,
-  retried under `retry` when one of its errors was a conflict); it cannot have
-  been ended behind TypeGraph's back. A Store transaction runs the same
-  check as soon as the callback returns, before any work of its own; every
-  check first waits for the statements queued on the connection. A backend
+- `"commit-reply"` (the bundled PostgreSQL backends, every driver): the
+  database's reply to the closing `COMMIT` decides. PostgreSQL answers the
+  `COMMIT` of a transaction a failed statement aborted with the command tag
+  `ROLLBACK`, whatever caused the abort and whether or not the client saw the
+  failure. On node-postgres and neon-serverless the backend reads the tag from
+  the result of Drizzle's `commit`, through the transaction's pinned client,
+  which it observes for the whole attempt; on PGlite from the `COMMIT`'s
+  `CommandComplete` message, observed on the instance's protocol stream between
+  the callback's return and that `COMMIT`. postgres-js does not expose the
+  reply of the `COMMIT` that `sql.begin()` sends; instead it refuses to commit a
+  transaction in which a statement failed, rolls back, and rejects with that
+  failure, which the backend reports as the rollback it is. A rolled-back
+  transaction rejects with `TransactionRolledBackError`; a statement TypeGraph
+  sends before the `COMMIT` and that the aborted transaction refuses (`25P02`)
+  is reported the same way. A clean transaction sends exactly what it sent
+  before: `BEGIN`, its statements, `COMMIT`. Statement failures are observed
+  only for the error's `cause` and its retry classification. As a defence
+  against transaction control sent through a raw-SQL port (unsupported; see
+  below), when such a port is handed out (`tx.sql` is read, a
+  `transactionWithNative` callback receives the native handle, a schema
+  preflight or a `schemaWriteTransaction` callback is handed `executeSchemaDdl`)
+  the backend first hands the driver a transaction-local setting (`SET LOCAL`,
+  which takes no snapshot) whose value it generates for the attempt, reads it
+  back before `COMMIT`, and never retries the attempt automatically: a missing
+  marker or a failure is `TransactionOutcomeUnknownError`. A rollback to one of
+  TypeGraph's own savepoints that undid the marker sets it again. A backend
   built over a transaction handle opens savepoints rather than transactions
   and declares no evidence.
 - `"statement-scoped"` (the bundled SQLite backends): a failed statement undoes
@@ -2016,6 +2019,22 @@ began, the evidence behind its decision to send `COMMIT`:
   ended refuses the closing `COMMIT`, so the `COMMIT`'s own result is the
   outcome. This evidence cannot tell TypeGraph's transaction from one the
   callback opened in its place through `tx.sql`.
+
+Transaction control (`COMMIT`, `COMMIT AND CHAIN`, `ROLLBACK`, `BEGIN`) sent
+through any member that forwards caller-supplied SQL text, inside a transaction
+TypeGraph opened, is unsupported: it can end or replace the transaction in ways
+that cannot be fully detected. The members that forward caller SQL text, and
+whether handing them out counts as a release (marker set, never retried):
+
+| Member | Where a caller holds it inside a TypeGraph-owned transaction | Release |
+| ------ | ------------------------------------------------------------ | ------- |
+| `tx.sql` (Store transaction context) | `store.transaction()` callback | Yes, when read |
+| Native handle (2nd argument) | `transactionWithNative` callback | Yes, when the callback receives it |
+| `executeSchemaDdl` | schema preflight; `schemaWriteTransaction` callback | Yes, on first call |
+| `executeRaw(sqlText, params)` | `backend.transaction()` / `transactionWithNative` callback's transaction backend | No |
+| `execute(query)`, `executeStatement(query)` | same; the query is a branded compiled fragment, which `sql.raw` can carry | No |
+| `executeTemporaryStatement(query)` | same; its input cannot be built through the public API | No |
+| `executeDdl(ddl)` | runs outside any transaction by contract | Not applicable |
 
 A custom backend that declares no `commitOutcome` behaves exactly as it always
 has: TypeGraph commits whatever its callback returned on, apart from
