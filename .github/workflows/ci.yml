@@ -332,7 +332,10 @@ jobs:
     runs-on: latchkey-large
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
-    timeout-minutes: 20
+    # The packed-consumer matrix compiles every declaration-emit fixture under
+    # four consumer setups and a tsup re-bundle, and each emitted declaration
+    # again downstream with skipLibCheck off.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

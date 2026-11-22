@@ -50,7 +50,7 @@ export type DefineEdgeOptions<
 // ============================================================
 
 const EMPTY_SCHEMA = z.object({});
-type EmptySchema = typeof EMPTY_SCHEMA;
+export type EmptySchema = typeof EMPTY_SCHEMA;
 
 // ============================================================
 // Edge Factory

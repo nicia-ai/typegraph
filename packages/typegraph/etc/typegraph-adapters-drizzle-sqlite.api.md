@@ -7539,7 +7539,7 @@ export type SqliteBackendOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type SqliteExecutionProfileHints = Readonly<{
+export type SqliteExecutionProfileHints = Readonly<{
     isSync?: boolean;
     transactionMode?: SqliteTransactionMode;
 }>;

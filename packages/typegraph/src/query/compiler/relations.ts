@@ -37,14 +37,14 @@ export type RelationOrder = Readonly<{
   nulls: "first" | "last";
 }>;
 
-type RelationSource = Readonly<{
+export type RelationSource = Readonly<{
   kind: "source";
   query: QueryAst;
   graphId: string;
   options: CompileQueryOptions;
 }>;
 
-type DerivedRelation = Readonly<{
+export type DerivedRelation = Readonly<{
   kind: "derived";
   source: RelationAst;
   sourceColumns: readonly RelationColumn[];
@@ -60,7 +60,7 @@ type DerivedRelation = Readonly<{
   offset?: number;
 }>;
 
-type SetRelation = Readonly<{
+export type SetRelation = Readonly<{
   kind: "set";
   operator: "union" | "unionAll" | "intersect" | "except";
   left: RelationAst;

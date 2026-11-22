@@ -45,7 +45,7 @@ import { type Node } from "./types";
  * The option shape of a call that takes the search default or states
  * `"exact"`: the hit stays the searched kind's own type.
  */
-type ExactExpansion = Readonly<{
+export type ExactExpansion = Readonly<{
   expansion?: "exact" | undefined;
 }>;
 
@@ -59,7 +59,7 @@ type ExactExpansion = Readonly<{
  * axis, matches neither and takes the last overload, which types the hit as
  * an unpinned axis would.
  */
-type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
+export type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
   expansion: E;
 }>;
 
@@ -76,8 +76,10 @@ type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
  * - an axis the call site does not pin to one literal — widened too, the
  *   conservative reading.
  */
-type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> =
-  [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
+export type SearchNodeType<
+  N extends NodeType,
+  E extends DefaultAliasExpansionAxis,
+> = [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 /**
  * Resolves the hit's `node` type. Compile-time kinds keep their
@@ -90,7 +92,7 @@ type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> =
  * works for any registered kind, and the type narrows when (and only
  * when) the literal is statically known.
  */
-type ResolveNode<
+export type ResolveNode<
   G extends GraphDef,
   K extends string,
   E extends DefaultAliasExpansionAxis,
@@ -106,14 +108,14 @@ type ResolveNode<
  * companion of {@link ResolveNode}, used to type `where` predicates.
  * Falls back to the base `NodeType` for dynamic (string) kinds.
  */
-type ResolveNodeType<G extends GraphDef, K extends string> =
+export type ResolveNodeType<G extends GraphDef, K extends string> =
   K extends NodeKinds<G> ?
     G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ?
       N
     : NodeType
   : NodeType;
 
-type StoreSearchContext = Readonly<{
+export type StoreSearchContext = Readonly<{
   graphId: string;
   backend: GraphBackend;
   registry: KindRegistry;

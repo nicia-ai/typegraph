@@ -639,7 +639,7 @@ export type ValidityEndResolution = Readonly<{
  * PAIR, never the bare id (a `Doctor` and a `SpecialistDoctor` can share an id string),
  * so report shapes that name nodes carry both halves.
  */
-type ReportNodeIdentity = Readonly<{
+export type ReportNodeIdentity = Readonly<{
   kind: string;
   id: NodeId<NodeType>;
 }>;

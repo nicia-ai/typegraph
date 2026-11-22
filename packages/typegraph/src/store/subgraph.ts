@@ -178,27 +178,27 @@ export type SubsetEdge<G extends GraphDef, K extends EdgeKinds<G>> = {
   [Kind in K]: Edge<G["edges"][Kind]["type"]>;
 }[K];
 
-type EmptyShape = Readonly<Record<never, never>>;
+export type EmptyShape = Readonly<Record<never, never>>;
 
-type NodeProjectionPropertyKey<N extends NodeType> = Exclude<
+export type NodeProjectionPropertyKey<N extends NodeType> = Exclude<
   keyof Node<N>,
   "id" | "kind" | "meta"
 > &
   string;
 
-type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<
+export type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<
   keyof Edge<E>,
   "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId" | "meta"
 > &
   string;
 
-type SubgraphNodeProjectionField<N extends NodeType = NodeType> =
+export type SubgraphNodeProjectionField<N extends NodeType = NodeType> =
   NodeProjectionPropertyKey<N> | "meta";
 
-type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> =
+export type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> =
   EdgeProjectionPropertyKey<E> | "meta";
 
-type SubgraphNodeProjectionMap<
+export type SubgraphNodeProjectionMap<
   G extends GraphDef,
   NK extends NodeKinds<G> = NodeKinds<G>,
 > = Readonly<{
@@ -207,7 +207,7 @@ type SubgraphNodeProjectionMap<
   : never;
 }>;
 
-type SubgraphEdgeProjectionMap<
+export type SubgraphEdgeProjectionMap<
   G extends GraphDef,
   EK extends EdgeKinds<G> = EdgeKinds<G>,
 > = Readonly<{
@@ -262,14 +262,14 @@ export function defineSubgraphProject<G extends GraphDef>(
   return <const P extends SubgraphProject<G>>(project: P): P => project;
 }
 
-type HasMeta<Selection extends readonly string[] | undefined> =
+export type HasMeta<Selection extends readonly string[] | undefined> =
   Selection extends readonly string[] ?
     "meta" extends Selection[number] ?
       true
     : false
   : false;
 
-type SelectedNodeProps<
+export type SelectedNodeProps<
   N extends NodeType,
   Selection extends readonly string[] | undefined,
 > =
@@ -277,7 +277,7 @@ type SelectedNodeProps<
     Pick<Node<N>, Extract<Selection[number], NodeProjectionPropertyKey<N>>>
   : EmptyShape;
 
-type SelectedEdgeProps<
+export type SelectedEdgeProps<
   E extends AnyEdgeType,
   Selection extends readonly string[] | undefined,
 > =
@@ -285,14 +285,14 @@ type SelectedEdgeProps<
     Pick<Edge<E>, Extract<Selection[number], EdgeProjectionPropertyKey<E>>>
   : EmptyShape;
 
-type ProjectedNodeResult<
+export type ProjectedNodeResult<
   N extends NodeType,
   Selection extends readonly string[] | undefined,
 > = Readonly<Pick<Node<N>, "id" | "kind">> &
   Readonly<SelectedNodeProps<N, Selection>> &
   (HasMeta<Selection> extends true ? Readonly<{ meta: NodeMeta }> : EmptyShape);
 
-type ProjectedEdgeResult<
+export type ProjectedEdgeResult<
   E extends AnyEdgeType,
   Selection extends readonly string[] | undefined,
 > = Readonly<
@@ -301,7 +301,7 @@ type ProjectedEdgeResult<
   Readonly<SelectedEdgeProps<E, Selection>> &
   (HasMeta<Selection> extends true ? Readonly<{ meta: EdgeMeta }> : EmptyShape);
 
-type ProjectionSelection<
+export type ProjectionSelection<
   P,
   Key extends "nodes" | "edges",
   Kind extends string,
@@ -315,7 +315,7 @@ type ProjectionSelection<
     : undefined
   : undefined;
 
-type SubgraphNodeResultForKind<
+export type SubgraphNodeResultForKind<
   G extends GraphDef,
   Kind extends NodeKinds<G>,
   P,
@@ -327,7 +327,7 @@ type SubgraphNodeResultForKind<
     >
   : Node<G["nodes"][Kind]["type"]>;
 
-type SubgraphEdgeResultForKind<
+export type SubgraphEdgeResultForKind<
   G extends GraphDef,
   Kind extends EdgeKinds<G>,
   P,

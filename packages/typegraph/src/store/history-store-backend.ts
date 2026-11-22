@@ -160,7 +160,8 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "verifyContributions",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
-type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
+export type HistoryStoreBackendMember =
+  (typeof HISTORY_STORE_BACKEND_KEYS)[number];
 
 // I13: every `claims` core member is exposed through the history-store
 // projection, or a history-enabled Store could silently lose access to a
@@ -174,7 +175,7 @@ type _historyStoreContainsClaimsCore = Assert<
   >
 >;
 
-type UnsafeHistoryStoreBackendMember =
+export type UnsafeHistoryStoreBackendMember =
   | "findEdgesByMatchIdentity"
   | "clearGraph"
   | "clearGraphPreservingContributionMaterializations"
@@ -194,7 +195,7 @@ type UnsafeHistoryStoreBackendMember =
   | "transaction"
   | "trustedImport";
 
-type UnclassifiedHistoryStoreBackendMember = Exclude<
+export type UnclassifiedHistoryStoreBackendMember = Exclude<
   keyof GraphBackend,
   HistoryStoreBackendMember | UnsafeHistoryStoreBackendMember
 >;
