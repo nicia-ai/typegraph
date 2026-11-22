@@ -1462,10 +1462,18 @@ const DELETE_THEN_ASSERT_EXAMPLE: ModelScenario = {
  * import the IDENTICAL row for it under one shared id. The target's committed id
  * wins, and the shared id is dropped once — not once per branch that carried it
  * (CI seeds 1698708783 and -1317488788).
+ *
+ * The target's id is FIXED and sorts before the branches' (`shared-x1` <
+ * `shared-x2`): staging orders candidates by id, so the winner is the incumbent
+ * when both copies lose. A minted target id sorting after `shared-x2` would let
+ * the two copies collapse into each other first and pass with the reducer
+ * reverted.
  */
 const SHARED_IMPORT_LOSES_ONCE_EXAMPLE: ModelScenario = {
   baseOps: NO_MODEL_OPS,
-  targetOps: [{ op: "same", left: 3, right: 0 }],
+  targetOps: [
+    { op: "importAssertion", idPick: 0, left: 3, right: 0, validFromPick: 1 },
+  ],
   branchAOps: [
     { op: "importAssertion", idPick: 1, left: 0, right: 3, validFromPick: 1 },
   ],
