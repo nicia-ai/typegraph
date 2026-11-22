@@ -1927,9 +1927,10 @@ export type TransactionRolledBackErrorDetails = Readonly<{
  * On PostgreSQL, a statement that fails inside a transaction aborts the whole
  * transaction even when the callback catches the error: every later statement
  * is refused, and the database answers the closing `COMMIT` with a rollback.
- * Before it commits, TypeGraph reads a marker it set on the session when it
- * opened the transaction; an aborted transaction refuses that read, and
- * TypeGraph rejects with this error instead of reporting success. Nothing the
+ * Before it commits, TypeGraph checks the session whenever a statement failed
+ * on it or the native handle was read; an aborted transaction refuses that
+ * check, and TypeGraph rejects with this error instead of reporting success.
+ * Nothing the
  * transaction wrote was saved. `cause` is the first engine error the
  * transaction observed.
  */
@@ -1961,7 +1962,7 @@ export class TransactionRolledBackError extends TypeGraphError {
 export type TransactionOutcomeUnknownErrorDetails = Readonly<{
   /**
    * What TypeGraph found on the session before its `COMMIT`.
-   * `"transaction-ended"`: the marker it set when it opened the transaction
+   * `"transaction-ended"`: the marker it set when the native handle was read
    * was gone, so the session was no longer inside that transaction.
    */
   reason: "transaction-ended";

@@ -20,9 +20,13 @@
  * TypeGraph's hands (`releaseNativeTransaction`: the `tx.sql` getter, a
  * public `transactionWithNative` callback) the transaction gets a marker
  * that identifies it: a transaction-local setting
- * (`SET LOCAL typegraph.transaction_marker = 'open'`), handed to the pinned
- * driver client synchronously, so the session receives it before any
- * statement the caller sends through the handle afterwards. Right before the
+ * (`SET LOCAL typegraph.transaction_marker = 'open'`), ordered on the pinned
+ * driver client ahead of every statement handed to it afterwards, so the
+ * session receives it before anything the caller sends through the handle,
+ * in the same tick included: postgres-js takes it at once; on node-postgres,
+ * neon-serverless and PGlite it waits for the statements already executing
+ * and holds the later ones behind it, so it never overlaps another statement
+ * on the client. Right before the
  * `COMMIT`, the setting is read back on the same session, through the
  * connection's statement queue so the read never overlaps a statement still
  * running. A transaction-local setting lives exactly as long as the
@@ -115,7 +119,7 @@ export type PostgresTransactionMarker = Readonly<{
  * cannot collide with an application's own custom setting. Both marker
  * statements name it in their text and bind no parameters.
  */
-export const TRANSACTION_MARKER_SETTING = "typegraph.transaction_marker";
+const TRANSACTION_MARKER_SETTING = "typegraph.transaction_marker";
 
 /** The marker's value while the transaction that set it is open. */
 const MARKER_VALUE = "open";
@@ -249,10 +253,45 @@ function isFixedProperty(target: object, property: PropertyKey): boolean {
   return descriptor?.configurable === false && descriptor.writable === false;
 }
 
-function observeClient(client: object, observer: StatementObserver): object {
+/**
+ * Holds statements on a client that queues them itself (node-postgres,
+ * neon-serverless, PGlite) behind a marker plant still on its way, so the
+ * plant is never sent while another statement is executing on the client —
+ * node-postgres deprecates that overlap and `pg@9` removes it — and still
+ * reaches the session ahead of every statement handed to the client after
+ * it. postgres-js queues and pipelines statements on its connection itself,
+ * so its plant is sent at once and nothing is ever held.
+ */
+interface SendGate {
+  /** Statements handed to the driver that have not settled, by result. */
+  readonly inFlight: Set<Promise<unknown>>;
+  /** The plant, while it waits for {@link inFlight} or runs. */
+  blocker: Promise<unknown> | undefined;
+}
+
+/** Tracks a driver's native promise; a lazy query object is never touched. */
+function trackInFlight(gate: SendGate, result: unknown): void {
+  if (!(result instanceof Promise) || result.constructor !== Promise) return;
+  const pending: Promise<unknown> = result;
+  gate.inFlight.add(pending);
+  const settle = (): void => {
+    gate.inFlight.delete(pending);
+  };
+  pending.then(settle, settle);
+}
+
+function observeClient(
+  client: object,
+  observer: StatementObserver,
+  gate: SendGate,
+): object {
   function send(statement: () => unknown): unknown {
     observer.sent();
-    return observeOutcome(statement(), observer);
+    const blocker = gate.blocker;
+    const result =
+      blocker === undefined ? statement() : blocker.then(statement, statement);
+    trackInFlight(gate, result);
+    return observeOutcome(result, observer);
   }
   return new Proxy(client, {
     get(target, property) {
@@ -274,7 +313,7 @@ function observeClient(client: object, observer: StatementObserver): object {
                       (typeof scoped === "object" && scoped !== null) ||
                       typeof scoped === "function"
                     ) ?
-                      observeClient(scoped, observer)
+                      observeClient(scoped, observer, gate)
                     : scoped,
                     ...rest,
                   ])
@@ -313,32 +352,54 @@ function ignoreSettlement(): void {
 }
 
 /**
- * Hands `statement` to the driver client now, in this tick, and returns
- * whether the client accepted it. postgres-js (`unsafe`) builds a lazy query
- * that executes only once its `then` is called, so `then` is called here
- * rather than left to a microtask; node-postgres, neon-serverless and PGlite
- * (`query`) enqueue the statement on the call itself. Either way the driver
- * sends it ahead of every statement handed to it later, which is the order
- * the session receives them in.
+ * Plants the marker on the transaction's driver client. `rawClient` is the
+ * driver client itself, `observedClient` the observing wrapper the
+ * transaction's statements go through, which also holds them behind the plant
+ * (see {@link SendGate}). Returns whether the client could take the plant.
+ *
+ * - postgres-js (`unsafe`) builds a lazy query that executes once its `then`
+ *   is called, so `then` is called here, in this tick; the driver sends its
+ *   queries in the order they started executing.
+ * - node-postgres, neon-serverless and PGlite (`query`): the plant is sent
+ *   once every statement already handed to the client has settled, and every
+ *   statement handed to the client meanwhile waits for the plant first.
  */
-function sendNow(client: object, statement: string): boolean {
-  let pending: unknown;
-  if (hasFunctionProperty(client, "unsafe")) {
-    pending = client.unsafe(statement);
-  } else if (hasFunctionProperty(client, "query")) {
-    pending = client.query(statement);
-  } else {
-    return false;
+function sendPlant(
+  rawClient: object,
+  observedClient: object,
+  observer: StatementObserver,
+  gate: SendGate,
+): boolean {
+  if (hasFunctionProperty(observedClient, "unsafe")) {
+    const pending: unknown = observedClient.unsafe(PLANT_MARKER_TEXT);
+    if (
+      (typeof pending === "object" || typeof pending === "function") &&
+      pending !== null &&
+      hasFunctionProperty(pending, "then")
+    ) {
+      pending.then(ignoreSettlement, ignoreSettlement);
+    }
+    return true;
   }
-  if (
-    (typeof pending === "object" || typeof pending === "function") &&
-    pending !== null &&
-    hasFunctionProperty(pending, "then")
-  ) {
-    pending.then(ignoreSettlement, ignoreSettlement);
-  }
+  if (!hasFunctionProperty(rawClient, "query")) return false;
+  const planted = Promise.allSettled(gate.inFlight).then(() => {
+    observer.sent();
+    return observeOutcome(rawClient.query(PLANT_MARKER_TEXT), observer);
+  });
+  gate.blocker = planted;
+  const release = (): void => {
+    if (gate.blocker === planted) gate.blocker = undefined;
+  };
+  planted.then(release, release);
   return true;
 }
+
+/** The pinned client of an observed transaction attempt. */
+type ObservedClient = Readonly<{
+  raw: object;
+  observer: StatementObserver;
+  gate: SendGate;
+}>;
 
 type TransactionEvidenceSession = Readonly<{
   marker: PostgresTransactionMarker;
@@ -349,15 +410,15 @@ type TransactionEvidenceSession = Readonly<{
 }>;
 
 /**
- * The commit evidence of one transaction. `observed` says whether the
- * transaction's pinned client is observed: when it is not, no failure can be
- * seen and no statement can be handed to the client synchronously, so the
- * marker is planted at once, through the queue, and always read.
+ * The commit evidence of one transaction. `observed` is its observed pinned
+ * client; without one no failure can be seen and the plant cannot be ordered
+ * ahead of the caller's statements, so the marker is planted at once,
+ * through the queue, and always read.
  */
 async function createTransactionEvidence(
   transaction: AnyPgTransaction,
   evidence: AttemptEvidence,
-  observed: boolean,
+  observed: ObservedClient | undefined,
 ): Promise<TransactionEvidenceSession> {
   const session = createSerialExecutionAdapter(
     createPostgresExecutionAdapter(transaction),
@@ -372,7 +433,7 @@ async function createTransactionEvidence(
   // transaction healthy.
   let probedAtEngineErrors = 0;
 
-  if (!observed) {
+  if (observed === undefined) {
     await session.execute(sql.raw(PLANT_MARKER_TEXT));
     planted = true;
   }
@@ -380,7 +441,10 @@ async function createTransactionEvidence(
   function plant(): void {
     if (planted || closed) return;
     const client = getPinnedPostgresTransactionClient(transaction);
-    planted = client !== undefined && sendNow(client, PLANT_MARKER_TEXT);
+    planted =
+      observed !== undefined &&
+      client !== undefined &&
+      sendPlant(observed.raw, client, observed.observer, observed.gate);
   }
 
   async function readMarker(): Promise<void> {
@@ -474,16 +538,21 @@ export async function runMarkedPostgresTransaction<T>(
   const observer = createStatementObserver(evidence, isConflict);
   try {
     return await open(async (transaction) => {
+      const gate: SendGate = { inFlight: new Set(), blocker: undefined };
+      let observed: ObservedClient | undefined;
       const restoreClient = replacePinnedPostgresTransactionClient(
         transaction,
-        (client) => observeClient(client, observer),
+        (client) => {
+          observed = { raw: client, observer, gate };
+          return observeClient(client, observer, gate);
+        },
       );
       let attempt: TransactionEvidenceSession | undefined;
       try {
         attempt = await createTransactionEvidence(
           transaction,
           evidence,
-          restoreClient !== undefined,
+          observed,
         );
         registerNativeTransactionRelease(transaction, attempt.plant);
         const result = await body(transaction, attempt.marker);

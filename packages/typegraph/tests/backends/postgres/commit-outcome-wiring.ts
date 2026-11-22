@@ -142,12 +142,23 @@ type StatementLog = Readonly<{
   sent: () => readonly SentStatement[];
   statements: () => readonly string[];
   count: (prefix: string) => number;
+  /**
+   * Statements handed to a node-postgres client while another was still
+   * executing on it: the overlap `pg@9` removes.
+   */
+  overlaps: () => number;
+  recordOverlap: () => void;
   reset: () => void;
 }>;
 
 function createStatementLog(): StatementLog {
   const statements: SentStatement[] = [];
+  let overlaps = 0;
   return {
+    overlaps: () => overlaps,
+    recordOverlap: () => {
+      overlaps += 1;
+    },
     record: (statement) => {
       statements.push({
         statement: statement.trim().replaceAll(/\s+/g, " ").toLowerCase(),
@@ -160,6 +171,7 @@ function createStatementLog(): StatementLog {
       statements.filter(({ statement }) => statement.startsWith(prefix)).length,
     reset: () => {
       statements.length = 0;
+      overlaps = 0;
     },
   };
 }
@@ -270,10 +282,32 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
       pool.on("connect", (client: PoolClient) => {
         const query = client.query.bind(client) as (
           ...args: unknown[]
-        ) => unknown;
+        ) => Promise<unknown>;
+        let executing = 0;
         Reflect.set(client, "query", (...args: unknown[]): unknown => {
           log.record(textOf(args[0]));
-          return query(...args);
+          if (executing > 0) log.recordOverlap();
+          executing += 1;
+          const settle = (): void => {
+            executing -= 1;
+          };
+          // The pool itself calls `query` with a callback, and gets no promise.
+          const callbackIndex = args.findIndex(
+            (argument) => typeof argument === "function",
+          );
+          if (callbackIndex !== -1) {
+            const callback = args[callbackIndex] as (
+              ...results: unknown[]
+            ) => unknown;
+            args[callbackIndex] = (...results: unknown[]): unknown => {
+              settle();
+              return callback(...results);
+            };
+            return query(...args);
+          }
+          const pending = query(...args);
+          pending.then(settle, settle);
+          return pending;
         });
       });
       await pool.query(generatePostgresMigrationSQL());
@@ -382,6 +416,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       });
 
       expect(seen).toBe("open");
+      expect(statementLog.overlaps()).toBe(0);
       const statements = statementLog.statements();
       expect(keywordsOf(statements)).toEqual([
         "begin",
@@ -392,6 +427,33 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       ]);
       expect(statements[1]).toMatch(new RegExp(`^${PLANT_PREFIX}`));
       expect(statements[3]).toMatch(/^select current_setting\('typegraph/);
+    });
+
+    it("plants the marker without overlapping a statement still executing on the connection", async () => {
+      await requireDefined(storePromise);
+      const slowReadStore = createAdapterStore(
+        wiringGraph,
+        backendWithRead(requireDefined(opened).backend, SLOW_READ_SQL),
+      );
+      statementLog.reset();
+
+      const seen = await slowReadStore.transaction(async (tx) => {
+        const slowRead = tx.nodes.WiringNote.getById("in-flight" as never);
+        // The slow read is on the wire when the handle is read; the handle
+        // is used only once the read is done, so only the plant could
+        // overlap it.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const native = nativeHandleOf(tx);
+        await slowRead;
+        const rows = rowsOf(
+          await native.execute(drizzleSql.raw(CALLER_MARKER_READ)),
+        );
+        return rows[0]?.["seen_by_caller"];
+      });
+
+      expect(seen).toBe("open");
+      expect(statementLog.overlaps()).toBe(0);
+      expect(statementLog.count(PLANT_PREFIX)).toBe(1);
     });
 
     it("costs one plant and one read when the handle is read and never used", async () => {
