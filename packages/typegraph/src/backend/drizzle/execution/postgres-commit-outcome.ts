@@ -11,15 +11,25 @@
  * (`COMMIT`, `ROLLBACK`) and even open another (`BEGIN`), after which a
  * `COMMIT` TypeGraph sends would close a transaction it never opened.
  *
- * The evidence is a marker that identifies the transaction itself: right
- * after the transaction opens, a transaction-local setting
- * (`SET LOCAL typegraph.transaction_marker = 'open'`); right before the
- * `COMMIT`, a read of that setting on the same session, through the
- * connection's statement queue so it never overlaps a statement still
+ * A transaction in which nothing failed and whose native handle never left
+ * TypeGraph costs nothing: no statement is added to it. Evidence is gathered
+ * only when one of the two things that can go wrong becomes possible.
+ *
+ * **The native handle is released.** Native `COMMIT`, `ROLLBACK` and `BEGIN`
+ * can only arrive through the native handle, so the moment it leaves
+ * TypeGraph's hands (`releaseNativeTransaction`: the `tx.sql` getter, a
+ * public `transactionWithNative` callback) the transaction gets a marker
+ * that identifies it: a transaction-local setting
+ * (`SET LOCAL typegraph.transaction_marker = 'open'`), handed to the pinned
+ * driver client synchronously, so the session receives it before any
+ * statement the caller sends through the handle afterwards. Right before the
+ * `COMMIT`, the setting is read back on the same session, through the
+ * connection's statement queue so the read never overlaps a statement still
  * running. A transaction-local setting lives exactly as long as the
  * transaction that set it — whether the transaction ends in `COMMIT` or
- * `ROLLBACK` — and survives a caller's `ROLLBACK TO SAVEPOINT`, since it was
- * set before any savepoint the caller could take. The read decides:
+ * `ROLLBACK` — and survives a caller's `ROLLBACK TO SAVEPOINT`, since a
+ * caller can only take a savepoint through a handle whose release planted
+ * the marker first. The read decides:
  *
  * - It returns the marker: the session is still inside the transaction
  *   TypeGraph opened, and that transaction is healthy. Commit.
@@ -30,31 +40,32 @@
  *   commit; reject with {@link TransactionOutcomeUnknownError}, which is
  *   never retried — whatever ended the transaction may have committed it.
  *
+ * **A statement failed.** Every statement on the transaction passes through
+ * the pinned driver client, which is observed for the attempt: Drizzle's
+ * session (and so the native handle, its relational queries included) and
+ * TypeGraph's compiled fast path both read it when they send a statement.
+ * When an engine error (one carrying a SQLSTATE) was observed and the
+ * marker was never planted, the transaction cannot have been ended or
+ * replaced, so a plain health probe decides: refused with `25P02`, the
+ * transaction is aborted; answered, a savepoint TypeGraph rolled back has
+ * recovered it. Errors the engine surfaces only at `COMMIT` (a deferred
+ * constraint, a serialization failure at commit, a terminated connection)
+ * reject the `COMMIT` itself.
+ *
  * The marker is planted with `SET LOCAL`, not `SELECT set_config(...)`: a
  * `SET` takes no snapshot, so a `REPEATABLE READ` or `SERIALIZABLE`
- * transaction still takes its snapshot at the callback's first statement,
- * exactly as it did before the marker existed. The value is a constant, which
- * `SET` (it binds no parameters) and statement caching both prefer: no
- * other transaction can set it on this session, since the setting ends with
- * the transaction that set it and a nested transaction (a savepoint on this
- * one) plants none, so its presence alone identifies the transaction.
+ * transaction still takes its snapshot at the callback's first statement
+ * even when the handle is released before it. The value is a constant, which
+ * `SET` (it binds no parameters) prefers: no other transaction can set it on
+ * this session, since the setting ends with the transaction that set it and
+ * a nested transaction (a savepoint on this one) plants none, so its
+ * presence alone identifies the transaction.
  *
- * A transaction-local setting is preferred to a savepoint marker: both
- * survive a caller's savepoint rollback and both distinguish the three
- * outcomes, but a savepoint held for the whole transaction puts every later
- * write inside a subtransaction, which costs each writing transaction a
- * second transaction id.
- *
- * Errors observed on the session no longer decide anything. They supply the
- * rejection's `cause` — the first error that reached the engine (it carries
- * a SQLSTATE; a driver's client-side refusal is not a cause) — and its
- * retry classification: a rolled-back transaction is a conflict, re-run
+ * Observed errors also supply the rejection's `cause` — the first error that
+ * reached the engine (a driver's client-side refusal is not a cause) — and
+ * its retry classification: a rolled-back transaction is a conflict, re-run
  * under `retry: { attempts }`, when any engine error observed in the attempt
- * was a serialization failure or deadlock. They are observed on the pinned
- * driver client, which every statement on the transaction passes through:
- * Drizzle's session (and so the native `tx.sql` handle, its relational
- * queries included) and TypeGraph's compiled fast path both read it when
- * they prepare a statement.
+ * was a serialization failure or deadlock.
  *
  * One driver needs the observation for more than that. postgres-js tracks
  * the first failed statement of a transaction scope and, when the scope's
@@ -74,24 +85,27 @@ import {
   carriesEngineSqlState,
   isPostgresFailedTransactionError,
 } from "../../../utils/sql-errors";
+import { registerNativeTransactionRelease } from "../../native-transaction-release";
 import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
+  getPinnedPostgresTransactionClient,
   getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
   replacePinnedPostgresTransactionClient,
 } from "./postgres-execution";
 import { createSerialExecutionAdapter } from "./statement-queue";
 
-/** The commit check of one TypeGraph-opened transaction. */
+/** The commit evidence of one TypeGraph-opened transaction. */
 export type PostgresTransactionMarker = Readonly<{
   /**
    * Resolves when the transaction TypeGraph opened is still open and healthy
    * on its session. Rejects with {@link TransactionRolledBackError} when it
    * is aborted, and with {@link TransactionOutcomeUnknownError} when the
-   * session is no longer inside it. Call it after every statement the
-   * transaction issued has settled; a call with no statement sent since the
-   * last successful one answers from that read.
+   * session is no longer inside it. Waits for every statement queued on the
+   * connection first, then sends nothing unless the marker was planted or an
+   * engine error was observed since the last check that found the
+   * transaction healthy.
    */
   assertCommittable: () => Promise<void>;
 }>;
@@ -106,13 +120,17 @@ export const TRANSACTION_MARKER_SETTING = "typegraph.transaction_marker";
 /** The marker's value while the transaction that set it is open. */
 const MARKER_VALUE = "open";
 
-const PLANT_MARKER_STATEMENT = sql.raw(
-  `SET LOCAL ${TRANSACTION_MARKER_SETTING} = '${MARKER_VALUE}'`,
-);
+const PLANT_MARKER_TEXT = `SET LOCAL ${TRANSACTION_MARKER_SETTING} = '${MARKER_VALUE}'`;
 
 const READ_MARKER_STATEMENT = sql.raw(
   `SELECT current_setting('${TRANSACTION_MARKER_SETTING}', true) AS marker`,
 );
+
+/**
+ * The health probe of a transaction whose native handle never left
+ * TypeGraph: refused with `25P02` exactly when the transaction is aborted.
+ */
+const PROBE_STATEMENT = sql.raw("SELECT 1 AS healthy");
 
 /**
  * Driver-client members that send a statement and return its pending result:
@@ -138,13 +156,15 @@ const SCOPED_CLIENT_MEMBER = "savepoint";
 interface AttemptEvidence {
   /** Statements sent through the observed client; `undefined` when unobserved. */
   statements: number | undefined;
+  /** Failures that reached the engine, counted. */
+  engineErrors: number;
   /** The first failure that reached the engine. */
   firstEngineError: unknown;
   /** Whether any failure that reached the engine was a conflict. */
   conflict: boolean;
   /** Every failure a statement settled with, by identity. */
   readonly failures: WeakSet<object>;
-  /** Whether the marker was found and the transaction handed back to its driver to commit. */
+  /** Whether the transaction was found committable and handed back to its driver to commit. */
   handedToDriver: boolean;
 }
 
@@ -166,6 +186,7 @@ function createStatementObserver(
         evidence.failures.add(error);
       }
       if (!carriesEngineSqlState(error)) return;
+      evidence.engineErrors += 1;
       if (evidence.firstEngineError === undefined) {
         evidence.firstEngineError = error;
       }
@@ -287,64 +308,150 @@ function rolledBack(evidence: AttemptEvidence): TransactionRolledBackError {
   );
 }
 
+function ignoreSettlement(): void {
+  // The observer records the plant's failure; nothing awaits the plant.
+}
+
 /**
- * Plants the marker on the transaction's session and returns the check that
- * reads it back. Both statements run through the connection's statement
- * queue, behind any statement already queued on it.
+ * Hands `statement` to the driver client now, in this tick, and returns
+ * whether the client accepted it. postgres-js (`unsafe`) builds a lazy query
+ * that executes only once its `then` is called, so `then` is called here
+ * rather than left to a microtask; node-postgres, neon-serverless and PGlite
+ * (`query`) enqueue the statement on the call itself. Either way the driver
+ * sends it ahead of every statement handed to it later, which is the order
+ * the session receives them in.
  */
-async function plantMarker(
+function sendNow(client: object, statement: string): boolean {
+  let pending: unknown;
+  if (hasFunctionProperty(client, "unsafe")) {
+    pending = client.unsafe(statement);
+  } else if (hasFunctionProperty(client, "query")) {
+    pending = client.query(statement);
+  } else {
+    return false;
+  }
+  if (
+    (typeof pending === "object" || typeof pending === "function") &&
+    pending !== null &&
+    hasFunctionProperty(pending, "then")
+  ) {
+    pending.then(ignoreSettlement, ignoreSettlement);
+  }
+  return true;
+}
+
+type TransactionEvidenceSession = Readonly<{
+  marker: PostgresTransactionMarker;
+  /** Plants the marker; see `releaseNativeTransaction`. Idempotent. */
+  plant: () => void;
+  /** Ends the evidence: a later plant sends nothing. */
+  close: () => void;
+}>;
+
+/**
+ * The commit evidence of one transaction. `observed` says whether the
+ * transaction's pinned client is observed: when it is not, no failure can be
+ * seen and no statement can be handed to the client synchronously, so the
+ * marker is planted at once, through the queue, and always read.
+ */
+async function createTransactionEvidence(
   transaction: AnyPgTransaction,
   evidence: AttemptEvidence,
-): Promise<PostgresTransactionMarker> {
+  observed: boolean,
+): Promise<TransactionEvidenceSession> {
   const session = createSerialExecutionAdapter(
     createPostgresExecutionAdapter(transaction),
     getPinnedPostgresTransactionConnection(transaction) ?? transaction,
   );
-  await session.execute(PLANT_MARKER_STATEMENT);
+  let planted = false;
+  let closed = false;
   // The statement count at the last read that found the marker; a check
   // with nothing sent since has nothing new to learn from the session.
   let verifiedAtStatement: number | undefined;
+  // The engine errors already accounted for by a probe that found the
+  // transaction healthy.
+  let probedAtEngineErrors = 0;
+
+  if (!observed) {
+    await session.execute(sql.raw(PLANT_MARKER_TEXT));
+    planted = true;
+  }
+
+  function plant(): void {
+    if (planted || closed) return;
+    const client = getPinnedPostgresTransactionClient(transaction);
+    planted = client !== undefined && sendNow(client, PLANT_MARKER_TEXT);
+  }
+
+  async function readMarker(): Promise<void> {
+    if (
+      verifiedAtStatement !== undefined &&
+      verifiedAtStatement === evidence.statements
+    ) {
+      return;
+    }
+    let rows: readonly Readonly<{ marker?: unknown }>[];
+    try {
+      rows = await session.execute<Readonly<{ marker?: unknown }>>(
+        READ_MARKER_STATEMENT,
+      );
+    } catch (error) {
+      if (isPostgresFailedTransactionError(error)) {
+        throw rolledBack(evidence);
+      }
+      throw error;
+    }
+    if (rows[0]?.marker !== MARKER_VALUE) {
+      throw new TransactionOutcomeUnknownError(
+        { reason: "transaction-ended" },
+        { cause: evidence.firstEngineError },
+      );
+    }
+    verifiedAtStatement = evidence.statements;
+  }
+
+  async function probe(): Promise<void> {
+    const accountedFor = evidence.engineErrors;
+    try {
+      await session.execute(PROBE_STATEMENT);
+    } catch (error) {
+      if (isPostgresFailedTransactionError(error)) {
+        throw rolledBack(evidence);
+      }
+      throw error;
+    }
+    probedAtEngineErrors = accountedFor;
+  }
 
   return {
-    async assertCommittable(): Promise<void> {
-      if (
-        verifiedAtStatement !== undefined &&
-        verifiedAtStatement === evidence.statements
-      ) {
-        return;
-      }
-      let rows: readonly Readonly<{ marker?: unknown }>[];
-      try {
-        rows = await session.execute<Readonly<{ marker?: unknown }>>(
-          READ_MARKER_STATEMENT,
-        );
-      } catch (error) {
-        if (isPostgresFailedTransactionError(error)) {
-          throw rolledBack(evidence);
-        }
-        throw error;
-      }
-      if (rows[0]?.marker !== MARKER_VALUE) {
-        throw new TransactionOutcomeUnknownError(
-          { reason: "transaction-ended" },
-          { cause: evidence.firstEngineError },
-        );
-      }
-      verifiedAtStatement = evidence.statements;
+    plant,
+    close() {
+      closed = true;
+    },
+    marker: {
+      async assertCommittable(): Promise<void> {
+        // Every statement queued on the connection settles first, so its
+        // failure, if any, has been observed before anything is decided.
+        await session.runExclusive(() => Promise.resolve());
+        if (planted) return readMarker();
+        if (evidence.engineErrors === probedAtEngineErrors) return;
+        return probe();
+      },
     },
   };
 }
 
 /**
  * Runs one transaction TypeGraph opens and will commit, with its commit
- * decided by the marker.
+ * decided by the evidence above.
  *
  * `open` opens the transaction and runs the body it is given inside it —
- * `(body) => db.transaction(body, config)`. The body plants the marker first,
- * before anything else binds to the transaction, then runs `body`, then reads
- * the marker; only a body that resolves and finds its marker reaches the
- * driver's `COMMIT`. A `body` that rejects propagates unchanged, and the
- * driver rolls the transaction back as before.
+ * `(body) => db.transaction(body, config)`. The body installs the observer
+ * and registers the marker's plant as the transaction's native-handle
+ * release, both before anything else binds to the transaction, then runs
+ * `body`, then checks the evidence; only a body that resolves and passes the
+ * check reaches the driver's `COMMIT`. A `body` that rejects propagates
+ * unchanged, and the driver rolls the transaction back as before.
  *
  * `isConflict` is the backend's own serialization-failure classifier.
  */
@@ -358,6 +465,7 @@ export async function runMarkedPostgresTransaction<T>(
 ): Promise<T> {
   const evidence: AttemptEvidence = {
     statements: undefined,
+    engineErrors: 0,
     firstEngineError: undefined,
     conflict: false,
     failures: new WeakSet(),
@@ -370,13 +478,20 @@ export async function runMarkedPostgresTransaction<T>(
         transaction,
         (client) => observeClient(client, observer),
       );
+      let attempt: TransactionEvidenceSession | undefined;
       try {
-        const marker = await plantMarker(transaction, evidence);
-        const result = await body(transaction, marker);
-        await marker.assertCommittable();
+        attempt = await createTransactionEvidence(
+          transaction,
+          evidence,
+          restoreClient !== undefined,
+        );
+        registerNativeTransactionRelease(transaction, attempt.plant);
+        const result = await body(transaction, attempt.marker);
+        await attempt.marker.assertCommittable();
         evidence.handedToDriver = true;
         return result;
       } finally {
+        attempt?.close();
         restoreClient?.();
       }
     });

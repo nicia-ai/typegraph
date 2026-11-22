@@ -21,7 +21,6 @@ import { afterEach } from "vitest";
 
 import { type GraphDef } from "../src";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
-import { TRANSACTION_MARKER_SETTING } from "../src/backend/drizzle/execution/postgres-commit-outcome";
 import { type AnyPgTransaction } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { type AdapterBackend } from "../src/backend/types";
@@ -65,10 +64,6 @@ export async function createRecordedPostgresStore<TGraph extends GraphDef>(
     drizzle(client, {
       logger: {
         logQuery(query: string, params: unknown[]): void {
-          // The commit-outcome marker frames every transaction TypeGraph
-          // opens, like the BEGIN and COMMIT PGlite sends without logging
-          // them; it is not a statement any write emits.
-          if (query.includes(TRANSACTION_MARKER_SETTING)) return;
           statements.push({ query, params });
         },
       },

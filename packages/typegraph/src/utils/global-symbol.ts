@@ -3,6 +3,7 @@ type TypeGraphGlobalSymbolName =
   | "sql-placeholder"
   | "sql-intent-registry"
   | "internal-temporary-writes-v1"
+  | "internal-deferred-native-handle-v1"
   | "external-recorded-read-source-v1"
   | "sql-schema-v1"
   | "compare-and-set-absent-v1"

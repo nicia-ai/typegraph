@@ -1,24 +1,38 @@
 /**
- * Shared driver wiring cases for the commit-outcome marker, registered by
+ * Shared driver wiring cases for the commit-outcome evidence, registered by
  * `pglite-commit-outcome.test.ts` (in-process) and
  * `postgres-commit-outcome.test.ts` (server drivers).
  *
  * The behaviour itself — a transaction the database rolled back rejects, one a
  * savepoint recovered commits, one the callback ended has an unknown outcome —
  * is the shared integration suite's (`integration/transaction-commit-outcome.ts`).
- * This file pins what is per driver: the statements the marker costs on the
- * clean path, that its read waits for a statement the callback left running,
- * that a nested transaction plants no marker and shares the enclosing
- * connection's statement queue, and how postgres-js — which rolls back a
- * transaction scope in which any statement failed — is reported.
+ * This file pins what is per driver, from the statements the driver itself
+ * sends (not Drizzle's logger, which never sees a statement handed straight to
+ * the driver client):
+ *
+ * - a transaction in which nothing failed and whose native handle was never
+ *   read sends exactly what it sent before the evidence existed;
+ * - reading the handle plants the marker ahead of anything the caller then
+ *   sends through it, in the same tick, and costs one plant and one read;
+ * - a failure with the handle never read costs one probe and no marker;
+ * - the decision waits for a statement the callback left running;
+ * - a nested transaction plants nothing and shares the enclosing
+ *   connection's statement queue, and a handle read inside it is covered by
+ *   the enclosing marker;
+ * - the plant takes no snapshot (server drivers);
+ * - postgres-js, which rolls back a transaction scope in which any statement
+ *   failed, is reported as the rollback it is.
  */
-import { PGlite } from "@electric-sql/pglite";
+import {
+  PGlite,
+  type Transaction as PGliteTransaction,
+} from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
-import { type Logger, sql as drizzleSql } from "drizzle-orm";
+import { sql as drizzleSql } from "drizzle-orm";
 import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { drizzle as drizzlePostgresJs } from "drizzle-orm/postgres-js";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -28,6 +42,7 @@ import {
   createAdapterStoreWithSchema,
   defineGraph,
   defineNode,
+  TransactionOutcomeUnknownError,
   TransactionRolledBackError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
@@ -48,26 +63,55 @@ const wiringGraph = defineGraph({
 });
 
 const PLANT_PREFIX = "set local typegraph.transaction_marker";
-const READ_PREFIX = "select current_setting(";
+const READ_PREFIX = "select current_setting('typegraph.transaction_marker'";
+const PROBE_PREFIX = "select 1 as healthy";
 const MISSING_RELATION_SQL = "SELECT * FROM commit_outcome_missing_table";
+const CALLER_MARKER_READ =
+  "SELECT current_setting('typegraph.transaction_marker', true) AS seen_by_caller";
 
 type NativeHandle = Readonly<{
   execute: (query: ReturnType<typeof drizzleSql.raw>) => Promise<unknown>;
+  transaction: <T>(body: (nested: NativeHandle) => Promise<T>) => Promise<T>;
 }>;
 
 function nativeHandleOf(transactionContext: object): NativeHandle {
   return Reflect.get(transactionContext, "sql") as NativeHandle;
 }
 
+/** The rows of a native `execute`, whichever shape the driver returns. */
+function rowsOf(result: unknown): readonly Readonly<Record<string, unknown>>[] {
+  if (Array.isArray(result))
+    return result as Readonly<Record<string, unknown>>[];
+  return (result as Readonly<{ rows: Readonly<Record<string, unknown>>[] }>)
+    .rows;
+}
+
+async function noteBody(
+  store: Readonly<{
+    nodes: Readonly<{
+      WiringNote: Readonly<{
+        getById: (id: never) => Promise<Readonly<{ body: string }> | undefined>;
+      }>;
+    }>;
+  }>,
+  id: string,
+): Promise<string | undefined> {
+  const note = await store.nodes.WiringNote.getById(id as never);
+  return note?.body;
+}
+
 const SLOW_READ_MILLISECONDS = 300;
 const SLOW_READ_SQL = "select pg_sleep(0.3)";
+/** Holds the connection for {@link SLOW_READ_MILLISECONDS}, then fails (22P02). */
+const SLOW_FAILING_READ_SQL = "select (pg_sleep(0.3)::text || 'x')::int";
 
 /**
  * The same backend, with every transaction's `getNode` a managed read that
- * holds the connection for {@link SLOW_READ_MILLISECONDS}.
+ * runs `statement` through the transaction's statement queue.
  */
-function backendWithSlowRead(
+function backendWithRead(
   backend: ReturnType<typeof createPostgresBackend>,
+  statement: string,
 ): ReturnType<typeof createPostgresBackend> {
   return deriveBackend(backend, {
     transactionWithNative: (run, options) =>
@@ -76,7 +120,7 @@ function backendWithSlowRead(
           run(
             deriveBackend(target, {
               getNode: async (): Promise<NodeRow | undefined> => {
-                await target.execute(asCompiledRowsSql(sql.raw(SLOW_READ_SQL)));
+                await target.execute(asCompiledRowsSql(sql.raw(statement)));
                 return undefined;
               },
             }),
@@ -89,24 +133,29 @@ function backendWithSlowRead(
 
 type SentStatement = Readonly<{ statement: string; at: number }>;
 
-/** Records every statement Drizzle sends, the marker's included. */
-function createStatementLog(): Readonly<{
-  logger: Logger;
+/**
+ * Every statement the driver sends, recorded where it is handed to the
+ * driver: the marker's plant included, which goes straight to the client.
+ */
+type StatementLog = Readonly<{
+  record: (statement: string) => void;
   sent: () => readonly SentStatement[];
+  statements: () => readonly string[];
   count: (prefix: string) => number;
   reset: () => void;
-}> {
+}>;
+
+function createStatementLog(): StatementLog {
   const statements: SentStatement[] = [];
   return {
-    logger: {
-      logQuery: (query) => {
-        statements.push({
-          statement: query.trim().toLowerCase(),
-          at: performance.now(),
-        });
-      },
+    record: (statement) => {
+      statements.push({
+        statement: statement.trim().replaceAll(/\s+/g, " ").toLowerCase(),
+        at: performance.now(),
+      });
     },
     sent: () => [...statements],
+    statements: () => statements.map(({ statement }) => statement),
     count: (prefix) =>
       statements.filter(({ statement }) => statement.startsWith(prefix)).length,
     reset: () => {
@@ -117,8 +166,10 @@ function createStatementLog(): Readonly<{
 
 /** The statements sent while the slow read held the connection. */
 function sentDuringSlowRead(sent: readonly SentStatement[]): readonly string[] {
-  const readIndex = sent.findIndex(({ statement }) =>
-    statement.startsWith(SLOW_READ_SQL),
+  const readIndex = sent.findIndex(
+    ({ statement }) =>
+      statement.startsWith(SLOW_READ_SQL) ||
+      statement.startsWith(SLOW_FAILING_READ_SQL),
   );
   expect(readIndex).toBeGreaterThanOrEqual(0);
   const read = requireDefined(sent[readIndex]);
@@ -126,6 +177,17 @@ function sentDuringSlowRead(sent: readonly SentStatement[]): readonly string[] {
     .slice(readIndex + 1)
     .filter(({ at }) => at - read.at < SLOW_READ_MILLISECONDS * 0.8)
     .map(({ statement }) => statement);
+}
+
+/** Each statement's leading keyword, which is what the clean-path gate pins. */
+function keywordsOf(statements: readonly string[]): readonly string[] {
+  return statements.map((statement) => statement.split(" ")[0] ?? "");
+}
+
+function textOf(query: unknown): string {
+  if (typeof query === "string") return query;
+  const text: unknown = Reflect.get(new Object(query), "text");
+  return typeof text === "string" ? text : String(query);
 }
 
 export type DriverFixture = Readonly<{
@@ -137,7 +199,7 @@ export type DriverFixture = Readonly<{
    * transaction is open (a pool); PGlite has one session.
    */
   independentConnections: boolean;
-  open: (logger: Logger) => Promise<
+  open: (log: StatementLog) => Promise<
     Readonly<{
       backend: ReturnType<typeof createPostgresBackend>;
       close: () => Promise<void>;
@@ -145,15 +207,54 @@ export type DriverFixture = Readonly<{
   >;
 }>;
 
+/**
+ * PGlite sends `BEGIN` and `COMMIT` / `ROLLBACK` itself, around the callback
+ * of its `transaction`, and hands the callback a transaction object; both are
+ * recorded here, the transaction object's statement members included.
+ */
+function recordPgliteStatements(client: PGlite, log: StatementLog): void {
+  const statementMembers = new Set<PropertyKey>(["query", "exec", "sql"]);
+  const openTransaction = client.transaction.bind(client);
+  client.transaction = <T>(
+    callback: (transaction: PGliteTransaction) => Promise<T>,
+  ): Promise<T> =>
+    openTransaction(async (transaction) => {
+      log.record("BEGIN");
+      const recording = new Proxy(transaction, {
+        get(target, property) {
+          const value: unknown = Reflect.get(target, property, target);
+          if (typeof value !== "function") return value;
+          if (!statementMembers.has(property)) {
+            return (...args: unknown[]): unknown =>
+              Reflect.apply(value, target, args);
+          }
+          return (...args: unknown[]): unknown => {
+            log.record(textOf(args[0]));
+            return Reflect.apply(value, target, args);
+          };
+        },
+      });
+      try {
+        const result = await callback(recording);
+        if (!transaction.closed) log.record("COMMIT");
+        return result;
+      } catch (error) {
+        if (!transaction.closed) log.record("ROLLBACK");
+        throw error;
+      }
+    });
+}
+
 export const pgliteFixture: DriverFixture = {
   name: "PGlite",
   driverTracksScopeFailures: false,
   independentConnections: false,
-  async open(logger) {
+  async open(log) {
     const client = new PGlite({ extensions: { vector: pgvectorExtension } });
     await client.exec(generatePostgresMigrationSQL());
+    recordPgliteStatements(client, log);
     return {
-      backend: createPostgresBackend(drizzlePglite(client, { logger })),
+      backend: createPostgresBackend(drizzlePglite(client)),
       close: () => client.close(),
     };
   },
@@ -164,14 +265,23 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
     name: "node-postgres",
     driverTracksScopeFailures: false,
     independentConnections: true,
-    async open(logger) {
+    async open(log) {
       const pool = new Pool({ connectionString: databaseUrl });
+      pool.on("connect", (client: PoolClient) => {
+        const query = client.query.bind(client) as (
+          ...args: unknown[]
+        ) => unknown;
+        Reflect.set(client, "query", (...args: unknown[]): unknown => {
+          log.record(textOf(args[0]));
+          return query(...args);
+        });
+      });
       await pool.query(generatePostgresMigrationSQL());
       await pool.query(
         "TRUNCATE typegraph_nodes, typegraph_edges, typegraph_schema_versions CASCADE",
       );
       return {
-        backend: createPostgresBackend(drizzleNodePg(pool, { logger })),
+        backend: createPostgresBackend(drizzleNodePg(pool)),
         close: () => pool.end(),
       };
     },
@@ -183,10 +293,13 @@ export function postgresJsFixture(databaseUrl: string): DriverFixture {
     name: "postgres-js",
     driverTracksScopeFailures: true,
     independentConnections: true,
-    async open(logger) {
+    async open(log) {
       const client = postgres(databaseUrl, {
         onnotice: () => {
           // Silence CREATE IF NOT EXISTS notices.
+        },
+        debug: (_connection, query) => {
+          log.record(query);
         },
       });
       await client.unsafe(generatePostgresMigrationSQL()).simple();
@@ -194,15 +307,23 @@ export function postgresJsFixture(databaseUrl: string): DriverFixture {
         "TRUNCATE typegraph_nodes, typegraph_edges, typegraph_schema_versions CASCADE",
       );
       return {
-        backend: createPostgresBackend(drizzlePostgresJs(client, { logger })),
+        backend: createPostgresBackend(drizzlePostgresJs(client)),
         close: () => client.end(),
       };
     },
   };
 }
 
+/**
+ * The statement keywords a clean transaction sends, as recorded on `main`
+ * before the commit-outcome evidence existed: BEGIN, the callback's own
+ * statements, COMMIT.
+ */
+const CLEAN_GET_NODE_KEYWORDS = ["begin", "select", "commit"];
+const CLEAN_STORE_CREATE_KEYWORDS = ["begin", "insert", "commit"];
+
 export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
-  describe(`commit-outcome marker on ${fixture.name}`, () => {
+  describe(`commit-outcome evidence on ${fixture.name}`, () => {
     const statementLog = createStatementLog();
     // Opened in `beforeAll`, not at registration: the two server drivers
     // share this file's database and must not run its migration concurrently.
@@ -216,7 +337,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
     }
 
     beforeAll(async () => {
-      opened = await fixture.open(statementLog.logger);
+      opened = await fixture.open(statementLog);
       storePromise = openStore(opened.backend);
       await storePromise;
     });
@@ -225,7 +346,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       await opened?.close();
     });
 
-    it("costs one statement after BEGIN and one before COMMIT on the clean path", async () => {
+    it("adds no statement to a clean transaction whose native handle was never read", async () => {
       const store = await requireDefined(storePromise);
       const { backend } = requireDefined(opened);
 
@@ -233,85 +354,121 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       await backend.transaction(async (tx) => {
         await tx.getNode(wiringGraph.id, "WiringNote", "absent");
       });
-      expect([
-        statementLog.count(PLANT_PREFIX),
-        statementLog.count(READ_PREFIX),
-      ]).toEqual([1, 1]);
+      expect(keywordsOf(statementLog.statements())).toEqual(
+        CLEAN_GET_NODE_KEYWORDS,
+      );
 
-      // The Store checks the marker as soon as the callback returns, before
-      // its own work; the backend's check before COMMIT then has nothing new
-      // to read, since no statement was sent in between.
+      // An adapter Store's transaction carries the native handle on
+      // `tx.sql`; a callback that never reads it pays nothing for it.
       statementLog.reset();
       await store.transaction(async (tx) => {
         await tx.nodes.WiringNote.create({ body: "clean" });
       });
-      expect([
-        statementLog.count(PLANT_PREFIX),
-        statementLog.count(READ_PREFIX),
-      ]).toEqual([1, 1]);
-      const sent = statementLog.sent().map(({ statement }) => statement);
-      const plantIndex = sent.findIndex((statement) =>
-        statement.startsWith(PLANT_PREFIX),
-      );
-      const readIndex = sent.findIndex((statement) =>
-        statement.startsWith(READ_PREFIX),
-      );
-      // Planted before the callback's first statement, read after its last.
-      expect(plantIndex).toBeLessThan(
-        sent.findIndex((statement) => statement.startsWith("insert")),
-      );
-      expect(readIndex).toBe(
-        sent.findLastIndex(
-          (statement) =>
-            statement !== "commit" && !statement.startsWith("commit"),
-        ),
+      expect(keywordsOf(statementLog.statements())).toEqual(
+        CLEAN_STORE_CREATE_KEYWORDS,
       );
     });
 
-    it.runIf(fixture.independentConnections)(
-      "leaves a repeatable-read transaction's snapshot to the callback's first statement",
-      async () => {
-        const store = await requireDefined(storePromise);
-        const id = `${fixture.name}-committed-after-begin`;
+    it("plants the marker ahead of a statement the caller sends through the handle in the same tick", async () => {
+      const store = await requireDefined(storePromise);
 
-        const seen = await store.transaction(
-          async (tx) => {
-            // Committed on another connection after BEGIN and the marker,
-            // before the callback's first statement takes the snapshot.
-            await store.nodes.WiringNote.create(
-              { body: "committed elsewhere" },
-              { id },
-            );
-            const note = await tx.nodes.WiringNote.getById(id as never);
-            return note?.body;
-          },
-          { isolationLevel: "repeatable_read" },
+      statementLog.reset();
+      const seen = await store.transaction(async (tx) => {
+        // Read and used in one expression: nothing awaits in between.
+        const rows = rowsOf(
+          await nativeHandleOf(tx).execute(drizzleSql.raw(CALLER_MARKER_READ)),
         );
+        return rows[0]?.["seen_by_caller"];
+      });
 
-        expect(seen).toBe("committed elsewhere");
-      },
-    );
+      expect(seen).toBe("open");
+      const statements = statementLog.statements();
+      expect(keywordsOf(statements)).toEqual([
+        "begin",
+        "set",
+        "select",
+        "select",
+        "commit",
+      ]);
+      expect(statements[1]).toMatch(new RegExp(`^${PLANT_PREFIX}`));
+      expect(statements[3]).toMatch(/^select current_setting\('typegraph/);
+    });
 
-    it("reads the marker only after a read the callback left running has finished", async () => {
+    it("costs one plant and one read when the handle is read and never used", async () => {
+      const store = await requireDefined(storePromise);
+
+      statementLog.reset();
+      await store.transaction(async (tx) => {
+        await tx.nodes.WiringNote.create(
+          { body: "handle read" },
+          { id: `${fixture.name}-handle-read` },
+        );
+        expect(nativeHandleOf(tx)).toBeDefined();
+        // A second read of the handle plants nothing more.
+        expect(nativeHandleOf(tx)).toBe(nativeHandleOf(tx));
+      });
+
+      expect([
+        statementLog.count(PLANT_PREFIX),
+        statementLog.count(READ_PREFIX),
+        statementLog.count(PROBE_PREFIX),
+      ]).toEqual([1, 1, 0]);
+      expect(await noteBody(store, `${fixture.name}-handle-read`)).toBe(
+        "handle read",
+      );
+    });
+
+    it("probes once, and plants nothing, after a failure with the handle never read", async () => {
+      await requireDefined(storePromise);
+      const failingReadStore = createAdapterStore(
+        wiringGraph,
+        backendWithRead(requireDefined(opened).backend, MISSING_RELATION_SQL),
+      );
+
+      statementLog.reset();
+      const outcome = await failingReadStore
+        .transaction(async (tx) =>
+          tx.nodes.WiringNote.getById("missing" as never).then(
+            () => "the read did not fail",
+            () => "callback caught the failure",
+          ),
+        )
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(TransactionRolledBackError);
+      expect([
+        statementLog.count(PLANT_PREFIX),
+        statementLog.count(READ_PREFIX),
+        statementLog.count(PROBE_PREFIX),
+      ]).toEqual([0, 0, 1]);
+    });
+
+    it("decides only after a failing read the callback left running has finished", async () => {
       await requireDefined(storePromise);
       const slowReadStore = createAdapterStore(
         wiringGraph,
-        backendWithSlowRead(requireDefined(opened).backend),
+        backendWithRead(requireDefined(opened).backend, SLOW_FAILING_READ_SQL),
       );
       statementLog.reset();
       let leftRunning: Promise<unknown> | undefined;
 
-      await slowReadStore.transaction((tx) => {
-        // Not awaited: the callback returns while the read is on the wire.
-        leftRunning = tx.nodes.WiringNote.getById("in-flight" as never);
-        return Promise.resolve();
-      });
+      const outcome = await slowReadStore
+        .transaction((tx) => {
+          // Not awaited: the callback returns while the read is on the wire,
+          // and the read fails only after the callback has returned.
+          leftRunning = tx.nodes.WiringNote.getById("in-flight" as never).catch(
+            () => "caught",
+          );
+          return Promise.resolve("callback returned");
+        })
+        .catch((error: unknown) => error);
       await leftRunning;
 
-      // The marker read joins the connection's statement queue, so nothing is
-      // sent until the read in flight has finished.
+      // Nothing is sent while the read holds the connection, and its failure
+      // decides the outcome.
       expect(sentDuringSlowRead(statementLog.sent())).toEqual([]);
-      expect(statementLog.count(READ_PREFIX)).toBe(1);
+      expect(outcome).toBeInstanceOf(TransactionRolledBackError);
+      expect(statementLog.count(PROBE_PREFIX)).toBe(1);
     });
 
     it("plants no marker in a nested transaction, which shares the enclosing connection's statement queue", async () => {
@@ -319,9 +476,14 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       const { backend } = requireDefined(opened);
       statementLog.reset();
 
+      // A `transactionWithNative` callback receives the handle: released.
       await backend.transactionWithNative(async (outer, native) => {
-        const nested = backendWithSlowRead(createPostgresBackend(native));
-        await nested.transactionWithNative(async (inner) => {
+        const nested = backendWithRead(
+          createPostgresBackend(native),
+          SLOW_READ_SQL,
+        );
+        await nested.transactionWithNative(async (inner, nestedNative) => {
+          expect(nestedNative).toBeDefined();
           // Not awaited: the nested transaction's slow read holds the
           // connection while the enclosing transaction sends a statement.
           const slowRead = inner.getNode(wiringGraph.id, "WiringNote", "x");
@@ -336,6 +498,80 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       expect(statementLog.count(READ_PREFIX)).toBe(1);
       expect(sentDuringSlowRead(statementLog.sent())).toEqual([]);
     });
+
+    it("reports an unknown outcome when a handle read inside a nested Store transaction ends the whole transaction", async () => {
+      const store = await requireDefined(storePromise);
+      const id = `${fixture.name}-nested-ended`;
+
+      const outcome = await store
+        .transaction(async (tx) => {
+          await tx.nodes.WiringNote.create({ body: "outer write" }, { id });
+          const nestedStore = createAdapterStore(
+            wiringGraph,
+            createPostgresBackend(nativeHandleOf(tx) as never),
+          );
+          await nestedStore
+            .transaction(async (inner) => {
+              await nativeHandleOf(inner).execute(drizzleSql.raw("ROLLBACK"));
+            })
+            .catch(() => "the nested scope could not release its savepoint");
+          return "callback returned";
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(TransactionOutcomeUnknownError);
+      expect(await noteBody(store, id)).toBeUndefined();
+    });
+
+    it("commits when a handle read inside a nested Store transaction is never used", async () => {
+      const store = await requireDefined(storePromise);
+      const id = `${fixture.name}-nested-clean`;
+      statementLog.reset();
+
+      await store.transaction(async (tx) => {
+        const nestedStore = createAdapterStore(
+          wiringGraph,
+          createPostgresBackend(nativeHandleOf(tx) as never),
+        );
+        await nestedStore.transaction(async (inner) => {
+          await inner.nodes.WiringNote.create({ body: "nested write" }, { id });
+          expect(nativeHandleOf(inner)).toBeDefined();
+        });
+      });
+
+      expect(statementLog.count(PLANT_PREFIX)).toBe(1);
+      expect(statementLog.count(READ_PREFIX)).toBe(1);
+      expect(await noteBody(store, id)).toBe("nested write");
+    });
+
+    for (const options of [
+      { isolationLevel: "repeatable_read", accessMode: "read_only" },
+      { isolationLevel: "serializable" },
+    ] as const) {
+      it.runIf(fixture.independentConnections)(
+        `leaves the snapshot to the callback's first statement when the handle is read first (${JSON.stringify(options)})`,
+        async () => {
+          const store = await requireDefined(storePromise);
+          const id = `${fixture.name}-${options.isolationLevel}-after-plant`;
+
+          const seen = await store.transaction(async (tx) => {
+            // Released before anything else: the plant is the transaction's
+            // first statement after BEGIN.
+            expect(nativeHandleOf(tx)).toBeDefined();
+            // Committed on another connection after the plant, before the
+            // callback's first statement takes the snapshot.
+            await store.nodes.WiringNote.create(
+              { body: "committed elsewhere" },
+              { id },
+            );
+            const note = await tx.nodes.WiringNote.getById(id as never);
+            return note?.body;
+          }, options);
+
+          expect(seen).toBe("committed elsewhere");
+        },
+      );
+    }
 
     it("reports what the driver does after raw savepoint statements on the outer handle recovered a failure", async () => {
       const store = await requireDefined(storePromise);

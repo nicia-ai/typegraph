@@ -746,6 +746,105 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
+    it("never commits after a native ROLLBACK and BEGIN sent in the same tick the handle was read", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+
+      const outcome = await outcomeOf(
+        store.transaction(async (tx) => {
+          await tx.nodes.OutcomeNote.create(
+            { body: "written before the native rollback" },
+            { id: "outcome-same-tick-before" },
+          );
+          // Read and used with nothing awaited in between: the marker must
+          // reach the session ahead of both statements, or it would mark the
+          // transaction the callback opened.
+          const native = nativeHandleOf(tx);
+          const rollback = runNative(native, "ROLLBACK");
+          // postgres-js refuses a BEGIN outside its own transaction API.
+          const begin = runNative(native, "BEGIN").catch(() => "refused");
+          await Promise.all([rollback, begin]);
+          return "callback returned";
+        }),
+      );
+
+      expect(await noteBody(store, "outcome-same-tick-before")).toBeUndefined();
+      // See "never commits a transaction the callback opened" for SQLite.
+      expect(marked ? outcome : "either").toEqual(
+        marked ? outcomeUnknown() : "either",
+      );
+    });
+
+    it("commits a transaction whose handle was read and never used", async () => {
+      const store = await context.createStore(outcomeGraph);
+
+      const outcome = await outcomeOf(
+        store.transaction(async (tx) => {
+          await tx.nodes.OutcomeNote.create(
+            { body: "written with the handle read" },
+            { id: "outcome-handle-unused" },
+          );
+          return nativeHandleOf(tx) === undefined ? "absent" : "read";
+        }),
+      );
+
+      expect(outcome).toEqual({ kind: "committed", value: "read" });
+      expect(await noteBody(store, "outcome-handle-unused")).toBe(
+        "written with the handle read",
+      );
+    });
+
+    it("rejects after a caught failure on PostgreSQL when the handle is read only afterwards", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const failingReadStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReadRunning(
+          context.getBackend(),
+          MISSING_RELATION_SQL,
+        ),
+      );
+
+      const outcome = await outcomeOf(
+        failingReadStore.transaction(async (tx) => {
+          await tx.nodes.OutcomeNote.create(
+            { body: "written before the read" },
+            { id: "outcome-handle-after-failure" },
+          );
+          await expect(
+            tx.nodes.OutcomeNote.getById(
+              "outcome-handle-after-failure" as never,
+            ),
+          ).rejects.toThrow();
+          return nativeHandleOf(tx) === undefined ? "absent" : "read";
+        }),
+      );
+
+      expect(outcome).toEqual(
+        marked ? rolledBack("42P01") : { kind: "committed", value: "read" },
+      );
+      expect(await noteBody(store, "outcome-handle-after-failure")).toBe(
+        marked ? undefined : "written before the read",
+      );
+    });
+
+    it("reports an unknown outcome after a transactionWithNative callback sent a native ROLLBACK", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const backend = context.getBackend();
+
+      const outcome = await outcomeOf(
+        backend.transactionWithNative(async (_tx, native) => {
+          await runNative(native, "ROLLBACK");
+          return "callback returned";
+        }),
+      );
+
+      expect(marked ? outcome : outcome.kind).toEqual(
+        marked ? outcomeUnknown() : "rejected",
+      );
+    });
+
     it("rejects a schema-version flip whose preflight caught a failed statement on PostgreSQL", async () => {
       const store = await context.createStore(outcomeGraph);
       const marked = usesSessionMarker(store.backend);

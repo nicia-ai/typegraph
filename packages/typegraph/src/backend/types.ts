@@ -405,16 +405,20 @@ export type BackendCapabilities = Readonly<{
      * returned normally, is still the open, healthy transaction it began —
      * the evidence behind its decision to `COMMIT`. One of:
      *
-     * - `"session-marker"`: right after opening the transaction the backend
-     *   sets a marker that lives exactly as long as that transaction, and
-     *   right before `COMMIT` reads it back on the same session. Present: the
-     *   transaction commits. Refused because the transaction is aborted (on
-     *   PostgreSQL, a caught statement failure aborts the whole
-     *   transaction): it rejects with `TransactionRolledBackError`. Absent:
-     *   something the backend did not issue ended or replaced the
-     *   transaction, and it rejects with `TransactionOutcomeUnknownError`,
-     *   which is never retried. The bundled PostgreSQL backends declare
-     *   this.
+     * - `"session-marker"`: the backend observes every statement on the
+     *   transaction's session. The moment the native handle (`tx.sql`)
+     *   leaves its hands it sets a marker that lives exactly as long as that
+     *   transaction, and right before `COMMIT` reads it back on the same
+     *   session. Present: the transaction commits. Refused because the
+     *   transaction is aborted (on PostgreSQL, a caught statement failure
+     *   aborts the whole transaction): it rejects with
+     *   `TransactionRolledBackError`. Absent: something the backend did not
+     *   issue ended or replaced the transaction, and it rejects with
+     *   `TransactionOutcomeUnknownError`, which is never retried. With no
+     *   marker set, a transaction in which a statement failed is probed
+     *   before `COMMIT` (aborted: `TransactionRolledBackError`), and one in
+     *   which nothing failed adds no statement at all. The bundled
+     *   PostgreSQL backends declare this.
      * - `"statement-scoped"`: a failed statement undoes only itself and
      *   leaves the transaction usable, and an engine that ends a
      *   transaction on its own refuses the closing `COMMIT`, so the
@@ -2263,6 +2267,13 @@ export const INTERNAL_TEMPORARY_WRITES: unique symbol = typeGraphGlobalSymbol(
 );
 
 /**
+ * @internal Capability token: the caller of `transactionWithNative` releases
+ * the native handle itself, on demand (see `native-transaction-release.ts`).
+ */
+export const INTERNAL_DEFERRED_NATIVE_HANDLE: unique symbol =
+  typeGraphGlobalSymbol("internal-deferred-native-handle-v1");
+
+/**
  * Transaction options.
  */
 export type TransactionOptions = Readonly<{
@@ -2285,6 +2296,14 @@ export type InternalTransactionOptions = TransactionOptions &
      * read-only transaction.
      */
     temporaryWrites?: typeof INTERNAL_TEMPORARY_WRITES;
+    /**
+     * The caller of `transactionWithNative` keeps the native handle to
+     * itself and releases it, through `releaseNativeTransaction`, only if and
+     * when it hands the handle on (the Store's `tx.sql` getter). Without this
+     * option the handle counts as released the moment the callback receives
+     * it.
+     */
+    nativeHandle?: typeof INTERNAL_DEFERRED_NATIVE_HANDLE;
   }>;
 
 // ============================================================
