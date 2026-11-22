@@ -46,10 +46,13 @@ import {
 const TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER = 8;
 const TRAVERSAL_LIMIT_PUSHDOWN_MAX = 10_000;
 
-function isColumnPruningEnabled(ast: QueryAst): boolean {
-  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
-    return true;
-  }
+/**
+ * Whether the statement's result rows are groups rather than matches: it
+ * groups, filters groups, or projects an aggregate (an ungrouped aggregate
+ * folds every match into one row). A per-match value read in such a
+ * statement's SELECT or ORDER BY must itself be aggregated.
+ */
+export function isAggregatedStatement(ast: QueryAst): boolean {
   if (ast.groupBy || ast.having) {
     return true;
   }
@@ -59,6 +62,13 @@ function isColumnPruningEnabled(ast: QueryAst): boolean {
       (field.source.__type === "database_expression" &&
         expressionContainsAggregate(field.source)),
   );
+}
+
+function isColumnPruningEnabled(ast: QueryAst): boolean {
+  if (ast.selectiveFields && ast.selectiveFields.length > 0) {
+    return true;
+  }
+  return isAggregatedStatement(ast);
 }
 
 export function visitExpressionFields(
@@ -411,18 +421,7 @@ function canCollapseLinearTraversalRowset(
     expectedJoinFromAlias = traversal.nodeAlias;
   }
 
-  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
-    return false;
-  }
-
-  if (
-    ast.projection.fields.some(
-      (field) =>
-        field.source.__type === "aggregate" ||
-        (field.source.__type === "database_expression" &&
-          expressionContainsAggregate(field.source)),
-    )
-  ) {
+  if (ast.resultPredicate !== undefined || isAggregatedStatement(ast)) {
     return false;
   }
 

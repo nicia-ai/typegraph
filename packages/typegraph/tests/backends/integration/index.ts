@@ -60,6 +60,7 @@ export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";
 export { registerGraphMergeTargetCardinalityIntegrationTests } from "./graph-merge-target-cardinality";
 export { registerGraphStorageIntegrationTests } from "./graph-storage";
+export { registerGroupedSearchIntegrationTests } from "./grouped-search";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";

@@ -163,6 +163,7 @@ import {
 } from "./sql-name-registry";
 import {
   collectRequiredColumnsByAlias,
+  isAggregatedStatement,
   runStandardQueryPassPipeline,
   shouldMaterializeTraversalCte,
 } from "./standard-pass-pipeline";
@@ -1569,14 +1570,15 @@ function selectStandardOrderBy(
     fusion,
     vectorPredicate,
   } = input;
+  const aggregated = isAggregatedStatement(ast);
   if (vectorPredicate && fulltextPredicate) {
-    return buildStandardHybridRrfOrderBy({ ast, dialect, fusion });
+    return buildStandardHybridRrfOrderBy({ aggregated, ast, dialect, fusion });
   }
   if (vectorPredicate) {
-    return buildStandardVectorOrderBy({ ast, dialect });
+    return buildStandardVectorOrderBy({ aggregated, ast, dialect });
   }
   if (fulltextPredicate) {
-    return buildStandardFulltextOrderBy({ ast, dialect });
+    return buildStandardFulltextOrderBy({ aggregated, ast, dialect });
   }
   return buildStandardOrderBy({
     ast,

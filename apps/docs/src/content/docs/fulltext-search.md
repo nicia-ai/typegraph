@@ -314,6 +314,23 @@ the final result. The final order does not change which nodes entered the
 top-k candidate set, and the final limit counts match rows rather than distinct
 source nodes.
 
+A search predicate also composes with `groupBy()` and `aggregate()`. The top-k
+candidates are grouped like any other matches, and the groups are ordered by
+their best member: the highest rank for fulltext, the smallest distance for
+`similarTo()`, the highest fused score for hybrid. `.orderBy()` terms,
+including ones naming an `aggregate()` key, break ties between groups:
+
+```typescript
+const categories = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) => d.$fulltext.matches("climate change", 100))
+  .groupBy("d", "category")
+  .aggregate({ category: field("d", "category"), matches: count("d") })
+  .orderBy("matches", "desc")
+  .execute();
+```
+
 ### Query Modes
 
 ```typescript
