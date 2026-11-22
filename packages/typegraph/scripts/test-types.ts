@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import {
   copyFile,
   cp,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
@@ -12,9 +13,14 @@ import { availableParallelism, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { reportNameForExport } from "./api-report-names";
+import {
+  accountableDiagnostics,
+  type DeclarationEmitFixture,
+  nonPublicDeclarationSpecifiers,
+  PACKAGE_NAME,
+  validateDeclarationEmitFixtures,
+} from "./declaration-emit-fixtures";
 import { hasDeclarationLoadBlock } from "./declaration-loads";
-import { COVERED_ENTRYPOINTS } from "./entrypoint-stability";
 
 type TestMode = "all" | "inline" | "declarations" | "consumer";
 
@@ -23,35 +29,36 @@ type TypegraphPackageJson = Readonly<{
   exports?: Readonly<Record<string, Readonly<{ types: string }>>>;
 }>;
 
-const PACKAGE_NAME = "@nicia-ai/typegraph";
-
 /**
- * The module resolutions each declaration-emit fixture compiles under. Each
- * names a checked-in `type-smoke/tsconfig.declaration-emit.<name>.json` that
- * a per-fixture config extends.
+ * The consumer setups each declaration-emit fixture compiles under: both
+ * module resolutions a modern consumer uses, each with `skipLibCheck` on and
+ * off. Each names a checked-in
+ * `type-smoke/tsconfig.declaration-emit.<resolution>.json` that a per-fixture
+ * config extends.
  */
+const DECLARATION_EMIT_VARIANTS = [
+  { resolution: "bundler", skipLibCheck: true },
+  { resolution: "bundler", skipLibCheck: false },
+  { resolution: "node16", skipLibCheck: true },
+  { resolution: "node16", skipLibCheck: false },
+] as const;
+
 const DECLARATION_EMIT_RESOLUTIONS = ["bundler", "node16"] as const;
+
+function variantName(
+  variant: Readonly<{ resolution: string; skipLibCheck: boolean }>,
+): string {
+  return `${variant.resolution}-${variant.skipLibCheck ? "skiplibcheck" : "libcheck"}`;
+}
 
 /** The directory of declaration-emit fixtures, under `type-smoke`. */
 const DECLARATION_EMIT_FIXTURE_DIR = "declaration-emit";
-
-/**
- * Packages other than TypeGraph an emitted consumer declaration may import,
- * with any of their subpaths: the consumer depends on them directly.
- */
-const DECLARATION_EMIT_FOREIGN_PACKAGES: readonly string[] = [
-  "zod",
-  "drizzle-orm",
-];
 
 /** How many fixture compilations run at once. */
 const DECLARATION_EMIT_CONCURRENCY = Math.max(
   1,
   Math.min(8, Math.floor(availableParallelism() / 2)),
 );
-
-const MODULE_SPECIFIER_PATTERN =
-  /\b(?:from\s+|import\s*\(\s*)["']([^"']+)["']/g;
 
 function getUnknownErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -173,34 +180,6 @@ function publicEntrypointSpecifiers(
   );
 }
 
-function isForeignPackageSpecifier(specifier: string): boolean {
-  return DECLARATION_EMIT_FOREIGN_PACKAGES.some(
-    (name) => specifier === name || specifier.startsWith(`${name}/`),
-  );
-}
-
-/**
- * Every module specifier in an emitted declaration that is neither a public
- * TypeGraph entrypoint nor an allowed foreign package. A type TypeScript could
- * not name through an entrypoint the program imports surfaces either as a
- * TS2742/TS2883 refusal or, when the path happens to resolve, as a relative
- * `dist/<hashed chunk>` specifier; this catches the second form.
- */
-function nonPublicDeclarationSpecifiers(
-  declarationSource: string,
-  publicSpecifiers: ReadonlySet<string>,
-): readonly string[] {
-  const offending = new Set<string>();
-  for (const match of declarationSource.matchAll(MODULE_SPECIFIER_PATTERN)) {
-    const specifier = match[1];
-    if (specifier === undefined) continue;
-    if (publicSpecifiers.has(specifier)) continue;
-    if (isForeignPackageSpecifier(specifier)) continue;
-    offending.add(specifier);
-  }
-  return [...offending].toSorted();
-}
-
 async function assertDeclarationsNamePublicEntrypoints(
   outputDir: string,
   publicSpecifiers: ReadonlySet<string>,
@@ -214,7 +193,11 @@ async function assertDeclarationsNamePublicEntrypoints(
   }
   for (const file of files) {
     const source = await readFile(path.join(outputDir, file), "utf8");
-    const offending = nonPublicDeclarationSpecifiers(source, publicSpecifiers);
+    const offending = nonPublicDeclarationSpecifiers(
+      file,
+      source,
+      publicSpecifiers,
+    );
     if (offending.length > 0) {
       throw new Error(
         `${path.join(outputDir, file)} references non-public modules: ${offending.join(", ")}`,
@@ -259,84 +242,23 @@ async function mapWithConcurrency<T>(
   await Promise.all(workers);
 }
 
-type DeclarationEmitFixture = Readonly<{
-  /** The fixture's file name without `.ts`. */
-  name: string;
-  /** The TypeGraph entrypoint specifiers the fixture imports. */
-  specifiers: readonly string[];
-}>;
-
-function specifierOfEntrypoint(entrypoint: string): string {
-  return entrypoint === "." ? PACKAGE_NAME : (
-      `${PACKAGE_NAME}/${entrypoint.slice(2)}`
-    );
-}
-
 /**
  * Reads the declaration-emit fixtures and refuses a set that could hide a
- * per-entrypoint gap. Each covered entrypoint has a fixture named after its
- * API report (`typegraph-core.ts` for `/core`) that imports that entrypoint
- * and no other: a second entrypoint in the program would make the types it
- * exports nameable and mask a type the fixture's entrypoint fails to make
- * nameable. Any other fixture composes two or more covered entrypoints. A
- * fixture imports nothing else but the foreign packages a consumer depends on.
+ * per-entrypoint gap (`validateDeclarationEmitFixtures`).
  */
 async function readDeclarationEmitFixtures(
   fixtureDir: string,
 ): Promise<readonly DeclarationEmitFixture[]> {
   const entries = await readdir(fixtureDir);
-  const files = entries.filter((file) => file.endsWith(".ts"));
-  const coveredSpecifiers = new Map<string, string>(
-    COVERED_ENTRYPOINTS.map((entrypoint) => [
-      reportNameForExport(entrypoint),
-      specifierOfEntrypoint(entrypoint),
-    ]),
+  const files = await Promise.all(
+    entries
+      .filter((file) => file.endsWith(".ts"))
+      .map(async (file) => ({
+        file,
+        source: await readFile(path.join(fixtureDir, file), "utf8"),
+      })),
   );
-  const allowed = new Set(coveredSpecifiers.values());
-  const fixtures: DeclarationEmitFixture[] = [];
-  const problems: string[] = [];
-  for (const file of files.toSorted()) {
-    const name = file.slice(0, -".ts".length);
-    const source = await readFile(path.join(fixtureDir, file), "utf8");
-    const imported = [...source.matchAll(MODULE_SPECIFIER_PATTERN)].flatMap(
-      (match) => (match[1] === undefined ? [] : [match[1]]),
-    );
-    const specifiers = [
-      ...new Set(
-        imported.filter((specifier) => !isForeignPackageSpecifier(specifier)),
-      ),
-    ];
-    const disallowed = specifiers.filter(
-      (specifier) => !allowed.has(specifier),
-    );
-    if (disallowed.length > 0) {
-      problems.push(
-        `${file} imports ${disallowed.join(", ")}, which is neither a covered entrypoint nor a foreign package a consumer depends on`,
-      );
-    }
-    const own = coveredSpecifiers.get(name);
-    if (
-      own !== undefined &&
-      (specifiers.length !== 1 || specifiers[0] !== own)
-    ) {
-      problems.push(
-        `${file} must import ${own} and no other entrypoint; it imports ${specifiers.join(", ")}`,
-      );
-    }
-    if (own === undefined && specifiers.length < 2) {
-      problems.push(
-        `${file} imports ${specifiers.length} entrypoint(s): name a single-entrypoint fixture after its report (${[...coveredSpecifiers.keys()].join(", ")})`,
-      );
-    }
-    fixtures.push({ name, specifiers });
-  }
-  for (const [name, specifier] of coveredSpecifiers) {
-    if (!fixtures.some((fixture) => fixture.name === name)) {
-      problems.push(
-        `No declaration-emit fixture for ${specifier} (${name}.ts)`,
-      );
-    }
-  }
+  const { fixtures, problems } = validateDeclarationEmitFixtures(files);
   if (problems.length > 0) {
     throw new Error(
       `Declaration-emit fixtures are incomplete:\n${problems.join("\n")}`,
@@ -447,6 +369,17 @@ async function runConsumerTypeSmokeTest(
   const zodVersion = packageJson.devDependencies?.["zod"] ?? "^4.5.0";
   const drizzleVersion =
     packageJson.devDependencies?.["drizzle-orm"] ?? ">=0.35.0";
+  const pgliteVersion =
+    packageJson.devDependencies?.["@electric-sql/pglite"] ?? "^0.5.8";
+  const tsupVersion = packageJson.devDependencies?.["tsup"] ?? "^8.5.1";
+  const libsqlVersion =
+    packageJson.devDependencies?.["@libsql/client"] ?? "^0.18.0";
+  const nodeTypesVersion =
+    packageJson.devDependencies?.["@types/node"] ?? "^24.0.0";
+  const betterSqliteTypesVersion =
+    packageJson.devDependencies?.["@types/better-sqlite3"] ?? "^9.6.0";
+  const localTypescriptVersion =
+    packageJson.devDependencies?.["typescript"] ?? "^5.9.3";
 
   try {
     await runCommand("pnpm", ["pack", "--out", tarballPath], packageDir);
@@ -485,8 +418,26 @@ async function runConsumerTypeSmokeTest(
       type: "module",
       dependencies: {
         "@nicia-ai/typegraph": "file:./typegraph.tgz",
+        // The optional peer the PGlite adapter's results are typed with: a
+        // consumer exporting them depends on it, and without it TypeScript
+        // emits an unresolved bare `PGlite` that fails downstream.
+        "@electric-sql/pglite": pgliteVersion,
+        // The libSQL adapter's peer, which its declarations import.
+        "@libsql/client": libsqlVersion,
         "drizzle-orm": drizzleVersion,
         zod: zodVersion,
+      },
+      devDependencies: {
+        // The re-bundling consumer: tsup's declaration rollup
+        // (rollup-plugin-dts) compiles a fixture and rolls its declarations,
+        // keeping the package as an external import.
+        tsup: tsupVersion,
+        typescript: localTypescriptVersion,
+        // A Node consumer's globals (`AbortSignal`, `URL`) and the local
+        // SQLite driver's types, which a downstream program with
+        // `skipLibCheck` off needs to check the declarations it loads.
+        "@types/node": nodeTypesVersion,
+        "@types/better-sqlite3": betterSqliteTypesVersion,
       },
     };
 
@@ -511,26 +462,144 @@ async function runConsumerTypeSmokeTest(
     );
 
     const publicSpecifiers = publicEntrypointSpecifiers(packageJson);
-    const runs = DECLARATION_EMIT_RESOLUTIONS.flatMap((resolution) =>
-      fixtures.map((fixture) => ({ fixture, resolution })),
+    const failures: string[] = [];
+    let thirdPartyDiagnostics = 0;
+
+    /**
+     * Runs `tsc` and records a failure for any diagnostic the run is
+     * accountable for (`accountableDiagnostics`): one in the consumer's
+     * files, its emitted declarations or TypeGraph's declarations. A
+     * non-zero exit with no diagnostic at all is a failure too.
+     */
+    async function runAccountable(
+      label: string,
+      configPath: string,
+    ): Promise<boolean> {
+      const run = await runCommandCaptured(
+        "pnpm",
+        [...commandArguments, "--pretty", "false", "--project", configPath],
+        temporaryDir,
+      );
+      if (run.code === 0) return true;
+      const { accountable, thirdParty } = accountableDiagnostics(run.output);
+      thirdPartyDiagnostics += thirdParty.length;
+      if (accountable.length === 0 && thirdParty.length > 0) return true;
+      failures.push(
+        `${label}: tsc exited ${run.code}\n${accountable.length > 0 ? accountable.join("\n") : run.output}`,
+      );
+      return false;
+    }
+
+    /**
+     * Compiles a second program that imports `declarationFile` the way a
+     * downstream project consumes a library's declarations, with
+     * `skipLibCheck` off so the declaration itself is checked. Any
+     * diagnostic fails the run: an emitted declaration that names an
+     * unresolvable type passes its own emit and fails here.
+     */
+    async function checkDownstream(
+      label: string,
+      resolution: (typeof DECLARATION_EMIT_RESOLUTIONS)[number],
+      declarationFile: string,
+    ): Promise<boolean> {
+      const downstreamDir = path.join(
+        "downstream",
+        label.replaceAll(/[^\w-]+/g, "_"),
+      );
+      await mkdir(path.join(temporaryDir, downstreamDir), { recursive: true });
+      const importPath = path
+        .relative(downstreamDir, declarationFile.replace(/\.d\.ts$/, ".js"))
+        .split(path.sep)
+        .join("/");
+      await writeFile(
+        path.join(temporaryDir, downstreamDir, "downstream.ts"),
+        `import type * as emitted from "${importPath.startsWith(".") ? importPath : `./${importPath}`}";\nexport type Emitted = typeof emitted;\n`,
+        "utf8",
+      );
+      const configPath = path.join(downstreamDir, "tsconfig.json");
+      await writeFile(
+        path.join(temporaryDir, configPath),
+        `${JSON.stringify(
+          {
+            extends: `../../tsconfig.declaration-emit.${resolution}.json`,
+            compilerOptions: {
+              noEmit: true,
+              declaration: false,
+              emitDeclarationOnly: false,
+              skipLibCheck: false,
+              rootDir: "../..",
+            },
+            files: ["downstream.ts"],
+          },
+          undefined,
+          2,
+        )}\n`,
+        "utf8",
+      );
+      return await runAccountable(
+        `${label}: downstream program importing ${declarationFile}`,
+        configPath,
+      );
+    }
+
+    /** Whether every declaration in `outDir` names only public specifiers; records a failure otherwise. */
+    async function namesOnlyPublicSpecifiers(
+      label: string,
+      outDir: string,
+    ): Promise<boolean> {
+      try {
+        await assertDeclarationsNamePublicEntrypoints(
+          path.join(temporaryDir, outDir),
+          publicSpecifiers,
+        );
+        return true;
+      } catch (error: unknown) {
+        failures.push(`${label}: ${getUnknownErrorMessage(error)}`);
+        return false;
+      }
+    }
+
+    async function checkEmitted(
+      label: string,
+      resolution: (typeof DECLARATION_EMIT_RESOLUTIONS)[number],
+      outDir: string,
+      fixtureName: string,
+    ): Promise<void> {
+      if (!(await namesOnlyPublicSpecifiers(label, outDir))) return;
+      if (
+        await checkDownstream(
+          label,
+          resolution,
+          path.join(outDir, `${fixtureName}.d.ts`),
+        )
+      ) {
+        console.log(`  ${label}: ok`);
+      }
+    }
+
+    const runs = DECLARATION_EMIT_VARIANTS.flatMap((variant) =>
+      fixtures.map((fixture) => ({ fixture, variant })),
     );
     console.log(
-      `Emitting consumer declarations for ${fixtures.length} fixtures under ${DECLARATION_EMIT_RESOLUTIONS.join(" and ")} resolution...`,
+      `Emitting consumer declarations for ${fixtures.length} fixtures under ${DECLARATION_EMIT_VARIANTS.map((variant) => variantName(variant)).join(", ")}, then compiling each emitted declaration downstream...`,
     );
-    const failures: string[] = [];
     await mapWithConcurrency(
       runs,
       DECLARATION_EMIT_CONCURRENCY,
-      async ({ fixture, resolution }) => {
-        const label = `${fixture.name} (${resolution})`;
-        const outDir = path.join("declaration-out", resolution, fixture.name);
-        const configName = `tsconfig.declaration-emit.${resolution}.${fixture.name}.json`;
+      async ({ fixture, variant }) => {
+        const label = `${fixture.name} (${variantName(variant)})`;
+        const outDir = path.join(
+          "declaration-out",
+          variantName(variant),
+          fixture.name,
+        );
+        const configName = `tsconfig.declaration-emit.${variantName(variant)}.${fixture.name}.json`;
         await writeFile(
           path.join(temporaryDir, configName),
           `${JSON.stringify(
             {
-              extends: `./tsconfig.declaration-emit.${resolution}.json`,
-              compilerOptions: { outDir },
+              extends: `./tsconfig.declaration-emit.${variant.resolution}.json`,
+              compilerOptions: { outDir, skipLibCheck: variant.skipLibCheck },
               files: [`${DECLARATION_EMIT_FIXTURE_DIR}/${fixture.name}.ts`],
             },
             undefined,
@@ -538,25 +607,48 @@ async function runConsumerTypeSmokeTest(
           )}\n`,
           "utf8",
         );
+        if (!(await runAccountable(label, configName))) return;
+        await checkEmitted(label, variant.resolution, outDir, fixture.name);
+      },
+    );
+
+    console.log(
+      `Re-bundling each fixture's declarations with tsup (rollup-plugin-dts, TypeScript ${localTypescriptVersion}), then compiling each bundle downstream...`,
+    );
+    await mapWithConcurrency(
+      fixtures,
+      DECLARATION_EMIT_CONCURRENCY,
+      async (fixture) => {
+        const label = `${fixture.name} (tsup re-bundle)`;
+        const outDir = path.join("rebundle-out", fixture.name);
         const run = await runCommandCaptured(
           "pnpm",
-          [...commandArguments, "--project", configName],
+          [
+            "exec",
+            "tsup",
+            `${DECLARATION_EMIT_FIXTURE_DIR}/${fixture.name}.ts`,
+            "--dts-only",
+            "--format",
+            "esm",
+            "--out-dir",
+            outDir,
+            "--tsconfig",
+            "tsconfig.declaration-emit.bundler.json",
+            "--no-config",
+            "--silent",
+          ],
           temporaryDir,
         );
         if (run.code !== 0) {
-          failures.push(`${label}: tsc exited ${run.code}\n${run.output}`);
+          failures.push(`${label}: tsup exited ${run.code}\n${run.output}`);
           return;
         }
-        try {
-          await assertDeclarationsNamePublicEntrypoints(
-            path.join(temporaryDir, outDir),
-            publicSpecifiers,
-          );
-          console.log(`  ${label}: ok`);
-        } catch (error: unknown) {
-          failures.push(`${label}: ${getUnknownErrorMessage(error)}`);
-        }
+        await checkEmitted(label, "bundler", outDir, fixture.name);
       },
+    );
+
+    console.log(
+      `${thirdPartyDiagnostics} diagnostic(s) located in third-party declarations were reported by skipLibCheck-off runs and not counted.`,
     );
     if (failures.length > 0) {
       throw new Error(
