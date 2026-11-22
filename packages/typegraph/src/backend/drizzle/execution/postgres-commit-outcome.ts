@@ -104,6 +104,7 @@ import {
   getPinnedPostgresTransactionClient,
   getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
+  isPgliteTransaction,
   isPostgresJsClient,
   replacePinnedPostgresTransactionClient,
 } from "./postgres-execution";
@@ -179,15 +180,27 @@ const ROLLED_BACK_TAG = "ROLLBACK";
  * - `"pglite-protocol"`: from the PGlite instance's protocol stream;
  * - `"driver-refusal"`: nowhere; the driver refuses to commit a transaction
  *   in which a statement failed (postgres-js);
- * - `"unobserved"`: the transaction's client could not be observed at all.
- *   The marker is then planted before the callback runs and always read, so
- *   an aborted session refuses the read.
+ * - `"unobserved"`: the transaction's client could not be observed at all;
+ * - `"unreadable"`: a PGlite client that does not expose the protocol
+ *   stream its `COMMIT` goes through (a wrapper that forwards only
+ *   `query` and `transaction`).
+ *
+ * For the last two the reply cannot be read, so the marker is planted before
+ * the callback runs and always read back right before `COMMIT`: an aborted
+ * session refuses that read with `25P02`, reported as the rollback it is.
+ * That costs two statements, on these clients only.
  */
 type CommitReplySource =
   | "client-result"
   | "pglite-protocol"
   | "driver-refusal"
-  | "unobserved";
+  | "unobserved"
+  | "unreadable";
+
+/** Whether the marker must stand in for an unreadable `COMMIT` reply. */
+function plantsUpFront(source: CommitReplySource): boolean {
+  return source === "unobserved" || source === "unreadable";
+}
 
 /** The reply to the first statement sent once an attempt's work was done. */
 type CommitReply = Readonly<{
@@ -517,7 +530,7 @@ function simpleQueryText(message: unknown): string | undefined {
     return undefined;
   }
   // Type byte, 4-byte length, then the NUL-terminated query text.
-  return new TextDecoder().decode(message.subarray(5, - 1));
+  return new TextDecoder().decode(message.subarray(5, -1));
 }
 
 /** The tag of the last `CommandComplete` among PGlite's parsed replies. */
@@ -596,10 +609,18 @@ function watchPgliteCommitReply(
 /** Where the reply to `observed`'s `COMMIT` can be read. */
 function commitReplySourceOf(
   observed: ObservedClient | undefined,
+  onPglite: boolean,
   pglite: object | undefined,
 ): CommitReplySource {
   if (observed === undefined) return "unobserved";
-  if (pglite !== undefined) return "pglite-protocol";
+  if (onPglite) {
+    return (
+        pglite !== undefined &&
+          typeof Reflect.get(pglite, PGLITE_PROTOCOL_MEMBER) === "function"
+      ) ?
+        "pglite-protocol"
+      : "unreadable";
+  }
   if (isPostgresJsClient(observed.raw)) return "driver-refusal";
   return "client-result";
 }
@@ -718,14 +739,15 @@ type TransactionEvidenceSession = Readonly<{
 
 /**
  * The marker evidence of one transaction. `observed` is its observed pinned
- * client; without one no failure can be seen and the plant cannot be ordered
- * ahead of the caller's statements, so the marker is planted at once,
- * through the queue, and always read.
+ * client. With `plantUpFront` (no observed client, or a `COMMIT` reply that
+ * cannot be read) the marker is planted at once, through the queue, before
+ * the callback runs, and always read.
  */
 async function createTransactionEvidence(
   transaction: AnyPgTransaction,
   evidence: AttemptEvidence,
   observed: ObservedClient | undefined,
+  plantUpFront: boolean,
 ): Promise<TransactionEvidenceSession> {
   const session = createSerialExecutionAdapter(
     createPostgresExecutionAdapter(transaction),
@@ -740,7 +762,7 @@ async function createTransactionEvidence(
   // with nothing sent since has nothing new to learn from the session.
   let verifiedAtStatement: number | undefined;
 
-  if (observed === undefined) {
+  if (plantUpFront) {
     markerValue = newMarkerValue();
     await session.execute(sql.raw(plantStatement(markerValue)));
   }
@@ -992,13 +1014,18 @@ export async function runMarkedPostgresTransaction<T>(
           return observeClient(client, observer, gate);
         },
       );
-      source = commitReplySourceOf(observed, pglite);
+      source = commitReplySourceOf(
+        observed,
+        isPgliteTransaction(transaction),
+        pglite,
+      );
       let attempt: TransactionEvidenceSession | undefined;
       try {
         attempt = await createTransactionEvidence(
           transaction,
           evidence,
           observed,
+          plantsUpFront(source),
         );
         if (
           !registerNativeTransactionRelease(transaction, attempt.releasePort)

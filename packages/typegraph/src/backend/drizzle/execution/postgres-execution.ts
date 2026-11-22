@@ -270,8 +270,7 @@ export function replacePinnedPostgresTransactionClient(
   wrap: (client: object) => object,
 ): (() => void) | undefined {
   const session = transactionSession(db as PgClientCarrier) as
-    | { client?: unknown }
-    | undefined;
+    { client?: unknown } | undefined;
   const client = getPinnedPostgresTransactionClient(db);
   if (session === undefined || client === undefined) return undefined;
   const wrapped = wrap(client);
@@ -284,6 +283,15 @@ export function replacePinnedPostgresTransactionClient(
 
 function hasPgliteSession(carrier: PgClientCarrier): boolean {
   return transactionSession(carrier)?.constructor?.name === "PgliteSession";
+}
+
+/**
+ * Whether this Drizzle transaction runs on PGlite, whatever object the
+ * caller handed Drizzle as its client (a wrapper around a PGlite instance
+ * included).
+ */
+export function isPgliteTransaction(db: AnyPgDatabase): boolean {
+  return hasPgliteSession(db as PgClientCarrier);
 }
 
 /**

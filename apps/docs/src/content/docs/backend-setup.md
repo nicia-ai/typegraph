@@ -1994,7 +1994,11 @@ it opened, whose callback returned normally, committed:
   the result of Drizzle's `commit`, through the transaction's pinned client,
   which it observes for the whole attempt; on PGlite from the `COMMIT`'s
   `CommandComplete` message, observed on the instance's protocol stream between
-  the callback's return and that `COMMIT`. postgres-js does not expose the
+  the callback's return and that `COMMIT`. A PGlite client wrapped so that
+  it hides that stream (a wrapper forwarding only `query` and `transaction`)
+  cannot yield the reply; there the backend plants its marker before the
+  callback runs and reads it back before `COMMIT`, which an aborted
+  transaction refuses (two statements, on such clients only). postgres-js does not expose the
   reply of the `COMMIT` that `sql.begin()` sends; instead it refuses to commit a
   transaction in which a statement failed, rolls back, and rejects with that
   failure, which the backend reports as the rollback it is. A rolled-back
