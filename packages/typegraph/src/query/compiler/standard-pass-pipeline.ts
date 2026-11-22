@@ -83,70 +83,148 @@ export function visitExpressionFields(
   });
 }
 
-export function markPredicateFieldsAsRequired(
-  requiredColumnsByAlias: Map<string, Set<string>>,
+/** Visits every field a predicate reads. */
+function visitPredicateFields(
   expression: PredicateExpression,
+  visit: (field: FieldRef) => void,
 ): void {
   switch (expression.__type) {
     case "comparison": {
-      markFieldRefAsRequired(requiredColumnsByAlias, expression.left);
+      visit(expression.left);
       return;
     }
     case "tuple_comparison": {
-      for (const field of expression.fields)
-        markFieldRefAsRequired(requiredColumnsByAlias, field);
+      for (const field of expression.fields) visit(field);
       return;
     }
     case "string_op":
     case "null_check":
     case "between":
     case "array_op":
-    case "object_op": {
-      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+    case "object_op":
+    case "in_subquery":
+    case "vector_similarity":
+    case "fulltext_match": {
+      visit(expression.field);
       return;
     }
     case "and":
     case "or": {
       for (const predicate of expression.predicates) {
-        markPredicateFieldsAsRequired(requiredColumnsByAlias, predicate);
+        visitPredicateFields(predicate, visit);
       }
       return;
     }
     case "not": {
-      markPredicateFieldsAsRequired(
-        requiredColumnsByAlias,
-        expression.predicate,
-      );
+      visitPredicateFields(expression.predicate, visit);
       return;
     }
     case "aggregate_comparison": {
-      markFieldRefAsRequired(
-        requiredColumnsByAlias,
-        expression.aggregate.field,
-      );
-      return;
-    }
-    case "in_subquery": {
-      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
-      return;
-    }
-    case "vector_similarity": {
-      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
-      return;
-    }
-    case "fulltext_match": {
-      markFieldRefAsRequired(requiredColumnsByAlias, expression.field);
+      visit(expression.aggregate.field);
       return;
     }
     case "exists": {
       return;
     }
     case "database_expression_predicate": {
-      visitExpressionFields(expression.expression, (field) => {
-        markFieldRefAsRequired(requiredColumnsByAlias, field);
-      });
+      visitExpressionFields(expression.expression, visit);
       return;
     }
+  }
+}
+
+export function markPredicateFieldsAsRequired(
+  requiredColumnsByAlias: Map<string, Set<string>>,
+  expression: PredicateExpression,
+): void {
+  visitPredicateFields(expression, (field) => {
+    markFieldRefAsRequired(requiredColumnsByAlias, field);
+  });
+}
+
+/**
+ * Where the outer statement reads a field: the projection (when it is not a
+ * selective one), the id an aggregate counts, grouping, an ordering term that
+ * is a plain field or one inside an expression, the result predicate, or
+ * HAVING.
+ */
+type OuterClauseFieldUse =
+  | "projection"
+  | "aggregate-id"
+  | "group-by"
+  | "order-by-field"
+  | "order-by-expression"
+  | "result-predicate"
+  | "having";
+
+/**
+ * Visits every field the outer SELECT of a standard statement may read from
+ * its candidate CTEs, with the clause that reads it, so column pruning keeps
+ * those columns. Selective fields are not visited; pruning reads them from
+ * `ast.selectiveFields`.
+ *
+ * This answers "which columns must a CTE carry", where keeping a column the
+ * SQL never reads is harmless. It is not the read set the SQL-name check
+ * uses: that is recorded by the function that writes each reference
+ * (`column-reads.ts`), and the two are allowed to differ.
+ */
+function visitOuterClauseFields(
+  ast: QueryAst,
+  options: Readonly<{ includeProjection: boolean }>,
+  visit: (field: FieldRef, use: OuterClauseFieldUse) => void,
+): void {
+  const hasSelectiveFields = (ast.selectiveFields?.length ?? 0) > 0;
+  if (options.includeProjection && !hasSelectiveFields) {
+    for (const projectedField of ast.projection.fields) {
+      const source = projectedField.source;
+      if (source.__type === "field_ref") {
+        visit(source, "projection");
+      } else if (source.__type === "aggregate") {
+        visit(
+          { __type: "field_ref", alias: source.field.alias, path: ["id"] },
+          "aggregate-id",
+        );
+        visit(source.field, "projection");
+      } else {
+        visitExpressionFields(source, (field) => {
+          visit(field, "projection");
+        });
+      }
+    }
+  }
+
+  if (ast.groupBy) {
+    for (const field of ast.groupBy.fields) {
+      if (field.__type === "field_ref") {
+        visit(field, "group-by");
+      } else {
+        visitExpressionFields(field, (referencedField) => {
+          visit(referencedField, "group-by");
+        });
+      }
+    }
+  }
+
+  for (const orderSpec of ast.orderBy ?? []) {
+    if (orderSpec.field.__type === "database_expression") {
+      visitExpressionFields(orderSpec.field, (field) => {
+        visit(field, "order-by-expression");
+      });
+      continue;
+    }
+    visit(orderSpec.field, "order-by-field");
+  }
+
+  if (ast.resultPredicate !== undefined) {
+    visitPredicateFields(ast.resultPredicate, (field) => {
+      visit(field, "result-predicate");
+    });
+  }
+
+  if (ast.having) {
+    visitPredicateFields(ast.having, (field) => {
+      visit(field, "having");
+    });
   }
 }
 
@@ -173,73 +251,29 @@ export function collectRequiredColumnsByAlias(
 
   const hasSelectiveFields = (ast.selectiveFields?.length ?? 0) > 0;
 
-  if (includeProjection) {
-    if (hasSelectiveFields) {
-      for (const field of ast.selectiveFields ?? []) {
-        if (field.isSystemField) {
-          addRequiredColumn(
-            requiredColumnsByAlias,
-            field.alias,
-            mapSelectiveSystemFieldToColumn(field.field),
-          );
-        }
-      }
-    } else {
-      for (const projectedField of ast.projection.fields) {
-        const source = projectedField.source;
-        if (source.__type === "field_ref") {
-          markFieldRefAsRequired(requiredColumnsByAlias, source);
-        } else if (source.__type === "aggregate") {
-          addRequiredColumn(requiredColumnsByAlias, source.field.alias, "id");
-          markFieldRefAsRequired(requiredColumnsByAlias, source.field);
-        } else {
-          visitExpressionFields(source, (field) => {
-            markFieldRefAsRequired(requiredColumnsByAlias, field);
-          });
-        }
+  if (includeProjection && hasSelectiveFields) {
+    for (const field of ast.selectiveFields ?? []) {
+      if (field.isSystemField) {
+        addRequiredColumn(
+          requiredColumnsByAlias,
+          field.alias,
+          mapSelectiveSystemFieldToColumn(field.field),
+        );
       }
     }
   }
 
-  if (ast.groupBy) {
-    for (const field of ast.groupBy.fields) {
-      if (field.__type === "field_ref") {
-        markFieldRefAsRequired(requiredColumnsByAlias, field);
-      } else {
-        visitExpressionFields(field, (referencedField) => {
-          markFieldRefAsRequired(requiredColumnsByAlias, referencedField);
-        });
-      }
-    }
-  }
-
-  if (ast.orderBy) {
-    for (const orderSpec of ast.orderBy) {
-      if (orderSpec.field.__type === "database_expression") {
-        visitExpressionFields(orderSpec.field, (field) => {
-          markFieldRefAsRequired(requiredColumnsByAlias, field);
-        });
-        continue;
-      }
-      if (
-        findSelectivePropsFieldForFieldRef(
-          ast.selectiveFields,
-          orderSpec.field,
-        ) !== undefined
-      ) {
-        continue;
-      }
-      markFieldRefAsRequired(requiredColumnsByAlias, orderSpec.field);
-    }
-  }
-
-  if (ast.resultPredicate !== undefined) {
-    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.resultPredicate);
-  }
-
-  if (ast.having) {
-    markPredicateFieldsAsRequired(requiredColumnsByAlias, ast.having);
-  }
+  visitOuterClauseFields(ast, { includeProjection }, (field, use) => {
+    // An ordering term the selective projection already extracts is read
+    // from that extracted column, so it needs nothing else carried.
+    if (
+      use === "order-by-field" &&
+      findSelectivePropsFieldForFieldRef(ast.selectiveFields, field) !==
+        undefined
+    )
+      return;
+    markFieldRefAsRequired(requiredColumnsByAlias, field);
+  });
 
   if (!hasSelectiveFields) {
     for (const predicate of ast.predicates) {

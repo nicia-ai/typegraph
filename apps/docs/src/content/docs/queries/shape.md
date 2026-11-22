@@ -38,6 +38,9 @@ For new queries that need SQL composition, use `project()` and the typed `expr` 
 [Database Expressions](/queries/expressions). A projected query can become an
 [`asRelation()`](/queries/relations/) for derived filtering, aggregation, distinctness, and set
 operations. Use `select()` when you specifically need the compatibility JavaScript mapper.
+`project()` keys become SQL result names, so two keys that differ only by letter case (`name`
+and `Name`) are refused when `project()` is called (see
+[Errors](/errors#sql_identifier_collision-and-sql_identifier_too_long)).
 
 ## Selection Patterns
 

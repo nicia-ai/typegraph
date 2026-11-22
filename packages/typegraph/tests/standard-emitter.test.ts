@@ -59,7 +59,7 @@ describe("emitStandardQuerySql", () => {
     const projection = sql.raw(`cte_p.p_id AS "id"`);
     const result = emitStandardQuerySql({
       ctes: [sql.raw(`cte_p AS (SELECT 'p-1' AS p_id)`)],
-      fromClause: sql`FROM cte_p`,
+      fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
       limitOffset: sql`LIMIT 10`,
       logicalPlan,
       orderBy: sql`ORDER BY cte_p.p_id ASC`,
@@ -93,7 +93,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         logicalPlan: invalidPlan,
         projection: sql.raw("cte_p.p_id AS id"),
       }),
@@ -127,7 +127,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         logicalPlan: plan,
         orderBy: sql`ORDER BY cte_p.p_id ASC`,
         projection: sql.raw("cte_p.p_id AS id"),
@@ -162,7 +162,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         limitOffset: sql`LIMIT 10`,
         logicalPlan: plan,
         projection: sql.raw("cte_p.p_id AS id"),
@@ -176,7 +176,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         limitOffset: sql`LIMIT 10`,
         logicalPlan: plan,
         projection: sql.raw("cte_p.p_id AS id"),
@@ -190,7 +190,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         logicalPlan: plan,
         orderBy: sql`ORDER BY cte_p.p_id ASC`,
         projection: sql.raw("cte_p.p_id AS id"),
@@ -226,7 +226,7 @@ describe("emitStandardQuerySql", () => {
 
     const result = emitStandardQuerySql({
       ctes: [],
-      fromClause: sql`FROM nodes`,
+      fromClause: { sql: sql`FROM nodes`, relations: [] },
       logicalPlan: plan,
       projection: sql.raw("id"),
     });
@@ -245,7 +245,7 @@ describe("emitStandardQuerySql", () => {
         sql.raw("cte_p AS (SELECT 'p-1' AS p_id)"),
         sql.raw("cte_f AS (SELECT 'f-1' AS f_id, 'p-1' AS p_id)"),
       ],
-      fromClause: sql`FROM cte_f`,
+      fromClause: { sql: sql`FROM cte_f`, relations: ["cte_f"] },
       limitOffset: sql`LIMIT 10`,
       logicalPlan,
       orderBy: sql`ORDER BY cte_f.f_id ASC`,
@@ -323,7 +323,7 @@ describe("emitStandardQuerySql", () => {
 
     const result = emitStandardQuerySql({
       ctes: [sql.raw("cte_p AS (SELECT 'p-1' AS p_id, 'Alice' AS p_name)")],
-      fromClause: sql`FROM cte_p`,
+      fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
       groupBy: sql`GROUP BY cte_p.p_name`,
       having: sql`HAVING COUNT(cte_p.p_id) > 1`,
       logicalPlan: plan,
@@ -362,7 +362,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         groupBy: sql`GROUP BY cte_p.p_name`,
         logicalPlan: plan,
         projection: sql.raw("cte_p.p_name AS name"),
@@ -397,7 +397,7 @@ describe("emitStandardQuerySql", () => {
     expect(() =>
       emitStandardQuerySql({
         ctes: [],
-        fromClause: sql`FROM cte_p`,
+        fromClause: { sql: sql`FROM cte_p`, relations: ["cte_p"] },
         having: sql`HAVING COUNT(*) > 1`,
         logicalPlan: plan,
         projection: sql.raw("cte_p.p_id AS id"),

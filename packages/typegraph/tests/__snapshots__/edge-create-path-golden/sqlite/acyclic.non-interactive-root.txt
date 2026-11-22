@@ -1,0 +1,92 @@
+### edge.create on free axes, generated id
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on free axes, supplied id
+hook start create edge:link link-new
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create born ended on free axes
+hook start create edge:link link-ended
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create to a missing target
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create to a tombstoned target
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create from a tombstoned source
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on a taken source axis
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on a taken target axis
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on both taken axes
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on a taken source axis to a tombstoned target
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create on a taken target axis from a tombstoned source
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create with an occupied id
+hook start create edge:link link-live
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create closing a cycle
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints found
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+=> ok found
+
+### edge.getOrCreateByEndpoints matchOn label created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints on a taken source axis to a tombstoned target
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+hook start create edge:link <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]

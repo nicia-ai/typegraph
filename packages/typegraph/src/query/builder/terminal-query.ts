@@ -2,7 +2,7 @@
 import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst } from "../ast";
-import { compileQuery } from "../compiler";
+import { compileNameCheckedQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
@@ -57,7 +57,13 @@ export async function executeQueryTerminal(
       { operation },
     );
   const options = buildCompileOptions(config);
-  const relation = compileQuery(ast, config.graphId, options);
+  // The terminal wrapper reads no result column of the relation by name.
+  const relation = compileNameCheckedQuery(
+    ast,
+    config.graphId,
+    options,
+    "embedded",
+  );
   const column = "typegraph_terminal_value";
   const statement = asCompiledSelectSql(
     operation === "count" ?

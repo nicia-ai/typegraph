@@ -54,6 +54,8 @@ import {
   isUnsupportedInSubqueryValueType,
 } from "../subquery-utils";
 import { validateAggregateOperand } from "./aggregate-validation";
+import { aliasColumnName } from "./alias-names";
+import { readColumn, readUnresolvedColumn } from "./column-reads";
 import {
   compileDatabaseExpression,
   compileLegacyAggregateExpression,
@@ -112,21 +114,16 @@ export function compileFieldColumn(
     return sql.raw(`${qualifier}${field.path.join("_")}`);
   }
 
-  // Default behavior: use aliased column names (e.g., "p_props")
-  const prefix = field.alias;
-  const qualifier = cteAlias ? `${cteAlias}.` : "";
-
-  if (field.path.length === 1 && field.path[0] === "id") {
-    return sql.raw(`${qualifier}${prefix}_id`);
-  }
-  if (field.path.length === 1 && field.path[0] === "kind") {
-    return sql.raw(`${qualifier}${prefix}_kind`);
-  }
-  if (field.path.length > 0 && field.path[0] === "props") {
-    return sql.raw(`${qualifier}${prefix}_props`);
-  }
-
-  return sql.raw(`${qualifier}${prefix}_${field.path.join("_")}`);
+  // Default behavior: use aliased column names (e.g., "p_props"), written
+  // through the column-read owner so the statement records each read.
+  const column =
+    field.path.length > 0 && field.path[0] === "props" ?
+      "props"
+    : field.path.join("_");
+  const name = aliasColumnName(field.alias, column);
+  return cteAlias === undefined || cteAlias === "" ?
+      readUnresolvedColumn(name)
+    : readColumn(cteAlias, name);
 }
 
 /**

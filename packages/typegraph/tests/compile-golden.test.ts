@@ -70,6 +70,8 @@ import {
   type VectorSlotMap,
 } from "../src/query/compiler/schema";
 import { compileSetOperation } from "../src/query/compiler/set-operations";
+import type * as SqlNameRegistry from "../src/query/compiler/sql-name-registry";
+import type { SqlStatementNames } from "../src/query/compiler/sql-name-registry";
 import { getDialect } from "../src/query/dialect";
 import {
   fts5Strategy,
@@ -91,8 +93,43 @@ import { buildReachableCte } from "../src/store/recursive-cte";
 import type { StoreViewCoordinate } from "../src/store/store-view";
 import { executeSubgraph } from "../src/store/subgraph";
 import { requireDefined } from "../src/utils/presence";
+import {
+  recordedColumnReferences,
+  textColumnReferences,
+} from "./column-read-gate";
 import { toSqlWithParams } from "./sql-test-utils";
 import { createTestBackend, disableTransactions } from "./test-utils";
+
+// ============================================================
+// Column-read gate over the whole corpus
+// ============================================================
+
+/**
+ * Every standard statement the corpus compiles, as the SQL-name registry
+ * recorded it. The last test of this file runs the column-read gate
+ * (`tests/column-read-gate.ts`) over each one.
+ */
+const recordedStatements = vi.hoisted(
+  () =>
+    [] as {
+      names: SqlStatementNames;
+      statement: SqlFragment;
+    }[],
+);
+
+vi.mock("../src/query/compiler/sql-name-registry", async (importOriginal) => {
+  const actual = await importOriginal<typeof SqlNameRegistry>();
+  return {
+    ...actual,
+    recordStatementColumnReads: (
+      ...args: Parameters<typeof actual.recordStatementColumnReads>
+    ) => {
+      const statement = actual.recordStatementColumnReads(...args);
+      recordedStatements.push({ names: args[0], statement });
+      return statement;
+    },
+  };
+});
 
 // ============================================================
 // Faked clock
@@ -1372,12 +1409,11 @@ describe("compile-golden: metadata, dates, fragments, recursive outputs, aliases
         ).toMatchSnapshot();
       });
 
-      // Pins a known defect: the builder accepts `person` / `Person`, but
-      // the unquoted identifiers they compile to collide, and both engines
-      // reject the recorded statement (SQLite: duplicate WITH table name;
-      // PostgreSQL: WITH query name specified more than once). A change to
-      // identifier generation is expected to turn this into a typed refusal,
-      // which will show up here as a diff.
+      // `person` / `Person` compile to unquoted identifiers that collide, so
+      // both engines rejected the statement (SQLite: duplicate WITH table
+      // name; PostgreSQL: WITH query name specified more than once). The name
+      // registry now refuses it with a typed error before any SQL is built;
+      // the test name keeps its original snapshot key.
       it(`node aliases differing only by case (known defect: SQL both engines reject) / ${dialect}`, () => {
         expect(
           compileOrRefusal(
@@ -1395,6 +1431,10 @@ describe("compile-golden: metadata, dates, fragments, recursive outputs, aliases
         ).toMatchSnapshot();
       });
 
+      // `compile()` returns the full projection, which reads both `k_id` and
+      // `K_id` from `cte_friend` (SQLite: the node id in place of the edge id;
+      // PostgreSQL: ambiguous column), so it is refused even though
+      // `execute()` sends an ids-only statement that does not collide.
       it(`node and edge aliases differing only by case / ${dialect}`, () => {
         expect(
           compileOrRefusal(
@@ -2366,4 +2406,39 @@ describe("compile-golden: updateWhere candidate selection", () => {
       });
     }
   }
+});
+
+describe("compile-golden: column reads", () => {
+  // Runs after every test above has compiled its statements.
+  it("records, for every standard statement compiled above, exactly the column references its SQL makes", () => {
+    expect(recordedStatements.length).toBeGreaterThan(100);
+    const rendered = recordedStatements.map(({ names, statement }) => ({
+      names,
+      relations: new Set(names.relations.entries().map((entry) => entry.name)),
+      text: toSqlWithParams(statement, "sqlite").sql,
+    }));
+    const mismatches = rendered.flatMap((current, index) => {
+      // A nested statement (an EXISTS or IN subquery) was recorded just
+      // before the statement that embeds it. Its text is its own; drop it
+      // when it names a relation of the enclosing statement, so its
+      // references are not counted twice.
+      let text = current.text;
+      for (const nested of rendered.slice(Math.max(0, index - 20), index)) {
+        if (
+          nested.text.length < text.length &&
+          text.includes(nested.text) &&
+          [...nested.relations].some((relation) =>
+            current.relations.has(relation),
+          )
+        )
+          text = text.split(nested.text).join(" ");
+      }
+      const recorded = recordedColumnReferences(current.names);
+      const written = textColumnReferences(text, current.names);
+      return JSON.stringify(recorded) === JSON.stringify(written) ?
+          []
+        : [{ text: current.text, recorded, written }];
+    });
+    expect(mismatches).toEqual([]);
+  });
 });

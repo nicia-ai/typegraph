@@ -16,7 +16,10 @@ import {
   type QueryAst,
   type SortDirection,
 } from "../ast";
-import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import {
+  compileNameCheckedQuery,
+  type CompileQueryOptions,
+} from "../compiler/index";
 import type { DatabaseExpression } from "../expressions";
 import { parseJsonPointer } from "../json-pointer";
 import { type CompiledSelectSql } from "../sql-intent";
@@ -261,7 +264,12 @@ export class ExecutableAggregateQuery<
     // this is not the reusable placeholder template execute() caches (see
     // #resolveTemplate).
     const ast = this.toAst();
-    return compileQuery(ast, this.#config.graphId, this.#compileOptions());
+    return compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      this.#compileOptions(),
+      "decoded",
+    );
   }
 
   /** Adapts this compatibility aggregate builder to the shared relation API. */
@@ -324,6 +332,15 @@ export class ExecutableAggregateQuery<
     if (limit !== undefined) relation = relation.limit(limit);
     if (offset !== undefined) relation = relation.offset(offset);
     return relation;
+  }
+
+  /**
+   * @internal Refuses, before any statement is sent, an aggregate whose
+   * statement has colliding generated SQL names. `store.batch()` runs it for
+   * every item before its first statement.
+   */
+  checkSqlNamesBeforeExecution?(): void {
+    this.asRelation().checkSqlNamesBeforeExecution?.();
   }
 
   /** Runs on a target with the same database and transaction provenance. */
@@ -489,7 +506,12 @@ export class ExecutableAggregateQuery<
           ),
         )
       : await backend.execute<Record<string, unknown>>(
-          compileQuery(ast, this.#config.graphId, this.#compileOptions()),
+          compileNameCheckedQuery(
+            ast,
+            this.#config.graphId,
+            this.#compileOptions(),
+            "decoded",
+          ),
         );
 
     return this.#mapResults(rows);

@@ -3820,6 +3820,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...BatchableQuery<unknown>[],
     ],
   >(...queries: Queries): Promise<BatchResults<Queries>> {
+    // Every item's generated SQL names are checked before the first statement,
+    // so a refused item leaves no earlier item's statement sent.
+    for (const query of queries) query.checkSqlNamesBeforeExecution?.();
     // batch() is read-only, so it routes through the uncaptured backend. Going
     // through the capture wrapper would open a recorded-capture transaction
     // scope — which demands executeStatement on the transaction target — for a

@@ -88,6 +88,12 @@ export type BatchableQuery<R = unknown> = Readonly<{
   executeOn: (
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly R[]>;
+  /**
+   * @internal Refuses the query, before any statement is sent, when the
+   * statement `executeOn()` sends first has colliding generated SQL names.
+   * `store.batch()` runs it for every item before its first statement.
+   */
+  checkSqlNamesBeforeExecution?: () => void;
 }>;
 
 /** A read whose result can be embedded in an exact-one-statement batch. */

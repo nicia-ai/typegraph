@@ -420,6 +420,7 @@ const BATCH_POINT_READ: {
 // @public
 type BatchableQuery<R = unknown> = Readonly<{
     executeOn: (backend: GraphBackend | TransactionBackend) => Promise<readonly R[]>;
+    checkSqlNamesBeforeExecution?: () => void;
 }>;
 
 // @public
@@ -2365,6 +2366,8 @@ type ExactExpansion = Readonly<{
 class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAliasMap, R extends Record<string, FieldRef | AggregateExpr>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R);
     asRelation(): ExecutableRelationQuery<AggregateRelationFields<R, Aliases>, AggregateResult<R, Aliases>>;
+    // @internal
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     // @internal
     compileOneStatementBatchItem(): {
@@ -2413,6 +2416,8 @@ class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAlia
 class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Result = ProjectionResult<Fields>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: Fields, context: () => Context, mapper?: (row: ProjectionResult<Fields>) => Result);
     asRelation(): ExecutableRelationQuery<Fields, Result>;
+    // @internal
+    checkSqlNamesBeforeExecution?(): void;
     // (undocumented)
     compile(): CompiledRowsSql;
     // (undocumented)
@@ -2472,6 +2477,8 @@ class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Resu
 // @public
 class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
+    // @internal
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     compileNodeCandidateIds(readInstant?: string): CompiledSelectSql;
     // @internal
@@ -2536,6 +2543,8 @@ class ExecutableRelationQuery<Fields extends RelationProjection, Result = Relati
     constructor(definition: RelationDefinition<Fields, Result>, state?: RelationState, scopeIdentity?: symbol);
     // (undocumented)
     aggregate<const NextFields extends RelationProjection>(build: (columns: RelationColumnContext<Fields>) => NextFields): ExecutableRelationQuery<NextFields>;
+    // @internal
+    checkSqlNamesBeforeExecution?(): void;
     // (undocumented)
     compile(): CompiledRowsSql;
     // (undocumented)
@@ -7958,6 +7967,8 @@ type UndefinedWhenOptional<Optional extends boolean> = Optional extends true ? u
 // @public (undocumented)
 class UnionableQuery<G extends GraphDef, R> {
     constructor(config: QueryBuilderConfig, state: UnionableQueryState);
+    // @internal
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     // @internal
     compileOneStatementBatchItem?(): Readonly<{

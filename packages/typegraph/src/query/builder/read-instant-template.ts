@@ -20,7 +20,10 @@ import { ConfigurationError } from "../../errors";
 import { nowIso } from "../../utils/date";
 import { readOwnProperty } from "../../utils/object";
 import { type ComposableQuery, type QueryAst } from "../ast";
-import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import {
+  compileNameCheckedQuery,
+  type CompileQueryOptions,
+} from "../compiler/index";
 import { CURRENT_READ_INSTANT_PLACEHOLDER } from "../compiler/temporal";
 import { getDialect } from "../dialect";
 import { bindSqlValue } from "../dialect/profile";
@@ -145,7 +148,10 @@ export function buildReadInstantTemplate(
 /**
  * Convenience over {@link buildReadInstantTemplate} for a standard (non
  * set-operation) query: compiles `ast` in placeholder mode via
- * {@link compileQuery} and derives {@link queryAstNeedsCurrentReadInstant}.
+ * {@link compileNameCheckedQuery} and derives
+ * {@link queryAstNeedsCurrentReadInstant}. Every caller decodes the template's
+ * rows by result-column name, so the template is refused when its generated
+ * SQL names collide or a decoded name would be clipped.
  * Set operations call {@link buildReadInstantTemplate} directly with their own
  * compile function and composable need-check.
  */
@@ -157,10 +163,12 @@ export function buildQueryTemplate(
 ): CompiledTemplate | undefined {
   return buildReadInstantTemplate({
     compile: () =>
-      compileQuery(ast, graphId, {
-        ...compileOptions,
-        readInstant: "placeholder",
-      }),
+      compileNameCheckedQuery(
+        ast,
+        graphId,
+        { ...compileOptions, readInstant: "placeholder" },
+        "decoded",
+      ),
     backend,
     needsReadInstant: queryAstNeedsCurrentReadInstant(ast),
   });
