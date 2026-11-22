@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asNodeId,
   count,
   createStoreWithSchema,
   defineEdge,
@@ -30,9 +31,11 @@ import {
   ValidationError,
 } from "../../../src/errors-entry";
 import { compileNameCheckedQuery } from "../../../src/query/compiler";
+import { fieldRef } from "../../../src/query/predicates";
 import { requireDefined } from "../../../src/utils/presence";
 import {
   createStatementCounter,
+  createTransactionStatementCounter,
   type StatementCounter,
 } from "./statement-counter";
 import { type IntegrationTestContext } from "./test-context";
@@ -316,6 +319,24 @@ function nodeBesideEdgeIds(store: IdentifierStore) {
     .traverse("knows", "K")
     .to("Person", "friend")
     .select((ctx) => ({ id: ctx.k.id, friend: ctx.friend.id }));
+}
+
+/** The refusal of `aggregate()` or `project()` keys that differ only by letter case. */
+function caseOnly(builder: string, first: string, second: string): Refusal {
+  return refusal(
+    SQL_IDENTIFIER_COLLISION_CODE,
+    `The ${builder}() keys "${first}" and "${second}" differ only by letter case; SQLite compares SQL result names without regard to letter case, so they cannot be told apart on every database engine.`,
+  );
+}
+
+/** Edge `e` from Alice beside a target `e_from`: both carry a column `e_from_id`. */
+function edgeBesideFrom(store: IdentifierStore, seeded: Seed) {
+  return store
+    .query()
+    .from("Person", "p")
+    .traverse("knows", "e")
+    .whereEdge("e", (edge) => edge.fromId.eq(seeded.aliceId))
+    .to("Person", "e_from");
 }
 
 /** The team with the highest maximum, ordered by the output key `high`. */
@@ -789,33 +810,132 @@ export function registerSqlIdentifierIdentityIntegrationTests(
             { team: "spread", lowest: 1, highest: 5 },
           ]);
         });
+      });
 
-        it("refuses `total` and `Total` with ORDER BY `Total` on every terminal, before any SQL is sent", async () => {
-          const expected = refusal(
+      it("refuses keys that differ only by letter case where they are declared, before any SQL is sent", async () => {
+        counter.reset();
+        // Refused whether or not a terminal would refer to the keys by name:
+        // SQLite returns the wrong value through some terminals, so the
+        // builder is refused rather than some of its terminals.
+        const refusals = {
+          ordered: await captureRefusal(() => topTeam(store, "total", "Total")),
+          unordered: await captureRefusal(() =>
+            store
+              .query()
+              .from("Score", "s")
+              .aggregate({
+                total: min("s", "points"),
+                Total: max("s", "points"),
+              }),
+          ),
+          projected: await captureRefusal(() =>
+            store
+              .query()
+              .from("Person", "p")
+              .project((ctx) => ({ name: ctx.p.name, NAME: ctx.p.name })),
+          ),
+        };
+        expect(refusals).toEqual({
+          ordered: caseOnly("aggregate", "total", "Total"),
+          unordered: caseOnly("aggregate", "total", "Total"),
+          projected: caseOnly("project", "name", "NAME"),
+        });
+        expect(counter.count()).toBe(0);
+      });
+    });
+
+    describe("columns read in HAVING and by aggregates", () => {
+      it("refuses HAVING that reads `e_from.id` as its right operand beside an edge `e`, before any SQL is sent", async () => {
+        const query = edgeBesideFrom(store, seeded)
+          .groupBy("e_from", "name")
+          .having({
+            __type: "comparison",
+            op: "neq",
+            left: fieldRef("e_from", ["props", "name"], {
+              valueType: "string",
+            }),
+            right: fieldRef("e_from", ["id"], { valueType: "string" }),
+          })
+          .aggregate({ name: field("e_from", "name"), edges: count("e") });
+        await expectRefusedEverywhere(
+          counter,
+          () => query,
+          refusal(
             SQL_IDENTIFIER_COLLISION_CODE,
-            '"total" (the value selected as "total") and "Total" (the value selected as "Total") collide in the result columns, which SQL refers to by name and the engines compare without regard to letter case.',
-          );
-          const query = topTeam(store, "total", "Total");
-          const terminals: Readonly<Record<string, () => unknown>> = {
-            execute: () => query.execute(),
-            compile: () => query.compile(),
-            toSQL: () => query.toSQL(),
-            prepare: () => query.prepare(),
-            first: () => query.first(),
-            count: () => query.count(),
-            exists: () => query.exists(),
-            executeOn: () => query.executeOn(counter.backend),
-          };
-          counter.reset();
-          const refusals: Record<string, Refusal | undefined> = {};
-          for (const [terminal, run] of Object.entries(terminals))
-            refusals[terminal] = await captureRefusal(run);
-          expect(refusals).toEqual(
-            Object.fromEntries(
-              Object.keys(terminals).map((terminal) => [terminal, expected]),
+            collisionMessage(
+              "e_from_id",
+              'column from_id of alias "e"',
+              "e_from_id",
+              'column id of alias "e_from"',
+              "the columns of cte_e_from",
             ),
-          );
-          expect(counter.count()).toBe(0);
+          ),
+        );
+      });
+
+      it("returns the maximum of `e_from`'s age beside an edge `e` filtered on fromId, since no statement reads either `e_from_id`", async () => {
+        await store.nodes.Person.update(asNodeId<typeof Person>(seeded.bobId), {
+          age: 41,
+        });
+        const query = edgeBesideFrom(store, seeded).aggregate({
+          age: max("e_from", "age"),
+        });
+        expect(await query.execute()).toEqual([{ age: 41 }]);
+        expect(await query.prepare().execute({})).toEqual([{ age: 41 }]);
+        expect(await query.first()).toEqual({ age: 41 });
+      });
+    });
+
+    describe("store.batch()", () => {
+      it("refuses a colliding item in any position before the transaction runs any statement", async () => {
+        const transactionCounter = createTransactionStatementCounter(
+          context.getBackend(),
+        );
+        const [batchStore] = await createStoreWithSchema(
+          identifierGraph,
+          transactionCounter.backend,
+        );
+        function valid() {
+          return batchStore
+            .query()
+            .from("Person", "p")
+            .select((ctx) => ctx.p.name);
+        }
+        function colliding() {
+          return batchStore
+            .query()
+            .from("Person", "item")
+            .traverse("knows", "e")
+            .to("Person", "Item")
+            .select((ctx) => ({ from: ctx.item.name, to: ctx.Item.name }));
+        }
+        transactionCounter.reset();
+        const names = await batchStore.batch(valid(), valid());
+        expect(names.map((rows) => rows.toSorted())).toEqual([
+          ["Alice", "Bob"],
+          ["Alice", "Bob"],
+        ]);
+        expect(transactionCounter.count()).toBeGreaterThan(0);
+        const outcomes: Record<string, unknown> = {};
+        for (const position of [0, 1, 2]) {
+          transactionCounter.reset();
+          const items = [valid(), valid(), valid()] as const;
+          const queries = items.map((item, index) =>
+            index === position ? colliding() : item,
+          ) as unknown as readonly [
+            ReturnType<typeof valid>,
+            ReturnType<typeof valid>,
+            ReturnType<typeof valid>,
+          ];
+          outcomes[`position ${position}`] = {
+            refusal: await captureRefusal(() => batchStore.batch(...queries)),
+            statements: transactionCounter.count(),
+          };
+        }
+        expect(outcomes).toEqual({
+          "position 0": { refusal: ITEM_CASE_REFUSAL, statements: 0 },
+          "position 1": { refusal: ITEM_CASE_REFUSAL, statements: 0 },
+          "position 2": { refusal: ITEM_CASE_REFUSAL, statements: 0 },
         });
       });
     });

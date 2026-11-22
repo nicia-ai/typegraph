@@ -3,9 +3,12 @@
  *
  * The standard emitter registers every name it declares, per scope, together
  * with the logical value the name stands for (an alias's CTE, one column of an
- * alias, one result column), and records every place it refers to a name in a
- * scope. A name is checked against the other names of its scope under the
- * strictest comparison a supported engine applies:
+ * alias, one result column). The names a statement refers to are not derived
+ * here: they are the column reads its SQL carries, recorded by the one
+ * function that writes each reference (`column-reads.ts`) and applied with
+ * {@link recordStatementColumnReads}. A name is checked against the other
+ * names of its scope under the strictest comparison a supported engine
+ * applies:
  *
  * - PostgreSQL clips every identifier to its first 63 bytes.
  * - PostgreSQL folds unquoted names to lower case, and SQLite compares
@@ -13,9 +16,12 @@
  *   quoted or not. A name SQL refers to inside the statement is therefore
  *   compared case-insensitively.
  * - Result columns are read back by their exact name (both engines return a
- *   quoted alias as written), so they are compared case-sensitively unless SQL
- *   also refers to them; a result column the library decodes by name must also
- *   fit in 63 bytes, or PostgreSQL returns it under a clipped key.
+ *   quoted alias as written), so they are compared case-sensitively unless a
+ *   wrapping statement reads them by name; a result column the library decodes
+ *   by name must also fit in 63 bytes, or PostgreSQL returns it under a
+ *   clipped key. Output keys a caller declares never differ only by letter
+ *   case: `aggregate()` and `project()` refuse such keys where they are
+ *   declared (see {@link refuseCaseInsensitiveOutputKeys}).
  *
  * Two different values that meet under that comparison make a statement that
  * fails, or silently returns the wrong value, on at least one engine; the
@@ -31,11 +37,14 @@ import {
   type ValidationIssue,
 } from "../../errors";
 import { truncateToBytes } from "../../utils/identifier";
+import { type SqlFragment } from "../sql-fragment";
+import { type SqlColumnRead } from "../sql-intent";
 import {
   aliasColumnName,
   aliasCteName,
   selectivePropsColumnName,
 } from "./alias-names";
+import { sealStatementColumnReads } from "./column-reads";
 
 const TEXT_ENCODER = new TextEncoder();
 
@@ -50,8 +59,8 @@ const TEXT_ENCODER = new TextEncoder();
  *   relation: both engines accept duplicate columns that nothing names.
  * - `"result"`: the outermost SELECT list. Two names with the same exact
  *   spelling always collide (the row comes back keyed by name); two that meet
- *   only without regard to case collide when SQL refers to that name (an
- *   `ORDER BY` of an output alias, or a statement that wraps this one).
+ *   only without regard to case collide when a statement that wraps this one
+ *   reads them by name (usage `"wrapped"`).
  */
 type SqlNameComparison = "relation" | "column" | "result";
 
@@ -71,10 +80,11 @@ export type SqlNameScope = Readonly<{
   /** Adds every name `source` holds, as a `SELECT source.*` does. */
   inherit: (source: SqlNameScope) => void;
   /**
-   * Records that the statement refers to `name` in this scope by name, and
-   * returns it. The emitter calls it where it writes the reference.
+   * Records that the statement refers to `name` in this scope by name.
+   * Called only by {@link recordStatementColumnReads}, from the reads the
+   * statement's SQL carries.
    */
-  reference: (name: string) => string;
+  reference: (name: string) => void;
   /**
    * Records that the statement refers to every name of this scope, as a
    * `SELECT *` over the relation does: SQLite renames a duplicate column it
@@ -94,6 +104,10 @@ export type SqlStatementNames = Readonly<{
   relationColumns: (relationName: string) => SqlNameScope;
   /** The statement's outermost SELECT list. */
   results: SqlNameScope;
+  /** The column reads recorded for the statement, as its SQL carries them. */
+  columnReads: () => readonly SqlColumnRead[];
+  /** Records the statement's column reads and applies them to its scopes. */
+  recordColumnReads: (reads: readonly SqlColumnRead[]) => void;
   scopes: () => readonly Readonly<{
     comparison: SqlNameComparison;
     scope: SqlNameScope;
@@ -150,7 +164,6 @@ function createSqlNameScope(label: string): SqlNameScope {
     },
     reference(name) {
       referencedKeys.add(referenceKey(name));
-      return name;
     },
     referenceEvery() {
       everyNameReferenced = true;
@@ -167,16 +180,32 @@ export function createSqlStatementNames(): SqlStatementNames {
   const relations = createSqlNameScope("the WITH list");
   const results = createSqlNameScope("the result columns");
   const relationColumns = new Map<string, SqlNameScope>();
+  const columnReads: SqlColumnRead[] = [];
+  function columnsOf(relationName: string): SqlNameScope {
+    const existing = relationColumns.get(relationName);
+    if (existing !== undefined) return existing;
+    const scope = createSqlNameScope(`the columns of ${relationName}`);
+    relationColumns.set(relationName, scope);
+    return scope;
+  }
   return {
     relations,
-    relationColumns(relationName) {
-      const existing = relationColumns.get(relationName);
-      if (existing !== undefined) return existing;
-      const scope = createSqlNameScope(`the columns of ${relationName}`);
-      relationColumns.set(relationName, scope);
-      return scope;
-    },
+    relationColumns: columnsOf,
     results,
+    columnReads: () => columnReads,
+    recordColumnReads(reads) {
+      for (const read of reads) {
+        columnReads.push(read);
+        for (const relation of read.relations ?? []) {
+          const scope = columnsOf(relation);
+          if (read.name !== undefined) scope.reference(read.name);
+          // `SELECT *` returns every column under its own name; a
+          // `relation.*` that carries the columns into another CTE reads
+          // none of them by name there.
+          else if (!read.qualified) scope.referenceEvery();
+        }
+      }
+    },
     scopes: () => [
       { comparison: "relation", scope: relations },
       ...[...relationColumns.values()].map((scope) => ({
@@ -219,6 +248,22 @@ export function declareFixedCte(
   return name;
 }
 
+/**
+ * Takes a finished standard statement's read set from the reads its SQL
+ * carries, records it in the statement's scopes, and returns the statement
+ * carrying only the correlated reads it passes up to an enclosing statement.
+ * This is the only place a standard statement's read set enters the registry.
+ */
+export function recordStatementColumnReads(
+  names: SqlStatementNames,
+  statement: SqlFragment,
+  ownScope: symbol | undefined,
+): SqlFragment {
+  const sealed = sealStatementColumnReads(statement, ownScope, true);
+  names.recordColumnReads(sealed.reads);
+  return sealed.statement;
+}
+
 /** Declares one physical column of an alias in a CTE's columns and returns its name. */
 export function declareAliasColumn(
   scope: SqlNameScope,
@@ -232,21 +277,6 @@ export function declareAliasColumn(
     `column ${column} of alias "${alias}"`,
   );
   return name;
-}
-
-/**
- * Records a by-name reference to one physical column of an alias in the
- * columns of `relationName`, and returns the column's name.
- */
-export function referenceAliasColumn(
-  names: SqlStatementNames,
-  relationName: string,
-  alias: string,
-  column: string,
-): string {
-  return names
-    .relationColumns(relationName)
-    .reference(aliasColumnName(alias, column));
 }
 
 /** Declares the CTE column that carries one selectively extracted props field. */
@@ -386,11 +416,12 @@ export function findSqlNameIssues(
               " once PostgreSQL clips them to 63 bytes",
             ),
           );
+        if (usage !== "wrapped") break;
         const reported = new Set(exact.map(({ entry }) => entry));
         for (const { earlier, entry } of findMeetingPairs(
           scope,
           referenceKey,
-          (name) => usage === "wrapped" || scope.isReferenced(name),
+          () => true,
         )) {
           if (reported.has(entry)) continue;
           issues.push(
@@ -398,7 +429,7 @@ export function findSqlNameIssues(
               scope,
               earlier,
               entry,
-              ", which SQL refers to by name and the engines compare without regard to letter case",
+              ", which the wrapping statement reads by name and the engines compare without regard to letter case",
             ),
           );
         }
@@ -406,7 +437,72 @@ export function findSqlNameIssues(
       }
     }
   }
+  issues.push(...findAmbiguousUnqualifiedReads(names));
   return issues;
+}
+
+/**
+ * Every unqualified read whose name more than one relation of its FROM
+ * declares: both engines refuse such a reference as ambiguous.
+ */
+function findAmbiguousUnqualifiedReads(
+  names: SqlStatementNames,
+): readonly ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const reported = new Set<string>();
+  for (const read of names.columnReads()) {
+    const { name, relations } = read;
+    if (read.qualified || name === undefined || relations === undefined)
+      continue;
+    const key = referenceKey(name);
+    const declaring = relations.filter((relation) =>
+      names
+        .relationColumns(relation)
+        .entries()
+        .some((entry) => referenceKey(entry.name) === key),
+    );
+    const [first, second] = declaring;
+    if (first === undefined || second === undefined) continue;
+    const reportKey = `${key}\u0000${declaring.join("\u0000")}`;
+    if (reported.has(reportKey)) continue;
+    reported.add(reportKey);
+    issues.push({
+      path: "an unqualified column reference",
+      code: SQL_IDENTIFIER_COLLISION_CODE,
+      message: `"${name}" is read without naming its relation, and both ${first} and ${second} have a column by that name, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * Refuses output keys a caller declares for `aggregate()` or `project()` when
+ * two of them are equal without regard to letter case. SQLite compares result
+ * names that way wherever SQL refers to them (an `ORDER BY` of an output key,
+ * a statement that wraps this one), so such keys return the wrong value
+ * through some terminals; the builder is refused where the keys are declared,
+ * not some of its terminals.
+ */
+export function refuseCaseInsensitiveOutputKeys(
+  keys: readonly string[],
+  builder: "aggregate" | "project",
+): void {
+  const firstByFolded = new Map<string, string>();
+  const issues: ValidationIssue[] = [];
+  for (const key of keys) {
+    const folded = foldAsciiCase(key);
+    const earlier = firstByFolded.get(folded);
+    if (earlier === undefined) {
+      firstByFolded.set(folded, key);
+      continue;
+    }
+    issues.push({
+      path: `${builder}() keys`,
+      code: SQL_IDENTIFIER_COLLISION_CODE,
+      message: `The ${builder}() keys "${earlier}" and "${key}" differ only by letter case; SQLite compares SQL result names without regard to letter case, so they cannot be told apart on every database engine.`,
+    });
+  }
+  if (issues.length > 0) throw sqlNameRefusal(issues);
 }
 
 /** Builds the refusal for a statement whose generated SQL names cannot be told apart. */

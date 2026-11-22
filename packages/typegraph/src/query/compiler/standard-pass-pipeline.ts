@@ -148,7 +148,7 @@ export function markPredicateFieldsAsRequired(
  * is a plain field or one inside an expression, the result predicate, or
  * HAVING.
  */
-export type OuterClauseFieldUse =
+type OuterClauseFieldUse =
   | "projection"
   | "aggregate-id"
   | "group-by"
@@ -158,13 +158,17 @@ export type OuterClauseFieldUse =
   | "having";
 
 /**
- * Visits every field the outer SELECT of a standard statement reads from its
- * candidate CTEs, with the clause that reads it. This is the one enumeration of
- * those clauses: column pruning keeps the columns they read, and the SQL-name
- * check counts the same columns as referenced by name. Selective fields are
- * not visited; each consumer reads them from `ast.selectiveFields`.
+ * Visits every field the outer SELECT of a standard statement may read from
+ * its candidate CTEs, with the clause that reads it, so column pruning keeps
+ * those columns. Selective fields are not visited; pruning reads them from
+ * `ast.selectiveFields`.
+ *
+ * This answers "which columns must a CTE carry", where keeping a column the
+ * SQL never reads is harmless. It is not the read set the SQL-name check
+ * uses: that is recorded by the function that writes each reference
+ * (`column-reads.ts`), and the two are allowed to differ.
  */
-export function visitOuterClauseFields(
+function visitOuterClauseFields(
   ast: QueryAst,
   options: Readonly<{ includeProjection: boolean }>,
   visit: (field: FieldRef, use: OuterClauseFieldUse) => void,

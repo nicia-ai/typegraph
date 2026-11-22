@@ -15,6 +15,7 @@ export {
 } from "./set-operations";
 export {
   emitStandardQuerySql,
+  type StandardFromClause,
   type StandardQueryEmitterInput,
 } from "./standard";
 export {
@@ -41,4 +42,3 @@ export {
   lateMaterializedProjectedNodeAliases,
   type StandardEmitterPredicateIndex,
 } from "./standard-builders";
-export { referenceOuterClauseColumns } from "./standard-name-references";

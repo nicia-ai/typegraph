@@ -58,6 +58,7 @@ import { aliasColumnName, aliasCteName } from "../compiler/alias-names";
 import {
   exceedsSqlIdentifierLimit,
   isReservedResultKey,
+  refuseCaseInsensitiveOutputKeys,
   sqlIdentifierTooLongIssue,
   sqlNameRefusal,
 } from "../compiler/sql-name-registry";
@@ -332,10 +333,12 @@ type CompositionNavigationResult<
 /**
  * Refuses `aggregate()` keys the result row could not carry back on every
  * engine: a key longer than 63 bytes (PostgreSQL clips it, so the value comes
- * back under another name) or one in the reserved `__tg_` namespace, in any
- * letter case. Keys need not be identifiers otherwise; `"total count"` works.
+ * back under another name), one in the reserved `__tg_` namespace in any
+ * letter case, or two keys that differ only by letter case. Keys need not be
+ * identifiers otherwise; `"total count"` works.
  */
 function assertAggregateKeys(keys: readonly string[]): void {
+  refuseCaseInsensitiveOutputKeys(keys, "aggregate");
   for (const key of keys) {
     if (isReservedResultKey(key))
       throw new ConfigurationError("Projection output name is reserved.", {
@@ -1930,6 +1933,10 @@ export class QueryBuilder<
       throw new ConfigurationError(
         "project() requires at least one database expression.",
       );
+    refuseCaseInsensitiveOutputKeys(
+      entries.map(([outputName]) => outputName),
+      "project",
+    );
     const projection = entries.map(([outputName, source]) => {
       validateSqlIdentifier(outputName);
       if (

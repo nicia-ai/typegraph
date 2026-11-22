@@ -22,6 +22,7 @@ import {
   declareAliasCte,
   declareResultColumn,
   findSqlNameIssues,
+  refuseCaseInsensitiveOutputKeys,
 } from "../src/query/compiler/sql-name-registry";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
@@ -97,17 +98,45 @@ describe("SQL name registry comparison", () => {
     expect(findSqlNameIssues(names, "embedded")).toEqual([]);
   });
 
-  it("compares result columns without regard to case where SQL refers to them by name", () => {
-    const referenced = createSqlStatementNames();
-    declareResultColumn(referenced, "total", "the minimum");
-    declareResultColumn(referenced, "Total", "the maximum");
-    expect(findSqlNameIssues(referenced, "decoded")).toEqual([]);
+  it("compares result columns without regard to case only when a wrapping statement reads them by name", () => {
+    const names = createSqlStatementNames();
+    declareResultColumn(names, "k_id", "id of alias k");
+    declareResultColumn(names, "K_id", "id of alias K");
+    expect(findSqlNameIssues(names, "decoded")).toEqual([]);
+    expect(findSqlNameIssues(names, "embedded")).toEqual([]);
     expect(
-      findSqlNameIssues(referenced, "wrapped").map((issue) => issue.code),
+      findSqlNameIssues(names, "wrapped").map((issue) => issue.code),
     ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
-    referenced.results.reference("Total");
+  });
+
+  it("refuses declared output keys that are equal without regard to letter case, naming both", () => {
+    expect(() => {
+      refuseCaseInsensitiveOutputKeys(["team", "total", "Total"], "aggregate");
+    }).toThrow(
+      'The aggregate() keys "total" and "Total" differ only by letter case',
+    );
+    expect(() => {
+      refuseCaseInsensitiveOutputKeys(
+        ["total", "totals", "`Total`"],
+        "project",
+      );
+    }).not.toThrow();
+  });
+
+  it("refuses an unqualified read whose name two relations of its FROM declare", () => {
+    const names = createSqlStatementNames();
+    declareAliasColumn(names.relationColumns("cte_p"), "p", "id");
+    declareAliasColumn(names.relationColumns("cte_q"), "p", "id");
+    const read = {
+      name: "p_id",
+      qualified: false,
+      scope: undefined,
+    } as const;
+    names.recordColumnReads([{ ...read, relations: ["cte_p"] }]);
+    expect(findSqlNameIssues(names, "decoded")).toEqual([]);
+    names.recordColumnReads([{ ...read, relations: ["cte_p", "cte_q"] }]);
     expect(
-      findSqlNameIssues(referenced, "decoded").map((issue) => issue.code),
+      findSqlNameIssues(names, "decoded").map((issue) => issue.code),
     ).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
   });
 });
