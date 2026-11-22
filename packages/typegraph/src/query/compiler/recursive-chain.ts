@@ -22,7 +22,7 @@ import {
   compileVariableLengthQuery,
   hasExplicitRecursiveProjection,
 } from "./recursive";
-import { assertTraversalStagePredicatesSupported } from "./traversal-stage-validation";
+import { assertIsolatedStageReadsNoEnclosingQuery } from "./traversal-stage-validation";
 import { EDGE_COLUMNS, NODE_COLUMNS } from "./utils";
 
 function stageAst(
@@ -183,9 +183,9 @@ function compileStage(
   ctx: PredicateCompilerContext,
   seed?: SqlFragment,
 ): SqlFragment {
-  assertTraversalStagePredicatesSupported(ast, traversal, index);
   const isolated = stageAst(ast, traversal, index);
   if (traversal.variableLength === undefined) {
+    assertIsolatedStageReadsNoEnclosingQuery(isolated, ctx.callerAlias);
     const compiled = ctx.compileQuery(
       {
         ...isolated,
@@ -380,9 +380,10 @@ export function compileMultiStageRecursiveQuery(
     );
   }
   if (firstTraversal.optional) {
-    assertTraversalStagePredicatesSupported(ast, firstTraversal, 0);
     const sourceName = "typegraph_recursive_source_0";
-    const source = ctx.compileQuery(sourceAst(ast), graphId);
+    const isolatedSource = sourceAst(ast);
+    assertIsolatedStageReadsNoEnclosingQuery(isolatedSource, ctx.callerAlias);
+    const source = ctx.compileQuery(isolatedSource, graphId);
     const seed = sql`SELECT DISTINCT ${sql.identifier(`${ast.start.alias}_kind`)} AS kind, ${sql.identifier(`${ast.start.alias}_id`)} AS id FROM ${sql.identifier(sourceName)}`;
     const expansion = compileStage(ast, firstTraversal, 1, graphId, ctx, seed);
     const expansionName = "typegraph_recursive_expansion_0";
