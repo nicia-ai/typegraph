@@ -175,40 +175,48 @@ function mentionsBrand(
  * renamed import of one. Closed to a fixed point, by name, so a chain of
  * aliases across modules is followed. A same-named unrelated type would be
  * swept in too; that fails loudly as an extra site rather than hiding one.
+ *
+ * The trees are walked once to collect the declarations that can introduce a
+ * name; the fixed point iterates over that short list, not over every tree.
  */
 function brandNameClosure(
   sources: readonly ts.SourceFile[],
 ): ReadonlySet<string> {
-  const names = new Set<string>(BRAND_TYPE_NAMES);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const source of sources) {
-      const visit = (node: ts.Node): void => {
-        if (
-          (ts.isTypeAliasDeclaration(node) ||
-            ts.isInterfaceDeclaration(node)) &&
-          !names.has(node.name.text) &&
-          mentionsBrand(node, names)
-        ) {
-          names.add(node.name.text);
-          grew = true;
-        }
-        if (
-          ts.isImportSpecifier(node) &&
-          node.propertyName !== undefined &&
-          names.has(node.propertyName.text) &&
-          !names.has(node.name.text)
-        ) {
-          names.add(node.name.text);
-          grew = true;
-        }
-        ts.forEachChild(node, visit);
-      };
-      visit(source);
-    }
+  const declarations: (
+    ts.TypeAliasDeclaration | ts.InterfaceDeclaration | ts.ImportSpecifier
+  )[] = [];
+  for (const source of sources) {
+    const collect = (node: ts.Node): void => {
+      if (
+        ts.isTypeAliasDeclaration(node) ||
+        ts.isInterfaceDeclaration(node) ||
+        (ts.isImportSpecifier(node) && node.propertyName !== undefined)
+      ) {
+        declarations.push(node);
+      }
+      ts.forEachChild(node, collect);
+    };
+    collect(source);
   }
-  return names;
+
+  function introducesBrandName(
+    declaration: (typeof declarations)[number],
+    names: ReadonlySet<string>,
+  ): boolean {
+    if (names.has(declaration.name.text)) return false;
+    return ts.isImportSpecifier(declaration) ?
+        names.has(declaration.propertyName?.text ?? "")
+      : mentionsBrand(declaration, names);
+  }
+
+  const names = new Set<string>(BRAND_TYPE_NAMES);
+  for (;;) {
+    const added = declarations.filter((declaration) =>
+      introducesBrandName(declaration, names),
+    );
+    if (added.length === 0) return names;
+    for (const declaration of added) names.add(declaration.name.text);
+  }
 }
 
 type AssertionSite = Readonly<{ file: string; function: string }>;
@@ -436,9 +444,15 @@ describe("operation-scope ratchet", () => {
     },
   );
 
-  it("the brand is asserted only at the two mints", () => {
-    expect(brandAssertionSites()).toEqual(MINT_ASSERTION_SITES);
-  });
+  // Parses every `src` module; coverage instrumentation slows that well past
+  // the default timeout.
+  it(
+    "the brand is asserted only at the two mints",
+    { timeout: 120_000 },
+    () => {
+      expect(brandAssertionSites()).toEqual(MINT_ASSERTION_SITES);
+    },
+  );
 
   it("the assertion scan sees aliases, brand type arguments and inline import types", () => {
     const source = ts.createSourceFile(
