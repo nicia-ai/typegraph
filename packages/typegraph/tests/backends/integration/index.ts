@@ -62,6 +62,7 @@ export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerGraphMergeReviewV2IntegrationTests } from "./graph-merge-review-v2";
 export { registerGraphMergeTargetCardinalityIntegrationTests } from "./graph-merge-target-cardinality";
 export { registerGraphStorageIntegrationTests } from "./graph-storage";
+export { registerGroupedSearchIntegrationTests } from "./grouped-search";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
@@ -135,6 +136,7 @@ export { registerTransactionBoundaryIntegrationTests } from "./transaction-bound
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
+export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limit-pushdown";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
