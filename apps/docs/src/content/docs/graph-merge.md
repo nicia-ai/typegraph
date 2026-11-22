@@ -1095,7 +1095,7 @@ The rules are fixed; there is no policy to choose.
 
 | Staged shape | Outcome |
 | --- | --- |
-| Branches assert the same pair under different assertion ids | One survivor is written: an id the target already holds wins, then the earliest `validFrom`, then the code-point-smallest id. Every other id is reported on `dropped` with reason `identity:duplicate-assertion` |
+| Branches assert the same pair under different assertion ids | One survivor is written: an id the target already holds wins, then the earliest `validFrom`, then the code-point-smallest id. Every other id is reported once on `dropped` with reason `identity:duplicate-assertion`, however many branches staged the identical row |
 | Branches end the same assertion at different instants | One retraction is written, at the **earliest** staged `validTo` — independent of branch order |
 | One branch retracts a pair and re-asserts it itself | Both are written: the base assertion ends at the staged instant and the replacement lands |
 | One branch retracts a pair while a **different** branch re-asserts it without retracting | The merge fails with `GRAPH_MERGE_IDENTITY_CONFLICT`, naming both assertions and both branches |

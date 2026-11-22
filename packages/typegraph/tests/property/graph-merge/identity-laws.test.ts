@@ -1457,6 +1457,23 @@ const DELETE_THEN_ASSERT_EXAMPLE: ModelScenario = {
   branchBOps: NO_MODEL_OPS,
 };
 
+/**
+ * The target asserts a pair under its own id after the fork, and both branches
+ * import the IDENTICAL row for it under one shared id. The target's committed id
+ * wins, and the shared id is dropped once — not once per branch that carried it
+ * (CI seeds 1698708783 and -1317488788).
+ */
+const SHARED_IMPORT_LOSES_ONCE_EXAMPLE: ModelScenario = {
+  baseOps: NO_MODEL_OPS,
+  targetOps: [{ op: "same", left: 3, right: 0 }],
+  branchAOps: [
+    { op: "importAssertion", idPick: 1, left: 0, right: 3, validFromPick: 1 },
+  ],
+  branchBOps: [
+    { op: "importAssertion", idPick: 1, left: 3, right: 0, validFromPick: 1 },
+  ],
+};
+
 /** One branch deletes a node another branch asserts a current relation over. */
 const DELETED_ENDPOINT_EXAMPLE: ModelScenario = {
   baseOps: NO_MODEL_OPS,
@@ -1931,6 +1948,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
         COMMITTED_SURVIVOR_EXAMPLE,
         EARLIEST_RETRACTION_EXAMPLE,
         DELETE_THEN_ASSERT_EXAMPLE,
+        SHARED_IMPORT_LOSES_ONCE_EXAMPLE,
       ],
     },
   ] as const;

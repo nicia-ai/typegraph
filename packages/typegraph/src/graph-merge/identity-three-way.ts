@@ -136,6 +136,24 @@ function isIdenticalIdentityRow(
 export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
   "identity:duplicate-assertion";
 
+/**
+ * THE "does this losing row need its own `dropped` entry" decision both
+ * survivor reducers read: not when it is the very row that won (two branches
+ * staging the IDENTICAL row collapse silently), and not when an identical row
+ * is already reported — two branches carrying one imported row that a third
+ * candidate beats lose it once, whichever order the candidates arrive in.
+ */
+function isUnreportedIdentityLoser(
+  loser: IdentityTransferAssertion,
+  winner: IdentityTransferAssertion,
+  reported: readonly IdentityTransferAssertion[],
+): boolean {
+  return (
+    !isIdenticalIdentityRow(loser, winner) &&
+    !reported.some((row) => isIdenticalIdentityRow(loser, row))
+  );
+}
+
 function droppedIdentityAssertion(
   assertion: IdentityTransferAssertion,
   reason: string,
@@ -260,20 +278,21 @@ function assertedOutcome(
 ): IdentityPairOutcome {
   const [first, ...rest] = candidates;
   let survivor = requireDefined(first);
-  const superseded: DroppedItem[] = [];
+  const losers: IdentityTransferAssertion[] = [];
   for (const candidate of rest) {
     const picked = pickIdentitySurvivor(candidate, survivor, committedIds);
     survivor = picked.winner;
-    if (isIdenticalIdentityRow(picked.loser.assertion, picked.winner.assertion))
-      continue;
-    superseded.push(
-      droppedIdentityAssertion(
-        picked.loser.assertion,
-        DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
-      ),
-    );
+    const loser = picked.loser.assertion;
+    if (!isUnreportedIdentityLoser(loser, survivor.assertion, losers)) continue;
+    losers.push(loser);
   }
-  return { kind: "asserted", survivor: survivor.assertion, superseded };
+  return {
+    kind: "asserted",
+    survivor: survivor.assertion,
+    superseded: losers.map((loser) =>
+      droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
+    ),
+  };
 }
 
 /**
@@ -315,6 +334,7 @@ export function dedupeIdentityAssertionsRaw(
   dropped: readonly DroppedItem[];
 }> {
   const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  const losersBySemantic = new Map<string, IdentityTransferAssertion[]>();
   const dropped: DroppedItem[] = [];
   for (const assertion of assertions) {
     const key = identityDedupeKey(assertion);
@@ -331,7 +351,9 @@ export function dedupeIdentityAssertionsRaw(
     const survivor = picked.winner.assertion;
     const loser = picked.loser.assertion;
     survivorBySemantic.set(key, survivor);
-    if (isIdenticalIdentityRow(loser, survivor)) continue;
+    const losers = losersBySemantic.get(key) ?? [];
+    if (!isUnreportedIdentityLoser(loser, survivor, losers)) continue;
+    losersBySemantic.set(key, [...losers, loser]);
     dropped.push(
       droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
     );

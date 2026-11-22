@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import {
   classifyIdentityPair,
+  dedupeIdentityAssertionsRaw,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
 } from "../../src/graph-merge/identity-three-way";
 import {
@@ -583,5 +584,49 @@ describe("every staged identity change is accounted for", () => {
       (entry) => entry.assertion.id,
     );
     expect(staged.filter((id) => !accounted.has(id))).toEqual([]);
+  });
+});
+
+describe("dedupeIdentityAssertionsRaw", () => {
+  it("reports a row two branches carried identically once when a third row wins", () => {
+    const pair = {
+      relation: "same",
+      a: { kind: "Person", id: "x" },
+      b: { kind: "Person", id: "y" },
+    } as const;
+    const winner: IdentityTransferAssertion = {
+      ...pair,
+      id: "own",
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    const shared: IdentityTransferAssertion = {
+      ...pair,
+      id: "imported",
+      validFrom: "2024-02-01T00:00:00.000Z",
+    };
+    const orders = [
+      [winner, shared, shared],
+      [shared, winner, shared],
+      [shared, shared, winner],
+    ];
+
+    const outcomes = orders.map((order) => {
+      const deduped = dedupeIdentityAssertionsRaw(order, new Set());
+      return {
+        survivors: deduped.survivors.map((entry) => entry.id),
+        dropped: deduped.dropped,
+      };
+    });
+    const expected = {
+      survivors: ["own"],
+      dropped: [
+        {
+          kind: "identity",
+          id: "imported",
+          reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+        },
+      ],
+    };
+    expect(outcomes).toEqual(orders.map(() => expected));
   });
 });
