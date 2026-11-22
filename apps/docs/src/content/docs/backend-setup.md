@@ -1987,19 +1987,25 @@ support at all.
 opened, whose callback returned normally, is still the healthy transaction it
 began, the evidence behind its decision to send `COMMIT`:
 
-- `"session-marker"` (the bundled PostgreSQL backends, every driver): right
-  after `BEGIN` the backend sets a transaction-local setting (`SET LOCAL`,
-  which takes no snapshot), and right before `COMMIT` reads it back on the
-  same session, through the connection's statement queue. Found: the transaction commits. Refused
-  because the transaction is aborted: `TransactionRolledBackError`. Gone:
-  something other than TypeGraph ended the transaction (a `COMMIT`, `ROLLBACK`
-  or `BEGIN` sent through `tx.sql`), and the backend rejects with
-  `TransactionOutcomeUnknownError`, never retried. The marker costs one
-  statement after `BEGIN` and one before `COMMIT`; a Store transaction reads it
-  as soon as the callback returns, before any work of its own, and the read
-  before `COMMIT` is skipped when no statement was sent since. A backend built
-  over a transaction handle opens savepoints rather than transactions and
-  declares no evidence.
+- `"session-marker"` (the bundled PostgreSQL backends, every driver): the
+  backend observes every statement the transaction sends, and adds none to a
+  transaction in which nothing failed and whose native handle was never read.
+  When the native handle leaves TypeGraph (`tx.sql` is read, or a
+  `transactionWithNative` callback receives it), the backend first hands the
+  driver a transaction-local setting (`SET LOCAL`, which takes no snapshot),
+  ahead of anything sent through the handle, and right before `COMMIT` reads
+  it back on the same session, through the connection's statement queue.
+  Found: the transaction commits. Refused because the transaction is aborted:
+  `TransactionRolledBackError`. Gone: something other than TypeGraph ended the
+  transaction (a `COMMIT`, `ROLLBACK` or `BEGIN` sent through `tx.sql`), and
+  the backend rejects with `TransactionOutcomeUnknownError`, never retried.
+  Without the marker, a transaction in which a statement failed is probed once
+  before `COMMIT` instead (refused: `TransactionRolledBackError`); it cannot
+  have been ended behind TypeGraph's back. A Store transaction runs the same
+  check as soon as the callback returns, before any work of its own; every
+  check first waits for the statements queued on the connection. A backend
+  built over a transaction handle opens savepoints rather than transactions
+  and declares no evidence.
 - `"statement-scoped"` (the bundled SQLite backends): a failed statement undoes
   only itself and leaves the transaction usable, and a transaction the engine
   ended refuses the closing `COMMIT`, so the `COMMIT`'s own result is the

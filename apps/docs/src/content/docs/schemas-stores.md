@@ -2294,11 +2294,12 @@ When `store.transaction()` resolves, the transaction committed. A failed stateme
 catches does not change that guarantee. On PostgreSQL, a statement that fails inside a transaction
 (a duplicate id, a constraint violation, a read or a `tx.sql` statement the database refuses)
 aborts the whole transaction whether or not the callback catches the error, and the database
-answers the closing `COMMIT` with a rollback. Right after it opens the transaction, TypeGraph sets
-a marker on the session that lives exactly as long as that transaction (a transaction-local
-setting), and right before its `COMMIT` it reads the marker back. An aborted transaction refuses
-that read, so such a transaction rejects with a `TransactionRolledBackError` whose `cause` is the
-first error the database reported in it; it never resolves as if it had committed. A
+answers the closing `COMMIT` with a rollback. TypeGraph observes every statement the transaction
+sends, and when one of them failed it checks the session before its `COMMIT`. An aborted
+transaction refuses that check, so such a transaction rejects with a `TransactionRolledBackError`
+whose `cause` is the first error the database reported in it; it never resolves as if it had
+committed. A transaction in which nothing failed and whose `tx.sql` was never read pays nothing for
+this: it sends exactly `BEGIN`, its own statements and `COMMIT`. A
 `TransactionRolledBackError` means the transaction did not commit: nothing the callback wrote was
 saved. To carry on after an expected failure, run the failing statement inside a savepoint (for
 example a nested `tx.sql.transaction(...)`) that rolls back past it: the transaction is then
@@ -2317,8 +2318,16 @@ try {
 ```
 
 Transaction control through `tx.sql` is not supported inside `store.transaction()`: do not send
-`COMMIT`, `ROLLBACK` or `BEGIN` there (savepoints are fine). On PostgreSQL, TypeGraph detects it:
-a transaction ended that way no longer carries TypeGraph's marker, so TypeGraph does not send its
+`COMMIT`, `ROLLBACK` or `BEGIN` there (savepoints are fine). On PostgreSQL, TypeGraph detects it.
+Reading `tx.sql` first hands the driver a marker that lives exactly as long as the transaction (a
+transaction-local setting), ahead of anything sent through the handle, and TypeGraph reads it back
+before its `COMMIT`; this costs one statement when `tx.sql` is first read and one before `COMMIT`.
+On node-postgres and PGlite the marker waits for a TypeGraph statement still executing on the
+connection, and statements sent through the handle wait for the marker. Read `tx.sql` while no
+graph operation of the transaction is still running, as you await every `tx.sql` statement: a
+marker that lands inside a savepoint a running TypeGraph operation then rolls back is undone, which
+reports an unknown outcome for a transaction that was fine.
+A transaction ended through `tx.sql` no longer carries the marker, so TypeGraph does not send its
 own `COMMIT`, which would otherwise close whatever the session is doing now, and rejects with a
 `TransactionOutcomeUnknownError` instead. The outcome is unknown because TypeGraph cannot tell what
 was saved: a native `COMMIT` saved the writes before it, a native `ROLLBACK` discarded them, and a

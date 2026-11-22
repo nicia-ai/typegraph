@@ -2377,10 +2377,11 @@ Thrown when a PostgreSQL transaction that TypeGraph opened was rolled back even
 though its callback returned normally. On PostgreSQL, a statement that fails
 inside a transaction aborts the whole transaction, including when the callback
 catches the error: every later statement is refused, and the database answers
-the closing `COMMIT` with a rollback. Before it commits, TypeGraph reads a
-marker it set on the session when it opened the transaction; an aborted
-transaction refuses that read, and TypeGraph rejects with this error instead of
-reporting success. Nothing the transaction wrote was saved. `cause` is the
+the closing `COMMIT` with a rollback. TypeGraph observes every statement the
+transaction sends; before it commits, it checks the session when one of them
+failed (and reads the marker it set when the callback read `tx.sql`). An
+aborted transaction refuses that check, and TypeGraph rejects with this error
+instead of reporting success. Nothing the transaction wrote was saved. `cause` is the
 first error the database reported during the transaction (for example a unique
 violation, `23505`); an error the driver raised without sending the statement,
 such as a parameter it could not serialize, is never the cause.
@@ -2431,9 +2432,10 @@ raises this error.
 
 Thrown when the transaction TypeGraph opened was ended by a statement TypeGraph
 did not issue: a `COMMIT`, `ROLLBACK` or `BEGIN` sent through the native `tx.sql`
-handle inside `store.transaction()`, which is not supported. Before it commits,
-TypeGraph reads the marker it set when it opened the transaction; the marker is
-gone once that transaction has ended, so TypeGraph does not send its `COMMIT`
+handle inside `store.transaction()`, which is not supported. Reading `tx.sql`
+sets a marker on the session that lives exactly as long as the transaction, and
+TypeGraph reads it back before it commits; the marker is gone once that
+transaction has ended, so TypeGraph does not send its `COMMIT`
 (which would close whatever the session is doing instead) and rejects with this
 error. `details.reason` is `"transaction-ended"`, and `cause` is the first error
 the database reported during the transaction, if any.
