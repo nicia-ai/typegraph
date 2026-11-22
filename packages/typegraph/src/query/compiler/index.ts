@@ -78,6 +78,7 @@ import {
   type CompiledSelectSql,
   markAnnIndexScan,
 } from "../sql-intent";
+import { isAggregatedStatement } from "./aggregated-statement";
 import {
   aliasCountColumnName,
   aliasCountCteName,
@@ -101,17 +102,15 @@ import {
   buildStandardEmbeddingsCte,
   buildStandardFromClause,
   buildStandardFulltextCte,
-  buildStandardFulltextOrderBy,
   buildStandardGroupBy,
   buildStandardHaving,
   buildStandardHybridCandidateCte,
-  buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardRelevanceOrderBy,
   buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
-  buildStandardVectorOrderBy,
   describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
   lateMaterializedProjectedNodeAliases,
@@ -140,6 +139,10 @@ import {
   hasVariableLengthTraversal,
 } from "./recursive";
 import { compileMultiStageRecursiveQuery } from "./recursive-chain";
+import {
+  describeRelevanceOrder,
+  type RelevanceSortKey,
+} from "./relevance-order";
 import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
@@ -1568,33 +1571,33 @@ function compileStandardQuery(
 }
 
 type SelectStandardOrderByInput = Readonly<{
+  aggregated: boolean;
   ast: QueryAst;
   collapsedTraversalCteAlias: string | undefined;
   dialect: DialectAdapter;
-  fulltextPredicate: FulltextMatchPredicate | undefined;
   fusion: HybridFusionOptions | undefined;
-  vectorPredicate: VectorSimilarityPredicate | undefined;
+  relevanceKeys: readonly RelevanceSortKey[];
 }>;
 
 function selectStandardOrderBy(
   input: SelectStandardOrderByInput,
 ): SqlFragment | undefined {
   const {
+    aggregated,
     ast,
     collapsedTraversalCteAlias,
     dialect,
-    fulltextPredicate,
     fusion,
-    vectorPredicate,
+    relevanceKeys,
   } = input;
-  if (vectorPredicate && fulltextPredicate) {
-    return buildStandardHybridRrfOrderBy({ ast, dialect, fusion });
-  }
-  if (vectorPredicate) {
-    return buildStandardVectorOrderBy({ ast, dialect });
-  }
-  if (fulltextPredicate) {
-    return buildStandardFulltextOrderBy({ ast, dialect });
+  if (relevanceKeys.length > 0) {
+    return buildStandardRelevanceOrderBy({
+      aggregated,
+      ast,
+      dialect,
+      fusion,
+      keys: relevanceKeys,
+    });
   }
   return buildStandardOrderBy({
     ast,
@@ -1754,6 +1757,8 @@ function compileStandardQueryWithCteStrategy(
   }
 
   // Build main SELECT
+  const relevanceKeys = describeRelevanceOrder(ast);
+  const aggregated = isAggregatedStatement(ast);
   const projection = buildStandardProjection({
     ast,
     ...(collapsedTraversalCteAlias === undefined ?
@@ -1775,12 +1780,12 @@ function compileStandardQueryWithCteStrategy(
   const having = buildStandardHaving({ ast, ctx });
 
   const orderBy = selectStandardOrderBy({
+    aggregated,
     ast,
     collapsedTraversalCteAlias,
     dialect,
-    fulltextPredicate,
     fusion,
-    vectorPredicate,
+    relevanceKeys,
   });
 
   const limitOffset = buildLimitOffsetClause({

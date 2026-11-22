@@ -678,3 +678,140 @@ describe("logical plan generation", () => {
     expect(state.logicalPlan).toBeDefined();
   });
 });
+
+// ============================================================
+// runStandardQueryPassPipeline — final-limit commutation
+// ============================================================
+
+describe("traversal limit pushdown precondition: the final limit commutes with the output", () => {
+  /** A pinned two-hop statement whose final LIMIT 10 is pushed down as 80. */
+  function commutingAst(overrides: Partial<QueryAst> = {}): QueryAst {
+    return makeMinimalAst({
+      limit: 10,
+      traversals: [
+        makeTraversal({ nodeAlias: "c", joinFromAlias: "p" }),
+        makeTraversal({
+          nodeAlias: "loc",
+          edgeAlias: "e_loc",
+          joinFromAlias: "c",
+        }),
+      ],
+      predicates: [
+        makeNodePredicate("p", makeComparison("p", ["id"], "abc123")),
+      ],
+      ...overrides,
+    });
+  }
+
+  function pushedLimit(ast: QueryAst): number | undefined {
+    return runStandardQueryPassPipeline(
+      ast,
+      "test_graph",
+      makePipelineContext(),
+    ).traversalCteLimit;
+  }
+
+  const pinned = makeNodePredicate("p", makeComparison("p", ["id"], "abc123"));
+  const countLocations = {
+    outputName: "n",
+    source: {
+      __type: "aggregate" as const,
+      function: "count" as const,
+      field: makeFieldRef("loc", ["id"]),
+    },
+  };
+  const locationName = {
+    outputName: "name",
+    source: makeFieldRef("loc", ["props", "name"], "string"),
+  };
+  const fulltextMatch: NodePredicate = {
+    targetAlias: "loc",
+    expression: {
+      __type: "fulltext_match",
+      field: makeFieldRef("loc", ["$fulltext"]),
+      query: "climate",
+      mode: "websearch",
+      limit: 50,
+    },
+  };
+  const vectorMatch: NodePredicate = {
+    targetAlias: "loc",
+    expression: {
+      __type: "vector_similarity",
+      field: makeFieldRef("loc", ["props", "embedding"], "embedding"),
+      queryEmbedding: [1, 0, 0],
+      limit: 50,
+    },
+  };
+
+  it("pushes the limit down when every clause holds (the control)", () => {
+    expect(pushedLimit(commutingAst())).toBe(80);
+  });
+
+  const clauses: readonly (readonly [string, Partial<QueryAst>])[] = [
+    ["an offset skips rows of the prefix", { offset: 5 }],
+    [
+      "a result predicate filters rows after the traversal",
+      { resultPredicate: makeComparison("loc", ["props", "name"], "Acme") },
+    ],
+    [
+      "grouping folds the rows",
+      { groupBy: { fields: [makeFieldRef("loc", ["props", "name"])] } },
+    ],
+    [
+      "a having clause folds the rows",
+      { having: makeComparison("loc", ["props", "name"], "Acme") },
+    ],
+    [
+      "an ungrouped aggregate projection folds every row into one",
+      { projection: { fields: [countLocations] } },
+    ],
+    [
+      "a field orderBy() picks from every row",
+      {
+        orderBy: [
+          {
+            field: makeFieldRef("loc", ["props", "name"], "string"),
+            direction: "asc",
+          },
+        ],
+      },
+    ],
+    [
+      "an orderBy() naming a field-only aggregate() output picks from every row",
+      {
+        projection: { fields: [locationName] },
+        aggregateOrderBy: [{ outputName: "name", direction: "asc" }],
+      },
+    ],
+    [
+      "a full-text relevance order picks from every row",
+      { predicates: [pinned, fulltextMatch] },
+    ],
+    [
+      "a vector relevance order picks from every row",
+      { predicates: [pinned, vectorMatch] },
+    ],
+    [
+      "a hybrid relevance order picks from every row",
+      { predicates: [pinned, fulltextMatch, vectorMatch] },
+    ],
+  ];
+
+  for (const [clause, overrides] of clauses) {
+    it(`does not push the limit down when ${clause}`, () => {
+      expect(pushedLimit(commutingAst(overrides))).toBeUndefined();
+    });
+  }
+
+  it("still pushes a zero limit without an offset down whatever the output does", () => {
+    expect(
+      pushedLimit(
+        commutingAst({
+          limit: 0,
+          groupBy: { fields: [makeFieldRef("loc", ["props", "name"])] },
+        }),
+      ),
+    ).toBe(0);
+  });
+});

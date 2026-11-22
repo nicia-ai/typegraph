@@ -314,6 +314,33 @@ the final result. The final order does not change which nodes entered the
 top-k candidate set, and the final limit counts match rows rather than distinct
 source nodes.
 
+A search predicate also composes with `groupBy()` and `aggregate()`. The top-k
+candidates are grouped like any other matches, and the groups are ordered by
+their best member under the backend's native scoring: the highest rank for
+fulltext, the smallest distance for `similarTo()`, the highest fused score for
+hybrid. Native scores differ between engines (SQLite's BM25 and PostgreSQL's
+`ts_rank_cd` can rank the same documents differently), so the rule is the
+same on every backend but the ranks it reads are not. `.orderBy()` terms,
+including ones naming an `aggregate()` key, break ties between groups, and a
+hybrid group still tied after them falls back to its smallest node id in byte
+order on every backend. `.limit()` counts groups. This order holds for
+`execute()`; terminals that run the query through a relation (`first()`,
+`executeOn()`, `prepare()`, `batchOnce()`, `asRelation()`) order by the
+`.orderBy()` terms alone and can select a different group, which is tracked in
+[#974](https://github.com/nicia-ai/typegraph/issues/974). Until it is fixed, use
+`.limit(n).execute()` when the group order matters:
+
+```typescript
+const categories = await store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) => d.$fulltext.matches("climate change", 100))
+  .groupBy("d", "category")
+  .aggregate({ category: field("d", "category"), matches: count("d") })
+  .orderBy("matches", "desc")
+  .execute();
+```
+
 ### Query Modes
 
 ```typescript

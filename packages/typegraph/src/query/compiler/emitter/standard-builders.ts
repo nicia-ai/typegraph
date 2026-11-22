@@ -58,6 +58,10 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
+  type RelevanceSortKey,
+  type RelevanceSortSource,
+} from "../relevance-order";
+import {
   EMBEDDINGS_CTE_ALIAS,
   FULLTEXT_CTE_ALIAS,
   HYBRID_CANDIDATES_CTE_ALIAS,
@@ -973,11 +977,25 @@ type BuildStandardOrderByInput = Readonly<{
 export function buildStandardOrderBy(
   input: BuildStandardOrderByInput,
 ): SqlFragment | undefined {
+  const parts = compileStandardOrderTerms(input);
+  if (parts.length === 0) return undefined;
+  return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
+}
+
+/**
+ * The caller's `orderBy()` terms, in order: field terms, then terms naming an
+ * `aggregate()` / `project()` output. The one owner of user ordering — the
+ * plain ORDER BY and the relevance ORDER BYs (vector, fulltext, hybrid RRF),
+ * which append these after their relevance term, both read it.
+ */
+function compileStandardOrderTerms(
+  input: BuildStandardOrderByInput,
+): readonly SqlFragment[] {
   const { ast, collapsedTraversalCteAlias, dialect } = input;
   const fieldOrderBy = ast.orderBy ?? [];
   const aggregateOrderBy = ast.aggregateOrderBy ?? [];
   if (fieldOrderBy.length === 0 && aggregateOrderBy.length === 0) {
-    return undefined;
+    return [];
   }
 
   // Only built when there's a FieldRef-based order spec to resolve against
@@ -1023,7 +1041,7 @@ export function buildStandardOrderBy(
     parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
 
-  return sql`ORDER BY ${sql.join(parts, sql`, `)}`;
+  return parts;
 }
 
 // ============================================================
@@ -1734,86 +1752,26 @@ export function buildStandardHybridCandidateCte(
   `;
 }
 
-/**
- * Compiles user-supplied `orderBy` clauses into `SqlFragment` values suitable
- * for appending after a relevance-driven primary ORDER BY (vector,
- * fulltext, or hybrid RRF).
- */
-function compileUserOrderBy(
-  ast: QueryAst,
-  dialect: DialectAdapter,
-): readonly SqlFragment[] {
-  if (!ast.orderBy || ast.orderBy.length === 0) return [];
-
-  const aliasToCte = buildAliasToCteMap(ast);
-  const fragments: SqlFragment[] = [];
-  for (const orderSpec of ast.orderBy) {
-    const valueType = orderSpec.field.valueType;
-    if (valueType === "array" || valueType === "object") {
-      throw new UnsupportedPredicateError(
-        "Ordering by JSON arrays or objects is not supported",
-      );
-    }
-    const cteAlias =
-      orderSpec.field.__type === "field_ref" ?
-        (aliasToCte.get(orderSpec.field.alias) ??
-        aliasCteName(orderSpec.field.alias))
-      : "";
-    const field = compileOrderFieldValue(
-      ast,
-      orderSpec.field,
-      dialect,
-      cteAlias,
-    );
-    const nulls = resolveNullOrdering(orderSpec);
-    fragments.push(compileOrderTerm(field, orderSpec.direction, nulls));
-  }
-  return fragments;
-}
-
-type BuildStandardFulltextOrderByInput = Readonly<{
-  ast: QueryAst;
-  dialect: DialectAdapter;
-}>;
-
-/**
- * ORDER BY clause when only a fulltext predicate is present.
- * Orders by rank DESC then any user-supplied ORDER BY as tiebreakers.
- */
-export function buildStandardFulltextOrderBy(
-  input: BuildStandardFulltextOrderByInput,
-): SqlFragment {
-  const { ast, dialect } = input;
-  const rankOrder = sql`${readColumn(FULLTEXT_CTE_ALIAS, "rank")} DESC`;
-  const userOrders = compileUserOrderBy(ast, dialect);
-  return sql`ORDER BY ${sql.join([rankOrder, ...userOrders], sql`, `)}`;
-}
-
-/**
- * ORDER BY clause when BOTH vector and fulltext predicates are present.
- *
- * Reciprocal Rank Fusion at SQL level. Each CTE emits an `ord` ordinal
- * via ROW_NUMBER; the outer ORDER BY blends them as
- * `w_vec / (k + ord_vec) + w_ft / (k + ord_ft)`. NULL `ord` (a node
- * matched by only one source) makes that source's term NULL → COALESCE-to-0
- * absorbs it. User-supplied `orderBy` clauses follow as tiebreakers,
- * matching the single-source paths so pagination stays stable across
- * RRF score ties.
- *
- * Defaults: k=60, vector weight = fulltext weight = 1. Override via
- * `.fuseWith({ k, weights })` on the query builder.
- */
-
-type BuildStandardHybridRrfOrderByInput = Readonly<{
-  ast: QueryAst;
+type RelevanceSortValueInput = Readonly<{
+  /** Whether the statement's result rows are groups (`isAggregatedStatement`). */
+  aggregated: boolean;
   dialect: DialectAdapter;
   fusion: HybridFusionOptions | undefined;
 }>;
 
-export function buildStandardHybridRrfOrderBy(
-  input: BuildStandardHybridRrfOrderByInput,
+/**
+ * The reciprocal-rank-fusion score of one hybrid match. Each CTE emits an
+ * `ord` ordinal via ROW_NUMBER; the score blends them as
+ * `w_vec / (k + ord_vec) + w_ft / (k + ord_ft)`. NULL `ord` (a node matched
+ * by only one source) makes that source's term NULL → COALESCE-to-0 absorbs
+ * it.
+ *
+ * Defaults: k=60, vector weight = fulltext weight = 1. Override via
+ * `.fuseWith({ k, weights })` on the query builder.
+ */
+function compileHybridRrfScore(
+  fusion: HybridFusionOptions | undefined,
 ): SqlFragment {
-  const { ast, dialect, fusion } = input;
   const k = fusion?.k ?? DEFAULT_RRF_K;
   const vectorWeight = fusion?.weights?.vector ?? DEFAULT_RRF_WEIGHT;
   const fulltextWeight = fusion?.weights?.fulltext ?? DEFAULT_RRF_WEIGHT;
@@ -1825,30 +1783,81 @@ export function buildStandardHybridRrfOrderBy(
   // `* 1.0` is also deliberate: PostgreSQL otherwise performs integer
   // division when the default weight and rank constant are integers. Keep
   // this promotion in lockstep with the backend hybrid statement emitter.
-  const rrfOrder = sql`${sql.raw(`(COALESCE((${vectorWeight} * 1.0) / (${k} + `)}${readColumn(EMBEDDINGS_CTE_ALIAS, "ord")}${sql.raw(`), 0) + COALESCE((${fulltextWeight} * 1.0) / (${k} + `)}${readColumn(FULLTEXT_CTE_ALIAS, "ord")}${sql.raw("), 0)) DESC")}`;
-  // Deterministic tiebreak on the CTE-projected node_id. At least one of
-  // the two CTEs always has a non-NULL node_id for any row returned by
-  // the LEFT JOIN-union shape, so COALESCE always resolves. This matches
-  // `store.search.hybrid`'s JS-side code-unit `compareStrings(nodeId)`
-  // tiebreak so the two paths produce identical top-k under ties (SQLite
-  // BINARY collation is code-unit order for the ASCII id alphabet).
-  const idTiebreak = sql`COALESCE(${readColumn(FULLTEXT_CTE_ALIAS, "node_id")}, ${readColumn(EMBEDDINGS_CTE_ALIAS, "node_id")}) ASC`;
-  const userOrders = compileUserOrderBy(ast, dialect);
-  return sql`ORDER BY ${sql.join([rrfOrder, ...userOrders, idTiebreak], sql`, `)}`;
+  return sql`${sql.raw(`(COALESCE((${vectorWeight} * 1.0) / (${k} + `)}${readColumn(EMBEDDINGS_CTE_ALIAS, "ord")}${sql.raw(`), 0) + COALESCE((${fulltextWeight} * 1.0) / (${k} + `)}${readColumn(FULLTEXT_CTE_ALIAS, "ord")}${sql.raw("), 0))")}`;
 }
 
-type BuildStandardVectorOrderByInput = Readonly<{
-  ast: QueryAst;
-  dialect: DialectAdapter;
-}>;
-
-export function buildStandardVectorOrderBy(
-  input: BuildStandardVectorOrderByInput,
+/** The value one relevance sort key reads from a single match row. */
+function compileRelevancePerMatchValue(
+  source: RelevanceSortSource,
+  input: RelevanceSortValueInput,
 ): SqlFragment {
-  const { ast, dialect } = input;
-  const distanceOrder = sql`${readColumn(EMBEDDINGS_CTE_ALIAS, "distance")} ASC`;
-  const userOrders = compileUserOrderBy(ast, dialect);
-  return sql`ORDER BY ${sql.join([distanceOrder, ...userOrders], sql`, `)}`;
+  switch (source) {
+    case "fulltext_rank": {
+      return readColumn(FULLTEXT_CTE_ALIAS, "rank");
+    }
+    case "vector_distance": {
+      return readColumn(EMBEDDINGS_CTE_ALIAS, "distance");
+    }
+    case "hybrid_score": {
+      return compileHybridRrfScore(input.fusion);
+    }
+    case "hybrid_node_id": {
+      // Deterministic tiebreak on the CTE-projected node_id. At least one of
+      // the two CTEs always has a non-NULL node_id for any row returned by
+      // the LEFT JOIN-union shape, so COALESCE always resolves. It compares
+      // in byte order (`binaryText`) on every backend, the order of
+      // `store.search.hybrid`'s JS-side code-unit tiebreak and of SQLite's
+      // BINARY collation, so ties never follow a PostgreSQL database's
+      // linguistic collation.
+      return input.dialect.binaryText(
+        sql`COALESCE(${readColumn(FULLTEXT_CTE_ALIAS, "node_id")}, ${readColumn(EMBEDDINGS_CTE_ALIAS, "node_id")})`,
+      );
+    }
+  }
+}
+
+/**
+ * The value of one relevance sort key for a result row. When the rows are
+ * groups (`isAggregatedStatement`), a group sorts by its best member: `MAX`
+ * of a value ordered descending, `MIN` of one ordered ascending, so the
+ * relevance order of groups extends the order of matches and every engine
+ * accepts the term.
+ */
+function compileRelevanceSortValue(
+  key: RelevanceSortKey,
+  input: RelevanceSortValueInput,
+): SqlFragment {
+  const perMatch = compileRelevancePerMatchValue(key.source, input);
+  if (!input.aggregated) return perMatch;
+  return sql`${sql.raw(key.direction === "desc" ? "MAX" : "MIN")}(${perMatch})`;
+}
+
+type BuildStandardRelevanceOrderByInput = RelevanceSortValueInput &
+  Readonly<{
+    ast: QueryAst;
+    /** `describeRelevanceOrder(ast)`; never empty. */
+    keys: readonly RelevanceSortKey[];
+  }>;
+
+/**
+ * ORDER BY clause of a full-text, vector or hybrid statement: the leading
+ * relevance keys (rank DESC, distance ASC, or the fused RRF score DESC), then
+ * the caller's `orderBy()` terms as tiebreakers, then the trailing relevance
+ * keys (the hybrid node_id tiebreak), so pagination stays stable across ties.
+ */
+export function buildStandardRelevanceOrderBy(
+  input: BuildStandardRelevanceOrderByInput,
+): SqlFragment {
+  const { ast, dialect, keys } = input;
+  const terms = (placement: RelevanceSortKey["placement"]) =>
+    keys
+      .filter((key) => key.placement === placement)
+      .map(
+        (key) =>
+          sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`,
+      );
+  const userOrders = compileStandardOrderTerms({ ast, dialect });
+  return sql`ORDER BY ${sql.join([...terms("leading"), ...userOrders, ...terms("trailing")], sql`, `)}`;
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{
