@@ -4,6 +4,7 @@
     "module": "Node16",
     "target": "ES2022",
     "lib": ["ES2023"],
+    "types": ["node"],
     "strict": true,
     "declaration": true,
     "emitDeclarationOnly": true,
