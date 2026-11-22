@@ -1,38 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  FieldRef,
-  PredicateExpression,
-  QueryAst,
-  Traversal,
-} from "../src/query/ast";
-import { assertTraversalStagePredicatesSupported } from "../src/query/compiler/traversal-stage-validation";
+import { UnsupportedPredicateError } from "../src/errors";
+import type { FieldRef, PredicateExpression, QueryAst } from "../src/query/ast";
+import { assertIsolatedStageReadsNoEnclosingQuery } from "../src/query/compiler/traversal-stage-validation";
 import {
+  createExistsSubqueryExpression,
   createFieldExpression,
   createOuterReferenceExpression,
   expr,
 } from "../src/query/expressions";
 
-const traversal = {
-  direction: "out",
-  edgeAlias: "edge",
-  edgeKinds: ["connects"],
-  joinEdgeField: "from_id",
-  joinFromAlias: "middle",
-  nodeAlias: "target",
-  nodeKinds: ["Target"],
-  optional: false,
-} satisfies Traversal;
-
-function queryWith(expression: PredicateExpression): QueryAst {
-  return {
-    projection: { fields: [] },
-    predicates: [{ expression, targetAlias: "target" }],
-    start: { alias: "root", expansion: "exact", kinds: ["Root"] },
-    temporalMode: { mode: "current" },
-    traversals: [traversal],
-  } satisfies QueryAst;
-}
+const enclosingScope = Symbol("enclosing");
+const stageScope = Symbol("stage");
+const nestedScope = Symbol("nested");
 
 function field(alias: string): FieldRef<string> {
   return {
@@ -43,87 +23,141 @@ function field(alias: string): FieldRef<string> {
   } satisfies FieldRef<string>;
 }
 
-describe("isolated traversal-stage validation", () => {
-  it("accepts references owned by the stage", () => {
-    const ast = queryWith({
-      __type: "comparison",
-      left: field("target"),
-      op: "eq",
-      right: field("target"),
-    });
+/** An isolated fixed stage `middle -edge-> target` with one predicate on `target`. */
+function isolatedStage(expression: PredicateExpression): QueryAst {
+  return {
+    expressionScope: stageScope,
+    projection: { fields: [] },
+    predicates: [{ expression, targetAlias: "target" }],
+    start: { alias: "middle", expansion: "exact", kinds: ["Middle"] },
+    temporalMode: { mode: "current" },
+    traversals: [
+      {
+        direction: "out",
+        edgeAlias: "edge",
+        edgeKinds: ["connects"],
+        joinEdgeField: "from_id",
+        joinFromAlias: "middle",
+        nodeAlias: "target",
+        nodeKinds: ["Target"],
+        optional: false,
+      },
+    ],
+  } satisfies QueryAst;
+}
 
+function targetEquals(
+  right: ReturnType<typeof createFieldExpression<string, string>>,
+) {
+  return isolatedStage({
+    __type: "database_expression_predicate",
+    expression: expr.eq(
+      createFieldExpression(field("target"), stageScope, false),
+      right,
+    ),
+  });
+}
+
+describe("isolated traversal-stage scope", () => {
+  it("accepts a predicate that reads only the stage's own statement", () => {
     expect(() => {
-      assertTraversalStagePredicatesSupported(ast, traversal, 1);
+      assertIsolatedStageReadsNoEnclosingQuery(
+        targetEquals(createFieldExpression(field("target"), stageScope, false)),
+      );
     }).not.toThrow();
   });
 
-  it("refuses a reference to the isolated stage source alias", () => {
-    const ast = queryWith({
-      __type: "comparison",
-      left: field("target"),
-      op: "eq",
-      right: field("middle"),
-    });
-
-    expect(() => {
-      assertTraversalStagePredicatesSupported(ast, traversal, 1);
-    }).toThrow('cannot evaluate cross-alias reference "middle"');
-  });
-
-  it("refuses a direct reference to an unavailable earlier alias", () => {
-    const ast = queryWith({
-      __type: "comparison",
-      left: field("target"),
-      op: "eq",
-      right: field("root"),
-    });
-
-    expect(() => {
-      assertTraversalStagePredicatesSupported(ast, traversal, 1);
-    }).toThrow('cannot evaluate cross-alias reference "root"');
-  });
-
-  it("refuses a correlated outer reference to an unavailable earlier alias", () => {
-    const parentScope = Symbol("parent");
-    const childScope = Symbol("child");
-    const outer = createOuterReferenceExpression(
-      createFieldExpression(field("root"), parentScope, false),
-      childScope,
+  it("refuses an outer reference to the enclosing query, naming the caller's alias", () => {
+    const ast = targetEquals(
+      createOuterReferenceExpression(
+        createFieldExpression(field("p"), enclosingScope, false),
+        stageScope,
+      ),
     );
-    const comparison = expr.eq(
-      createFieldExpression(field("target"), childScope, false),
-      outer,
-    );
-    const ast = queryWith({
-      __type: "database_expression_predicate",
-      expression: comparison,
-    });
 
     expect(() => {
-      assertTraversalStagePredicatesSupported(ast, traversal, 1);
-    }).toThrow('cannot evaluate cross-alias reference "root"');
+      assertIsolatedStageReadsNoEnclosingQuery(ast);
+    }).toThrow(UnsupportedPredicateError);
+    let refusal: unknown;
+    try {
+      assertIsolatedStageReadsNoEnclosingQuery(ast, (alias) =>
+        alias === "target" ? "callerTarget" : alias,
+      );
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(UnsupportedPredicateError);
+    expect((refusal as UnsupportedPredicateError).details).toEqual({
+      targetAlias: "callerTarget",
+    });
+    expect((refusal as UnsupportedPredicateError).message).toMatch(
+      /^The predicate on alias "callerTarget" reads an enclosing query/,
+    );
   });
 
-  it("does not validate predicates assigned to an earlier stage", () => {
-    const ast = {
+  it("accepts a nested subquery correlated with the stage itself", () => {
+    const nested: QueryAst = {
+      expressionScope: nestedScope,
       projection: { fields: [] },
       predicates: [
         {
+          targetAlias: "inner",
           expression: {
-            __type: "null_check",
-            field: field("root"),
-            op: "isNotNull",
+            __type: "database_expression_predicate",
+            expression: expr.eq(
+              createFieldExpression(field("inner"), nestedScope, false),
+              createOuterReferenceExpression(
+                createFieldExpression(field("target"), stageScope, false),
+                nestedScope,
+              ),
+            ),
           },
-          targetAlias: "root",
         },
       ],
-      start: { alias: "root", expansion: "exact", kinds: ["Root"] },
+      start: { alias: "inner", expansion: "exact", kinds: ["Target"] },
       temporalMode: { mode: "current" },
-      traversals: [traversal],
-    } satisfies QueryAst;
+      traversals: [],
+    };
+    const ast = isolatedStage({
+      __type: "database_expression_predicate",
+      expression: createExistsSubqueryExpression(nested, stageScope),
+    });
 
     expect(() => {
-      assertTraversalStagePredicatesSupported(ast, traversal, 1);
+      assertIsolatedStageReadsNoEnclosingQuery(ast);
     }).not.toThrow();
+  });
+
+  it("refuses a nested subquery correlated with the enclosing query", () => {
+    const nested: QueryAst = {
+      expressionScope: nestedScope,
+      projection: { fields: [] },
+      predicates: [
+        {
+          targetAlias: "inner",
+          expression: {
+            __type: "database_expression_predicate",
+            expression: expr.eq(
+              createFieldExpression(field("inner"), nestedScope, false),
+              createOuterReferenceExpression(
+                createFieldExpression(field("p"), enclosingScope, false),
+                nestedScope,
+              ),
+            ),
+          },
+        },
+      ],
+      start: { alias: "inner", expansion: "exact", kinds: ["Target"] },
+      temporalMode: { mode: "current" },
+      traversals: [],
+    };
+    const ast = isolatedStage({
+      __type: "database_expression_predicate",
+      expression: createExistsSubqueryExpression(nested, stageScope),
+    });
+
+    expect(() => {
+      assertIsolatedStageReadsNoEnclosingQuery(ast);
+    }).toThrow('The predicate on alias "target" reads an enclosing query');
   });
 });
