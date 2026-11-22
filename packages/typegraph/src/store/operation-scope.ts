@@ -17,7 +17,10 @@
  * and the layers above discriminate a root from a transaction with
  * `"transaction" in target`; a derived object per operation would change both.
  *
- * Only this module may produce an {@link OperationScoped} value.
+ * Only this module may produce an {@link OperationScoped} value. ESLint bans
+ * a type assertion to any of these types elsewhere in `src`, and
+ * `tests/operation-scope-ratchet.test.ts` pins the assertion sites to the two
+ * mints below.
  */
 import type { GraphBackend, TransactionBackend } from "../backend/types";
 
@@ -44,6 +47,7 @@ export type StatementBackend = GraphBackend | OperationBackend;
 export function enterOperation(
   backend: GraphBackend | TransactionBackend,
 ): StatementBackend {
+  // eslint-disable-next-line no-restricted-syntax -- This module is the mint: the one place a backend may be asserted to the operation brand.
   return backend as StatementBackend;
 }
 
@@ -55,5 +59,6 @@ export function enterOperation(
 export function scopeWriteFrameTarget<T extends object>(
   target: T,
 ): OperationScoped<T> {
+  // eslint-disable-next-line no-restricted-syntax -- This module is the mint: the one place a target may be asserted to the operation brand.
   return target as OperationScoped<T>;
 }

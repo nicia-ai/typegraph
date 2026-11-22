@@ -252,12 +252,61 @@ const DETERMINISM_RESTRICTIONS = [
   },
 ];
 
-// Every no-restricted-syntax block below starts from this list: both guardrails
-// apply to the whole library source, and a block that set only one of them
-// would silently switch the other off for its files.
+const OPERATION_BRAND_MESSAGE =
+  "Do not assert a value to OperationScoped / OperationBackend / " +
+  "StatementBackend. A raw transaction backend reaches a statement-issuing " +
+  "Store function only through a mint in src/store/operation-scope.ts " +
+  "(enterOperation at a public Store member, scopeWriteFrameTarget in the " +
+  "write executor); an assertion anywhere else forges the brand and hides a " +
+  "call path the type exists to expose. Call a mint instead. " +
+  "tests/operation-scope-ratchet.test.ts pins the assertion sites to the two " +
+  "mints.";
+
+const OPERATION_BRAND_TYPE_NAMES =
+  "/^(OperationScoped|OperationBackend|StatementBackend)$/";
+
+/**
+ * The operation-brand forgery ban: a type assertion (`as` or angle-bracket)
+ * whose asserted type spells a brand type directly, through a namespace
+ * import, through an inline `import("…")` type, or as `typeof` a mint (`ReturnType<typeof enterOperation>`), and an
+ * import that renames a brand type, which would let the first selector miss
+ * it. The two mints in `src/store/operation-scope.ts` carry an inline disable
+ * each; `tests/operation-scope-ratchet.test.ts` pins the assertion sites,
+ * including spellings these selectors cannot see (a local alias of a brand
+ * type, a brand type argument at a call). Exported so that test fires THESE
+ * selectors.
+ */
+export const OPERATION_BRAND_RESTRICTIONS = [
+  {
+    selector: `:matches(TSAsExpression, TSTypeAssertion) TSTypeReference[typeName.name=${OPERATION_BRAND_TYPE_NAMES}]`,
+    message: OPERATION_BRAND_MESSAGE,
+  },
+  {
+    selector: `:matches(TSAsExpression, TSTypeAssertion) TSTypeReference[typeName.right.name=${OPERATION_BRAND_TYPE_NAMES}]`,
+    message: OPERATION_BRAND_MESSAGE,
+  },
+  {
+    selector: `:matches(TSAsExpression, TSTypeAssertion) :matches(TSImportType[qualifier.name=${OPERATION_BRAND_TYPE_NAMES}], TSImportType[qualifier.right.name=${OPERATION_BRAND_TYPE_NAMES}])`,
+    message: OPERATION_BRAND_MESSAGE,
+  },
+  {
+    selector:
+      ":matches(TSAsExpression, TSTypeAssertion) TSTypeQuery[exprName.name=/^(enterOperation|scopeWriteFrameTarget)$/]",
+    message: OPERATION_BRAND_MESSAGE,
+  },
+  {
+    selector: `ImportSpecifier[imported.name=${OPERATION_BRAND_TYPE_NAMES}]:not([local.name=${OPERATION_BRAND_TYPE_NAMES}])`,
+    message: OPERATION_BRAND_MESSAGE,
+  },
+];
+
+// Every no-restricted-syntax block below starts from this list: these
+// guardrails apply to the whole library source, and a block that set only some
+// of them would silently switch the others off for its files.
 export const SOURCE_WIDE_RESTRICTIONS = [
   ...DETERMINISM_RESTRICTIONS,
   ...INTEROP_PROBE_RESTRICTIONS,
+  ...OPERATION_BRAND_RESTRICTIONS,
 ];
 
 // The dialect ban, named once so every block that also needs it can respell
