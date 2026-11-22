@@ -2,88 +2,55 @@
  * THE RATCHET for operation-scoped statement targets
  * (`src/store/operation-scope.ts`).
  *
- * Two invariants, each asserted where ESLint cannot reach:
+ * Two invariants:
  *
- * 1. **The brand is minted in one module.** ESLint's
- *    `OPERATION_BRAND_RESTRICTIONS` bans the direct spellings of an assertion
- *    to a brand type. This file fires those selectors at a fixture, and then
- *    scans `src` for every assertion site, including spellings the selectors
- *    cannot see: a local alias of a brand type, a renamed import, or a brand
- *    type argument at a call (`identity<StatementBackend>(raw)`). The scan
- *    must find exactly the two mints, so an inline `eslint-disable` added
- *    anywhere else fails here.
+ * 1. **The brand is produced only by the two mints.** The brand key is a
+ *    module-private, declared-only unique symbol, so a route that would have
+ *    to spell the key (an object literal, a computed property, `satisfies`,
+ *    module augmentation) is a type error by construction. TypeScript cannot
+ *    refuse an assertion to a subtype, though, so every other route is found
+ *    by `forgeSites` (`tests/helpers/operation-scope-scan.ts`): a
+ *    checker-backed scan that recognizes the brand by its property, not by a
+ *    type name. It must find exactly the two mint assertions in `src`.
+ *    ESLint's `OPERATION_BRAND_RESTRICTIONS` is a fast-feedback backstop for
+ *    the spellings a selector can see.
  *
  * 2. **The raw surface only shrinks.** Per store family, the number of
  *    exported functions that still accept a raw `TransactionBackend` for
- *    statement-issuing work. A parameter counts when a raw `TransactionBackend`
- *    is assignable to it (so a structural slice such as `WriteTarget` counts,
- *    not only a parameter that spells the name) and its type exposes at least
- *    one backend member outside the `identity` class of
- *    `GRAPH_BACKEND_MEMBER_CLASSES` (a parameter that can only read the
- *    dialect or table names issues no statement). Each count is pinned
- *    exactly: a family that gains a raw parameter fails, and a change that
- *    narrows one lowers the baseline in the same commit.
+ *    statement-issuing work (`rawStatementTargets`). A parameter counts when a
+ *    raw transaction is assignable to it, to its constraint, to a union
+ *    constituent, or to a property or array element of it, and that type
+ *    exposes a backend member outside the `identity` class. Each count is
+ *    pinned exactly: a family that gains a raw parameter fails, and a change
+ *    that narrows one lowers the baseline in the same commit.
  *
- * Why the type checker for (2) rather than a syntax scan: a raw transaction
- * reaches most row helpers through structural slices that never name
- * `TransactionBackend`, so counting the name would undercount by more than
- * half and let a slice-typed parameter slip in unseen.
+ * The forge-route table below is the systematic enumeration: every route,
+ * the layer that refuses it (type system, lint, scan), or the reason it is an
+ * accepted gap. Its fixture is a virtual module inside `src/store` of the
+ * SAME program the repository is scanned in, run through the SAME
+ * `forgeSites`, and linted with the real ESLint config — there is no second
+ * implementation for a fixture to certify.
  */
-import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { ESLint } from "eslint";
-import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { OPERATION_BRAND_RESTRICTIONS } from "../eslint.config.mjs";
-import { GRAPH_BACKEND_MEMBER_CLASSES } from "../src/backend/member-classes";
-
-const PACKAGE_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-const SOURCE_ROOT = path.join(PACKAGE_ROOT, "src");
-const STORE_ROOT = path.join(SOURCE_ROOT, "store");
-const MINT_MODULE = "src/store/operation-scope.ts";
-
-const BRAND_TYPE_NAMES = [
-  "OperationScoped",
-  "OperationBackend",
-  "StatementBackend",
-] as const;
-const MINT_FUNCTION_NAMES = new Set([
-  "enterOperation",
-  "scopeWriteFrameTarget",
-]);
-
-/** The assertion sites the mint module owns: one per mint. */
-const MINT_ASSERTION_SITES = [
-  { file: MINT_MODULE, function: "enterOperation" },
-  { file: MINT_MODULE, function: "scopeWriteFrameTarget" },
-] as const;
-
-/**
- * Store families, matched in order against the path relative to `src/store`;
- * the last entry catches every remaining store module.
- */
-const STORE_FAMILIES = [
-  { family: "operations/edge", pattern: /^operations\/edge-/ },
-  { family: "operations/node", pattern: /^operations\/node-/ },
-  { family: "operations/composition", pattern: /^operations\/composition-/ },
-  { family: "operations/write", pattern: /^operations\// },
-  { family: "recorded-capture", pattern: /^recorded-capture(\.ts$|\/)/ },
-  { family: "claims", pattern: /^claims\// },
-  { family: "search-sync", pattern: /^(embedding-sync|fulltext-)/ },
-  {
-    family: "collections",
-    pattern: /^(collection-factory\.ts$|collections\/)/,
-  },
-  { family: "store", pattern: /^/ },
-] as const;
-
-type StoreFamily = (typeof STORE_FAMILIES)[number]["family"];
+import {
+  brandKeyDeclaration,
+  countByFamily,
+  createScanProgram,
+  errorDiagnostics,
+  type ForgeRoute,
+  forgeSites,
+  MINT_MODULE,
+  PACKAGE_ROOT,
+  rawStatementTargets,
+  type ScanProgram,
+  type StoreFamily,
+  storeModules,
+} from "./helpers/operation-scope-scan";
 
 /**
  * Exported functions that accept a raw `TransactionBackend` for
@@ -96,410 +63,728 @@ const RAW_STATEMENT_TARGET_BASELINE = {
   "operations/edge": 27,
   "operations/node": 41,
   "operations/composition": 16,
-  "operations/write": 23,
+  "operations/write": 36,
   "recorded-capture": 51,
-  claims: 14,
-  "search-sync": 3,
-  collections: 2,
-  store: 14,
+  claims: 25,
+  "search-sync": 10,
+  collections: 4,
+  store: 44,
 } as const satisfies Record<StoreFamily, number>;
 
-function relativeToPackage(file: string): string {
-  return path.relative(PACKAGE_ROOT, file).replaceAll(path.sep, "/");
-}
+/** The forge sites `src` may contain: one assertion per mint. */
+const MINT_SITES = [
+  { file: MINT_MODULE, function: "enterOperation", route: "assertion" },
+  { file: MINT_MODULE, function: "scopeWriteFrameTarget", route: "assertion" },
+] as const;
 
-function collectTypeScriptFiles(directory: string): readonly string[] {
-  return fs
-    .readdirSync(directory, { encoding: "utf8", recursive: true })
-    .filter((entry) => entry.endsWith(".ts"))
-    .map((entry) => path.join(directory, entry))
-    .toSorted();
-}
+// ---------------------------------------------------------------------------
+// The forge-route fixture
+// ---------------------------------------------------------------------------
 
-function parse(file: string): ts.SourceFile {
-  return ts.createSourceFile(
-    file,
-    fs.readFileSync(file, "utf8"),
-    ts.ScriptTarget.ESNext,
-    true,
-  );
-}
+/** A path inside `src/store`, so the fixture resolves imports like a store module. */
+const FORGE_FIXTURE = "src/store/operation-scope-forge-routes.fixture.ts";
 
-function referencedTypeName(node: ts.TypeReferenceNode): string {
-  return ts.isIdentifier(node.typeName) ?
-      node.typeName.text
-    : node.typeName.right.text;
-}
+/** A real `src/store` module whose path ESLint borrows; its content is never linted. */
+const BORROWED_LINT_PATH = "src/store/edge-fetch.ts";
 
-/** Whether `node` spells a brand type, a local alias of one, or `typeof` a mint. */
-function mentionsBrand(
-  node: ts.Node,
-  brandNames: ReadonlySet<string>,
-): boolean {
-  if (
-    ts.isTypeReferenceNode(node) &&
-    brandNames.has(referencedTypeName(node))
-  ) {
-    return true;
-  }
-  // `import("./operation-scope").StatementBackend`
-  if (
-    ts.isImportTypeNode(node) &&
-    node.qualifier !== undefined &&
-    brandNames.has(
-      ts.isIdentifier(node.qualifier) ?
-        node.qualifier.text
-      : node.qualifier.right.text,
-    )
-  ) {
-    return true;
-  }
-  if (
-    ts.isTypeQueryNode(node) &&
-    ts.isIdentifier(node.exprName) &&
-    MINT_FUNCTION_NAMES.has(node.exprName.text)
-  ) {
-    return true;
-  }
-  return (
-    ts.forEachChild(
-      node,
-      (child) => mentionsBrand(child, brandNames) || undefined,
-    ) ?? false
-  );
+const FORGE_PREAMBLE = `
+import type { GraphBackend, TransactionBackend } from "../backend/types";
+import type { GraphDef } from "../core/define-graph";
+import type { EdgeCollectionConfig } from "./collections/edge-collection";
+import type * as scope from "./operation-scope";
+import {
+  enterOperation,
+  type OperationBackend,
+  type StatementBackend,
+} from "./operation-scope";
+import {
+  type EdgeOperationContext,
+  executeEdgeCreate,
+} from "./operations/edge-operations";
+import type { CreateEdgeInput, Edge } from "./types";
+
+declare const raw: TransactionBackend;
+declare const ctx: EdgeOperationContext<GraphDef>;
+declare const input: CreateEdgeInput;
+type Loose = (
+  context: typeof ctx,
+  edge: CreateEdgeInput,
+  backend: TransactionBackend,
+) => Promise<Edge>;
+type LooseHolder = Readonly<{
+  create(
+    context: typeof ctx,
+    edge: CreateEdgeInput,
+    backend: TransactionBackend,
+  ): Promise<Edge>;
+}>;
+function identity<T>(value: unknown): T {
+  return value as T;
 }
+function withValue<T>(
+  value: unknown,
+  use: (value: T) => Promise<Edge>,
+): Promise<Edge> {
+  return use(value as T);
+}
+`;
 
 /**
- * The brand type names plus every name in `src` that can stand for one: a
- * type alias or interface whose declaration mentions a brand type, and a
- * renamed import of one. Closed to a fixed point, by name, so a chain of
- * aliases across modules is followed. A same-named unrelated type would be
- * swept in too; that fails loudly as an extra site rather than hiding one.
- *
- * The trees are walked once to collect the declarations that can introduce a
- * name; the fixed point iterates over that short list, not over every tree.
+ * Which layer refuses a route. `typeErrors`: the diagnostic codes the route's
+ * code draws, so a case cannot pass by failing to compile for an unrelated
+ * reason (2379: an argument not assignable to the parameter).
  */
-function brandNameClosure(
-  sources: readonly ts.SourceFile[],
-): ReadonlySet<string> {
-  const declarations: (
-    ts.TypeAliasDeclaration | ts.InterfaceDeclaration | ts.ImportSpecifier
-  )[] = [];
-  for (const source of sources) {
-    const collect = (node: ts.Node): void => {
-      if (
-        ts.isTypeAliasDeclaration(node) ||
-        ts.isInterfaceDeclaration(node) ||
-        (ts.isImportSpecifier(node) && node.propertyName !== undefined)
-      ) {
-        declarations.push(node);
-      }
-      ts.forEachChild(node, collect);
-    };
-    collect(source);
-  }
-
-  function introducesBrandName(
-    declaration: (typeof declarations)[number],
-    names: ReadonlySet<string>,
-  ): boolean {
-    if (names.has(declaration.name.text)) return false;
-    return ts.isImportSpecifier(declaration) ?
-        names.has(declaration.propertyName?.text ?? "")
-      : mentionsBrand(declaration, names);
-  }
-
-  const names = new Set<string>(BRAND_TYPE_NAMES);
-  for (;;) {
-    const added = declarations.filter((declaration) =>
-      introducesBrandName(declaration, names),
-    );
-    if (added.length === 0) return names;
-    for (const declaration of added) names.add(declaration.name.text);
-  }
-}
-
-type AssertionSite = Readonly<{ file: string; function: string }>;
-
-function enclosingFunctionName(node: ts.Node): string {
-  for (let current = node.parent; ; current = current.parent) {
-    if (ts.isSourceFile(current)) return "<module>";
-    if (ts.isFunctionDeclaration(current) && current.name !== undefined) {
-      return current.name.text;
-    }
-  }
-}
-
-/**
- * Every place in `src` that produces a branded value from an unbranded one:
- * an `as` / angle-bracket assertion to a type that mentions a brand, and a
- * call or construction whose explicit type arguments mention one.
- */
-function brandAssertionSites(): readonly AssertionSite[] {
-  const sources = collectTypeScriptFiles(SOURCE_ROOT).map((file) =>
-    parse(file),
-  );
-  const brandNames = brandNameClosure(sources);
-  const sites: AssertionSite[] = [];
-  for (const source of sources) {
-    const visit = (node: ts.Node): void => {
-      const assertedType =
-        ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) ?
-          node.type
-        : undefined;
-      const typeArguments =
-        ts.isCallExpression(node) || ts.isNewExpression(node) ?
-          node.typeArguments
-        : undefined;
-      if (
-        (assertedType !== undefined &&
-          mentionsBrand(assertedType, brandNames)) ||
-        (typeArguments?.some((argument) =>
-          mentionsBrand(argument, brandNames),
-        ) ??
-          false)
-      ) {
-        sites.push({
-          file: relativeToPackage(source.fileName),
-          function: enclosingFunctionName(node),
-        });
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  return sites;
-}
-
-function storeFamilyOf(file: string): StoreFamily {
-  const relative = path.relative(STORE_ROOT, file).replaceAll(path.sep, "/");
-  const match = STORE_FAMILIES.find((entry) => entry.pattern.test(relative));
-  if (match === undefined) throw new Error(`no store family for ${relative}`);
-  return match.family;
-}
-
-/** Backend members that issue a statement: every class but `identity`. */
-const STATEMENT_MEMBER_NAMES: ReadonlySet<string> = new Set(
-  Object.entries(GRAPH_BACKEND_MEMBER_CLASSES)
-    .filter(([memberClass]) => memberClass !== "identity")
-    .flatMap(([, members]) => [...members]),
-);
-
-type RawStatementTarget = Readonly<{
-  family: StoreFamily;
-  file: string;
-  function: string;
+type Refusal = Readonly<{
+  typeErrors: readonly number[];
+  lint: readonly LintCatch[];
+  scan: readonly ForgeRoute[];
 }>;
 
 /**
- * Exported functions in `src/store` with a parameter that accepts a raw
- * `TransactionBackend` and exposes a statement-issuing member. A parameter a
- * `number` is also assignable to (`unknown`, an unconstrained generic's
- * erasure) is not a backend parameter and is skipped.
+ * Lint rules that refuse a forge: the brand ban, and the type-aware `any`
+ * rules from the shared config.
  */
-function rawStatementTargets(): readonly RawStatementTarget[] {
-  const parsed = ts.getParsedCommandLineOfConfigFile(
-    path.join(PACKAGE_ROOT, "tsconfig.json"),
-    {},
-    {
-      ...ts.sys,
-      onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
-        throw new Error(
-          ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
-        );
-      },
-    },
-  );
-  if (parsed === undefined) throw new Error("tsconfig.json did not parse");
-  const storeFiles = parsed.fileNames
-    .map((file) => path.resolve(file))
-    .filter((file) => file.startsWith(STORE_ROOT + path.sep));
-  const program = ts.createProgram({
-    rootNames: storeFiles,
-    options: { ...parsed.options, noEmit: true },
-  });
-  const checker = program.getTypeChecker();
+type LintCatch =
+  | "brand-ban"
+  | "@typescript-eslint/ban-ts-comment"
+  | "@typescript-eslint/no-explicit-any"
+  | "@typescript-eslint/no-unsafe-argument"
+  | "@typescript-eslint/no-unsafe-call";
 
-  const backendTypes = program.getSourceFile(
-    path.join(SOURCE_ROOT, "backend", "types.ts"),
-  );
-  const backendModule =
-    backendTypes === undefined ? undefined : (
-      checker.getSymbolAtLocation(backendTypes)
-    );
-  const transactionBackendSymbol =
-    backendModule === undefined ? undefined : (
-      checker
-        .getExportsOfModule(backendModule)
-        .find((symbol) => symbol.name === "TransactionBackend")
-    );
-  if (transactionBackendSymbol === undefined) {
-    throw new Error("TransactionBackend not found in src/backend/types.ts");
-  }
-  const rawTransaction = checker.getDeclaredTypeOfSymbol(
-    transactionBackendSymbol,
-  );
-  const numberType = checker.getNumberType();
+type ForgeCase = Readonly<{
+  route: string;
+  code: string;
+  refusal: Refusal;
+  /** Set only on an accepted gap: why no layer refuses it. */
+  gap?: string;
+}>;
 
-  function acceptsRawStatementTarget(
-    parameter: ts.ParameterDeclaration,
-  ): boolean {
-    const parameterType = checker.getTypeAtLocation(parameter);
-    if (checker.isTypeAssignableTo(numberType, parameterType)) return false;
-    if (!checker.isTypeAssignableTo(rawTransaction, parameterType))
-      return false;
-    return checker
-      .getPropertiesOfType(checker.getNonNullableType(parameterType))
-      .some((property) => STATEMENT_MEMBER_NAMES.has(property.name));
-  }
-
-  const found: RawStatementTarget[] = [];
-  for (const file of storeFiles) {
-    if (relativeToPackage(file) === MINT_MODULE) continue;
-    const source = program.getSourceFile(file);
-    if (source === undefined) continue;
-    for (const statement of source.statements) {
-      if (
-        !ts.isFunctionDeclaration(statement) ||
-        statement.name === undefined ||
-        statement.body === undefined ||
-        !(ts.getModifiers(statement) ?? []).some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-        )
-      ) {
-        continue;
-      }
-      if (
-        statement.parameters.some((parameter) =>
-          acceptsRawStatementTarget(parameter),
-        )
-      ) {
-        found.push({
-          family: storeFamilyOf(file),
-          file: relativeToPackage(file),
-          function: statement.name.text,
-        });
-      }
-    }
-  }
-  return found;
+function refusal(
+  typeErrors: readonly number[],
+  lint: readonly LintCatch[],
+  scan: readonly ForgeRoute[],
+): Refusal {
+  return { typeErrors, lint, scan };
 }
 
-function countByFamily(
-  targets: readonly RawStatementTarget[],
-): Record<StoreFamily, number> {
-  const counts = Object.fromEntries(
-    STORE_FAMILIES.map((entry) => [entry.family, 0]),
-  ) as Record<StoreFamily, number>;
-  for (const target of targets) counts[target.family] += 1;
-  return counts;
+/** Argument of type … is not assignable to parameter of type …. */
+const NOT_ASSIGNABLE = 2379;
+
+const FORGE_CASES: readonly ForgeCase[] = [
+  {
+    route: "passes a raw transaction (the baseline)",
+    code: `export function forgeNone() { return executeEdgeCreate(ctx, input, raw); }`,
+    refusal: refusal([NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "as, brand named directly",
+    code: `export function forgeDirect() { return executeEdgeCreate(ctx, input, raw as OperationBackend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, through a local alias",
+    code: `type Handle = StatementBackend;
+export function forgeAlias() { return executeEdgeCreate(ctx, input, raw as Handle); }`,
+    refusal: refusal([], [], ["assertion"]),
+  },
+  {
+    route: "as, through a renamed import",
+    code: `import { type StatementBackend as Renamed } from "./operation-scope";
+export function forgeRenamedImport() { return executeEdgeCreate(ctx, input, raw as Renamed); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, namespace-qualified brand",
+    code: `export function forgeQualified() { return executeEdgeCreate(ctx, input, raw as scope.StatementBackend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: 'as, inline import("…") type',
+    code: `export function forgeImportType() { return executeEdgeCreate(ctx, input, raw as import("./operation-scope").OperationBackend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, ReturnType of a mint",
+    code: `export function forgeMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof enterOperation>); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, ReturnType of a namespace-qualified mint",
+    code: `export function forgeQualifiedMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scope.enterOperation>); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, ReturnType of an instantiated qualified mint",
+    code: `export function forgeInstantiatedMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scope.scopeWriteFrameTarget<TransactionBackend>>); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "as, Parameters of a brand consumer",
+    code: `export function forgeConsumerParameters() { return executeEdgeCreate(ctx, input, raw as Parameters<typeof executeEdgeCreate>[2]); }`,
+    refusal: refusal([], [], ["assertion"]),
+  },
+  {
+    route: "as, indexed access into a config type",
+    code: `export function forgeIndexedAccess() { return executeEdgeCreate(ctx, input, raw as Parameters<EdgeCollectionConfig["executeCreate"]>[1]); }`,
+    refusal: refusal([], [], ["assertion"]),
+  },
+  {
+    route: "as never into a branded parameter",
+    code: `export function forgeNever() { return executeEdgeCreate(ctx, input, raw as never); }`,
+    refusal: refusal([], [], ["assertion"]),
+  },
+  {
+    route: "as any into a branded parameter",
+    code: `export function forgeAny() { return executeEdgeCreate(ctx, input, raw as any); }`,
+    refusal: refusal(
+      [],
+      [
+        "@typescript-eslint/no-explicit-any",
+        "@typescript-eslint/no-unsafe-argument",
+      ],
+      ["assertion"],
+    ),
+  },
+  {
+    route: "as unknown as the brand",
+    code: `export function forgeDoubleAssertion() { return executeEdgeCreate(ctx, input, raw as unknown as StatementBackend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "an any-typed value into a branded parameter",
+    code: `export function forgeAnyValue() { const loose = JSON.parse("{}"); return executeEdgeCreate(ctx, input, loose); }`,
+    refusal: refusal(
+      [],
+      ["@typescript-eslint/no-unsafe-argument"],
+      ["any-flow"],
+    ),
+  },
+  {
+    route: "satisfies the brand",
+    code: `export function forgeSatisfies() { return executeEdgeCreate(ctx, input, raw satisfies StatementBackend); }`,
+    refusal: refusal([NOT_ASSIGNABLE, 1360], [], []),
+  },
+  {
+    route: "satisfies, then widened by assertion",
+    code: `export function forgeSatisfiesWidened() { return executeEdgeCreate(ctx, input, (raw satisfies TransactionBackend) as StatementBackend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "a type predicate",
+    code: `export function forgeTypePredicate() {
+  const isScoped = (backend: TransactionBackend): backend is OperationBackend => backend === raw;
+  return isScoped(raw) ? executeEdgeCreate(ctx, input, raw) : undefined;
+}`,
+    refusal: refusal([], ["brand-ban"], ["type-predicate"]),
+  },
+  {
+    route: "an assertion function",
+    code: `export function forgeAssertionFunction() {
+  const assertScoped: (backend: TransactionBackend) => asserts backend is OperationBackend = () => undefined;
+  const backend = raw;
+  assertScoped(backend);
+  return executeEdgeCreate(ctx, input, backend);
+}`,
+    refusal: refusal([], ["brand-ban"], ["type-predicate"]),
+  },
+  {
+    route: "object spread of a raw transaction",
+    code: `export function forgeSpreadRaw() { return executeEdgeCreate(ctx, input, { ...raw }); }`,
+    refusal: refusal([NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "object spread laundering raw members under a borrowed brand",
+    code: `export function forgeSpreadLaunder(scoped: OperationBackend) { return executeEdgeCreate(ctx, input, { ...scoped, ...raw }); }`,
+    refusal: refusal([], [], ["branded-copy"]),
+  },
+  {
+    route: "Object.assign of a borrowed brand onto a raw transaction",
+    code: `export function forgeObjectAssign(scoped: OperationBackend) { return executeEdgeCreate(ctx, input, Object.assign(raw, scoped)); }`,
+    refusal: refusal([], [], ["branded-copy"]),
+  },
+  {
+    route: "spelling the brand key",
+    code: `export async function forgeSpellKey() {
+  const { OPERATION_SCOPED } = await import("./operation-scope");
+  return executeEdgeCreate(ctx, input, { ...raw, [OPERATION_SCOPED]: "operation" as const });
+}`,
+    refusal: refusal([2339, NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "a generic call with the brand as explicit type argument",
+    code: `export function forgeTypeArgument() { return executeEdgeCreate(ctx, input, identity<StatementBackend>(raw)); }`,
+    refusal: refusal([], [], ["generic-instantiation"]),
+  },
+  {
+    route: "a generic call inferring the brand from its return context",
+    code: `export function forgeInferredTypeArgument() { return executeEdgeCreate(ctx, input, identity(raw)); }`,
+    refusal: refusal([], [], ["generic-instantiation"]),
+  },
+  {
+    route: "a generic call handing the brand to a callback",
+    code: `export function forgeCallback() { return withValue(raw, (backend: StatementBackend) => executeEdgeCreate(ctx, input, backend)); }`,
+    refusal: refusal([], [], ["generic-instantiation"]),
+  },
+  {
+    route: "an overload promising the brand",
+    code: `export function forgeOverload(backend: TransactionBackend): StatementBackend;
+export function forgeOverload(backend: TransactionBackend): GraphBackend | TransactionBackend { return backend; }`,
+    refusal: refusal([], [], ["unverified-signature"]),
+  },
+  {
+    route: "an ambient declaration of a branded value",
+    code: `export declare const forgeDeclared: StatementBackend;`,
+    refusal: refusal([], [], ["unverified-binding"]),
+  },
+  {
+    route: "a definite-assignment assertion on a branded binding",
+    code: `export function forgeDefiniteAssignment() { let forged!: StatementBackend; return executeEdgeCreate(ctx, input, forged); }`,
+    refusal: refusal([], [], ["unverified-binding"]),
+  },
+  {
+    route: "a declared class field of the brand",
+    code: `export class ForgeHolder { declare readonly forged: StatementBackend; }`,
+    refusal: refusal([], [], ["unverified-binding"]),
+  },
+  {
+    route: "@ts-expect-error over a raw call",
+    code: `export function forgeExpectError() {
+  // @ts-expect-error -- forged statement target
+  return executeEdgeCreate(ctx, input, raw);
+}`,
+    refusal: refusal([], [], ["suppression"]),
+  },
+  {
+    route: "@ts-ignore over a raw call",
+    code: `export function forgeIgnore() {
+  // @ts-ignore
+  return executeEdgeCreate(ctx, input, raw);
+}`,
+    refusal: refusal(
+      [],
+      ["@typescript-eslint/ban-ts-comment"],
+      ["suppression"],
+    ),
+  },
+  {
+    route: "a function type asserted to return the brand",
+    code: `export function forgeFunctionType() {
+  const forge = ((backend: TransactionBackend) => backend) as unknown as (backend: TransactionBackend) => StatementBackend;
+  return executeEdgeCreate(ctx, input, forge(raw));
+}`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "a structure asserted to hold the brand",
+    code: `export function forgeStructure() { return executeEdgeCreate(ctx, input, ({ backend: raw } as { backend: StatementBackend }).backend); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "a promise asserted to resolve to the brand",
+    code: `export async function forgePromise() { return executeEdgeCreate(ctx, input, await (Promise.resolve(raw) as Promise<StatementBackend>)); }`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route: "an array asserted to hold the brand",
+    code: `export async function forgeArray() {
+  const targets = [raw] as StatementBackend[];
+  for (const target of targets) await executeEdgeCreate(ctx, input, target);
+}`,
+    refusal: refusal([], ["brand-ban"], ["assertion"]),
+  },
+  {
+    route:
+      "object spread copying a statement target (a union with one branded constituent)",
+    code: `export function forgeUnionSpread(target: StatementBackend) { return executeEdgeCreate(ctx, input, { ...target }); }`,
+    refusal: refusal([], [], ["branded-copy"]),
+  },
+  {
+    route: "the consumer asserted to a raw-accepting signature",
+    code: `export function forgeConsumerAssertion() { return (executeEdgeCreate as Loose)(ctx, input, raw); }`,
+    refusal: refusal([], [], ["consumer-widening"]),
+  },
+  {
+    route: "the consumer as never into a raw-accepting binding",
+    code: `export function forgeConsumerNever() { const loose: Loose = executeEdgeCreate as never; return loose(ctx, input, raw); }`,
+    refusal: refusal([], [], ["consumer-widening"]),
+  },
+  {
+    route: "the consumer as any",
+    code: `export function forgeConsumerAny() { return (executeEdgeCreate as any)(ctx, input, raw); }`,
+    refusal: refusal(
+      [],
+      [
+        "@typescript-eslint/no-explicit-any",
+        "@typescript-eslint/no-unsafe-call",
+      ],
+      ["consumer-widening"],
+    ),
+  },
+  {
+    route: "the consumer through method-parameter bivariance",
+    code: `export function forgeMethodBivariance() {
+  const loose: { create(context: typeof ctx, edge: CreateEdgeInput, backend: TransactionBackend): Promise<Edge> } = { create: executeEdgeCreate };
+  return loose.create(ctx, input, raw);
+}`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route: "a consumer holder flowing whole into a bivariant method binding",
+    code: `export function forgeHolderFlow() {
+  const holder = { create: executeEdgeCreate };
+  const loose: LooseHolder = holder;
+  return loose.create(ctx, input, raw);
+}`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route:
+      "a consumer holder re-asserted to its own type into a bivariant method binding",
+    code: `export function forgeHolderAssertion() {
+  const holder = { create: executeEdgeCreate };
+  const loose: LooseHolder = holder as typeof holder;
+  return loose.create(ctx, input, raw);
+}`,
+    refusal: refusal([], [], ["consumer-widening"]),
+  },
+  {
+    route: "the consumer as unknown as a raw-accepting signature",
+    code: `export function forgeConsumerDoubleAssertion() { return (executeEdgeCreate as unknown as Loose)(ctx, input, raw); }`,
+    refusal: refusal([], [], ["consumer-widening"]),
+  },
+  {
+    route: "the consumer hidden in unknown and re-asserted",
+    code: `export function forgeConsumerOpaque() { const opaque: unknown = executeEdgeCreate; return (opaque as Loose)(ctx, input, raw); }`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route: "the consumer through Reflect.apply's untyped overload",
+    code: `export function forgeReflectApply(): unknown { return Reflect.apply(executeEdgeCreate, undefined, [ctx, input, raw]); }`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route: "the consumer through Function.prototype.call",
+    code: `export function forgeCall() { return executeEdgeCreate.call(undefined, ctx, input, raw); }`,
+    refusal: refusal([NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "the consumer through Function.prototype.bind",
+    code: `export function forgeBind() { return executeEdgeCreate.bind(undefined, ctx, input)(raw); }`,
+    refusal: refusal([NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "a wrapper with a raw parameter",
+    code: `export function forgeWrapper(backend: TransactionBackend) { return executeEdgeCreate(ctx, input, backend); }`,
+    refusal: refusal([NOT_ASSIGNABLE], [], []),
+  },
+  {
+    route: "a call to a mint",
+    code: `export function forgeMintCall() { return executeEdgeCreate(ctx, input, enterOperation(raw)); }`,
+    refusal: refusal([], [], []),
+    gap: "Not a forge: minting is the sanctioned route. What the brand proves is that a call path passes a mint where it can be reviewed; where mints may be called is not constrained by this ratchet.",
+  },
+  {
+    route: "a brand demand two members deep, hidden in unknown and re-asserted",
+    code: `export function forgeDeepOpaque() {
+  const holder = { operations: { create: executeEdgeCreate } };
+  const opaque: unknown = holder;
+  return (opaque as { operations: { create: Loose } }).operations.create(ctx, input, raw);
+}`,
+    refusal: refusal([], [], []),
+    gap: "A value is flagged entering an opaque type only when the brand demand is at most one member deep. Every store instance holds brand-demanding operations two members deep and is legitimately keyed into WeakMaps and asserted to its public flavor, so a deeper search would flag those instead of forges. Reaching the demand again needs a second assertion from unknown that names the full member path.",
+  },
+];
+
+function routeLine(index: number): string {
+  return `// route ${index}`;
 }
+
+const FORGE_SOURCE = [
+  FORGE_PREAMBLE,
+  ...FORGE_CASES.map(
+    (forgeCase, index) => `${routeLine(index)}\n${forgeCase.code}\n`,
+  ),
+].join("\n");
+
+/** The case index of each 1-based fixture line; preamble lines map to -1. */
+function caseIndexOfLine(line: number): number {
+  const lines = FORGE_SOURCE.split("\n");
+  for (let current = line - 1; current >= 0; current -= 1) {
+    const match = /^\/\/ route (\d+)$/.exec(lines[current] ?? "");
+    if (match?.[1] !== undefined) return Number(match[1]);
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// The raw-target fixture
+// ---------------------------------------------------------------------------
+
+/** Matches the `operations/edge` family pattern. */
+const RAW_TARGET_FIXTURE = "src/store/operations/edge-raw-target.fixture.ts";
+
+const RAW_TARGET_SOURCE = `
+import type { TransactionBackend } from "../../backend/types";
+import type { StatementBackend } from "../operation-scope";
+
+type Reader = Pick<TransactionBackend, "getNode">;
+
+export async function constrainedGeneric<Target extends Reader>(target: Target): Promise<void> {
+  await target.getNode("graph", "Kind", "id");
+}
+export async function constrainedGenericOrUndefined<Target extends Reader>(target: Target | undefined): Promise<void> {
+  await target?.getNode("graph", "Kind", "id");
+}
+export async function constrainedIntersection<Target extends Reader>(target: Target & Readonly<{ label?: string }>): Promise<void> {
+  await target.getNode("graph", "Kind", "id");
+}
+export async function structuralMember(context: Readonly<{ graphId: string; backend: Reader }>): Promise<void> {
+  await context.backend.getNode(context.graphId, "Kind", "id");
+}
+export async function nestedStructuralMember(context: Readonly<{ write: Readonly<{ target: Reader }> }>): Promise<void> {
+  await context.write.target.getNode("graph", "Kind", "id");
+}
+export async function constrainedStructuralMember<Context extends Readonly<{ backend: Reader }>>(context: Context): Promise<void> {
+  await context.backend.getNode("graph", "Kind", "id");
+}
+export async function arrayOfTargets(targets: readonly Reader[]): Promise<void> {
+  for (const target of targets) await target.getNode("graph", "Kind", "id");
+}
+export async function unionWithNonBackend(target: Reader | Readonly<{ offline: true }>): Promise<void> {
+  if ("getNode" in target) await target.getNode("graph", "Kind", "id");
+}
+export async function fourMembersDeep(context: Readonly<{ a: Readonly<{ b: Readonly<{ c: Readonly<{ backend: Reader }> }> }> }>): Promise<void> {
+  await context.a.b.c.backend.getNode("graph", "Kind", "id");
+}
+export async function readerOrCount(target: Reader | number): Promise<void> {
+  if (typeof target !== "number") await target.getNode("graph", "Kind", "id");
+}
+export const arrowTarget = async (target: Reader): Promise<void> => {
+  await target.getNode("graph", "Kind", "id");
+};
+
+// Not raw statement targets.
+export function identityOnly(target: Pick<TransactionBackend, "dialect">): string {
+  return target.dialect;
+}
+export function unconstrained<T>(value: T): T {
+  return value;
+}
+export function opaque(value: unknown): unknown {
+  return value;
+}
+// Beyond MEMBER_DEPTH (4): the bound of the member search.
+export async function fiveMembersDeep(context: Readonly<{ a: Readonly<{ b: Readonly<{ c: Readonly<{ d: Readonly<{ backend: Reader }> }> }> }> }>): Promise<void> {
+  await context.a.b.c.d.backend.getNode("graph", "Kind", "id");
+}
+export async function scopedOnly(target: StatementBackend): Promise<void> {
+  await target.getNode("graph", "Kind", "id");
+}
+
+declare const raw: TransactionBackend;
+async function callsWithRaw(): Promise<void> {
+  await constrainedGeneric(raw);
+  await constrainedGenericOrUndefined(raw);
+  await constrainedIntersection(raw);
+  await structuralMember({ graphId: "graph", backend: raw });
+  await nestedStructuralMember({ write: { target: raw } });
+  await constrainedStructuralMember({ backend: raw });
+  await arrayOfTargets([raw]);
+  await unionWithNonBackend(raw);
+  await fourMembersDeep({ a: { b: { c: { backend: raw } } } });
+  await readerOrCount(raw);
+  await arrowTarget(raw);
+}
+void callsWithRaw;
+`;
+
+const RAW_TARGET_FIXTURE_COUNTED = [
+  "constrainedGeneric",
+  "constrainedGenericOrUndefined",
+  "constrainedIntersection",
+  "structuralMember",
+  "nestedStructuralMember",
+  "constrainedStructuralMember",
+  "arrayOfTargets",
+  "unionWithNonBackend",
+  "fourMembersDeep",
+  "readerOrCount",
+  "arrowTarget",
+] as const;
+
+// ---------------------------------------------------------------------------
+// Lint
+// ---------------------------------------------------------------------------
 
 const eslint = new ESLint({ cwd: PACKAGE_ROOT });
-
-/** A `src/store` module whose path the fixture borrows; its content is never linted. */
-const BORROWED_STORE_PATH = "src/store/edge-fetch.ts";
 
 const OPERATION_BRAND_MESSAGES = new Set(
   OPERATION_BRAND_RESTRICTIONS.map((restriction) => restriction.message),
 );
 
-async function brandReportLines(source: string): Promise<readonly number[]> {
+const LINT_CATCHES: ReadonlySet<string> = new Set<LintCatch>([
+  "@typescript-eslint/ban-ts-comment",
+  "@typescript-eslint/no-explicit-any",
+  "@typescript-eslint/no-unsafe-argument",
+  "@typescript-eslint/no-unsafe-call",
+]);
+
+async function lintCatches(
+  source: string,
+): Promise<readonly Readonly<{ line: number; rule: LintCatch }>[]> {
   const results = await eslint.lintText(source, {
-    filePath: path.join(PACKAGE_ROOT, BORROWED_STORE_PATH),
+    filePath: path.join(PACKAGE_ROOT, BORROWED_LINT_PATH),
   });
   return results
     .flatMap((result) => result.messages)
-    .filter(
-      (message) =>
+    .flatMap((message) => {
+      if (
         message.ruleId === "no-restricted-syntax" &&
-        OPERATION_BRAND_MESSAGES.has(message.message),
-    )
-    .map((message) => message.line);
+        OPERATION_BRAND_MESSAGES.has(message.message)
+      ) {
+        return [{ line: message.line, rule: "brand-ban" as const }];
+      }
+      return message.ruleId !== null && LINT_CATCHES.has(message.ruleId) ?
+          [{ line: message.line, rule: message.ruleId as LintCatch }]
+        : [];
+    });
 }
 
+function sortedUnique<T extends string>(values: readonly T[]): readonly T[] {
+  return [...new Set(values)].toSorted();
+}
+
+// ---------------------------------------------------------------------------
+
 describe("operation-scope ratchet", () => {
-  it(
-    "the lint ban fires on each direct forge spelling",
-    { timeout: 120_000 },
-    async () => {
-      const fixture = [
-        'import type { TransactionBackend } from "../backend/types";',
-        'import type * as scope from "./operation-scope";',
-        "import {",
-        "  type enterOperation,",
-        "  type OperationBackend,",
-        "  type StatementBackend as Target,",
-        '} from "./operation-scope";',
-        "declare const raw: TransactionBackend;",
-        "export const direct = raw as OperationBackend;",
-        "export const qualified = raw as scope.StatementBackend;",
-        "export const viaMint = raw as ReturnType<typeof enterOperation>;",
-        'export const inline = raw as import("./operation-scope").OperationBackend;',
-        "export const renamed: Target | undefined = undefined;",
-      ].join("\n");
+  let scan: ScanProgram;
 
-      // Line 6 is the renamed import; 9–12 are the four assertion spellings.
-      expect(await brandReportLines(fixture)).toEqual([6, 9, 10, 11, 12]);
-    },
-  );
+  // Building the checker program over every `src` module is the expensive
+  // step; coverage instrumentation slows it well past the default timeout.
+  beforeAll(() => {
+    scan = createScanProgram({
+      [FORGE_FIXTURE]: FORGE_SOURCE,
+      [RAW_TARGET_FIXTURE]: RAW_TARGET_SOURCE,
+    });
+  }, 180_000);
 
-  // Parses every `src` module; coverage instrumentation slows that well past
-  // the default timeout.
-  it(
-    "the brand is asserted only at the two mints",
-    { timeout: 120_000 },
-    () => {
-      expect(brandAssertionSites()).toEqual(MINT_ASSERTION_SITES);
-    },
-  );
-
-  it("the assertion scan sees aliases, brand type arguments and inline import types", () => {
-    const source = ts.createSourceFile(
-      "fixture.ts",
-      [
-        "type Handle = StatementBackend;",
-        "declare function identity<T>(value: unknown): T;",
-        "const aliased = raw as Handle;",
-        "const viaTypeArgument = identity<OperationBackend>(raw);",
-        'const inlineImport = raw as import("./operation-scope").StatementBackend;',
-      ].join("\n"),
-      ts.ScriptTarget.ESNext,
-      true,
-    );
-    const names = brandNameClosure([source]);
-    expect(names.has("Handle")).toBe(true);
-
-    const flagged: string[] = [];
-    const visit = (node: ts.Node): void => {
-      if (ts.isAsExpression(node) && mentionsBrand(node.type, names)) {
-        flagged.push(node.getText(source));
-      }
-      if (
-        ts.isCallExpression(node) &&
-        (node.typeArguments?.some((argument) =>
-          mentionsBrand(argument, names),
-        ) ??
-          false)
-      ) {
-        flagged.push(node.getText(source));
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-    expect(flagged).toEqual([
-      "raw as Handle",
-      "identity<OperationBackend>(raw)",
-      'raw as import("./operation-scope").StatementBackend',
-    ]);
+  it("the brand key is declared-only and module-private", () => {
+    expect(brandKeyDeclaration(scan)).toEqual({
+      declaredOnly: true,
+      exported: false,
+    });
   });
 
-  // One test, because building the checker program is the expensive step.
+  // Its own program: the failed augmentation still lists the key among the
+  // module's exports, which would let the key-spelling route above compile.
+  it(
+    "a module augmentation cannot re-export the brand key",
+    { timeout: 180_000 },
+    () => {
+      const augmentation = "src/store/operation-scope-augmentation.fixture.ts";
+      const isolated = createScanProgram({
+        [augmentation]: [
+          'declare module "./operation-scope" {',
+          "  export { OPERATION_SCOPED };",
+          "}",
+          "export {};",
+        ].join("\n"),
+      });
+      // 2666: exports are not permitted in a module augmentation; 2304: the
+      // key is not visible to it.
+      expect(
+        errorDiagnostics(isolated, augmentation).map(([, code]) => code),
+      ).toEqual([2666, 2304]);
+    },
+  );
+
+  it(
+    "every forge route is refused by the layer the table names, or is a stated gap",
+    { timeout: 180_000 },
+    async () => {
+      const forgeFixturePath = path.join(PACKAGE_ROOT, FORGE_FIXTURE);
+      const typeErrors = errorDiagnostics(scan, FORGE_FIXTURE);
+      const typeErrorLines = typeErrors.map(([line]) => line);
+      const lintHits = await lintCatches(FORGE_SOURCE);
+      const scanHits = forgeSites(scan, [forgeFixturePath]);
+
+      const observed = FORGE_CASES.map((_, index) => ({
+        typeErrors: [
+          ...new Set(
+            typeErrors
+              .filter(([line]) => caseIndexOfLine(line) === index)
+              .map(([, code]) => code),
+          ),
+        ].toSorted((left, right) => left - right),
+        lint: sortedUnique(
+          lintHits
+            .filter((hit) => caseIndexOfLine(hit.line) === index)
+            .map((hit) => hit.rule),
+        ),
+        scan: sortedUnique(
+          scanHits
+            .filter((site) => caseIndexOfLine(site.line) === index)
+            .map((site) => site.route),
+        ),
+      }));
+      const expected = FORGE_CASES.map((forgeCase) => ({
+        typeErrors: forgeCase.refusal.typeErrors.toSorted(
+          (left, right) => left - right,
+        ),
+        lint: sortedUnique(forgeCase.refusal.lint),
+        scan: sortedUnique(forgeCase.refusal.scan),
+      }));
+
+      // The preamble compiles, lints and scans clean, so every hit above
+      // belongs to a route.
+      expect({
+        typeErrors: typeErrorLines.filter((line) => caseIndexOfLine(line) < 0),
+        lint: lintHits.filter((hit) => caseIndexOfLine(hit.line) < 0),
+        scan: scanHits.filter((site) => caseIndexOfLine(site.line) < 0),
+      }).toEqual({ typeErrors: [], lint: [], scan: [] });
+
+      expect(
+        FORGE_CASES.map((forgeCase, index) => ({
+          route: forgeCase.route,
+          ...observed[index],
+        })),
+      ).toEqual(
+        FORGE_CASES.map((forgeCase, index) => ({
+          route: forgeCase.route,
+          ...expected[index],
+        })),
+      );
+
+      // Every route that is not a stated gap is refused somewhere, and a
+      // stated gap is refused nowhere.
+      for (const forgeCase of FORGE_CASES) {
+        const refused =
+          forgeCase.refusal.typeErrors.length > 0 ||
+          forgeCase.refusal.lint.length > 0 ||
+          forgeCase.refusal.scan.length > 0;
+        expect({ route: forgeCase.route, refused }).toEqual({
+          route: forgeCase.route,
+          refused: forgeCase.gap === undefined,
+        });
+      }
+    },
+  );
+
+  it("src forges the brand only at the two mints", { timeout: 180_000 }, () => {
+    expect(
+      forgeSites(scan, scan.sourceFiles).map((site) => ({
+        file: site.file,
+        function: site.function,
+        route: site.route,
+      })),
+    ).toEqual(MINT_SITES);
+  });
+
   it(
     "raw statement targets per store family only decrease, and the edge-create entry points are off the raw surface",
-    { timeout: 120_000 },
+    { timeout: 180_000 },
     () => {
-      const targets = rawStatementTargets();
+      const targets = rawStatementTargets(scan, storeModules(scan));
       expect(countByFamily(targets)).toEqual(RAW_STATEMENT_TARGET_BASELINE);
 
       const rawFunctions = new Set(targets.map((target) => target.function));
@@ -512,4 +797,19 @@ describe("operation-scope ratchet", () => {
       ).toEqual([]);
     },
   );
+
+  it("counts a raw target behind a constraint, union, intersection, member or element", () => {
+    // Each counted helper is called with a raw transaction and compiles.
+    expect(errorDiagnostics(scan, RAW_TARGET_FIXTURE)).toEqual([]);
+
+    const fixture = rawStatementTargets(scan, [
+      path.join(PACKAGE_ROOT, RAW_TARGET_FIXTURE),
+    ]);
+    expect(fixture.map((target) => target.function)).toEqual(
+      RAW_TARGET_FIXTURE_COUNTED,
+    );
+    expect(new Set(fixture.map((target) => target.family))).toEqual(
+      new Set(["operations/edge"]),
+    );
+  });
 });
