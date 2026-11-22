@@ -2410,7 +2410,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
         FROM (
       SELECT "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" AS node_id, (1 - (("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $6::vector))) AS score
       FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $7 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = $8)
+      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $7 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $8)
       ORDER BY ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $9::vector) ASC
       LIMIT $10
     ) AS tg_ann_src
@@ -4894,7 +4894,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         FROM (
         SELECT "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-        WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = ?)
+        WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
