@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { count, expr } from "../../../src";
+import { count, expr, field } from "../../../src";
 import type { IntegrationStore } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
 const COMPANY_COUNT = 10;
+
+/** The traversal-level LIMIT the pushdown wraps around a traversal CTE. */
+const TRAVERSAL_LEVEL_LIMIT = /\) AS traversal_rows\s+LIMIT\b/;
 
 /**
  * One article whose author works at {@link COMPANY_COUNT} companies: a
@@ -119,6 +122,62 @@ export function registerTraversalLimitPushdownIntegrationTests(
       const [best] = await articles().execute();
       expect(best).toEqual({ title: strong });
       expect(await articles().limit(1).execute()).toEqual([{ title: strong }]);
+
+      // Which rows an unordered traversal CTE keeps is the planner's choice,
+      // so the rows alone cannot prove the pushdown is gone: the compiled
+      // statement must carry no traversal-level LIMIT. The
+      // same traversal without the search predicate does, so the pattern can
+      // match.
+      expect(articles().limit(3).toSQL().sql).not.toMatch(
+        TRAVERSAL_LEVEL_LIMIT,
+      );
+      const unranked = store
+        .query()
+        .from("Company", "c")
+        .whereNode("c", (c) => c.id.eq(company.id))
+        .traverse("worksAt", "employment", { direction: "in" })
+        .to("Person", "p")
+        .traverse("authoredBy", "authorship", { direction: "in" })
+        .to("Article", "a")
+        .select((selected) => ({ title: selected.a.title }));
+      expect(unranked.limit(3).toSQL().sql).toMatch(TRAVERSAL_LEVEL_LIMIT);
+    });
+
+    it("sorts every match by an aggregate() output name before limiting, with no aggregate in the projection", async () => {
+      const store = context.getStore();
+      const article = await store.nodes.Article.create({
+        title: "Climate notes",
+        body: "Climate notes",
+        category: "x",
+        published: true,
+      });
+      const author = await store.nodes.Person.create({ name: "Author" });
+      await store.edges.authoredBy.create(article, author);
+      // The alphabetically first company is written last, after more than
+      // `limit * 8` others.
+      for (let index = COMPANY_COUNT; index >= 0; index -= 1) {
+        const company = await store.nodes.Company.create({
+          name: index === 0 ? "Aardvark Ltd" : `Company `,
+        });
+        await store.edges.worksAt.create(author, company, { role: "advisor" });
+      }
+
+      const names = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .whereNode("a", (a) => a.id.eq(article.id))
+          .traverse("authoredBy", "authorship")
+          .to("Person", "p")
+          .traverse("worksAt", "employment")
+          .to("Company", "c")
+          .aggregate({ name: field("c", "name") })
+          .orderBy("name", "asc");
+
+      expect(await names().limit(1).execute()).toEqual([
+        { name: "Aardvark Ltd" },
+      ]);
+      expect(names().limit(3).toSQL().sql).not.toMatch(TRAVERSAL_LEVEL_LIMIT);
     });
   });
 }

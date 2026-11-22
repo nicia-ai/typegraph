@@ -339,6 +339,30 @@ function isStartAliasBoundToSingleId(
   );
 }
 
+/**
+ * Whether the statement's final LIMIT commutes with everything between the
+ * traversal and the output, so applying it to the traversal's rows first
+ * yields the same result. The traversal-limit pushdown keeps the first rows a
+ * traversal CTE produces; that is sound only when the output is a prefix of
+ * those rows. Each clause names a step that breaks it:
+ * - an OFFSET skips rows the pushdown would count toward its prefix;
+ * - a result predicate filters rows after the traversal, so a truncated
+ *   prefix can lose every row that passes;
+ * - a statement whose rows are groups folds the truncated rows into fewer or
+ *   smaller groups (an ungrouped count() of ten matches counts eight);
+ * - a field `orderBy()`, an `orderBy()` naming an `aggregate()` / `project()`
+ *   output (set even when the projection holds no aggregate), or a relevance
+ *   ORDER BY picks its rows from all of them, not from the first ones.
+ */
+function finalLimitCommutesWithOutput(ast: QueryAst): boolean {
+  if (ast.offset !== undefined) return false;
+  if (ast.resultPredicate !== undefined) return false;
+  if (isAggregatedStatement(ast)) return false;
+  if ((ast.orderBy?.length ?? 0) > 0) return false;
+  if ((ast.aggregateOrderBy?.length ?? 0) > 0) return false;
+  return describeRelevanceOrder(ast).length === 0;
+}
+
 function resolveTraversalCteLimit(
   ast: QueryAst,
   predicateIndex: PredicateIndex,
@@ -347,28 +371,13 @@ function resolveTraversalCteLimit(
     return undefined;
   }
 
-  if (ast.offset !== undefined) {
-    return undefined;
-  }
-
-  if (ast.limit <= 0) {
+  // A zero limit without an offset keeps no row of any output, so pushing
+  // it into the traversal cannot change the result.
+  if (ast.limit <= 0 && ast.offset === undefined) {
     return 0;
   }
 
-  // The pushdown keeps the first rows each traversal CTE produces, so it is
-  // sound only when the final LIMIT keeps a prefix of those rows unchanged.
-  // A statement whose rows are groups folds the truncated rows into fewer or
-  // smaller groups (an ungrouped count() of ten matches counts eight), and a
-  // caller or relevance ORDER BY picks its rows from all of them.
-  if (ast.resultPredicate !== undefined || isAggregatedStatement(ast)) {
-    return undefined;
-  }
-
-  if (ast.orderBy && ast.orderBy.length > 0) {
-    return undefined;
-  }
-
-  if (describeRelevanceOrder(ast).length > 0) {
+  if (!finalLimitCommutesWithOutput(ast)) {
     return undefined;
   }
 
