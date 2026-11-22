@@ -534,21 +534,44 @@ function withSwappedArguments(relation: DeclaredRelation): DeclaredRelation {
   );
 }
 
+/** A declared relation's literal `metaEdge:from:to`, endpoints in written order. */
+function declaredRelationKey(relation: DeclaredRelation): string {
+  const endpointName = (endpoint: DeclaredRelation["from"]) =>
+    typeof endpoint === "string" ? endpoint : endpoint.kind;
+  return `${relation.metaEdge.name}:${endpointName(relation.from)}:${endpointName(relation.to)}`;
+}
+
+type Restatement = Readonly<{
+  graph: GraphUnderTest;
+  kindsOnly: GraphUnderTest;
+}>;
+
+type RestatementChoices = Readonly<{
+  nodeOrder: readonly (readonly [string, GraphUnderTest["nodes"][string]])[];
+  edgeOrder: readonly (readonly [string, GraphUnderTest["edges"][string]])[];
+  relationOrder: readonly DeclaredRelation[];
+  swaps: readonly boolean[];
+}>;
+
 /**
- * `graph` declared again with its node, edge and relation order shuffled
- * and some symmetric relations' arguments swapped.
+ * `graph` declared again in the chosen order, with the chosen symmetric
+ * relations' arguments swapped.
+ *
+ * A swap is skipped when the graph also declares that relation's mirror:
+ * `[relatedTo(A, B), relatedTo(B, A)]` is an accepted (redundant)
+ * declaration, but swapping either entry writes the other one twice, a
+ * literal duplicate the coherence check refuses at construction and reload
+ * (`DUPLICATE_ONTOLOGY_RELATION`). That is a different declaration, not a
+ * restatement of this one. Swapping both entries of a mirrored pair would
+ * restate it, but it changes nothing either, so skipping both loses nothing.
  */
-function restatedGraphArb(
+function restateGraph(
   graph: GraphUnderTest,
-): fc.Arbitrary<
-  Readonly<{ graph: GraphUnderTest; kindsOnly: GraphUnderTest }>
-> {
-  const nodeEntries = Object.entries(graph.nodes);
-  const edgeEntries = Object.entries(graph.edges);
-  const relations = graph.ontology;
+  { nodeOrder, edgeOrder, relationOrder, swaps }: RestatementChoices,
+): Restatement {
   const declare = (
-    nodes: typeof nodeEntries,
-    edges: typeof edgeEntries,
+    nodes: RestatementChoices["nodeOrder"],
+    edges: RestatementChoices["edgeOrder"],
     ontology: readonly DeclaredRelation[],
   ) =>
     defineGraph({
@@ -558,6 +581,33 @@ function restatedGraphArb(
       ontology,
       defaults: graph.defaults,
     }) as unknown as GraphUnderTest;
+  const declaredKeys = new Set(
+    graph.ontology.map((relation) => declaredRelationKey(relation)),
+  );
+  return {
+    graph: declare(
+      nodeOrder,
+      edgeOrder,
+      relationOrder.map((relation, index) => {
+        if (swaps[index] !== true) return relation;
+        const swapped = withSwappedArguments(relation);
+        return declaredKeys.has(declaredRelationKey(swapped)) ? relation : (
+            swapped
+          );
+      }),
+    ),
+    kindsOnly: declare(nodeOrder, edgeOrder, graph.ontology),
+  };
+}
+
+/**
+ * `graph` declared again with its node, edge and relation order shuffled
+ * and some symmetric relations' arguments swapped (see {@link restateGraph}).
+ */
+function restatedGraphArb(graph: GraphUnderTest): fc.Arbitrary<Restatement> {
+  const nodeEntries = Object.entries(graph.nodes);
+  const edgeEntries = Object.entries(graph.edges);
+  const relations = graph.ontology;
   return fc
     .record({
       nodeOrder: fc.shuffledSubarray(nodeEntries, {
@@ -574,17 +624,40 @@ function restatedGraphArb(
         maxLength: relations.length,
       }),
     })
-    .map(({ nodeOrder, edgeOrder, relationOrder, swaps }) => ({
-      graph: declare(
-        nodeOrder,
-        edgeOrder,
-        relationOrder.map((relation, index) =>
-          swaps[index] === true ? withSwappedArguments(relation) : relation,
-        ),
-      ),
-      kindsOnly: declare(nodeOrder, edgeOrder, relations),
-    }));
+    .map((choices) => restateGraph(graph, choices));
 }
+
+/**
+ * The shape CI seed -1755285016 shrank to: a symmetric relation declared in
+ * both directions, restated with one of the two swapped. The `subClassOf`
+ * makes the diff build the AFTER registry (see `computeSchemaDiff`), where an
+ * unguarded swap is refused as a duplicate. Pinned because the random
+ * generator reaches it only when two of at most three relations draw the same
+ * symmetric meta-edge over the same pair in opposite directions.
+ */
+const MIRRORED_PAIR_RESTATEMENT = (() => {
+  const Left = defineNode("Left", { schema: z.object({}) });
+  const Right = defineNode("Right", { schema: z.object({}) });
+  const graph = defineGraph({
+    id: "mirrored-pair",
+    nodes: { Left: { type: Left }, Right: { type: Right } },
+    edges: {},
+    ontology: [
+      subClassOf(Right, Left),
+      relatedTo(Left, Right),
+      relatedTo(Right, Left),
+    ],
+  }) as unknown as GraphUnderTest;
+  return [
+    graph,
+    restateGraph(graph, {
+      nodeOrder: Object.entries(graph.nodes),
+      edgeOrder: Object.entries(graph.edges),
+      relationOrder: graph.ontology,
+      swaps: [false, true, false],
+    }),
+  ] as const;
+})();
 
 /**
  * Generate a version number.
@@ -697,7 +770,10 @@ describe("Schema Serialization Properties", () => {
         fc.asyncProperty(
           graphDefArb.chain((graph) =>
             restatedGraphArb(graph).map(
-              (restated) => [graph, restated] as const,
+              (restated): readonly [GraphUnderTest, Restatement] => [
+                graph,
+                restated,
+              ],
             ),
           ),
           async ([graph, restated]) => {
@@ -720,7 +796,10 @@ describe("Schema Serialization Properties", () => {
             ).toBe(await computeSchemaHash(before));
           },
         ),
-        { numRuns: propertyRuns({ ci: 100, local: 200 }) },
+        {
+          examples: [[MIRRORED_PAIR_RESTATEMENT]],
+          numRuns: propertyRuns({ ci: 100, local: 200 }),
+        },
       );
     });
 
