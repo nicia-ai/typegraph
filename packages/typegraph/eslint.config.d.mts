@@ -25,6 +25,9 @@ export declare const BACKEND_MUTATION_MESSAGE: string;
  * each one is installed whole rather than only the two it was written for.
  */
 export declare const SOURCE_WIDE_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
+
+/** The operation-brand forgery ban: part of SOURCE_WIDE_RESTRICTIONS. */
+export declare const OPERATION_BRAND_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
 export declare const GLOBAL_SYMBOL_RESTRICTION: RestrictedSyntaxEntry;
 export declare const RUNTIME_PORT_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
 export declare const BACKEND_SEAM_IMPORT_RESTRICTIONS: readonly RestrictedSyntaxEntry[];

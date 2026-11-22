@@ -21,6 +21,10 @@ import {
 } from "../../backend/types";
 import { requireDefined } from "../../utils/presence";
 import {
+  type OperationScoped,
+  scopeWriteFrameTarget,
+} from "../operation-scope";
+import {
   type GraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
@@ -154,7 +158,7 @@ export type OverlaidSessionMint<K extends RowWorkKind = RowWorkKind> = (
 /** Row work: the only place a plan-driven write may read or write rows. */
 export type WriteRowWork<K extends RowWorkKind, T> = (
   session: WriteSessionFor<K>,
-  target: WriteTarget,
+  target: OperationScoped<WriteTarget>,
   overlaidSession: OverlaidSessionMint<K>,
   lock: GraphWriteLock,
   transactionMode: WriteTransactionMode,
@@ -202,7 +206,7 @@ function planFrame<K extends RowWorkKind, T>(
     // static views.
     return rowWork(
       mintSessionOver(target) as WriteSessionFor<K>,
-      target,
+      scopeWriteFrameTarget(target),
       mintOverlaidSession,
       lock,
       transactionMode,
