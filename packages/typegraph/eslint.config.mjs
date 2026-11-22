@@ -254,44 +254,50 @@ const DETERMINISM_RESTRICTIONS = [
 
 const OPERATION_BRAND_MESSAGE =
   "Do not assert a value to OperationScoped / OperationBackend / " +
-  "StatementBackend. A raw transaction backend reaches a statement-issuing " +
+  "StatementBackend (by name, alias, namespace, import type or typeof a " +
+  "mint), and do not narrow to one with a type predicate. A raw transaction backend reaches a statement-issuing " +
   "Store function only through a mint in src/store/operation-scope.ts " +
   "(enterOperation at a public Store member, scopeWriteFrameTarget in the " +
   "write executor); an assertion anywhere else forges the brand and hides a " +
   "call path the type exists to expose. Call a mint instead. " +
-  "tests/operation-scope-ratchet.test.ts pins the assertion sites to the two " +
-  "mints.";
+  "tests/operation-scope-ratchet.test.ts pins every forge site, found by " +
+  "type, to the two mints.";
 
 const OPERATION_BRAND_TYPE_NAMES =
   "/^(OperationScoped|OperationBackend|StatementBackend)$/";
+const OPERATION_MINT_NAMES = "/^(enterOperation|scopeWriteFrameTarget)$/";
+const OPERATION_BRAND_CONTEXT =
+  ":matches(TSAsExpression, TSTypeAssertion, TSTypePredicate)";
 
 /**
- * The operation-brand forgery ban: a type assertion (`as` or angle-bracket)
- * whose asserted type spells a brand type directly, through a namespace
- * import, through an inline `import("…")` type, or as `typeof` a mint (`ReturnType<typeof enterOperation>`), and an
- * import that renames a brand type, which would let the first selector miss
- * it. The two mints in `src/store/operation-scope.ts` carry an inline disable
- * each; `tests/operation-scope-ratchet.test.ts` pins the assertion sites,
- * including spellings these selectors cannot see (a local alias of a brand
- * type, a brand type argument at a call). Exported so that test fires THESE
- * selectors.
+ * The operation-brand forgery ban, as a fast-feedback backstop. A type
+ * assertion (`as` or angle-bracket) or a type predicate (`x is T`,
+ * `asserts x is T`) that spells a brand type directly, through a namespace,
+ * through an inline `import("…")` type, or as `typeof` a mint (bare or
+ * namespace-qualified, `ReturnType<typeof scope.enterOperation>`); and an
+ * import that renames a brand type. The authority is
+ * `tests/operation-scope-ratchet.test.ts`, whose checker-backed scan finds a
+ * forge by the brand's property rather than its name, so it also sees what
+ * no selector can (a local alias, `Parameters<typeof consumer>[2]`,
+ * `as never` into a branded parameter, a generic instantiated to the brand).
+ * The two mints in `src/store/operation-scope.ts` carry an inline disable
+ * each. Exported so that test fires THESE selectors.
  */
 export const OPERATION_BRAND_RESTRICTIONS = [
   {
-    selector: `:matches(TSAsExpression, TSTypeAssertion) TSTypeReference[typeName.name=${OPERATION_BRAND_TYPE_NAMES}]`,
+    selector: `${OPERATION_BRAND_CONTEXT} TSTypeReference[typeName.name=${OPERATION_BRAND_TYPE_NAMES}]`,
     message: OPERATION_BRAND_MESSAGE,
   },
   {
-    selector: `:matches(TSAsExpression, TSTypeAssertion) TSTypeReference[typeName.right.name=${OPERATION_BRAND_TYPE_NAMES}]`,
+    selector: `${OPERATION_BRAND_CONTEXT} TSTypeReference[typeName.right.name=${OPERATION_BRAND_TYPE_NAMES}]`,
     message: OPERATION_BRAND_MESSAGE,
   },
   {
-    selector: `:matches(TSAsExpression, TSTypeAssertion) :matches(TSImportType[qualifier.name=${OPERATION_BRAND_TYPE_NAMES}], TSImportType[qualifier.right.name=${OPERATION_BRAND_TYPE_NAMES}])`,
+    selector: `${OPERATION_BRAND_CONTEXT} :matches(TSImportType[qualifier.name=${OPERATION_BRAND_TYPE_NAMES}], TSImportType[qualifier.right.name=${OPERATION_BRAND_TYPE_NAMES}])`,
     message: OPERATION_BRAND_MESSAGE,
   },
   {
-    selector:
-      ":matches(TSAsExpression, TSTypeAssertion) TSTypeQuery[exprName.name=/^(enterOperation|scopeWriteFrameTarget)$/]",
+    selector: `${OPERATION_BRAND_CONTEXT} :matches(TSTypeQuery[exprName.name=${OPERATION_MINT_NAMES}], TSTypeQuery[exprName.right.name=${OPERATION_MINT_NAMES}])`,
     message: OPERATION_BRAND_MESSAGE,
   },
   {

@@ -17,13 +17,22 @@
  * and the layers above discriminate a root from a transaction with
  * `"transaction" in target`; a derived object per operation would change both.
  *
- * Only this module may produce an {@link OperationScoped} value. ESLint bans
- * a type assertion to any of these types elsewhere in `src`, and
- * `tests/operation-scope-ratchet.test.ts` pins the assertion sites to the two
- * mints below.
+ * Only this module may produce an {@link OperationScoped} value. The brand key
+ * is a declared-only unique symbol that is not exported, so no other module
+ * can spell it: building a branded value from an object literal, a computed
+ * key, `satisfies` or a module augmentation is a type error. TypeScript
+ * cannot refuse an assertion to a subtype, so the remaining routes (`as`,
+ * `as never`, a generic instantiated to the brand, a type predicate, an
+ * overload, `declare`, a widened consumer) are found by the checker-backed
+ * scan in `tests/operation-scope-ratchet.test.ts`, which identifies the brand
+ * by this key rather than by a type name and pins its sites in `src` to the
+ * two mints below. ESLint's `OPERATION_BRAND_RESTRICTIONS` reports the
+ * spellings a selector can see before the test runs.
  */
 import type { GraphBackend, TransactionBackend } from "../backend/types";
 
+// Declared only and never exported: the brand cannot be spelled outside this
+// module. The ratchet test asserts both properties.
 declare const OPERATION_SCOPED: unique symbol;
 
 /** `T` as handed out by an operation mint. */
