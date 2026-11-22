@@ -120,7 +120,9 @@ edge alias `e` beside a node alias `e_from` when whole rows are selected — or 
 result column `<alias>_<field>` would exceed 63 bytes is refused before any SQL is sent
 with a `ValidationError` carrying the code `SQL_IDENTIFIER_COLLISION` or
 `SQL_IDENTIFIER_TOO_LONG` (see [Errors](/errors#sql_identifier_collision-and-sql_identifier_too_long)).
-Short, distinct aliases avoid both.
+Short, distinct aliases avoid both. An alias may mix letter case (`Doc`, `Friend`) on
+every backend: each generated name is spelled the same way, unquoted, wherever a
+statement declares or reads it, so PostgreSQL folds every spelling to the same name.
 
 ## Subclass Expansion
 

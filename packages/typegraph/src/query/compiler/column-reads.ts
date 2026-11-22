@@ -24,10 +24,13 @@ import { aliasColumnName } from "./alias-names";
  * How a qualified reference is spelled:
  *
  * - `"plain"`: `relation.name`
- * - `"quoted"`: `"relation"."name"`
  * - `"quoted-name"`: `relation."name"`
+ *
+ * The relation is never quoted: every relation a standard statement names by
+ * a generated name is declared unquoted, and a quoted reference to a
+ * mixed-case name would not match its folded declaration on PostgreSQL.
  */
-export type ColumnReferenceSpelling = "plain" | "quoted" | "quoted-name";
+export type ColumnReferenceSpelling = "plain" | "quoted-name";
 
 function withReads(
   fragment: SqlFragment,
@@ -48,9 +51,6 @@ export function readColumn(
       case "plain": {
         return sql.raw(`${relation}.${name}`);
       }
-      case "quoted": {
-        return sql`${sql.identifier(relation)}.${sql.identifier(name)}`;
-      }
       case "quoted-name": {
         return sql`${sql.raw(relation)}.${sql.identifier(name)}`;
       }
@@ -61,14 +61,22 @@ export function readColumn(
   ]);
 }
 
-/** Writes `relation.<alias>_<column>` for one physical column of an alias. */
+/**
+ * Writes `relation.<alias>_<column>` for one physical column of an alias.
+ *
+ * Always unquoted, the spelling every alias CTE and alias column is declared
+ * with: PostgreSQL folds an unquoted name to lower case and keeps a quoted one
+ * as written, so a quoted reference to a mixed-case alias (`"cte_Doc"`) names
+ * a relation the unquoted declaration (`cte_Doc`, folded to `cte_doc`) never
+ * created. Aliases are restricted to unquoted-identifier characters, so the
+ * unquoted spelling is always valid.
+ */
 export function readAliasColumn(
   relation: string,
   alias: string,
   column: string,
-  spelling: ColumnReferenceSpelling = "plain",
 ): SqlFragment {
-  return readColumn(relation, aliasColumnName(alias, column), spelling);
+  return readColumn(relation, aliasColumnName(alias, column));
 }
 
 /**

@@ -329,9 +329,7 @@ export function buildReachableCte(
     forceWorktableOuterJoinOrder: prepared.forceWorktableOuterJoinOrder,
     schema: prepared.schema,
     edgesTable:
-      windowed ?
-        sql.identifier(WINDOWED_EDGES_CTE)
-      : prepared.schema.edgesTable,
+      windowed ? sql.raw(WINDOWED_EDGES_CTE) : prepared.schema.edgesTable,
     ...(windowed && {
       joinKindField: "typegraph_source_kind",
       joinField: "typegraph_source_id",
