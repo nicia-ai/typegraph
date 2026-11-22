@@ -76,11 +76,13 @@ export type WriteShapeDriver = (typeof WRITE_SHAPE_DRIVERS)[number];
 /**
  * `exchange` lines mark a driver round trip that is not one statement: a
  * libSQL `batch()` bracketing the statements it carries, and the transaction
- * a libSQL client opens and settles itself.
+ * a libSQL client opens and settles itself. `port` lines are a test
+ * decorator's own account of a command-port dispatch it answered or passed on
+ * (see {@link WriteShapeRecorder.annotate}).
  */
 type WriteShapeEvent =
   | Readonly<{ source: "sql"; text: string; params: readonly unknown[] }>
-  | Readonly<{ source: "hook" | "fault" | "exchange"; line: string }>;
+  | Readonly<{ source: "hook" | "fault" | "exchange" | "port"; line: string }>;
 
 type WriteShapeOutcome =
   | Readonly<{ status: "ok"; summary: string | undefined }>
@@ -105,6 +107,13 @@ type WriteShapeRecorder = Readonly<{
     run: () => Promise<string | undefined>,
     pendingFaults?: () => readonly string[],
   ) => Promise<WriteShapeCapture>;
+  /**
+   * Adds a line to the timeline of the capture in progress, where it falls
+   * between the statements around it; outside a capture it is dropped. A
+   * command-port decorator uses it to show a dispatch it declined, which runs
+   * no statement and would otherwise leave no trace.
+   */
+  annotate: (line: string) => void;
 }>;
 
 export type WriteShapeEngine = Readonly<{
@@ -310,6 +319,9 @@ function createEngineRecording(dialect: FaultDialect): EngineRecording {
       capturing = false;
       armed = undefined;
       return { events: [...events], outcome };
+    },
+    annotate: (line) => {
+      sink({ source: "port", line });
     },
   };
   const faultTrigger: StatementFaultTrigger = (text, params, inTransaction) => {

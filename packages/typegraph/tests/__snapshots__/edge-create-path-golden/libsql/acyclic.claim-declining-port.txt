@@ -1,0 +1,254 @@
+### edge.create on free axes, generated id
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-b","Item","item-c","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create on free axes, supplied id
+hook start create edge:link link-new
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["link-new","Item","item-b","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-new","link","Item","item-b","Item","item-c","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link link-new written
+=> ok
+
+### edge.create born ended on free axes
+hook start create edge:link link-ended
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["link-ended","Item","item-b","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-ended","link","Item","item-b","Item","item-c","{\"label\":\"ended\"}","<timestamp>","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link link-ended written
+=> ok
+
+### edge.create to a missing target
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-missing","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-b","Item","item-missing","{\"label\":\"missing\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-missing"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-missing"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create to a tombstoned target
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-dead","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-b","Item","item-dead","{\"label\":\"tombstoned\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-dead"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-dead"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create from a tombstoned source
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-dead","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-dead","Item","item-c","{\"label\":\"tombstoned\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-dead","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-c","item-dead"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create on a taken source axis
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-a","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create on a taken target axis
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-c","Item","item-b","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create on both taken axes
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-a","Item","item-b","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"parallel\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-b"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok
+
+### edge.create on a taken source axis to a tombstoned target
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-a","Item","item-dead","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-dead","{\"label\":\"both\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-dead"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-dead"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create on a taken target axis from a tombstoned source
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-dead","Item","item-b","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-dead","Item","item-b","{\"label\":\"both\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-dead","<graph1>","Item","item-b"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-dead"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+
+### edge.create with an occupied id
+hook start create edge:link link-live
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["link-live","Item","item-b","Item","item-c","<graph1>","link"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-live","link","Item","item-b","Item","item-c","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+libsql rollback
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+
+### edge.create closing a cycle
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-a","<graph1>","link"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT DISTINCT CAST('' AS TEXT), s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.id NOT IN (SELECT value FROM json_each(?)) AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT a.origin_key, e.id AS edge_id, e.kind AS edge_kind, a.node_kind AS from_kind, a.node_id AS from_id, e.to_kind AS to_kind, e.to_id AS to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.id NOT IN (SELECT value FROM json_each(?)) AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id
+    ["<id1>","Item","item-b","Item","item-a","<graph1>","[\"<id1>\"]","link","<graph1>","[\"<id1>\"]","link"]
+libsql rollback
+hook error create edge EdgeAcyclicityError[EDGE_ACYCLICITY_ERROR]
+=> EdgeAcyclicityError[EDGE_ACYCLICITY_ERROR]
+
+### edge.getOrCreateByEndpoints created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-c","<graph1>","link"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-b","Item","item-c","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok created
+
+### edge.getOrCreateByEndpoints found
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+libsql transaction default
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+libsql commit
+=> ok found
+
+### edge.getOrCreateByEndpoints matchOn label created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-b","Item","item-c","<graph1>","link"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-b","Item","item-c","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-b","<graph1>","Item","item-c"]
+port transaction edge.create claims=0 -> created
+libsql commit
+hook end create edge:link <id1> written
+=> ok created
+
+### edge.getOrCreateByEndpoints on a taken source axis to a tombstoned target
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+hook start create edge:link <id1>
+libsql transaction default
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH RECURSIVE seed(origin_key, from_kind, from_id, to_kind, to_id) AS (VALUES (CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT))), ancestry(origin_key, node_kind, node_id) AS (SELECT s.origin_key, s.to_kind, s.to_id FROM seed s UNION SELECT a.origin_key, e.to_kind, e.to_id FROM ancestry a CROSS JOIN "typegraph_edges" e WHERE e.graph_id = ? AND e.deleted_at IS NULL AND e.kind = ? AND e.from_kind = a.node_kind AND e.from_id = a.node_id) SELECT DISTINCT a.origin_key FROM ancestry a JOIN seed s ON s.origin_key = a.origin_key AND s.from_kind = a.node_kind AND s.from_id = a.node_id LIMIT 1
+    ["<id1>","Item","item-a","Item","item-dead","<graph1>","link"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-dead","{\"label\":\"both\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-dead"]
+port transaction edge.create claims=0 -> rejected
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-dead"]
+libsql rollback
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
