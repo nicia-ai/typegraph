@@ -260,6 +260,29 @@ export function declareFixedCte(
 }
 
 /**
+ * Declares a fixed, library-owned WITH relation together with the columns
+ * its SELECT list emits, and returns its name. A reference written without
+ * its relation (as `having()` writes one) is resolved in every relation of
+ * its FROM, so a relation that declares no columns would hide a name it
+ * shares with an alias's CTE.
+ */
+export function declareFixedCteWithColumns(
+  names: SqlStatementNames,
+  name: string,
+  columns: readonly string[],
+): string {
+  declareFixedCte(names, name);
+  const scope = names.relationColumns(name);
+  for (const column of columns)
+    scope.register(
+      column,
+      `fixed-column\u0000${name}\u0000${column}`,
+      `column ${column} of the library's own "${name}" relation`,
+    );
+  return name;
+}
+
+/**
  * Takes a finished standard statement's read set from the reads its SQL
  * carries, records it in the statement's scopes, and returns the statement
  * carrying only the correlated reads it passes up to an enclosing statement.

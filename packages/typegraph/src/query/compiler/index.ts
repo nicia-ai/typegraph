@@ -141,9 +141,6 @@ import {
 import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
   DEFAULT_SQL_SCHEMA,
-  EMBEDDINGS_CTE_ALIAS,
-  FULLTEXT_CTE_ALIAS,
-  HYBRID_CANDIDATES_CTE_ALIAS,
   type RecordedReadBinding,
   recordedReadSchemaFor,
   requireSqlSchema,
@@ -1717,11 +1714,11 @@ function compileStandardQueryWithCteStrategy(
   // Add embeddings CTE if vector similarity is used
   if (vectorPredicate) {
     const nodeKinds = getNodeKindsForAlias(ast, vectorPredicate.field.alias);
-    declareFixedCte(names, EMBEDDINGS_CTE_ALIAS);
     ctes.push(
       buildStandardEmbeddingsCte({
         ctx,
         graphId,
+        names,
         nodeKinds,
         vectorPredicate,
       }),
@@ -1731,20 +1728,19 @@ function compileStandardQueryWithCteStrategy(
   // Add fulltext CTE if a matches() predicate is used
   if (fulltextPredicate) {
     const nodeKinds = getNodeKindsForAlias(ast, fulltextPredicate.field.alias);
-    declareFixedCte(names, FULLTEXT_CTE_ALIAS);
     ctes.push(
       buildStandardFulltextCte({
         ctx,
         fulltextPredicate,
         graphId,
+        names,
         nodeKinds,
       }),
     );
   }
 
   if (getHybridTargetAlias(vectorPredicate, fulltextPredicate) !== undefined) {
-    declareFixedCte(names, HYBRID_CANDIDATES_CTE_ALIAS);
-    ctes.push(buildStandardHybridCandidateCte());
+    ctes.push(buildStandardHybridCandidateCte(names));
   }
 
   // Build main SELECT

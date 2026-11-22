@@ -23,6 +23,7 @@ import {
   field,
   max,
   min,
+  searchable,
   type Store,
 } from "../../../src";
 import {
@@ -54,6 +55,10 @@ const Company = defineNode("Company", {
 const Score = defineNode("Score", {
   schema: z.object({ team: z.string(), points: z.number() }),
 });
+/** A node searched by full text, so a statement carries `cte_fulltext`. */
+const Note = defineNode("Note", {
+  schema: z.object({ text: searchable({ language: "english" }) }),
+});
 const knows = defineEdge("knows", { schema: z.object({}) });
 const worksAt = defineEdge("worksAt", { schema: z.object({}) });
 
@@ -63,6 +68,7 @@ const identifierGraph = defineGraph({
     Person: { type: Person },
     Company: { type: Company },
     Score: { type: Score },
+    Note: { type: Note },
   },
   edges: {
     knows: { type: knows, from: [Person], to: [Person] },
@@ -388,6 +394,37 @@ function fanOut(
 }
 const FAN_OUT_PLAIN = ["a", "b", "c", "d", "f"] as const;
 const FAN_OUT_CASE_TWINS = ["p", "K", "x", "e", "k"] as const;
+
+/**
+ * Notes matching "graph", grouped by id, with HAVING on that id. A
+ * grouped full-text query fails on PostgreSQL whatever its aliases
+ * (its relevance ordering is not grouped), so only the refusal is
+ * compared here; the compiler-level gate shows a non-colliding alias
+ * is not refused.
+ */
+function matchingNotes(store: IdentifierStore, alias: "node") {
+  return store
+    .query()
+    .from("Note", alias)
+    .whereNode(alias, (note) => note.$fulltext.matches("graph", 5))
+    .groupByNode(alias)
+    .having({
+      __type: "comparison",
+      op: "neq",
+      left: fieldRef(alias, ["id"], { valueType: "string" }),
+      right: { __type: "literal", value: "missing", valueType: "string" },
+    })
+    .aggregate({ id: field(alias, "id"), notes: count(alias) });
+}
+
+/** Skips a test on a backend without full-text search. */
+function skipWithoutFulltext(
+  context: IntegrationTestContext,
+  testContext: Readonly<{ skip: () => void }>,
+): void {
+  if (context.getBackend().capabilities.fulltext?.supported !== true)
+    testContext.skip();
+}
 
 export function registerSqlIdentifierIdentityIntegrationTests(
   context: IntegrationTestContext,
@@ -953,6 +990,21 @@ export function registerSqlIdentifierIdentityIntegrationTests(
         expect(await query.execute()).toEqual([{ age: 41 }]);
         expect(await query.prepare().execute({})).toEqual([{ age: 41 }]);
         expect(await query.first()).toEqual({ age: 41 });
+      });
+    });
+
+    describe("the full-text relevance CTE", () => {
+      it("refuses an unqualified HAVING read of `node_id` that both `cte_node` and `cte_fulltext` declare, before any SQL is sent", async (testContext) => {
+        skipWithoutFulltext(context, testContext);
+        await store.nodes.Note.create({ text: "graph storage" });
+        await expectRefusedEverywhere(
+          counter,
+          () => matchingNotes(store, "node"),
+          refusal(
+            SQL_IDENTIFIER_COLLISION_CODE,
+            '"node_id" is read without naming its relation, and both cte_node and cte_fulltext have a column by that name, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.',
+          ),
+        );
       });
     });
 

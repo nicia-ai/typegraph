@@ -346,7 +346,9 @@ itself: the function that writes each column reference into the SQL also records
 so the check and the SQL cannot disagree about what is read. A name the statement
 writes without its relation (as `having()` does) is resolved in every relation the
 statement reads from, and refused when more than one of them has a column by that
-name, which both engines reject as ambiguous. Where a statement is embedded in SQL
+name, which both engines reject as ambiguous. The library's own relations count too: a full-text, vector or
+hybrid search joins relations with the columns `node_id` and `node_kind`, so with a
+node aliased `node` a `having()` comparison on its id is refused. Where a statement is embedded in SQL
 that refers to its result columns by name (relations, checked reads, `batchOnce()`,
 the leftmost operand of a set operation), result names that differ only by letter case
 are refused too; for a `select()` they come from aliases, such as node `k` beside
