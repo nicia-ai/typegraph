@@ -17,6 +17,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  embedding,
   exists,
   expr,
   field,
@@ -24,11 +25,27 @@ import {
   inSubquery,
   max,
   min,
+  searchable,
   sum,
 } from "../src";
-import type { PredicateExpression, QueryAst } from "../src/query/ast";
+import type {
+  FulltextMatchPredicate,
+  PredicateExpression,
+  QueryAst,
+} from "../src/query/ast";
 import { createQueryBuilder } from "../src/query/builder";
-import { compileQueryWithSqlNames } from "../src/query/compiler";
+import {
+  type CompileQueryOptions,
+  compileQueryWithSqlNames,
+} from "../src/query/compiler";
+import { vectorSlotKey } from "../src/query/compiler/schema";
+import { findSqlNameIssues } from "../src/query/compiler/sql-name-registry";
+import {
+  fts5Strategy,
+  tsvectorStrategy,
+} from "../src/query/dialect/fulltext-strategy";
+import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
+import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { fieldRef } from "../src/query/predicates";
 import { buildKindRegistry } from "../src/registry";
 import { requireDefined } from "../src/utils/presence";
@@ -44,11 +61,81 @@ const Person = defineNode("Person", {
 const knows = defineEdge("knows", {
   schema: z.object({ since: z.string().optional() }),
 });
+/** A node with a full-text field and an embedding, for the search statements. */
+const Document = defineNode("Document", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    rating: z.number().optional(),
+    embedding: embedding(3),
+  }),
+});
 const graph = defineGraph({
   id: "sql_column_read_gate",
-  nodes: { Person: { type: Person } },
+  nodes: { Person: { type: Person }, Document: { type: Document } },
   edges: { knows: { type: knows, from: [Person], to: [Person] } },
 });
+
+/** The strategies a search statement compiles with, per dialect. */
+function searchOptions(
+  dialect: "sqlite" | "postgres",
+): Omit<CompileQueryOptions, "dialect"> {
+  return {
+    fulltextStrategy: dialect === "sqlite" ? fts5Strategy : tsvectorStrategy,
+    vectorStrategy: dialect === "sqlite" ? sqliteVecStrategy : pgvectorStrategy,
+    vectorSlots: new Map([
+      [
+        vectorSlotKey("Document", "embedding"),
+        {
+          dimensions: 3,
+          metric: "cosine" as const,
+          indexType: "hnsw" as const,
+        },
+      ],
+    ]),
+  };
+}
+
+/** A full-text match on `alias`, as `$fulltext.matches()` builds it. */
+function fulltextMatch(alias: string): FulltextMatchPredicate {
+  return {
+    __type: "fulltext_match",
+    field: fieldRef(alias, ["$fulltext"]),
+    query: "graph refactor",
+    mode: "websearch",
+    limit: 10,
+  };
+}
+
+/** `ast` with a full-text match on `alias` added to its predicates. */
+function withFulltextMatch(ast: QueryAst, alias: string): QueryAst {
+  return {
+    ...ast,
+    predicates: [
+      ...ast.predicates,
+      { targetAlias: alias, expression: fulltextMatch(alias) },
+    ],
+  };
+}
+
+/** Documents searched under `alias`, grouped by id, with HAVING on that id. */
+function searchedDocuments(
+  alias: "d" | "node",
+  search: "fulltext" | "vector" | "hybrid",
+  approximate = false,
+): QueryAst {
+  const base = builder()
+    .from("Document", alias)
+    .whereNode(alias, (document) =>
+      search === "fulltext" ?
+        document.rating.gt(0)
+      : document.embedding.similarTo([0.1, 0.2, 0.3], 5, { approximate }),
+    )
+    .groupByNode(alias)
+    .having(comparison(ID(alias), "neq", ID(alias)))
+    .aggregate({ id: field(alias, "id"), documents: count(alias) })
+    .toAst();
+  return search === "vector" ? base : withFulltextMatch(base, alias);
+}
 const registry = buildKindRegistry(graph);
 
 function builder() {
@@ -79,6 +166,8 @@ const ID = (alias: string) => fieldRef(alias, ["id"], { valueType: "string" });
 export const COLUMN_READ_GATE_DOMAIN: readonly Readonly<{
   label: string;
   ast: QueryAst;
+  /** Whether the statement needs the full-text and vector strategies. */
+  search?: true;
 }>[] = [
   {
     label: "review: HAVING reads `e_from.id` on the right",
@@ -244,16 +333,47 @@ export const COLUMN_READ_GATE_DOMAIN: readonly Readonly<{
       .select((ctx) => ctx.p.name)
       .toAst(),
   },
+  {
+    label: "a full-text search with HAVING on the searched alias's id",
+    ast: searchedDocuments("d", "fulltext"),
+    search: true,
+  },
+  {
+    label: "an exact vector search with HAVING on the searched alias's id",
+    ast: searchedDocuments("d", "vector"),
+    search: true,
+  },
+  {
+    label: "an approximate vector search (the strategy's own search SQL)",
+    ast: searchedDocuments("d", "vector", true),
+    search: true,
+  },
+  {
+    label: "a hybrid search with HAVING on the searched alias's id",
+    ast: searchedDocuments("d", "hybrid"),
+    search: true,
+  },
+  {
+    label: "a full-text selection ordered by relevance",
+    ast: withFulltextMatch(
+      builder()
+        .from("Document", "d")
+        .select((ctx) => ({ id: ctx.d.id, title: ctx.d.title }))
+        .toAst(),
+      "d",
+    ),
+    search: true,
+  },
 ];
 
 describe("column reads recorded by the emitter equal the references its SQL makes", () => {
-  for (const { label, ast } of COLUMN_READ_GATE_DOMAIN) {
+  for (const { label, ast, search } of COLUMN_READ_GATE_DOMAIN) {
     for (const dialect of ["sqlite", "postgres"] as const) {
       it(`${label} / ${dialect}`, () => {
         const { compiled, names } = compileQueryWithSqlNames(
           ast,
           graph.id,
-          dialect,
+          search === true ? { dialect, ...searchOptions(dialect) } : dialect,
         );
         const statementNames = requireDefined(names);
         const text = toSqlWithParams(compiled, dialect).sql;
@@ -265,14 +385,47 @@ describe("column reads recorded by the emitter equal the references its SQL make
   }
 
   it("records `e_from_id` as read by HAVING's right operand and not by an aggregate of another column", () => {
-    const [having, aggregate] = COLUMN_READ_GATE_DOMAIN.map((entry) =>
-      recordedColumnReferences(
-        requireDefined(
-          compileQueryWithSqlNames(entry.ast, graph.id, "sqlite").names,
+    const [having, aggregate] = COLUMN_READ_GATE_DOMAIN.slice(0, 2).map(
+      (entry) =>
+        recordedColumnReferences(
+          requireDefined(
+            compileQueryWithSqlNames(entry.ast, graph.id, "sqlite").names,
+          ),
         ),
-      ),
     );
     expect(having?.unqualified).toContain("e_from_id");
     expect(aggregate?.qualified["cte_e_from"] ?? []).not.toContain("e_from_id");
   });
+});
+
+describe("the columns of the full-text, vector and hybrid CTEs", () => {
+  for (const search of ["fulltext", "vector", "hybrid"] as const) {
+    it(`refuses an unqualified HAVING read of \`node_id\` beside the ${search} CTE when the searched alias is \`node\``, () => {
+      const verdicts = (["node", "d"] as const).map((alias) =>
+        findSqlNameIssues(
+          requireDefined(
+            compileQueryWithSqlNames(
+              searchedDocuments(alias, search),
+              graph.id,
+              {
+                dialect: "sqlite",
+                ...searchOptions("sqlite"),
+              },
+            ).names,
+          ),
+          "decoded",
+        ).map((issue) => issue.message),
+      );
+      const relevanceCte =
+        search === "vector" ? "cte_embeddings"
+        : search === "fulltext" ? "cte_fulltext"
+        : "cte_relevance_candidates";
+      expect(verdicts).toEqual([
+        [
+          `"node_id" is read without naming its relation, and both cte_node and ${relevanceCte} have a column by that name, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.`,
+        ],
+        [],
+      ]);
+    });
+  }
 });

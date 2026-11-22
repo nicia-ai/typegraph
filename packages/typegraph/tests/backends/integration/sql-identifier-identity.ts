@@ -23,6 +23,7 @@ import {
   field,
   max,
   min,
+  searchable,
   type Store,
 } from "../../../src";
 import {
@@ -54,6 +55,10 @@ const Company = defineNode("Company", {
 const Score = defineNode("Score", {
   schema: z.object({ team: z.string(), points: z.number() }),
 });
+/** A node searched by full text, so a statement carries `cte_fulltext`. */
+const Note = defineNode("Note", {
+  schema: z.object({ text: searchable({ language: "english" }) }),
+});
 const knows = defineEdge("knows", { schema: z.object({}) });
 const worksAt = defineEdge("worksAt", { schema: z.object({}) });
 
@@ -63,6 +68,7 @@ const identifierGraph = defineGraph({
     Person: { type: Person },
     Company: { type: Company },
     Score: { type: Score },
+    Note: { type: Note },
   },
   edges: {
     knows: { type: knows, from: [Person], to: [Person] },
@@ -352,6 +358,72 @@ function topTeam(store: IdentifierStore, low: string, high: string) {
     })
     .orderBy(high, "desc")
     .limit(1);
+}
+
+/**
+ * A fan-out from `start` over knows to a Person and over worksAt to a
+ * Company. With aliases `K` and `k` the two ids come from separate
+ * CTEs, so the leaf runs, but its result columns `K_id` and `k_id`
+ * differ only by letter case.
+ */
+function fanOut(
+  store: IdentifierStore,
+  aliases: readonly [string, string, string, string, string],
+  startId: string,
+) {
+  const [start, friendEdge, friend, employerEdge, employer] = aliases;
+  return store
+    .query()
+    .fromDynamic("Person", start as "fan_start")
+    .whereNode(start as "fan_start", (person) => person.id.eq(startId))
+    .traverseDynamic("knows", friendEdge as "fan_friend_edge")
+    .toDynamic("Person", friend as "fan_friend")
+    .traverseDynamic("worksAt", employerEdge as "fan_employer_edge", {
+      from: start as "fan_start",
+    })
+    .toDynamic("Company", employer as "fan_employer")
+    .select((ctx) => {
+      const row = ctx as unknown as Readonly<
+        Record<string, Readonly<{ name: unknown }>>
+      >;
+      return {
+        friend: requireDefined(row[friend]).name,
+        employer: requireDefined(row[employer]).name,
+      };
+    });
+}
+const FAN_OUT_PLAIN = ["a", "b", "c", "d", "f"] as const;
+const FAN_OUT_CASE_TWINS = ["p", "K", "x", "e", "k"] as const;
+
+/**
+ * Notes matching "graph", grouped by id, with HAVING on that id. A
+ * grouped full-text query fails on PostgreSQL whatever its aliases
+ * (its relevance ordering is not grouped), so only the refusal is
+ * compared here; the compiler-level gate shows a non-colliding alias
+ * is not refused.
+ */
+function matchingNotes(store: IdentifierStore, alias: "node") {
+  return store
+    .query()
+    .from("Note", alias)
+    .whereNode(alias, (note) => note.$fulltext.matches("graph", 5))
+    .groupByNode(alias)
+    .having({
+      __type: "comparison",
+      op: "neq",
+      left: fieldRef(alias, ["id"], { valueType: "string" }),
+      right: { __type: "literal", value: "missing", valueType: "string" },
+    })
+    .aggregate({ id: field(alias, "id"), notes: count(alias) });
+}
+
+/** Skips a test on a backend without full-text search. */
+function skipWithoutFulltext(
+  context: IntegrationTestContext,
+  testContext: Readonly<{ skip: () => void }>,
+): void {
+  if (context.getBackend().capabilities.fulltext?.supported !== true)
+    testContext.skip();
 }
 
 export function registerSqlIdentifierIdentityIntegrationTests(
@@ -873,6 +945,41 @@ export function registerSqlIdentifierIdentityIntegrationTests(
         );
       });
 
+      it("refuses HAVING `e_from.id != e.fromId` when no other clause reads the edge's fromId, instead of comparing `e_from_id` with itself", async () => {
+        // Column pruning used to visit only the left operand of a
+        // comparison, so `e.fromId` was not carried, the statement declared
+        // one `e_from_id`, and HAVING compared the target's id with itself:
+        // no rows on every engine for an Alice → Bob edge that matches.
+        const query = store
+          .query()
+          .from("Person", "p")
+          .traverse("knows", "e")
+          .to("Person", "e_from")
+          .groupByNode("e_from")
+          .groupBy("e_from", "name")
+          .having({
+            __type: "comparison",
+            op: "neq",
+            left: fieldRef("e_from", ["id"], { valueType: "string" }),
+            right: fieldRef("e", ["from_id"], { valueType: "string" }),
+          })
+          .aggregate({ name: field("e_from", "name"), edges: count("e") });
+        await expectRefusedEverywhere(
+          counter,
+          () => query,
+          refusal(
+            SQL_IDENTIFIER_COLLISION_CODE,
+            collisionMessage(
+              "e_from_id",
+              'column from_id of alias "e"',
+              "e_from_id",
+              'column id of alias "e_from"',
+              "the columns of cte_e_from",
+            ),
+          ),
+        );
+      });
+
       it("returns the maximum of `e_from`'s age beside an edge `e` filtered on fromId, since no statement reads either `e_from_id`", async () => {
         await store.nodes.Person.update(asNodeId<typeof Person>(seeded.bobId), {
           age: 41,
@@ -883,6 +990,55 @@ export function registerSqlIdentifierIdentityIntegrationTests(
         expect(await query.execute()).toEqual([{ age: 41 }]);
         expect(await query.prepare().execute({})).toEqual([{ age: 41 }]);
         expect(await query.first()).toEqual({ age: 41 });
+      });
+    });
+
+    describe("the full-text relevance CTE", () => {
+      it("refuses an unqualified HAVING read of `node_id` that both `cte_node` and `cte_fulltext` declare, before any SQL is sent", async (testContext) => {
+        skipWithoutFulltext(context, testContext);
+        await store.nodes.Note.create({ text: "graph storage" });
+        await expectRefusedEverywhere(
+          counter,
+          () => matchingNotes(store, "node"),
+          refusal(
+            SQL_IDENTIFIER_COLLISION_CODE,
+            '"node_id" is read without naming its relation, and both cte_node and cte_fulltext have a column by that name, which PostgreSQL clips to 63 bytes and the engines compare without regard to letter case.',
+          ),
+        );
+      });
+    });
+
+    describe("set operations", () => {
+      it("runs a UNION whose right operand's result columns differ only by letter case: the compound takes its names from the left operand", async () => {
+        const union = fanOut(store, FAN_OUT_PLAIN, "nobody").union(
+          fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId),
+        );
+        expect(await union.execute()).toEqual([
+          { friend: "Bob", employer: "Acme" },
+        ]);
+        expect(
+          await fanOut(store, FAN_OUT_PLAIN, seeded.aliceId)
+            .intersect(fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId))
+            .execute(),
+        ).toEqual([{ friend: "Bob", employer: "Acme" }]);
+        expect(
+          await fanOut(store, FAN_OUT_PLAIN, seeded.aliceId)
+            .except(fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId))
+            .execute(),
+        ).toEqual([]);
+      });
+
+      it("refuses the same operand on the left, where its result columns name the compound's, before any SQL is sent", async () => {
+        counter.reset();
+        const refusal = await captureRefusal(() =>
+          fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId)
+            .union(fanOut(store, FAN_OUT_PLAIN, "nobody"))
+            .execute(),
+        );
+        expect(refusal?.codes).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
+        expect(refusal?.message).toContain('"K_id"');
+        expect(refusal?.message).toContain('"k_id"');
+        expect(counter.count()).toBe(0);
       });
     });
 
