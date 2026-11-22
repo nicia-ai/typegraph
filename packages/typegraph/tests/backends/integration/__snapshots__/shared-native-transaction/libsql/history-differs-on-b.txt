@@ -1,0 +1,159 @@
+pair history-differs-on-b
+A {"graph":0,"tables":0,"history":false,"revisionTracking":false,"constraints":false}
+B {"graph":0,"tables":0,"history":true,"revisionTracking":false,"constraints":false}
+
+## caller-native
+steps: a1=ok b1=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B receipt 2
+settlement: A no receipt
+revision A: none -> none
+revision B: none -> 1
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2] recorded 2
+trace:
+  sql -- libsql transaction default
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a1","{\"label\":\"r1a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1b1","{\"label\":\"r1b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1b2","{\"label\":\"r1b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = revision
+    ["tss_pair_graph_0",0,"<timestamp>"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = ?
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_revision_origins" (graph_id, origin) VALUES (?, ?) ON CONFLICT (graph_id) DO NOTHING
+    ["tss_pair_graph_0","<random:1>"]
+  sql SELECT origin FROM "tss_one_revision_origins" WHERE graph_id = ?
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",1,"<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["tss_pair_graph_0","<random:1>",1,"<timestamp>"]
+  sql UPDATE "tss_one_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [1,"tss_pair_graph_0","ScopeItem",9007199254740991,"r1b1","r1b2"]
+  sql INSERT INTO "tss_one_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<random:2>","tss_pair_graph_0","ScopeItem","r1b1","{\"label\":\"r1b1\"}",1,"<timestamp>","<timestamp>","<timestamp>",1,9007199254740991,"create","{}","<random:3>","tss_pair_graph_0","ScopeItem","r1b2","{\"label\":\"r1b2\"}",1,"<timestamp>","<timestamp>","<timestamp>",1,9007199254740991,"create","{}"]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a2","{\"label\":\"r1a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql -- libsql commit
+
+## caller-native with a caller savepoint rolled back
+steps: a1=ok savepoint=ok b1=ok rollback-to=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B receipt 2
+settlement: A no receipt
+revision A: none -> none
+revision B: 1 -> 2
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2] recorded 4
+trace:
+  sql -- libsql transaction default
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a1","{\"label\":\"r2a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql SAVEPOINT tss_pair
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2b1","{\"label\":\"r2b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql ROLLBACK TO SAVEPOINT tss_pair
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2b2","{\"label\":\"r2b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = revision
+    ["tss_pair_graph_0",0,"<timestamp>"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = ?
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",2,"<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["tss_pair_graph_0","<random:1>",2,"<timestamp>"]
+  sql UPDATE "tss_one_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"tss_pair_graph_0","ScopeItem",9007199254740991,"r2b1","r2b2"]
+  sql INSERT INTO "tss_one_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<random:4>","tss_pair_graph_0","ScopeItem","r2b1","{\"label\":\"r2b1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<random:5>","tss_pair_graph_0","ScopeItem","r2b2","{\"label\":\"r2b2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a2","{\"label\":\"r2a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql -- libsql commit
+
+## store-transaction
+steps: a1=ok b1=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B receipt 2
+settlement: A receipt 2
+revision A: none -> none
+revision B: 2 -> 3
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2, r3a1, r3a2, r3b1, r3b2] recorded 6
+trace:
+  sql -- libsql transaction default
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, 1, ?, NULL, ?, ? FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."version" = ? AND "tss_one_schema_versions"."is_active" = TRUE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3a1","{\"label\":\"r3a1\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3b1","{\"label\":\"r3b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3b2","{\"label\":\"r3b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = revision
+    ["tss_pair_graph_0",0,"<timestamp>"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = ?
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",3,"<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["tss_pair_graph_0","<random:1>",3,"<timestamp>"]
+  sql UPDATE "tss_one_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [3,"tss_pair_graph_0","ScopeItem",9007199254740991,"r3b1","r3b2"]
+  sql INSERT INTO "tss_one_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<random:6>","tss_pair_graph_0","ScopeItem","r3b1","{\"label\":\"r3b1\"}",1,"<timestamp>","<timestamp>","<timestamp>",3,9007199254740991,"create","{}","<random:7>","tss_pair_graph_0","ScopeItem","r3b2","{\"label\":\"r3b2\"}",1,"<timestamp>","<timestamp>","<timestamp>",3,9007199254740991,"create","{}"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, 1, ?, NULL, ?, ? FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."version" = ? AND "tss_one_schema_versions"."is_active" = TRUE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3a2","{\"label\":\"r3a2\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql -- libsql commit
+
+## store-transaction with a caller savepoint rolled back
+steps: a1=ok savepoint=ok b1=ok rollback-to=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B receipt 2
+settlement: A receipt 2
+revision A: none -> none
+revision B: 3 -> 4
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2, r3a1, r3a2, r3b1, r3b2, r4a1, r4a2, r4b2] recorded 8
+trace:
+  sql -- libsql transaction default
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, 1, ?, NULL, ?, ? FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."version" = ? AND "tss_one_schema_versions"."is_active" = TRUE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4a1","{\"label\":\"r4a1\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SELECT * FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."is_active" = 1
+    ["tss_pair_graph_0"]
+  sql SAVEPOINT tss_pair
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4b1","{\"label\":\"r4b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql ROLLBACK TO SAVEPOINT tss_pair
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4b2","{\"label\":\"r4b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = revision
+    ["tss_pair_graph_0",0,"<timestamp>"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = ?
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",4,"<timestamp>"]
+  sql INSERT INTO "tss_one_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["tss_pair_graph_0","<random:1>",4,"<timestamp>"]
+  sql UPDATE "tss_one_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [4,"tss_pair_graph_0","ScopeItem",9007199254740991,"r4b1","r4b2"]
+  sql INSERT INTO "tss_one_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<random:8>","tss_pair_graph_0","ScopeItem","r4b1","{\"label\":\"r4b1\"}",1,"<timestamp>","<timestamp>","<timestamp>",4,9007199254740991,"create","{}","<random:9>","tss_pair_graph_0","ScopeItem","r4b2","{\"label\":\"r4b2\"}",1,"<timestamp>","<timestamp>","<timestamp>",4,9007199254740991,"create","{}"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, 1, ?, NULL, ?, ? FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = ? AND "tss_one_schema_versions"."version" = ? AND "tss_one_schema_versions"."is_active" = TRUE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4a2","{\"label\":\"r4a2\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql -- libsql commit

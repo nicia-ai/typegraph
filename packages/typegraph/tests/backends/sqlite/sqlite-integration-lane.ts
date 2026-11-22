@@ -8,6 +8,7 @@
 import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
+import { openTracedSqliteConnection } from "../../helpers/traced-connection";
 import { createTestDatabase } from "../../test-utils";
 import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
@@ -40,6 +41,10 @@ export function registerSqliteIntegrationLane(
         },
       };
     },
-    { slice: params.slice, driver: "better-sqlite3" },
+    {
+      slice: params.slice,
+      driver: "better-sqlite3",
+      openTracedConnection: openTracedSqliteConnection,
+    },
   );
 }

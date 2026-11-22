@@ -1,0 +1,117 @@
+pair revision-tracking-differs-on-a
+A {"graph":0,"tables":0,"history":false,"revisionTracking":true,"constraints":false}
+B {"graph":0,"tables":0,"history":false,"revisionTracking":false,"constraints":false}
+
+## caller-native
+steps: a1=ok b1=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A no receipt
+revision A: none -> 2
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2] recorded 0
+trace:
+  sql BEGIN
+  sql SET LOCAL typegraph.transaction_marker = '<marker:1>'
+  sql WITH "schema_fence" AS MATERIALIZED ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."version" = $2 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "<random:2>" FROM "graph_write_lock"
+    ["tss_pair_graph_0",1,"typegraph:recorded-graph-write","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a1","{\"label\":\"r1a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
+    ["typegraph:recorded-clock","tss_pair_graph_0"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = $2
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_revision_origins" (graph_id, origin) VALUES ($1, $2) ON CONFLICT (graph_id) DO NOTHING
+    ["tss_pair_graph_0","<random:3>"]
+  sql SELECT origin FROM "tss_one_revision_origins" WHERE graph_id = $1
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES ($1, $2, $3) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",1,"<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1b1","{\"label\":\"r1b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1b2","{\"label\":\"r1b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql WITH "schema_fence" AS MATERIALIZED ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."version" = $2 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "<random:2>" FROM "graph_write_lock"
+    ["tss_pair_graph_0",1,"typegraph:recorded-graph-write","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a2","{\"label\":\"r1a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
+    ["typegraph:recorded-clock","tss_pair_graph_0"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = $2
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES ($1, $2, $3) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",2,"<timestamp>"]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql COMMIT
+
+## caller-native with a caller savepoint rolled back
+steps: a1=ok savepoint=ok b1=ok rollback-to=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A no receipt
+revision A: 2 -> 4
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2] recorded 0
+trace:
+  sql BEGIN
+  sql SET LOCAL typegraph.transaction_marker = '<marker:4>'
+  sql WITH "schema_fence" AS MATERIALIZED ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."version" = $2 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "<random:2>" FROM "graph_write_lock"
+    ["tss_pair_graph_0",1,"typegraph:recorded-graph-write","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a1","{\"label\":\"r2a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
+    ["typegraph:recorded-clock","tss_pair_graph_0"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = $2
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES ($1, $2, $3) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",3,"<timestamp>"]
+  sql SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2b1","{\"label\":\"r2b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql ROLLBACK TO SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2b2","{\"label\":\"r2b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql WITH "schema_fence" AS MATERIALIZED ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."version" = $2 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "<random:2>" FROM "graph_write_lock"
+    ["tss_pair_graph_0",1,"typegraph:recorded-graph-write","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a2","{\"label\":\"r2a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
+    ["typegraph:recorded-clock","tss_pair_graph_0"]
+  sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "tss_one_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "tss_one_revision_origins" origins ON origins.graph_id = $2
+    ["tss_pair_graph_0","tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_recorded_clock" (graph_id, revision, recorded_at) VALUES ($1, $2, $3) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "tss_one_recorded_clock".revision < excluded.revision
+    ["tss_pair_graph_0",4,"<timestamp>"]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql COMMIT
+
+## store-transaction (refusal: A withholds tx.sql, so B has no handle and nothing is written)
+steps: 
+settled: ConfigurationError[CONFIGURATION_ERROR:REVISION_TRACKING_RAW_SQL_DISABLED]
+writes: A 0 B 0
+revision A: 4 -> 4
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2] recorded 0
+trace:
+  sql BEGIN
+  sql ROLLBACK
+
+## store-transaction with a caller savepoint rolled back (refusal: A withholds tx.sql, so B has no handle and nothing is written)
+steps: 
+settled: ConfigurationError[CONFIGURATION_ERROR:REVISION_TRACKING_RAW_SQL_DISABLED]
+writes: A 0 B 0
+revision A: 4 -> 4
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r1b1, r1b2, r2a1, r2a2, r2b2] recorded 0
+trace:
+  sql BEGIN
+  sql ROLLBACK

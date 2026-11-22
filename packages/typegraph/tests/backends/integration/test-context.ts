@@ -10,6 +10,10 @@ import type {
   LiveStoreOptions,
 } from "../../../src/store/types";
 import type { HistoryStoreBackend } from "../../../src/store-entry";
+import type {
+  TracedConnection,
+  TracedTableNames,
+} from "../../helpers/traced-connection";
 import { type IntegrationStore } from "./fixtures";
 
 export type InspectableStore<G extends GraphDef> = Store<G> &
@@ -166,4 +170,13 @@ export type IntegrationTestContext = Readonly<{
   serverLaneConcurrency: boolean;
   /** The driver this lane runs on; see {@link IntegrationLaneDriver}. */
   driver: IntegrationLaneDriver;
+  /**
+   * Opens one NEW connection of this lane's driver with one backend per
+   * table-name set over it, recording every statement the connection runs
+   * (`tests/helpers/traced-connection.ts`). Closing it is the caller's
+   * responsibility, as for {@link createSerializedBackend}.
+   */
+  openTracedConnection: (
+    tableNameSets: readonly TracedTableNames[],
+  ) => Promise<TracedConnection>;
 }>;

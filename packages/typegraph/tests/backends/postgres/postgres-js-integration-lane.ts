@@ -18,6 +18,7 @@ import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgr
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { requireDefined } from "../../../src/utils/presence";
+import { openTracedPostgresJsConnection } from "../../helpers/traced-connection";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 import {
@@ -92,6 +93,8 @@ export function registerPostgresJsIntegrationLane(
         {
           slice,
           driver: "postgres-js",
+          openTracedConnection: (tableNameSets) =>
+            openTracedPostgresJsConnection(databaseUrl, tableNameSets),
           createIsolatedBackend: async () => {
             const { backend } = await createLocalPgliteBackend();
             return { backend, cleanup: () => backend.close() };
