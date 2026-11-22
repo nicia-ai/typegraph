@@ -1990,18 +1990,23 @@ began, the evidence behind its decision to send `COMMIT`:
 - `"session-marker"` (the bundled PostgreSQL backends, every driver): the
   backend observes every statement the transaction sends, and adds none to a
   transaction in which nothing failed and whose native handle was never read.
-  When the native handle leaves TypeGraph (`tx.sql` is read, or a
-  `transactionWithNative` callback receives it), the backend first hands the
-  driver a transaction-local setting (`SET LOCAL`, which takes no snapshot),
-  ahead of anything sent through the handle, and right before `COMMIT` reads
-  it back on the same session, through the connection's statement queue.
-  Found: the transaction commits. Refused because the transaction is aborted:
-  `TransactionRolledBackError`. Gone: something other than TypeGraph ended the
-  transaction (a `COMMIT`, `ROLLBACK` or `BEGIN` sent through `tx.sql`), and
-  the backend rejects with `TransactionOutcomeUnknownError`, never retried.
-  Without the marker, a transaction in which a statement failed is probed once
-  before `COMMIT` instead (refused: `TransactionRolledBackError`); it cannot
-  have been ended behind TypeGraph's back. A Store transaction runs the same
+  When control leaves TypeGraph (`tx.sql` is read, a `transactionWithNative`
+  callback receives the native handle, or a schema preflight calls
+  `executeSchemaDdl`, which forwards any SQL text), the backend first hands the
+  driver a transaction-local setting (`SET LOCAL`, which takes no snapshot)
+  whose value it generates for the attempt, ahead of anything sent through the
+  handle, and right before `COMMIT` reads it back on the same session, through
+  the connection's statement queue. From then on the attempt has exactly two
+  outcomes: the marker is found and the `COMMIT` succeeds, and the transaction
+  committed; or anything else (the marker is gone, the read is refused, the
+  callback throws, the `COMMIT` fails), and the backend rejects with
+  `TransactionOutcomeUnknownError`, never retried, because an aborted
+  transaction cannot be queried to prove it is the one TypeGraph opened. A
+  rollback to one of TypeGraph's own savepoints that undid the marker sets it
+  again. Without a release, a transaction in which a statement failed is probed
+  once before `COMMIT` instead (refused: `TransactionRolledBackError`,
+  retried under `retry` when one of its errors was a conflict); it cannot have
+  been ended behind TypeGraph's back. A Store transaction runs the same
   check as soon as the callback returns, before any work of its own; every
   check first waits for the statements queued on the connection. A backend
   built over a transaction handle opens savepoints rather than transactions

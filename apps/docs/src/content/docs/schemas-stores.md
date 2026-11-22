@@ -2301,10 +2301,11 @@ whose `cause` is the first error the database reported in it; it never resolves 
 committed. A transaction in which nothing failed and whose `tx.sql` was never read pays nothing for
 this: it sends exactly `BEGIN`, its own statements and `COMMIT`. A
 `TransactionRolledBackError` means the transaction did not commit: nothing the callback wrote was
-saved. To carry on after an expected failure, run the failing statement inside a savepoint (for
-example a nested `tx.sql.transaction(...)`) that rolls back past it: the transaction is then
-healthy and commits. SQLite keeps a transaction usable after a failed statement, so on SQLite the
-same callback commits what it wrote.
+saved. It is only raised when the callback never read `tx.sql`; a transaction that read it reports
+the same failure as a `TransactionOutcomeUnknownError` (see below). To carry on after an expected
+failure, run the failing statement inside a savepoint (for example a nested
+`tx.sql.transaction(...)`) that rolls back past it: the transaction is then healthy and commits. SQLite keeps a
+transaction usable after a failed statement, so on SQLite the same callback commits what it wrote.
 
 ```typescript
 try {
@@ -2318,31 +2319,38 @@ try {
 ```
 
 Transaction control through `tx.sql` is not supported inside `store.transaction()`: do not send
-`COMMIT`, `ROLLBACK` or `BEGIN` there (savepoints are fine). On PostgreSQL, TypeGraph detects it.
-Reading `tx.sql` first hands the driver a marker that lives exactly as long as the transaction (a
-transaction-local setting), ahead of anything sent through the handle, and TypeGraph reads it back
-before its `COMMIT`; this costs one statement when `tx.sql` is first read and one before `COMMIT`.
-On node-postgres and PGlite the marker waits for a TypeGraph statement still executing on the
-connection, and statements sent through the handle wait for the marker. Read `tx.sql` while no
-graph operation of the transaction is still running, as you await every `tx.sql` statement: a
-marker that lands inside a savepoint a running TypeGraph operation then rolls back is undone, which
-reports an unknown outcome for a transaction that was fine.
-A transaction ended through `tx.sql` no longer carries the marker, so TypeGraph does not send its
-own `COMMIT`, which would otherwise close whatever the session is doing now, and rejects with a
-`TransactionOutcomeUnknownError` instead. The outcome is unknown because TypeGraph cannot tell what
-was saved: a native `COMMIT` saved the writes before it, a native `ROLLBACK` discarded them, and a
-statement sent after either ran outside the transaction (on node-postgres and PGlite, statements
-after a native `BEGIN` are rolled back with TypeGraph's own transaction). This error is never
-retried, even under `retry: { attempts }` and even when a serialization failure was caught
-earlier in the callback, because re-running the callback could repeat writes that are already
-committed; check what was saved before running it again. Resetting the marker setting (`RESET
-ALL`, for instance) is reported the same way. On postgres-js, a raw `ROLLBACK TO SAVEPOINT`
-through `tx.sql` recovers the session but not the driver, which rolls back any transaction in
-which a statement failed outside its own savepoint scopes; that transaction rejects with
-`TransactionRolledBackError`. Use `tx.sql.transaction(...)` for savepoints on postgres-js. On
-SQLite, TypeGraph has only the result of its own `COMMIT` to go on: a `COMMIT` after a native
-`COMMIT` or `ROLLBACK` fails with the driver's error, but a transaction the callback opened in
-place of TypeGraph's is not detected.
+`COMMIT`, `COMMIT AND CHAIN`, `ROLLBACK` or `BEGIN` there (savepoints are fine). On PostgreSQL,
+reading `tx.sql` hands control of the transaction to the callback, and changes how TypeGraph
+reports it:
+
+- **It commits only with proof.** Reading `tx.sql` first hands the driver a marker that lives
+  exactly as long as the transaction (a transaction-local setting whose value TypeGraph generates
+  for this attempt), ahead of anything sent through the handle, and TypeGraph reads it back before
+  its `COMMIT`. This costs one statement when `tx.sql` is first read and one before `COMMIT`. On
+  node-postgres and PGlite the marker waits for a statement still executing on the connection, and
+  statements sent through the handle wait for the marker. When TypeGraph rolls back one of its own
+  savepoints that the marker landed in, it sets the marker again.
+- **Anything else is an unknown outcome, never retried.** When the marker is gone (a native
+  `COMMIT`, `ROLLBACK` or `BEGIN` ended the transaction), TypeGraph does not send its `COMMIT`,
+  which would otherwise close whatever the session is doing now. When a statement aborted the
+  transaction, or a serialization failure or deadlock rejects the callback or the `COMMIT`, TypeGraph
+  cannot prove that the transaction that failed is the one it opened: the callback could have committed it
+  through the handle and begun another, and an aborted PostgreSQL transaction cannot be queried.
+  Either way the transaction rejects with `TransactionOutcomeUnknownError`: `details.reason` is
+  `"transaction-ended"` or `"native-handle-released"`, and `cause` is the failure (the conflict the
+  callback threw, or the first error the database reported). Any other error the callback throws
+  rejects `store.transaction()` unchanged, as before; it is never retried either. What the callback wrote may or may
+  not have been saved, so the error is never retried, not even under `retry: { attempts }` and not
+  even when its `cause` is a serialization failure or deadlock (see
+  [Retrying by hand after reading `tx.sql`](#retrying-by-hand-after-reading-txsql)).
+
+Resetting the marker setting (`RESET ALL`, for instance) is reported the same way. On postgres-js,
+a raw `ROLLBACK TO SAVEPOINT` through `tx.sql` recovers the session but not the driver, which rolls
+back any transaction in which a statement failed outside its own savepoint scopes; that transaction
+rejects with `TransactionOutcomeUnknownError`. Use `tx.sql.transaction(...)` for savepoints on
+postgres-js. On SQLite, TypeGraph has only the result of its own `COMMIT` to go on: a `COMMIT`
+after a native `COMMIT` or `ROLLBACK` fails with the driver's error, but a transaction the callback
+opened in place of TypeGraph's is not detected.
 
 Not every rejection means nothing was saved. The `onOperationEnd` and `onBulkOperationEnd` hooks
 run after the `COMMIT` succeeded, so an error one of them throws rejects `store.transaction()`
@@ -2364,7 +2372,8 @@ commits.
 
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
 not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
-`TransactionRolledBackError`, even if the callback caught the refusal), while SQLite, whose
+`TransactionOutcomeUnknownError`, even if the callback caught the refusal, since the callback read
+`tx.sql`), while SQLite, whose
 transaction is not read-only at the engine, runs it and commits it.
 
 #### Overlapping calls in one transaction
@@ -2705,7 +2714,9 @@ catches still rolled the transaction back, so it is detected too: the attempt
 rejects with `TransactionRolledBackError`, and is retried the same way when any
 error the database reported during the attempt was a conflict (`details.conflict`
 is `true`), whichever error is its `cause`. A transaction whose outcome is
-unknown (`TransactionOutcomeUnknownError`) is never retried:
+unknown (`TransactionOutcomeUnknownError`) is never retried, and on PostgreSQL
+that includes every transaction whose callback read `tx.sql` and then did not
+commit (see below):
 
 ```typescript
 import { TransactionConflictError } from "@nicia-ai/typegraph";
@@ -2731,6 +2742,57 @@ try {
 } catch (error) {
   if (error instanceof TransactionConflictError) {
     // every attempt conflicted; error.details.attempts === 3
+  }
+}
+```
+
+##### Retrying by hand after reading `tx.sql`
+
+On PostgreSQL, a transaction whose callback read `tx.sql` is never retried by
+`retry: { attempts }`, even when it hits a serialization failure or deadlock.
+Through the handle the callback could have committed TypeGraph's transaction
+(`COMMIT`, `COMMIT AND CHAIN`) and begun another, and an aborted transaction
+cannot be queried, so TypeGraph cannot tell a conflict that rolled back
+everything from one that came after writes were already committed. Replaying the
+callback could write them twice. Instead the transaction rejects on the first
+attempt with `TransactionOutcomeUnknownError` (code
+`TRANSACTION_OUTCOME_UNKNOWN`), `details.reason` `"native-handle-released"`, and
+the conflict as its `cause`: the very error the callback threw, or, when the
+callback caught it, the first error the database reported. A transaction whose
+`tx.sql` was never read keeps retrying as before.
+
+If your callback never ends the transaction through `tx.sql`, a conflict means
+nothing was saved, and you can retry it yourself:
+
+```typescript
+import { TransactionOutcomeUnknownError } from "@nicia-ai/typegraph";
+
+/** The SQLSTATE of the first database error in `error`'s cause chain. */
+function sqlStateOf(error: unknown): string | undefined {
+  for (let link: unknown = error; link instanceof Error; link = link.cause) {
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return undefined;
+}
+
+async function transferWithRawSql(attempts: number): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await store.transaction(async (tx) => {
+        await tx.sql.execute(sql`UPDATE ledger SET balance = balance - 10 WHERE id = ${fromId}`);
+        await tx.nodes.Transfer.create({ amount: 10 });
+      });
+      return;
+    } catch (error) {
+      // Safe only because this callback never sends COMMIT, ROLLBACK or BEGIN through tx.sql.
+      // 40001: serialization failure. 40P01: deadlock.
+      const conflict =
+        error instanceof TransactionOutcomeUnknownError &&
+        error.details.reason === "native-handle-released" &&
+        ["40001", "40P01"].includes(sqlStateOf(error.cause) ?? "");
+      if (!conflict || attempt === attempts) throw error;
+    }
   }
 }
 ```
