@@ -90,7 +90,7 @@ export function visitExpressionFields(
  * IN subqueries are compiled as independent statements and read nothing of
  * the enclosing query besides the IN field.
  */
-export function visitPredicateFields(
+function visitPredicateFields(
   expression: PredicateExpression,
   visit: (field: FieldRef) => void,
 ): void {

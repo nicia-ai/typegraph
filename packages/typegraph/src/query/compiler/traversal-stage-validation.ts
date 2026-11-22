@@ -12,7 +12,7 @@ import type { DatabaseExpression } from "../expressions";
  * Recursive stages compile in the chain's own scope and are not checked.
  *
  * Which aliases a predicate may read of its own statement is decided by
- * `assertAliasPredicateReadsOnlyItsTarget`; this check only answers whether
+ * `assertAliasPredicatesReadOnlyTheirTarget`; this check only answers whether
  * the enclosing scope is available.
  */
 export function assertIsolatedStageReadsNoEnclosingQuery(

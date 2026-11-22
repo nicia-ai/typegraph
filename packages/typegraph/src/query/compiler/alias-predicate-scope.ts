@@ -25,7 +25,7 @@ import { visitCorrelatedExpressionFields } from "./expression-subquery-scope";
  * the predicate can reach an enclosing statement at all is a separate
  * question (`traversal-stage-validation.ts`).
  */
-export function assertAliasPredicateReadsOnlyItsTarget(
+function assertAliasPredicateReadsOnlyItsTarget(
   predicate: NodePredicate,
 ): void {
   visitAliasPredicateFields(predicate.expression, (field) => {
