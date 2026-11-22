@@ -15,7 +15,7 @@ import {
   dateComparisonOperandText,
 } from "./predicates";
 
-type DatabaseJsonValue =
+export type DatabaseJsonValue =
   | boolean
   | number
   | string
@@ -26,7 +26,8 @@ type DatabaseJsonValue =
 export type DatabaseLiteral = DatabaseJsonValue | Date | undefined;
 
 export type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
-type ExpressionComparisonOperator = "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
+export type ExpressionComparisonOperator =
+  "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
 export type AggregateOperator =
   "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 
@@ -111,78 +112,78 @@ export function resolveCollectRecordFields(
     });
 }
 
-type FieldExpressionNode = Readonly<{
+export type FieldExpressionNode = Readonly<{
   kind: "field";
   field: FieldRef;
 }>;
-type LiteralExpressionNode = Readonly<{
+export type LiteralExpressionNode = Readonly<{
   kind: "literal";
   value: DatabaseLiteral;
 }>;
-type ParameterExpressionNode = Readonly<{
+export type ParameterExpressionNode = Readonly<{
   kind: "parameter";
   name: string;
 }>;
-type ArithmeticExpressionNode = Readonly<{
+export type ArithmeticExpressionNode = Readonly<{
   kind: "arithmetic";
   operator: ArithmeticOperator;
   left: DatabaseExpression;
   right: DatabaseExpression;
 }>;
-type ComparisonExpressionNode = Readonly<{
+export type ComparisonExpressionNode = Readonly<{
   kind: "comparison";
   operator: ExpressionComparisonOperator;
   left: DatabaseExpression;
   right: DatabaseExpression;
 }>;
-type ArrayContainsExpressionNode = Readonly<{
+export type ArrayContainsExpressionNode = Readonly<{
   kind: "array_contains";
   array: DatabaseExpression;
   element: DatabaseExpression;
 }>;
-type BooleanExpressionNode = Readonly<{
+export type BooleanExpressionNode = Readonly<{
   kind: "boolean";
   operator: "and" | "or";
   operands: readonly DatabaseExpression<boolean | undefined>[];
 }>;
-type NotExpressionNode = Readonly<{
+export type NotExpressionNode = Readonly<{
   kind: "not";
   operand: DatabaseExpression<boolean | undefined>;
 }>;
-type NullCheckExpressionNode = Readonly<{
+export type NullCheckExpressionNode = Readonly<{
   kind: "null_check";
   operator: "isNull" | "isNotNull";
   operand: DatabaseExpression;
 }>;
-type AggregateExpressionNode = Readonly<{
+export type AggregateExpressionNode = Readonly<{
   kind: "aggregate";
   operator: AggregateOperator;
   operand?: DatabaseExpression | undefined;
 }>;
-type CoalesceExpressionNode = Readonly<{
+export type CoalesceExpressionNode = Readonly<{
   kind: "coalesce";
   operands: readonly DatabaseExpression[];
 }>;
-type ConditionalExpressionNode = Readonly<{
+export type ConditionalExpressionNode = Readonly<{
   kind: "conditional";
   condition: DatabaseExpression<boolean | undefined>;
   then: DatabaseExpression;
   otherwise: DatabaseExpression;
 }>;
-type NumericConversionExpressionNode = Readonly<{
+export type NumericConversionExpressionNode = Readonly<{
   kind: "numeric_conversion";
   operand: DatabaseExpression;
 }>;
-type OuterReferenceExpressionNode = Readonly<{
+export type OuterReferenceExpressionNode = Readonly<{
   kind: "outer_reference";
   expression: DatabaseExpression;
   outerScopeIdentity: symbol;
 }>;
-type ExistsSubqueryExpressionNode = Readonly<{
+export type ExistsSubqueryExpressionNode = Readonly<{
   kind: "exists_subquery";
   subquery: QueryAst;
 }>;
-type ScalarSubqueryExpressionNode = Readonly<{
+export type ScalarSubqueryExpressionNode = Readonly<{
   kind: "scalar_subquery";
   subquery: QueryAst;
 }>;
@@ -228,9 +229,9 @@ export type DatabaseExpression<
   __scope?: Scope;
 }>;
 
-type NonNull<T> = Exclude<T, undefined>;
-type LiteralResult<T> = T extends null ? undefined : T;
-type ParameterValue<Value extends ValueType> =
+export type NonNull<T> = Exclude<T, undefined>;
+export type LiteralResult<T> = T extends null ? undefined : T;
+export type ParameterValue<Value extends ValueType> =
   Value extends "boolean" ? boolean
   : Value extends "date" ? Date
   : Value extends "number" ? number
@@ -238,15 +239,15 @@ type ParameterValue<Value extends ValueType> =
   : Value extends "array" ? readonly DatabaseJsonValue[]
   : Value extends "object" ? Readonly<Record<string, DatabaseJsonValue>>
   : unknown;
-type Comparable = boolean | Date | number | string;
-type OrderedComparable = Date | number | string;
-type NullIfEitherUndefined<Left, Right, Value> =
+export type Comparable = boolean | Date | number | string;
+export type OrderedComparable = Date | number | string;
+export type NullIfEitherUndefined<Left, Right, Value> =
   undefined extends Left | Right ? Value | undefined : Value;
-type NumericExpression<Scope extends string> = DatabaseExpression<
+export type NumericExpression<Scope extends string> = DatabaseExpression<
   number | undefined,
   Scope
 >;
-type ComparableExpression<
+export type ComparableExpression<
   T extends Comparable,
   Scope extends string,
 > = DatabaseExpression<T | undefined, Scope>;
@@ -666,7 +667,7 @@ function comparison<
   return expression;
 }
 
-type ArrayExpressionElement<ArrayValue> =
+export type ArrayExpressionElement<ArrayValue> =
   ArrayValue extends readonly (infer Element)[] ? Element : never;
 
 function arrayContains<

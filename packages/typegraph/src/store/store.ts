@@ -834,7 +834,7 @@ function defineUnavailableSqlGuard(context: object, guard: () => never): void {
  * read-only views included — so an identity-disabled graph simply has no
  * `identity` member to reach for.
  */
-type StoreIdentityAccess<G extends GraphDef> =
+export type StoreIdentityAccess<G extends GraphDef> =
   G["identity"] extends GraphIdentityConfig ?
     Readonly<{ identity: IdentityFacade<G> }>
   : Readonly<Record<never, never>>;
@@ -869,7 +869,7 @@ export interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
   (kind: string): DynamicEdgeCollection;
 }
 
-type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
+export type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
   query?: () => InitialQueryBuilder<G, "open">;
 }>;
 
@@ -877,7 +877,7 @@ type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
 export type CheckedReadScope<G extends GraphDef> = CheckedReadScopeBoundary<G> &
   Required<Pick<CheckedReadScopeBoundary<G>, "query">>;
 
-type StoreCore<G extends GraphDef> = Readonly<{
+export type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
   graphId: string;
@@ -1049,7 +1049,7 @@ export type StoreTransactionOptions = TransactionOptions &
     retry?: Readonly<{ attempts: number }>;
   }>;
 
-type StoreTransactions<G extends GraphDef> = Readonly<{
+export type StoreTransactions<G extends GraphDef> = Readonly<{
   transaction: <T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
     options?: StoreTransactionOptions,
@@ -1109,7 +1109,7 @@ type TransactionReadMethods<G extends GraphDef> = Readonly<{
   ) => Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>>;
 }>;
 
-type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+export type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
   allocationOwner?: () => Promise<GraphAllocationOwner>;
   recordedReadOwner?: () => Promise<GraphAllocationOwner>;
   resolveRecordedInstant?: (
@@ -1136,13 +1136,13 @@ type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
   changesSince?: (revision: EngineRevision) => Promise<LineageDelta>;
 }>;
 
-type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
+export type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
 
-type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
+export type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> &
   Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
 
 /** Lifecycle writes are required on concrete Stores, independently of the read boundary. */
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
+export type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> &
   AddedStoreReads<G> &
   Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> &
   Readonly<{
@@ -1250,7 +1250,7 @@ export type ReconciledSchema<G extends GraphDef> = Readonly<{
 }>;
 
 /** Construction option carrying a cached {@link ReconciledSchema}. */
-type ReconciledOption<G extends GraphDef> = Readonly<{
+export type ReconciledOption<G extends GraphDef> = Readonly<{
   reconciled?: ReconciledSchema<G>;
 }>;
 
@@ -1265,7 +1265,7 @@ type ReconciledOption<G extends GraphDef> = Readonly<{
  * self-reference (TS2456) but an interface resolves lazily — the same idiom as
  * {@link StoreEvolution}.
  */
-interface AdapterStoreReconciliation<
+export interface AdapterStoreReconciliation<
   G extends GraphDef,
   TNativeTransaction,
   Self,
@@ -1304,7 +1304,7 @@ export type AdapterStore<
   > &
   Readonly<{ backend: GraphBackend }>;
 
-type AdapterStoreTransactions<
+export type AdapterStoreTransactions<
   G extends GraphDef,
   TNativeTransaction,
 > = Readonly<{
@@ -8559,7 +8559,7 @@ export type AdapterHistoryStore<
     recordedReadBound: true;
   }>;
 
-type AdapterHistoryStoreTransactions<
+export type AdapterHistoryStoreTransactions<
   G extends GraphDef,
   TNativeTransaction,
 > = Readonly<{

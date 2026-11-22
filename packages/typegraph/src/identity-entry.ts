@@ -58,3 +58,11 @@ export {
   type RestoredIdentityTransition,
   type TransitionPageCursor,
 } from "./identity";
+
+/**
+ * Types the public declarations name without being everyday API: exported so
+ * a consumer's declaration emit can spell an inferred type through a public
+ * specifier. Entrypoints whose declarations name them load this entrypoint's
+ * declarations (contract 3 in `tests/public-type-reachability.test.ts`).
+ */
+export type { PlainNodeRef } from "./identity/sql-target";

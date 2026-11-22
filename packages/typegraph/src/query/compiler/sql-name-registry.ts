@@ -124,10 +124,21 @@ export type SqlStatementNames = Readonly<{
  *   collisions refuse it, not a name's length.
  * - `"wrapped"`: it embeds the statement in SQL that refers to its result
  *   columns by name and then reads them back (relations, checked reads,
- *   `batchOnce()`, set operations), so result names are also compared without
- *   regard to letter case.
+ *   `batchOnce()`, the leftmost leaf of a set operation), so result names are
+ *   also compared without regard to letter case.
+ * - `{ referencedResultNames }`: it is a leaf of a set operation whose
+ *   result columns the compound statement matches by position and refers to
+ *   by name only in `referencedResultNames` (a nested compound's ORDER BY
+ *   over its leftmost leaf; none for any other leaf). Only a result name
+ *   that meets a referenced one, after clipping and without regard to
+ *   letter case, collides; its WITH list and the columns it reads are checked
+ *   as always.
  */
-export type SqlNameUsage = "decoded" | "embedded" | "wrapped";
+export type SqlNameUsage =
+  | "decoded"
+  | "embedded"
+  | "wrapped"
+  | Readonly<{ referencedResultNames: readonly string[] }>;
 
 /** The name an engine resolves `name` to where SQL refers to it. */
 function referenceKey(name: string): string {
@@ -245,6 +256,29 @@ export function declareFixedCte(
     `fixed\u0000${name}`,
     `the library's own "${name}" relation`,
   );
+  return name;
+}
+
+/**
+ * Declares a fixed, library-owned WITH relation together with the columns
+ * its SELECT list emits, and returns its name. A reference written without
+ * its relation (as `having()` writes one) is resolved in every relation of
+ * its FROM, so a relation that declares no columns would hide a name it
+ * shares with an alias's CTE.
+ */
+export function declareFixedCteWithColumns(
+  names: SqlStatementNames,
+  name: string,
+  columns: readonly string[],
+): string {
+  declareFixedCte(names, name);
+  const scope = names.relationColumns(name);
+  for (const column of columns)
+    scope.register(
+      column,
+      `fixed-column\u0000${name}\u0000${column}`,
+      `column ${column} of the library's own "${name}" relation`,
+    );
   return name;
 }
 
@@ -398,6 +432,25 @@ export function findSqlNameIssues(
         break;
       }
       case "result": {
+        if (typeof usage === "object") {
+          const referenced = new Set(
+            usage.referencedResultNames.map((name) => referenceKey(name)),
+          );
+          for (const { earlier, entry } of findMeetingPairs(
+            scope,
+            referenceKey,
+            (name) => referenced.has(referenceKey(name)),
+          ))
+            issues.push(
+              collisionIssue(
+                scope,
+                earlier,
+                entry,
+                ", which a set operation's ORDER BY refers to by name and the engines compare without regard to letter case",
+              ),
+            );
+          break;
+        }
         if (usage !== "embedded") {
           for (const entry of scope.entries()) {
             if (exceedsSqlIdentifierLimit(entry.name))

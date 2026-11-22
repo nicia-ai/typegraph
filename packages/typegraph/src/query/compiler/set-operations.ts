@@ -44,11 +44,26 @@ import { runCompilerPass } from "./passes";
 import { type LogicalPlan, lowerSetOperationToLogicalPlan } from "./plan";
 
 /**
- * Type for the query compiler function.
+ * Which result columns of one leaf of a compound statement SQL refers to by
+ * name. The compound statement takes its column names from its leftmost leaf
+ * and matches every other leaf's columns to them by position:
+ *
+ * - `"all"`: the leftmost leaf of the outermost compound, whose columns its
+ *   callers read back by name.
+ * - a list of names: the result columns a nested compound's ORDER BY refers
+ *   to, for the leftmost leaf of that compound; empty for every leaf whose
+ *   names no SQL refers to.
+ */
+export type SetOperandResultNames = "all" | readonly string[];
+
+/**
+ * Type for the query compiler function. `resultNames` tells the compiler
+ * which of the leaf's result columns the compound statement refers to by name.
  */
 export type QueryCompilerFunction = (
   ast: QueryAst,
   graphId: string,
+  resultNames: SetOperandResultNames,
 ) => SqlFragment;
 
 /**
@@ -186,7 +201,14 @@ export function compileSetOperation(
     );
   }
 
-  const coreSql = compileSetOperationCore(op, graphId, compileQuery, dialect);
+  // The outermost compound's columns are read back by name by its callers.
+  const coreSql = compileSetOperationCore(
+    op,
+    graphId,
+    compileQuery,
+    dialect,
+    "all",
+  );
 
   const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
   return emitSetOperationQuerySql({
@@ -199,19 +221,29 @@ export function compileSetOperation(
 /**
  * Compiles a set operation node into a compound SELECT by wrapping each side
  * with the dialect's operand wrapper and joining them with the operator.
+ * `namesRead` is which of the compound's result columns SQL refers to by
+ * name; they are its left operand's, so only the left operand inherits it.
  */
 function compileSetOperationCore(
   op: SetOperation,
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
+  namesRead: SetOperandResultNames,
 ): SqlFragment {
-  const left = compileComposableQuery(op.left, graphId, compileQuery, dialect);
+  const left = compileComposableQuery(
+    op.left,
+    graphId,
+    compileQuery,
+    dialect,
+    namesRead,
+  );
   const right = compileComposableQuery(
     op.right,
     graphId,
     compileQuery,
     dialect,
+    [],
   );
 
   const opSql = sql.raw(setOperationKeyword(op.operator));
@@ -229,11 +261,18 @@ function compileComposableQuery(
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
+  namesRead: SetOperandResultNames,
 ): SqlFragment {
   if ("__type" in query) {
-    return compileSetOperationCompound(query, graphId, compileQuery, dialect);
+    return compileSetOperationCompound(
+      query,
+      graphId,
+      compileQuery,
+      dialect,
+      namesRead,
+    );
   }
-  return compileQuery(query, graphId);
+  return compileQuery(query, graphId, namesRead);
 }
 
 /**
@@ -248,8 +287,19 @@ function compileSetOperationCompound(
   graphId: string,
   compileQuery: QueryCompilerFunction,
   dialect: DialectAdapter,
+  namesRead: SetOperandResultNames,
 ): SqlFragment {
-  const core = compileSetOperationCore(op, graphId, compileQuery, dialect);
+  // Its own ORDER BY refers to its leftmost leaf's columns by name.
+  const orderedNames = resolveSetOperationOrderBy(op).map(
+    ({ outputName }) => outputName,
+  );
+  const core = compileSetOperationCore(
+    op,
+    graphId,
+    compileQuery,
+    dialect,
+    namesRead === "all" ? "all" : [...namesRead, ...orderedNames],
+  );
   const suffixClauses = buildSetOperationSuffixClauses(op, dialect);
   if (suffixClauses.length === 0) return core;
   return sql.join([core, ...suffixClauses], sql` `);
@@ -332,13 +382,58 @@ function matchFieldToProjection(
 }
 
 /**
- * Builds ORDER BY, LIMIT, OFFSET clauses for set operations.
+ * Resolves a set operation's ORDER BY to the output names it refers to.
  *
- * For set operations, ORDER BY must reference output column names from
- * the compound result, not internal CTE columns. This function:
- * 1. Maps each ORDER BY field to its output name from the leftmost projection
- * 2. Applies the requested NULLS FIRST/LAST placement
- * 3. Throws a descriptive error if an ORDER BY field isn't in the projection
+ * For set operations, ORDER BY must reference output column names from the
+ * compound result, not internal CTE columns, so each ORDER BY field is mapped
+ * to its output name in the leftmost projection; a field that is not in the
+ * projection is refused with a descriptive error. This is the one place that
+ * decides which names a compound's ORDER BY refers to: the ORDER BY clause and
+ * the SQL-name check of the leftmost leaf both use it.
+ */
+function resolveSetOperationOrderBy(
+  op: SetOperation,
+): readonly Readonly<{ outputName: string; orderSpec: OrderSpec }>[] {
+  if (op.orderBy === undefined || op.orderBy.length === 0) return [];
+  const projection = getLeftmostProjection(op);
+
+  // Check for SELECT * (empty projection) - can't order by named columns
+  if (projection.fields.length === 0) {
+    throw new UnsupportedPredicateError(
+      "Set operation ORDER BY requires explicit field projection. " +
+        "SELECT * does not provide stable output column names for ordering. " +
+        "Use .select() to specify which fields to project.",
+    );
+  }
+
+  return op.orderBy.map((orderSpec) => {
+    const projected = matchFieldToProjection(orderSpec.field, projection);
+
+    if (!projected) {
+      // Build a descriptive error message
+      const fieldDesc =
+        orderSpec.field.__type === "database_expression" ? "database expression"
+        : orderSpec.field.jsonPointer ?
+          `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
+        : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
+      const availableFields = projection.fields
+        .map((f) => f.outputName)
+        .join(", ");
+      throw new UnsupportedPredicateError(
+        `Set operation ORDER BY field "${fieldDesc}" is not in the projection. ` +
+          `ORDER BY for UNION/INTERSECT/EXCEPT must reference projected columns. ` +
+          `Available columns: ${availableFields}`,
+      );
+    }
+
+    return { outputName: projected.outputName, orderSpec };
+  });
+}
+
+/**
+ * Builds ORDER BY, LIMIT, OFFSET clauses for set operations: each ORDER BY
+ * term refers to the output name {@link resolveSetOperationOrderBy} resolves,
+ * with the requested NULLS FIRST/LAST placement.
  */
 function buildSetOperationSuffixClauses(
   op: SetOperation,
@@ -346,48 +441,17 @@ function buildSetOperationSuffixClauses(
 ): SqlFragment[] {
   const clauses: SqlFragment[] = [];
 
-  // Handle ORDER BY if present
-  if (op.orderBy && op.orderBy.length > 0) {
-    const projection = getLeftmostProjection(op);
-
-    // Check for SELECT * (empty projection) - can't order by named columns
-    if (projection.fields.length === 0) {
-      throw new UnsupportedPredicateError(
-        "Set operation ORDER BY requires explicit field projection. " +
-          "SELECT * does not provide stable output column names for ordering. " +
-          "Use .select() to specify which fields to project.",
-      );
-    }
-
-    const orderParts: SqlFragment[] = [];
-
-    for (const orderSpec of op.orderBy) {
-      const projected = matchFieldToProjection(orderSpec.field, projection);
-
-      if (!projected) {
-        // Build a descriptive error message
-        const fieldDesc =
-          orderSpec.field.__type === "database_expression" ?
-            "database expression"
-          : orderSpec.field.jsonPointer ?
-            `${orderSpec.field.alias}.props${orderSpec.field.jsonPointer}`
-          : `${orderSpec.field.alias}.${orderSpec.field.path.join(".")}`;
-        const availableFields = projection.fields
-          .map((f) => f.outputName)
-          .join(", ");
-        throw new UnsupportedPredicateError(
-          `Set operation ORDER BY field "${fieldDesc}" is not in the projection. ` +
-            `ORDER BY for UNION/INTERSECT/EXCEPT must reference projected columns. ` +
-            `Available columns: ${availableFields}`,
-        );
-      }
-
-      // Use output column name with proper quoting
-      const columnRef = sql.raw(dialect.quoteIdentifier(projected.outputName));
-      // Default: ASC → NULLS LAST, DESC → NULLS FIRST
-      const nulls = resolveNullOrdering(orderSpec);
-      orderParts.push(compileOrderTerm(columnRef, orderSpec.direction, nulls));
-    }
+  const orderBy = resolveSetOperationOrderBy(op);
+  if (orderBy.length > 0) {
+    const orderParts = orderBy.map(({ outputName, orderSpec }) =>
+      compileOrderTerm(
+        // Use output column name with proper quoting
+        sql.raw(dialect.quoteIdentifier(outputName)),
+        orderSpec.direction,
+        // Default: ASC → NULLS LAST, DESC → NULLS FIRST
+        resolveNullOrdering(orderSpec),
+      ),
+    );
 
     clauses.push(sql`ORDER BY ${sql.join(orderParts, sql`, `)}`);
   }

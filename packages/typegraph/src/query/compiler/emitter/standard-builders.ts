@@ -31,6 +31,7 @@ import {
   bindUnresolvedColumnReads,
   readAliasColumn,
   readColumn,
+  readDerivedTableColumn,
   readEveryColumn,
   readEveryColumnOf,
   readUnqualifiedColumn,
@@ -66,6 +67,7 @@ import {
   declareAliasColumn,
   declareAliasCte,
   declareFixedCte,
+  declareFixedCteWithColumns,
   declareResultColumn,
   declareSelectivePropsColumn,
   type SqlNameScope,
@@ -1336,9 +1338,25 @@ export function buildStandardHaving(
 type BuildStandardEmbeddingsCteInput = Readonly<{
   ctx: PredicateCompilerContext;
   graphId: string;
+  names: SqlStatementNames;
   nodeKinds: readonly string[];
   vectorPredicate: VectorSimilarityPredicate;
 }>;
+
+/** The columns `cte_embeddings` emits, in its SELECT list's order. */
+const EMBEDDINGS_CTE_COLUMNS = [
+  "node_id",
+  "node_kind",
+  "distance",
+  "score",
+  "ord",
+] as const;
+
+/** The columns `cte_fulltext` emits, in its SELECT list's order. */
+const FULLTEXT_CTE_COLUMNS = ["node_id", "node_kind", "rank", "ord"] as const;
+
+/** The columns `cte_relevance_candidates` emits, in its SELECT list's order. */
+const HYBRID_CANDIDATES_CTE_COLUMNS = ["node_id", "node_kind"] as const;
 
 /**
  * Builds the relevance CTE for a `field.similarTo(...)` predicate in the query
@@ -1361,7 +1379,7 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
 export function buildStandardEmbeddingsCte(
   input: BuildStandardEmbeddingsCteInput,
 ): SqlFragment {
-  const { ctx, graphId, nodeKinds, vectorPredicate } = input;
+  const { ctx, graphId, names, nodeKinds, vectorPredicate } = input;
   const { field, metric, minScore, queryEmbedding } = vectorPredicate;
 
   if (nodeKinds.length === 0) {
@@ -1486,9 +1504,11 @@ export function buildStandardEmbeddingsCte(
         kindCandidates,
       );
       const distanceFromScore =
-        branchMetric === "cosine" ? sql.raw("(1.0 - score)") : sql.raw("score");
+        branchMetric === "cosine" ?
+          sql`(1.0 - ${readDerivedTableColumn("score")})`
+        : readDerivedTableColumn("score");
       return sql`
-        SELECT node_id, ${kind} AS node_kind, ${distanceFromScore} AS distance, score
+        SELECT ${readDerivedTableColumn("node_id")}, ${kind} AS node_kind, ${distanceFromScore} AS distance, ${readDerivedTableColumn("score")}
         FROM (${annSql}) AS tg_ann_src
       `;
     }
@@ -1554,17 +1574,23 @@ export function buildStandardEmbeddingsCte(
   // assign vector ordinals to every candidate, letting documents far
   // outside the requested top-k contribute to the RRF fused score and
   // reorder final results.
+  declareFixedCteWithColumns(
+    names,
+    EMBEDDINGS_CTE_ALIAS,
+    EMBEDDINGS_CTE_COLUMNS,
+  );
+  // `ord` is computed here; the other columns are read from `vec_inner`.
   return sql`
     ${sql.raw(EMBEDDINGS_CTE_ALIAS)} AS (
       SELECT
-        node_id,
-        node_kind,
-        distance,
-        score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ${readDerivedTableColumn("node_id")},
+        ${readDerivedTableColumn("node_kind")},
+        ${readDerivedTableColumn("distance")},
+        ${readDerivedTableColumn("score")},
+        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("distance")} ASC) AS ord
       FROM (
         ${unionBody}
-        ORDER BY distance ASC
+        ORDER BY ${readDerivedTableColumn("distance")} ASC
         LIMIT ${vectorPredicate.limit}
       ) AS vec_inner
     )
@@ -1595,13 +1621,14 @@ type BuildStandardFulltextCteInput = Readonly<{
   ctx: PredicateCompilerContext;
   fulltextPredicate: FulltextMatchPredicate;
   graphId: string;
+  names: SqlStatementNames;
   nodeKinds: readonly string[];
 }>;
 
 export function buildStandardFulltextCte(
   input: BuildStandardFulltextCteInput,
 ): SqlFragment {
-  const { ctx, fulltextPredicate, graphId, nodeKinds } = input;
+  const { ctx, fulltextPredicate, graphId, names, nodeKinds } = input;
   const { dialect, schema } = ctx;
   const { query, mode, language, limit, minScore } = fulltextPredicate;
 
@@ -1657,13 +1684,15 @@ export function buildStandardFulltextCte(
   // SELECT/ORDER BY, so referencing the alias avoids duplicate work.
   // (2) SQLite FTS5's bm25() cannot appear inside a window function's
   // OVER clause — the auxiliary-function context is restricted.
+  declareFixedCteWithColumns(names, FULLTEXT_CTE_ALIAS, FULLTEXT_CTE_COLUMNS);
+  // `ord` is computed here; the other columns are read from `fts_inner`.
   return sql`
     ${sql.raw(FULLTEXT_CTE_ALIAS)} AS (
       SELECT
-        node_id,
-        node_kind,
-        rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ${readDerivedTableColumn("node_id")},
+        ${readDerivedTableColumn("node_kind")},
+        ${readDerivedTableColumn("rank")},
+        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("rank")} DESC, ${readDerivedTableColumn("node_id")} ASC) AS ord
       FROM (
         SELECT
           ${qualifyColumn(tableName, "node_id")} AS node_id,
@@ -1676,7 +1705,7 @@ export function buildStandardFulltextCte(
          AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
              ${qualifyColumn(tableName, "node_kind")}
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY rank DESC, ${qualifyColumn(tableName, "node_id")} ASC
+        ORDER BY ${readDerivedTableColumn("rank")} DESC, ${qualifyColumn(tableName, "node_id")} ASC
         LIMIT ${limit}
       ) AS fts_inner
     )
@@ -1702,7 +1731,14 @@ function sharedDeclaredLanguage(
   return [...languages][0];
 }
 
-export function buildStandardHybridCandidateCte(): SqlFragment {
+export function buildStandardHybridCandidateCte(
+  names: SqlStatementNames,
+): SqlFragment {
+  declareFixedCteWithColumns(
+    names,
+    HYBRID_CANDIDATES_CTE_ALIAS,
+    HYBRID_CANDIDATES_CTE_COLUMNS,
+  );
   return sql`
     ${sql.raw(HYBRID_CANDIDATES_CTE_ALIAS)} AS (
       SELECT ${readUnqualifiedColumn([EMBEDDINGS_CTE_ALIAS], "node_id")}, ${readUnqualifiedColumn([EMBEDDINGS_CTE_ALIAS], "node_kind")} FROM ${sql.raw(EMBEDDINGS_CTE_ALIAS)}

@@ -5,7 +5,7 @@ import {
 } from "../store/types";
 
 export type NodeKind<G extends GraphDef> = Extract<keyof G["nodes"], string>;
-type EdgeKind<G extends GraphDef> = Extract<keyof G["edges"], string>;
+export type EdgeKind<G extends GraphDef> = Extract<keyof G["edges"], string>;
 
 export type ProvenanceNodeRef<
   G extends GraphDef = GraphDef,
@@ -73,7 +73,7 @@ export type ProvenanceRetractionConfig<G extends GraphDef = GraphDef> =
  * full `NodeKind<G>` union when neither shape is present (e.g. a role config
  * that also carries unrelated fields, matched structurally).
  */
-type KindsFromRef<G extends GraphDef, Ref> =
+export type KindsFromRef<G extends GraphDef, Ref> =
   Ref extends Readonly<{ kind: infer K }> ? Extract<K, NodeKind<G>>
   : Ref extends Readonly<{ kinds: readonly (infer K)[] }> ?
     Extract<K, NodeKind<G>>

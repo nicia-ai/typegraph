@@ -44,7 +44,7 @@ import { claimSupport } from "./backing";
 export type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
 /** A target-side cardinality that declares something. */
-type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
+export type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 /** Which endpoint's population a declared cardinality bounds. */
 export type EdgeCardinalityDirection = "source" | "target";

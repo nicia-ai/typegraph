@@ -27,11 +27,11 @@ import type {
   QueryCoordinateState,
 } from "./types";
 
-type UndefinedWhenNullish<Value> =
+export type UndefinedWhenNullish<Value> =
   Extract<Value, null | undefined> extends never ? never : undefined;
-type UndefinedWhenOptional<Optional extends boolean> =
+export type UndefinedWhenOptional<Optional extends boolean> =
   Optional extends true ? undefined : never;
-type ExpressionObjectChildren<Value, Scope extends string> = {
+export type ExpressionObjectChildren<Value, Scope extends string> = {
   readonly [
     Key in Exclude<
       CommonPropertyKeys<NonNullable<Value>>,
@@ -58,7 +58,7 @@ export type ExpressionValue<Value, Scope extends string> = DatabaseExpression<
   : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope>
   : unknown);
 
-type ExpressionMetadata<
+export type ExpressionMetadata<
   Scope extends string,
   Optional extends boolean = false,
 > = Readonly<{
@@ -75,7 +75,7 @@ type ExpressionMetadata<
   deletedAt: DatabaseExpression<string | undefined, Scope>;
 }>;
 
-type AliasExpressions<
+export type AliasExpressions<
   Entry extends Readonly<{
     type: Readonly<{ schema: z.ZodType; kind: string }>;
     optional: boolean;
