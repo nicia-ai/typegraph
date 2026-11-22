@@ -51,6 +51,13 @@ const olderFriends = await store
   .execute();
 ```
 
+A subquery with a recursive traversal and more than one hop compiles each fixed (non-recursive)
+hop, and the start of an optional first recursive hop, as a separate statement that cannot see
+the outer row, so a `whereNode()` or `whereEdge()` predicate on one of those aliases that reads
+`outer` is refused with `UnsupportedPredicateError` (`details.targetAlias`). The same predicate on
+a recursive hop's alias is evaluated; otherwise correlate in the subquery's `where()`, which can
+read `outer`.
+
 ## NOT EXISTS
 
 Find records without related records:
