@@ -354,6 +354,41 @@ function topTeam(store: IdentifierStore, low: string, high: string) {
     .limit(1);
 }
 
+/**
+ * A fan-out from `start` over knows to a Person and over worksAt to a
+ * Company. With aliases `K` and `k` the two ids come from separate
+ * CTEs, so the leaf runs, but its result columns `K_id` and `k_id`
+ * differ only by letter case.
+ */
+function fanOut(
+  store: IdentifierStore,
+  aliases: readonly [string, string, string, string, string],
+  startId: string,
+) {
+  const [start, friendEdge, friend, employerEdge, employer] = aliases;
+  return store
+    .query()
+    .fromDynamic("Person", start as "fan_start")
+    .whereNode(start as "fan_start", (person) => person.id.eq(startId))
+    .traverseDynamic("knows", friendEdge as "fan_friend_edge")
+    .toDynamic("Person", friend as "fan_friend")
+    .traverseDynamic("worksAt", employerEdge as "fan_employer_edge", {
+      from: start as "fan_start",
+    })
+    .toDynamic("Company", employer as "fan_employer")
+    .select((ctx) => {
+      const row = ctx as unknown as Readonly<
+        Record<string, Readonly<{ name: unknown }>>
+      >;
+      return {
+        friend: requireDefined(row[friend]).name,
+        employer: requireDefined(row[employer]).name,
+      };
+    });
+}
+const FAN_OUT_PLAIN = ["a", "b", "c", "d", "f"] as const;
+const FAN_OUT_CASE_TWINS = ["p", "K", "x", "e", "k"] as const;
+
 export function registerSqlIdentifierIdentityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -918,6 +953,40 @@ export function registerSqlIdentifierIdentityIntegrationTests(
         expect(await query.execute()).toEqual([{ age: 41 }]);
         expect(await query.prepare().execute({})).toEqual([{ age: 41 }]);
         expect(await query.first()).toEqual({ age: 41 });
+      });
+    });
+
+    describe("set operations", () => {
+      it("runs a UNION whose right operand's result columns differ only by letter case: the compound takes its names from the left operand", async () => {
+        const union = fanOut(store, FAN_OUT_PLAIN, "nobody").union(
+          fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId),
+        );
+        expect(await union.execute()).toEqual([
+          { friend: "Bob", employer: "Acme" },
+        ]);
+        expect(
+          await fanOut(store, FAN_OUT_PLAIN, seeded.aliceId)
+            .intersect(fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId))
+            .execute(),
+        ).toEqual([{ friend: "Bob", employer: "Acme" }]);
+        expect(
+          await fanOut(store, FAN_OUT_PLAIN, seeded.aliceId)
+            .except(fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId))
+            .execute(),
+        ).toEqual([]);
+      });
+
+      it("refuses the same operand on the left, where its result columns name the compound's, before any SQL is sent", async () => {
+        counter.reset();
+        const refusal = await captureRefusal(() =>
+          fanOut(store, FAN_OUT_CASE_TWINS, seeded.aliceId)
+            .union(fanOut(store, FAN_OUT_PLAIN, "nobody"))
+            .execute(),
+        );
+        expect(refusal?.codes).toEqual([SQL_IDENTIFIER_COLLISION_CODE]);
+        expect(refusal?.message).toContain('"K_id"');
+        expect(refusal?.message).toContain('"k_id"');
+        expect(counter.count()).toBe(0);
       });
     });
 

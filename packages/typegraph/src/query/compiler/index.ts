@@ -150,7 +150,10 @@ import {
   type SqlSchema,
   type VectorSlotMap,
 } from "./schema";
-import { compileSetOperation as compileSetOp } from "./set-operations";
+import {
+  compileSetOperation as compileSetOp,
+  type SetOperandResultNames,
+} from "./set-operations";
 import {
   createSqlStatementNames,
   declareAliasColumn,
@@ -600,14 +603,22 @@ export function compileSetOperation(
   // statement here, or a union with an approximate operand would skip
   // the pgvector GUC wrapper.
   const annIndexTypes = new Set<string>();
-  const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
-    // The compound statement names each operand's columns positionally, but
-    // its ORDER BY and every caller read them back by name.
+  const compileOperand = (
+    ast: QueryAst,
+    gid: string,
+    resultNames: SetOperandResultNames,
+  ): CompiledSelectSql => {
+    // The compound statement takes its column names from its leftmost leaf,
+    // which its callers and ORDER BY read by name; every other leaf's columns
+    // are matched by position, and named only by a nested compound's ORDER BY
+    // over its own leftmost leaf.
     const compiled = compileNameCheckedQuery(
       ast,
       gid,
       propagateOptions(options_),
-      "wrapped",
+      resultNames === "all" ? "wrapped" : (
+        { referencedResultNames: resultNames }
+      ),
     );
     for (const indexType of annIndexScanTypes(compiled) ?? []) {
       annIndexTypes.add(indexType);

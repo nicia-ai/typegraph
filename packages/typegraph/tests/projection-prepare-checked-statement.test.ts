@@ -18,7 +18,7 @@ import type * as Compiler from "../src/query/compiler";
 import { toSqlWithParams } from "./sql-test-utils";
 import { createTestBackend } from "./test-utils";
 
-const checks = vi.hoisted(() => [] as { usage: string; sql: unknown }[]);
+const checks = vi.hoisted(() => [] as { usage: unknown; sql: unknown }[]);
 
 vi.mock("../src/query/compiler", async (importOriginal) => {
   const actual = await importOriginal<typeof Compiler>();
