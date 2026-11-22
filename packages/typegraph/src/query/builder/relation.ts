@@ -117,7 +117,7 @@ export type RelationDefinition<
   mapped?: boolean;
 }>;
 
-type RelationState = Readonly<{
+export type RelationState = Readonly<{
   predicate?: DatabaseExpression<boolean | undefined>;
   groupBy?: readonly DatabaseExpression[];
   distinct: boolean;

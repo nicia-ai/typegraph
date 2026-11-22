@@ -13,7 +13,9 @@ import { describe, expect, it } from "vitest";
 import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import {
   classifyIdentityPair,
+  dedupeIdentityAssertionsRaw,
   DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+  isUnreportedIdentityLoser,
 } from "../../src/graph-merge/identity-three-way";
 import {
   planIdentityChanges,
@@ -583,5 +585,200 @@ describe("every staged identity change is accounted for", () => {
       (entry) => entry.assertion.id,
     );
     expect(staged.filter((id) => !accounted.has(id))).toEqual([]);
+  });
+});
+
+describe("dedupeIdentityAssertionsRaw", () => {
+  it("reports a row two branches carried identically once when a third row wins", () => {
+    const pair = {
+      relation: "same",
+      a: { kind: "Person", id: "x" },
+      b: { kind: "Person", id: "y" },
+    } as const;
+    const winner: IdentityTransferAssertion = {
+      ...pair,
+      id: "own",
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    const shared: IdentityTransferAssertion = {
+      ...pair,
+      id: "imported",
+      validFrom: "2024-02-01T00:00:00.000Z",
+    };
+    const orders = [
+      [winner, shared, shared],
+      [shared, winner, shared],
+      [shared, shared, winner],
+    ];
+
+    const outcomes = orders.map((order) => {
+      const deduped = dedupeIdentityAssertionsRaw(order, new Set());
+      return {
+        survivors: deduped.survivors.map((entry) => entry.id),
+        dropped: deduped.dropped,
+      };
+    });
+    const expected = {
+      survivors: ["own"],
+      dropped: [
+        {
+          kind: "identity",
+          id: "imported",
+          reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+        },
+      ],
+    };
+    expect(outcomes).toEqual(orders.map(() => expected));
+  });
+});
+
+/**
+ * Wraps each row in a proxy counting every property read, so a test can bound
+ * the WORK a reducer does per row without timing it.
+ */
+function countingRows(rows: readonly IdentityTransferAssertion[]): Readonly<{
+  rows: readonly IdentityTransferAssertion[];
+  reads: () => number;
+}> {
+  let reads = 0;
+  const counted = rows.map(
+    (row) =>
+      new Proxy(row, {
+        get(target, property, receiver) {
+          reads += 1;
+          return Reflect.get(target, property, receiver) as unknown;
+        },
+      }),
+  );
+  return { rows: counted, reads: () => reads };
+}
+
+/**
+ * `count` DISTINCT assertions colliding on one pair, all losing to the first:
+ * what endpoint reconciliation produces when it maps many imported
+ * assertions onto one canonical pair. Every loser is a distinct row, so every
+ * one is reported.
+ */
+function collidingRows(count: number): readonly IdentityTransferAssertion[] {
+  const pair = {
+    relation: "same",
+    a: { kind: "Person", id: "x" },
+    b: { kind: "Person", id: "y" },
+  } as const;
+  return Array.from({ length: count }, (_, index) => ({
+    ...pair,
+    id: `row-${String(index).padStart(6, "0")}`,
+    validFrom:
+      index === 0 ? "2024-01-01T00:00:00.000Z" : "2024-02-01T00:00:00.000Z",
+  }));
+}
+
+/** One `same` row over `(pair, other)` asserted from `2024-01-<day>`. */
+function dayRow(
+  id: string,
+  day: string,
+  pair = "first",
+): IdentityTransferAssertion {
+  return {
+    relation: "same",
+    a: { kind: "Person", id: pair },
+    b: { kind: "Person", id: "other" },
+    id,
+    validFrom: `2024-01-${day}T00:00:00.000Z`,
+  };
+}
+
+/** The ids each reducer reports as dropped for one candidate order. */
+const DROPPED_ID_READERS = {
+  dedupeIdentityAssertionsRaw: (rows: readonly IdentityTransferAssertion[]) =>
+    dedupeIdentityAssertionsRaw(rows, new Set()).dropped.map(
+      (entry) => entry.id,
+    ),
+  classifyIdentityPair: (rows: readonly IdentityTransferAssertion[]) => {
+    const outcome = classifyIdentityPair(
+      [],
+      rows.map((assertion) => ({ branchId: BRANCH_A, assertion })),
+      [],
+      new Set(),
+    );
+    return outcome.kind === "asserted" ?
+        outcome.superseded.map((entry) => entry.id)
+      : [];
+  },
+} as const;
+
+describe.each(Object.entries(DROPPED_ID_READERS))(
+  "identity loser tracking in %s",
+  (_name, droppedIds) => {
+    it("does a bounded amount of work per colliding row, however many collide", () => {
+      const readsFor = (count: number) => {
+        const counted = countingRows(collidingRows(count));
+        expect(droppedIds(counted.rows)).toHaveLength(count - 1);
+        return counted.reads();
+      };
+      const small = readsFor(1000);
+      const large = readsFor(4000);
+      console.info("identity loser tracking reads", { small, large });
+
+      // Linear work quadruples when the group quadruples; scanning every
+      // reported row per new loser grows sixteenfold.
+      expect(large / small).toBeLessThan(4.5);
+      expect(large / 4000).toBeLessThan(50);
+    });
+
+    it("reports losers in the order they lose, each distinct row once", () => {
+      // c loses to b, d to b, b to a; the second copy of b is already
+      // reported; e loses to a.
+      expect(
+        droppedIds([
+          dayRow("c", "03"),
+          dayRow("b", "02"),
+          dayRow("d", "04"),
+          dayRow("a", "01"),
+          dayRow("b", "02"),
+          dayRow("e", "05"),
+        ]),
+      ).toEqual(["c", "d", "b", "e"]);
+    });
+  },
+);
+
+describe("dedupeIdentityAssertionsRaw report order", () => {
+  it("interleaves losers of distinct pairs in the order they lose", () => {
+    const deduped = dedupeIdentityAssertionsRaw(
+      [
+        dayRow("c", "03"),
+        dayRow("q", "02", "second"),
+        dayRow("b", "02"),
+        dayRow("d", "04"),
+        dayRow("r", "01", "second"),
+        dayRow("a", "01"),
+        dayRow("b", "02"),
+        dayRow("e", "05"),
+      ],
+      new Set(),
+    );
+    expect(deduped.dropped.map((entry) => entry.id)).toEqual([
+      "c",
+      "d",
+      "q",
+      "b",
+      "e",
+    ]);
+  });
+});
+
+describe("isUnreportedIdentityLoser", () => {
+  it("withholds a report only for the winning row itself", () => {
+    const winner = dayRow("a", "01");
+    expect({
+      winnerItself: isUnreportedIdentityLoser(winner, winner, new Set()),
+      sameIdOtherWindow: isUnreportedIdentityLoser(
+        dayRow("a", "02"),
+        winner,
+        new Set(),
+      ),
+      otherId: isUnreportedIdentityLoser(dayRow("b", "01"), winner, new Set()),
+    }).toEqual({ winnerItself: false, sameIdOtherWindow: true, otherId: true });
   });
 });

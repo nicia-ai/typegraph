@@ -6,7 +6,7 @@
  */
 import { z } from "zod";
 
-import { captureWherePredicate } from "../constraints";
+import { captureWherePredicate, type UniquePredicate } from "../constraints";
 import {
   getEdgeKinds,
   getNodeKinds,
@@ -390,7 +390,7 @@ function serializeUniqueConstraints(
 /**
  * A serialized predicate structure (matches UniqueConstraintPredicate from core/types).
  */
-type SerializedPredicate = Readonly<{
+export type SerializedPredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
   op: NullCheckOp;
@@ -399,7 +399,7 @@ type SerializedPredicate = Readonly<{
 /**
  * Field builder returned by the predicate proxy.
  */
-type FieldPredicateBuilder = Readonly<{
+export type FieldPredicateBuilder = Readonly<{
   isNull: () => SerializedPredicate;
   isNotNull: () => SerializedPredicate;
 }>;
@@ -407,7 +407,7 @@ type FieldPredicateBuilder = Readonly<{
 /**
  * Predicate builder type for where clause serialization.
  */
-type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
+export type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
 
 /**
  * Serializes a where predicate function to a JSON-serializable structure.
@@ -451,15 +451,6 @@ function serializeWherePredicate(
  * @param serialized - The JSON string from serialization
  * @returns A where function that returns the predicate structure
  */
-/**
- * Unique predicate result type.
- */
-type UniquePredicate = Readonly<{
-  __type: "unique_predicate";
-  field: string;
-  op: NullCheckOp;
-}>;
-
 export function deserializeWherePredicate(
   serialized: string,
 ): (builder: PredicateBuilder) => UniquePredicate {

@@ -31,6 +31,7 @@ import type { BatchableQuery } from "../../query/builder/types";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
+import { enterOperation, type StatementBackend } from "../operation-scope";
 import {
   assertEdgeIdentityMatches,
   type EdgeIdentity,
@@ -108,7 +109,7 @@ export type EdgeCollectionConfig = Readonly<{
     ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateEdgeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Edge>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
@@ -173,7 +174,7 @@ export type EdgeCollectionConfig = Readonly<{
     toKind: string,
     toId: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -629,7 +630,7 @@ export function createEdgeCollection<
     ): Promise<Edge<E>> {
       const result = await executeEdgeCreate(
         buildCreateEdgeInput(kind, from, to, props ?? {}, options),
-        backend,
+        enterOperation(backend),
       );
       return narrowEdge<E>(result);
     },
@@ -1232,7 +1233,7 @@ export function createEdgeCollection<
         to.kind,
         to.id,
         props,
-        backend,
+        enterOperation(backend),
         getOrCreateOptions,
       );
       return { edge: narrowEdge<E>(result.edge), action: result.action };

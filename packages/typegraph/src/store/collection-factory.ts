@@ -28,6 +28,7 @@ import {
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
+import { type StatementBackend } from "./operation-scope";
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
@@ -209,7 +210,7 @@ export type EdgeOperations = Readonly<{
     ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateEdgeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Edge>;
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
@@ -284,7 +285,7 @@ export type EdgeOperations = Readonly<{
     toKind: string,
     toId: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;

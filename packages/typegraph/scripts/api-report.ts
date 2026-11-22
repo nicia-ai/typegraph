@@ -1251,22 +1251,42 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // (+2 apiece). The expression context's `$meta` keeps its one forgotten name,
   // `ExpressionMetadata`, now mapped over `SelectableNodeMeta` /
   // `SelectableEdgeMeta`.
+  // Per-entrypoint declaration emit (#956). A type an entrypoint's public
+  // declarations name is now exported by that entrypoint or by an entrypoint
+  // its declarations load (`scripts/declaration-loads.ts`), so 384 names no
+  // entrypoint exported are now exported once, from the subpath that owns
+  // their source area. Those subpaths lose them as forgotten exports:
+  // `./query` 542→328, `./store` 801→707, `./core` 94→76, `./indexes`
+  // 41→31, `./adapters/drizzle/indexes` 24→21, `./graph-extension` 27→24, `./adapters/drizzle/sqlite` 282→281,
+  // and `./graph-merge`, `./provenance`, `./schema`, `./identity` and
+  // `./profiler` lose the names they now export. Every other entrypoint keeps
+  // rendering those names without exporting them: they are nameable through
+  // its loads, not re-exported. Separately, two duplicate private helpers
+  // were merged (`DynamicNodeTypeFor`, previously rendered twice as
+  // `DynamicNodeTypeFor` / `DynamicNodeTypeFor$1`) and the subquery-local
+  // `ExpressionValue` that collided with the public one was renamed
+  // `ProjectedExpressionValue`: −1 at every Store-bearing entrypoint. The
+  // names in each fingerprint below are the measured sets after the change.
   // Transaction commit outcomes: the root entrypoint exports
   // `TransactionRolledBackError` and `TransactionOutcomeUnknownError` beside
   // `TransactionConflictError` and, like it, leaves their details types to
   // `./errors`, so `.` gains exactly `TransactionRolledBackErrorDetails` and
   // `TransactionOutcomeUnknownErrorDetails` (+2). No other entrypoint changed.
   ".": {
-    count: 1082,
-    sha256: "aab883c6abd22c631fa0bcd32a86e66606e48262c77618a753909b44351db9ee",
+    count: 1081,
+    sha256: "79be40e108ddc7bc8ea8a7f6703da2843cbf85b3c8e823af4232ab7e1161c83a",
   },
   "./adapters/drizzle/engine": {
     count: 353,
     sha256: "6371337df2fab10e0a73cf469b4f5367b22fdf287507868ed283bcc21135df25",
   },
+  // #956: the Drizzle index-table types its builders name
+  // (`EdgeIndexTable`, `NodeIndexTable`, `NamedSqlWrapper`) are now exported
+  // here, where the signatures that name them live, rather than from
+  // `/indexes`, whose declaration graph stays free of Drizzle: 24→21.
   "./adapters/drizzle/indexes": {
-    count: 24,
-    sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
+    count: 21,
+    sha256: "7949327562f8f8bfd738f6439a424d88ccd82ac6182724dc755f0eca5bad2944",
   },
   "./adapters/drizzle/postgres": {
     count: 281,
@@ -1309,16 +1329,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `./postgres/pglite` and `./sqlite/local` 972→975, `./profiler`
   // 968→971, `./provenance` 981→984).
   "./adapters/drizzle/postgres/working-copy": {
-    count: 999,
-    sha256: "0ab0dc409dcd00a0587671994a667711e968be492f8708a6e29694dc81f80887",
+    count: 998,
+    sha256: "a1fc2c450ddd4aa31328a5b8488266d969ce72876314d1061d4b3da09baf32ae",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 285,
     sha256: "24c249d5a459a1cb1286583f2c837baf0d92ce16f22d1b6a0a13ac1a9b4f27bd",
   },
   "./adapters/drizzle/sqlite": {
-    count: 282,
-    sha256: "3fd226266889597fd9f5940172b83ed92ede9c196dac0abe7583ae5861f403a8",
+    count: 281,
+    sha256: "db4a04fb9bbbcf69f2f7f037455dba4788be704d913356612cddbcc172d52428",
   },
   "./adapters/drizzle/sqlite/libsql": {
     count: 285,
@@ -1333,8 +1353,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "3d657aa71ed47e43904143825eb9a60e957194664a5e4d821f7256b822b350e9",
   },
   "./core": {
-    count: 94,
-    sha256: "1e4a0abd4d19077fa53e15c0ab0b81a5d531b47c8b26867b9249b4003cb779f5",
+    count: 76,
+    sha256: "362c035581a11c7e4fe2da2e1b0d2e64b72c44fe5a9ac8a02bbc8ca33fa07c24",
   },
   "./errors": {
     count: 64,
@@ -1342,8 +1362,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   // ExtensionIndexWhere makes NullCheckOp reachable through this entrypoint.
   "./graph-extension": {
-    count: 27,
-    sha256: "64115e9abfc9ee39681d481ff752343070dedd3df72904966cbcad3cfb920896",
+    count: 24,
+    sha256: "f4fb5a066ed2a86da114edb553caed3a1718403716792ed44621fd87e772fb36",
   },
   // Paged identity history: `IdentityFacade.transitionsOf` now returns the
   // named `IdentityTransitionHistory` instead of a bare array. The root
@@ -1362,36 +1382,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Exact apply receipts expose TransactionReceipt as a named export here:
   // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 988,
-    sha256: "8e14037a33f86844d72a1eda8e9363ceb9c576ecc6df26b1eeb68876bf5ee1fd",
+    count: 981,
+    sha256: "6846289f635c6aada6452356c6a5fd271c928f2b3c7fd2eb9823d75d87f2adaf",
   },
   "./identity": {
-    count: 952,
-    sha256: "68342d081157039703185c8116b69df04d625b7f56de7371348f7d5b47f51bf9",
+    count: 950,
+    sha256: "206fb8576ae44dc6cbbabfc199e0c81f08f878ef4be64f75cb9c907f0747a794",
   },
   "./indexes": {
-    count: 41,
-    sha256: "cf3148262fa915c1fe8ae10b6ab8e79e9e3faeda326f8cd26264211b8675a021",
+    count: 31,
+    sha256: "ade8e22b2fbc66f14bbc5eb4a01414c226200488b56a3096e425668a1a7fb356",
   },
   "./interchange": {
-    count: 978,
-    sha256: "781e788b0f76b76e57c5430b2704218a0c0434d1cb92f418ce783846d533b25b",
+    count: 977,
+    sha256: "f78fe6fc84b4cca0502c8242cdf4391d217aef257c47c2e1bf1cf600500e8a44",
   },
   "./maintenance": {
-    count: 986,
-    sha256: "0738afce84796f20814551c1c3ad906d1079e4f8b56eb426a2c1f830ec7cc817",
+    count: 985,
+    sha256: "8cc6d5650eeb26f231788c9849189f092f166e448185f3e5ddf0435f796714f1",
   },
   "./postgres/pglite": {
-    count: 984,
-    sha256: "65f2804fd4c1d77243de3655a651c7774021400abd4057bede4f3c4b342b4bc2",
+    count: 983,
+    sha256: "7248beb86e30b1eec5ef3f0680aa7eecedac62874d8fafc6129206d3e50c53ec",
   },
   "./profiler": {
-    count: 980,
-    sha256: "d68dcf1f783f7120f2e8f65a082da908d06f04f28ed68823d7ef7e2ccb5cad70",
+    count: 977,
+    sha256: "f78fe6fc84b4cca0502c8242cdf4391d217aef257c47c2e1bf1cf600500e8a44",
   },
   "./provenance": {
-    count: 993,
-    sha256: "b66c9b7a33a10ce1c22f4922f6cfdcf0a1b0923cdf475812ed5e427f015f2e16",
+    count: 985,
+    sha256: "7be5ae65975bf8254350445abe4c878879d5eb62787fce76b5eb76f2f6556894",
   },
   // Declared-alias fragments (#863): `QueryFragment`'s call signature and
   // brand, and `composeFragments`' signature, are typed by private helpers in
@@ -1406,8 +1426,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `FlexibleQueryFragment` drops `MergeAliasMaps` and `MergeEdgeAliasMaps`
   // (-2). Delta: `./query` 520→543; no other entrypoint moved.
   "./query": {
-    count: 542,
-    sha256: "8d217a364e447a71a8b1a3e6d9450587eee365f0d95684aff08eede0fb530efc",
+    count: 328,
+    sha256: "1222fd83f6b6cc657fe5169ca83ff8a2d861336d88a1f78058b98d52fd907d85",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1419,16 +1439,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 988,
-    sha256: "2dfc44a088fdfb9e5475438c9d9bc04767166a17344968757e1b71aa1a709956",
+    count: 982,
+    sha256: "3e407c0b90762a600931916c1c71bb02703add0dff9a213400ff1728877954c2",
   },
   "./sqlite/local": {
-    count: 984,
-    sha256: "65f2804fd4c1d77243de3655a651c7774021400abd4057bede4f3c4b342b4bc2",
+    count: 983,
+    sha256: "7248beb86e30b1eec5ef3f0680aa7eecedac62874d8fafc6129206d3e50c53ec",
   },
   "./store": {
-    count: 801,
-    sha256: "83296b1b017a960927cbdd1a3ebf4c9b80aa3f5dc428f03ba2ab75106b5bbd3a",
+    count: 707,
+    sha256: "869e48dc8817e677bf0ee353a76d70ced5e863cec7d50f0ec25f1674666e4705",
   },
 };
 

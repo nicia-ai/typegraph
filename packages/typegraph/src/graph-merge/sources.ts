@@ -88,7 +88,7 @@ export type BaseMember = Readonly<{
  * (definitional) edges to pass through unscored, and the committed `baseMembers`
  * it pulled into scope.
  */
-type SourceResult = Readonly<{
+export type SourceResult = Readonly<{
   pairs: readonly CandidatePair[];
   forcedEdges: readonly CandidateEdge[];
   baseMembers: readonly BaseMember[];

@@ -30,7 +30,7 @@ export const SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS = [
   MERGE_REVIEW_FORMAT_VERSION_CANDIDATE_SCOPED,
 ] as const;
 
-type MergeReviewFormatVersion =
+export type MergeReviewFormatVersion =
   (typeof SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)[number];
 
 /** Whether a stored review's `formatVersion` is one this library validates. */

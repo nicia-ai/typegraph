@@ -69,7 +69,7 @@ export type ExtensionBooleanProperty = Readonly<{
 }> & ExtensionPropertyModifiers;
 
 // @public (undocumented)
-type ExtensionDefinedOutput<P extends ExtensionPropertyType> = P extends ExtensionStringProperty ? string : P extends ExtensionNumberProperty ? number : P extends ExtensionBooleanProperty ? boolean : P extends ExtensionEnumProperty ? P["values"][number] : P extends ExtensionArrayProperty ? readonly ExtensionPropertyOutput<P["items"]>[] : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]> : never;
+export type ExtensionDefinedOutput<P extends ExtensionPropertyType> = P extends ExtensionStringProperty ? string : P extends ExtensionNumberProperty ? number : P extends ExtensionBooleanProperty ? boolean : P extends ExtensionEnumProperty ? P["values"][number] : P extends ExtensionArrayProperty ? readonly ExtensionPropertyOutput<P["items"]>[] : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]> : never;
 
 // @public
 export type ExtensionEdgeDef = Readonly<{
@@ -195,7 +195,7 @@ export type ExtensionPropertyOutput<P extends ExtensionPropertyType> = P extends
 } ? ExtensionDefinedOutput<P> | undefined : ExtensionDefinedOutput<P>;
 
 // @public (undocumented)
-type ExtensionPropertySchema<P extends ExtensionPropertyType> = P extends {
+export type ExtensionPropertySchema<P extends ExtensionPropertyType> = P extends {
     optional: true;
 } ? z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>> : z.ZodType<ExtensionDefinedOutput<P>>;
 
@@ -554,7 +554,7 @@ type TypeGraphErrorOptions = Readonly<{
 export function validateGraphExtension(input: unknown, options?: ValidateGraphExtensionOptions): Result<GraphExtension, GraphExtensionValidationError>;
 
 // @public (undocumented)
-type ValidateGraphExtensionOptions = Readonly<{
+export type ValidateGraphExtensionOptions = Readonly<{
     strict?: boolean;
 }>;
 

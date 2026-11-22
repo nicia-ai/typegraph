@@ -141,16 +141,16 @@ import {
 import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
   DEFAULT_SQL_SCHEMA,
-  EMBEDDINGS_CTE_ALIAS,
-  FULLTEXT_CTE_ALIAS,
-  HYBRID_CANDIDATES_CTE_ALIAS,
   type RecordedReadBinding,
   recordedReadSchemaFor,
   requireSqlSchema,
   type SqlSchema,
   type VectorSlotMap,
 } from "./schema";
-import { compileSetOperation as compileSetOp } from "./set-operations";
+import {
+  compileSetOperation as compileSetOp,
+  type SetOperandResultNames,
+} from "./set-operations";
 import {
   createSqlStatementNames,
   declareAliasColumn,
@@ -600,14 +600,22 @@ export function compileSetOperation(
   // statement here, or a union with an approximate operand would skip
   // the pgvector GUC wrapper.
   const annIndexTypes = new Set<string>();
-  const compileOperand = (ast: QueryAst, gid: string): CompiledSelectSql => {
-    // The compound statement names each operand's columns positionally, but
-    // its ORDER BY and every caller read them back by name.
+  const compileOperand = (
+    ast: QueryAst,
+    gid: string,
+    resultNames: SetOperandResultNames,
+  ): CompiledSelectSql => {
+    // The compound statement takes its column names from its leftmost leaf,
+    // which its callers and ORDER BY read by name; every other leaf's columns
+    // are matched by position, and named only by a nested compound's ORDER BY
+    // over its own leftmost leaf.
     const compiled = compileNameCheckedQuery(
       ast,
       gid,
       propagateOptions(options_),
-      "wrapped",
+      resultNames === "all" ? "wrapped" : (
+        { referencedResultNames: resultNames }
+      ),
     );
     for (const indexType of annIndexScanTypes(compiled) ?? []) {
       annIndexTypes.add(indexType);
@@ -1706,11 +1714,11 @@ function compileStandardQueryWithCteStrategy(
   // Add embeddings CTE if vector similarity is used
   if (vectorPredicate) {
     const nodeKinds = getNodeKindsForAlias(ast, vectorPredicate.field.alias);
-    declareFixedCte(names, EMBEDDINGS_CTE_ALIAS);
     ctes.push(
       buildStandardEmbeddingsCte({
         ctx,
         graphId,
+        names,
         nodeKinds,
         vectorPredicate,
       }),
@@ -1720,20 +1728,19 @@ function compileStandardQueryWithCteStrategy(
   // Add fulltext CTE if a matches() predicate is used
   if (fulltextPredicate) {
     const nodeKinds = getNodeKindsForAlias(ast, fulltextPredicate.field.alias);
-    declareFixedCte(names, FULLTEXT_CTE_ALIAS);
     ctes.push(
       buildStandardFulltextCte({
         ctx,
         fulltextPredicate,
         graphId,
+        names,
         nodeKinds,
       }),
     );
   }
 
   if (getHybridTargetAlias(vectorPredicate, fulltextPredicate) !== undefined) {
-    declareFixedCte(names, HYBRID_CANDIDATES_CTE_ALIAS);
-    ctes.push(buildStandardHybridCandidateCte());
+    ctes.push(buildStandardHybridCandidateCte(names));
   }
 
   // Build main SELECT

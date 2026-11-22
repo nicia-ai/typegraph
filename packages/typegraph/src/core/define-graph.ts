@@ -65,14 +65,14 @@ const GRAPH_DEF_BRAND = "__graphDef" as const;
  * - EdgeType directly (constrained or unconstrained)
  * - EdgeRegistration object (always works, can override/narrow defaults)
  */
-type EdgeEntry = EdgeRegistration | AnyEdgeType;
+export type EdgeEntry = EdgeRegistration | AnyEdgeType;
 
 /**
  * Normalized edge map type - all entries become EdgeRegistration.
  * For bare EdgeTypes, constrained endpoints are extracted from the type;
  * unconstrained edges fall back to all node types in the graph.
  */
-type NormalizedEdges<
+export type NormalizedEdges<
   TNodes extends Record<string, NodeRegistration>,
   TEdges extends Record<string, EdgeEntry>,
 > = {
@@ -380,7 +380,7 @@ export type GraphIdentityConfig = Readonly<{
 /**
  * Configuration for defineGraph.
  */
-type GraphDefConfig<
+export type GraphDefConfig<
   TNodes extends Record<string, NodeRegistration>,
   TEdges extends Record<string, EdgeEntry>,
   TOntology extends readonly OntologyRelation[],

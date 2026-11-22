@@ -82,7 +82,7 @@ export type EdgeReadWindow = Readonly<{
 }>;
 
 /** Options for reading adjacent edge-node pairs without hydrating all targets. */
-type NeighborReadOptionsBoundary<
+export type NeighborReadOptionsBoundary<
   G extends GraphDef,
   K extends EdgeKinds<G>,
 > = Readonly<{

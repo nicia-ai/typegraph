@@ -63,13 +63,30 @@ export type CompositionOptions = Readonly<{
 }>;
 
 // @public
+export type CompositionPair = Readonly<{
+    partKind: string;
+    wholeKind: string;
+    viaEdgeKind: string;
+    partSide: CompositionPartSide;
+    population: "one" | "oneActive";
+    existence: CompositionExistence;
+}>;
+
+// @public
 export type CompositionPartSide = "from" | "to";
 
 // @public
-type CompositionRealization = Readonly<{
+export type CompositionRealization = Readonly<{
     via?: string;
     partSide?: CompositionPartSide;
     existence?: CompositionExistence;
+}>;
+
+// @public
+export type CompositionRelation = Readonly<{
+    pairs: readonly CompositionPair[];
+    edgeKinds: ReadonlySet<string>;
+    partSideByEdgeKind: ReadonlyMap<string, CompositionPartSide>;
 }>;
 
 // @public
@@ -215,7 +232,7 @@ function disjointWith<A extends NodeType, B extends NodeType>(kindA: A, kindB: B
 const EDGE_TYPE_BRAND: "__edgeType";
 
 // @public
-type EdgeEntry = EdgeRegistration | AnyEdgeType;
+export type EdgeEntry = EdgeRegistration | AnyEdgeType;
 
 // @public
 export type EdgeId<E extends AnyEdgeType = AnyEdgeType> = string & Readonly<{
@@ -231,6 +248,18 @@ type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 
 // @public (undocumented)
 type EdgeIndexDirection = "out" | "in" | "none";
+
+// @public
+export type EdgeKindFacts = Readonly<{
+    from: readonly string[];
+    to: readonly string[];
+    pairs: readonly Readonly<{
+        from: string;
+        to: string;
+    }>[];
+    cardinality: Cardinality;
+    targetCardinality: TargetCardinality;
+}>;
 
 // @public
 export type EdgeKinds<G extends GraphDef> = keyof G["edges"] & string;
@@ -294,7 +323,7 @@ export type EmbeddingBrand = Readonly<{
 }>;
 
 // @public
-type EmbeddingIndexOptions = Readonly<{
+export type EmbeddingIndexOptions = Readonly<{
     metric?: EmbeddingMetric;
     indexType?: EmbeddingIndexType;
     m?: number;
@@ -303,10 +332,10 @@ type EmbeddingIndexOptions = Readonly<{
 }>;
 
 // @public
-type EmbeddingIndexType = "hnsw" | "ivfflat" | "none";
+export type EmbeddingIndexType = "hnsw" | "ivfflat" | "none";
 
 // @public
-type EmbeddingMetric = "cosine" | "l2" | "inner_product";
+export type EmbeddingMetric = "cosine" | "l2" | "inner_product";
 
 // @public
 export type EmbeddingSchema<D extends number = number> = z.ZodType<EmbeddingValue> & Readonly<{
@@ -321,7 +350,7 @@ export type EmbeddingValue = readonly number[] & EmbeddingBrand;
 const EMPTY_SCHEMA: z.ZodObject<{}, z.core.$strip>;
 
 // @public (undocumented)
-type EmptySchema = typeof EMPTY_SCHEMA;
+export type EmptySchema = typeof EMPTY_SCHEMA;
 
 // @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
@@ -330,6 +359,13 @@ export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 export type EndpointPair = Readonly<{
     from: string;
     to: string;
+}>;
+
+// @public
+export type EngineRecordedInstantParts = Readonly<{
+    kind: "engine";
+    revision: string;
+    recordedAt: string;
 }>;
 
 // @public
@@ -575,7 +611,7 @@ export type GraphDefaults = Readonly<{
 }>;
 
 // @public
-type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>, TOntology extends readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined> = Readonly<{
+export type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>, TOntology extends readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined> = Readonly<{
     id: string;
     annotations?: GraphAnnotations;
     nodes: TNodes;
@@ -611,7 +647,7 @@ function hasPart<Whole extends NodeType, Part extends NodeType>(whole: Whole, pa
 function implies<A extends AnyEdgeType, B extends AnyEdgeType>(edgeA: A, edgeB: B): TypedOntologyRelation<typeof META_EDGE_IMPLIES, A, B>;
 
 // @public
-type IncompatibleKeys<Child, Parent> = {
+export type IncompatibleKeys<Child, Parent> = {
     [K in LiteralKeysOf<Parent>]-?: K extends keyof Child ? [
     TypeLevelChild<Child[K], Parent[K]>
     ] extends [Parent[K]] ? never : K : undefined extends Parent[K] ? never : K;
@@ -750,7 +786,91 @@ export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 export type KindEntity = "node" | "edge";
 
 // @public
-type LiteralKeysOf<T> = {
+export class KindRegistry {
+    constructor(nodeKinds: ReadonlyMap<string, NodeType>, edgeKinds: ReadonlyMap<string, AnyEdgeType>, closures: RegistryClosures, identity?: GraphIdentityConfig, composition?: CompositionRelation, edgeFacts?: ReadonlyMap<string, EdgeKindFacts>);
+    areDisjoint(a: string, b: string): boolean;
+    areEquivalent(a: string, b: string): boolean;
+    // (undocumented)
+    readonly broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    compositionEdgeKinds(): readonly string[];
+    compositionEdgeKindsOver(partKind: string): readonly string[];
+    compositionEdgeKindsUnder(wholeKind: string): readonly string[];
+    compositionEdgePopulation(edgeKind: string): "one" | "oneActive" | undefined;
+    compositionExistence(concretePartKind: string): CompositionExistence;
+    compositionPairsBetween(partKind: string, wholeKind: string): readonly CompositionPair[];
+    compositionPairVia(partKind: string, wholeKind: string, viaEdgeKind: string): CompositionPair | undefined;
+    compositionPartKindsUnder(wholeKind: string): readonly string[];
+    compositionPartKindsUnderVia(wholeKind: string, viaEdgeKind: string): readonly string[];
+    compositionPartSide(edgeKind: string): CompositionPartSide | undefined;
+    compositionPopulation(concretePartKind: string): "one" | "oneActive" | undefined;
+    compositionRelation(): CompositionRelation;
+    compositionWholeKindsOver(partKind: string): readonly string[];
+    compositionWholeKindsOverVia(partKind: string, viaEdgeKind: string): readonly string[];
+    disjointKindPairs(): readonly (readonly [string, string])[];
+    disjointPairLabel(a: string, b: string): string;
+    // (undocumented)
+    readonly disjointPairs: ReadonlySet<string>;
+    // (undocumented)
+    readonly edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly edgeInverses: ReadonlyMap<string, string>;
+    edgeKindFacts(edgeKind: string): EdgeKindFacts | undefined;
+    // (undocumented)
+    readonly edgeKinds: ReadonlyMap<string, AnyEdgeType>;
+    // (undocumented)
+    readonly equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+    expandBroader(kind: string): readonly string[];
+    expandImplyingEdges(edgeKind: string): readonly string[];
+    expandNarrower(kind: string): readonly string[];
+    expandSubClasses(kind: string): readonly string[];
+    getAncestors(kind: string): ReadonlySet<string>;
+    getDescendants(kind: string): ReadonlySet<string>;
+    getDisjointKinds(kind: string): readonly string[];
+    getEdgeType(name: string): AnyEdgeType | undefined;
+    getEquivalents(kind: string): readonly string[];
+    getImpliedEdges(edgeKind: string): readonly string[];
+    getImplyingEdges(edgeKind: string): readonly string[];
+    getInverseEdge(edgeKind: string): string | undefined;
+    getNodeType(name: string): NodeType | undefined;
+    getParts(whole: string): readonly string[];
+    getRelatedKinds(kind: string): readonly string[];
+    getSubClassComponent(kind: string): readonly string[];
+    getWholes(part: string): readonly string[];
+    hasEdgeType(name: string): boolean;
+    hasNodeType(name: string): boolean;
+    // (undocumented)
+    readonly hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    readonly identity: GraphIdentityConfig | undefined;
+    // (undocumented)
+    readonly iriToKind: ReadonlyMap<string, string>;
+    isAssignableTo(concreteKind: string, targetKind: string): boolean;
+    isAssignableToAny(concreteKind: string, targetKinds: readonly string[]): boolean;
+    isBroaderThan(broaderConcept: string, narrowerConcept: string): boolean;
+    isCompositionEdge(edgeKind: string): boolean;
+    isCompositionPart(kind: string): boolean;
+    isCompositionWhole(kind: string): boolean;
+    isNarrowerThan(narrowerConcept: string, broaderConcept: string): boolean;
+    isPartOf(part: string, whole: string): boolean;
+    isSubClassOf(child: string, parent: string): boolean;
+    // (undocumented)
+    readonly narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly nodeKinds: ReadonlyMap<string, NodeType>;
+    // (undocumented)
+    readonly partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
+    resolveIri(iri: string): string | undefined;
+    // (undocumented)
+    readonly subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
+    // (undocumented)
+    readonly subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+// @public
+export type LiteralKeysOf<T> = {
     [K in keyof T]-?: string extends K ? never : K;
 }[keyof T] & string;
 
@@ -854,7 +974,7 @@ export type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 }>;
 
 // @public
-type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
+export type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
     [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TEdges[K]["to"] extends (Record<string, readonly (infer N extends NodeType)[]>) ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"] : readonly TNodes[keyof TNodes]["type"][]> : never;
 };
 
@@ -872,7 +992,7 @@ export type OntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
-type OpaqueTypeLevelValue = string | number | bigint | boolean | symbol | Date | RegExp | Error | Promise<unknown> | ReadonlyMap<unknown, unknown> | ReadonlySet<unknown> | ((...args: never[]) => unknown);
+export type OpaqueTypeLevelValue = string | number | bigint | boolean | symbol | Date | RegExp | Error | Promise<unknown> | ReadonlyMap<unknown, unknown> | ReadonlySet<unknown> | ((...args: never[]) => unknown);
 
 // @public
 function partOf<Part extends NodeType, Whole extends NodeType>(part: Part, whole: Whole, options: CompositionOptions): TypedOntologyRelation<typeof META_EDGE_PART_OF, Part, Whole>;
@@ -888,6 +1008,17 @@ export function projectTargetKinds(to: EdgeTargets): readonly string[];
 
 // @public
 export function projectTargetNodes(to: EdgeTargets): readonly NodeType[];
+
+// @public
+export type ReadCoordinate = Readonly<{
+    valid: Readonly<{
+        mode: TemporalMode;
+        asOf?: string;
+    }>;
+    recorded?: Readonly<{
+        asOf: RecordedInstant;
+    }>;
+}>;
 
 // @public (undocumented)
 const RECORDED_INSTANT_BRAND: unique symbol;
@@ -908,10 +1039,30 @@ export function recordedInstant(coordinate: Readonly<{
 export function recordedInstantOwner(instant: RecordedInstant): GraphAllocationOwner | undefined;
 
 // @public
+export type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
+
+// @public
 export function recordedInstantRevision(instant: RecordedInstant): number;
 
 // @public
 export function recordedInstantWallTime(instant: RecordedInstant): string;
+
+// @public
+export type RegistryClosures = Readonly<{
+    subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
+    subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+    broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+    iriToKind: ReadonlyMap<string, string>;
+    relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
+    disjointPairs: ReadonlySet<string>;
+    partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    edgeInverses: ReadonlyMap<string, string>;
+    edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
+    edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
+}>;
 
 // @public
 function relatedTo<A extends NodeType, B extends NodeType>(conceptA: A, conceptB: B): TypedOntologyRelation<typeof META_EDGE_RELATED_TO, A, B>;
@@ -940,7 +1091,7 @@ export type RestoredRecordedInstant = string & {
 };
 
 // @public
-type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (Readonly<Record<typeof z.core.$brand, infer Tag>>) ? Readonly<Record<typeof z.core.$brand, Tag>> : unknown) & (NonNullable<Parent> extends EmbeddingBrand ? EmbeddingBrand : unknown);
+export type RuntimeInvisibleTags<Parent> = (NonNullable<Parent> extends (Readonly<Record<typeof z.core.$brand, infer Tag>>) ? Readonly<Record<typeof z.core.$brand, Tag>> : unknown) & (NonNullable<Parent> extends EmbeddingBrand ? EmbeddingBrand : unknown);
 
 // @public
 export function searchable(options?: SearchableOptions): SearchableSchema;
@@ -971,7 +1122,7 @@ export type StructuralSubtypeMismatch<Relation extends keyof StructuralSubtypeMi
 }>;
 
 // @public
-type StructuralSubtypeMismatchWording = Readonly<{
+export type StructuralSubtypeMismatchWording = Readonly<{
     subClassOf: Readonly<{
         requirement: "the child's schema must extend the parent's";
         fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
@@ -1007,14 +1158,23 @@ export type TypedOntologyRelation<M extends string, From extends NodeType | AnyE
 }> & CompositionRealization;
 
 // @public
-type TypeLevelChild<Child, Parent> = Child extends null | undefined ? Child : (Child extends OpaqueTypeLevelValue ? Child : Child extends readonly (infer Element)[] ? number extends Child["length"] ? TypeLevelChild<Element, TypeLevelElement<Parent>>[] : {
+export type TypeGraphRecordedInstantParts = Readonly<{
+    kind: "typegraph";
+    origin?: string;
+    namespace?: string;
+    revision: number;
+    recordedAt: string;
+}>;
+
+// @public
+export type TypeLevelChild<Child, Parent> = Child extends null | undefined ? Child : (Child extends OpaqueTypeLevelValue ? Child : Child extends readonly (infer Element)[] ? number extends Child["length"] ? TypeLevelChild<Element, TypeLevelElement<Parent>>[] : {
     -readonly [Index in keyof Child]: TypeLevelChild<Child[Index], TypeLevelElement<Parent>>;
 } : Child extends object ? {
     [Key in keyof Child]: Key extends keyof NonNullable<Parent> ? TypeLevelChild<Child[Key], NonNullable<Parent>[Key]> : Child[Key];
 } : Child) & RuntimeInvisibleTags<Parent>;
 
 // @public (undocumented)
-type TypeLevelElement<Parent> = NonNullable<Parent> extends readonly (infer Element)[] ? Element : unknown;
+export type TypeLevelElement<Parent> = NonNullable<Parent> extends readonly (infer Element)[] ? Element : unknown;
 
 // @public
 export type UniqueConstraint<S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
@@ -1026,25 +1186,32 @@ export type UniqueConstraint<S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<
 }>;
 
 // @public
-type UniqueConstraintField = Readonly<{
+export type UniqueConstraintField = Readonly<{
     isNull: () => UniqueConstraintPredicate;
     isNotNull: () => UniqueConstraintPredicate;
 }>;
 
 // @public
-type UniqueConstraintPredicate = Readonly<{
+export type UniqueConstraintPredicate = Readonly<{
     __type: "unique_predicate";
     field: string;
     op: NullCheckOp;
 }>;
 
 // @public
-type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
+export type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
     [K in keyof z.infer<S>]-?: UniqueConstraintField;
 }>;
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
+
+// @public
+export type UniquePredicate = Readonly<{
+    __type: "unique_predicate";
+    field: string;
+    op: NullCheckOp;
+}>;
 
 // @public
 export function validateTargetMapEntries(name: string, from: readonly NodeType[] | undefined, to: unknown): asserts to is EdgeTargetMap;

@@ -24,6 +24,9 @@ const config: KnipConfig = {
         "examples/**/*.ts",
         "test-d/**/*.ts",
         "type-smoke/**/*.ts",
+        // The declaration pipeline the package build (`pnpm build`) runs,
+        // which owns the rollup-plugin-dts dependency.
+        "scripts/declaration-*.ts",
       ],
       ignore: [
         "**/test-utils.ts",

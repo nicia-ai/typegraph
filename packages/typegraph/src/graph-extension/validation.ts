@@ -247,7 +247,7 @@ const EDGE_INDEX_KEYS: ReadonlySet<string> = new Set([
   "where",
 ]);
 
-type ValidateGraphExtensionOptions = Readonly<{
+export type ValidateGraphExtensionOptions = Readonly<{
   /**
    * Reject unknown top-level keys and unsupported string formats.
    * Used by `defineGraphExtension`, where the document is being

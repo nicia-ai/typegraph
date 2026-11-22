@@ -1524,10 +1524,7 @@ type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKind<K>> &
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
-// @public (undocumented)
-type DynamicNodeTypeFor$1<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
-
-// @public (undocumented)
+// @public
 type DynamicNodeTypeFor<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // @public (undocumented)
@@ -2544,7 +2541,9 @@ type ExpressionObjectChildren<Value, Scope extends string> = {
 }>;
 
 // @public
-type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ExpressionValue$1<Fields[keyof Fields]>>];
+type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
 type ExpressionProjectionEntry<T = unknown> = Readonly<{
@@ -2565,9 +2564,6 @@ type ExpressionSubqueryRelation<Projection extends readonly ExpressionProjection
     getOneStatementReadProvenance: () => OneStatementReadProvenance;
     toAst: () => QueryAst;
 }>;
-
-// @public (undocumented)
-type ExpressionValue$1<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public (undocumented)
 type ExpressionValue<Value, Scope extends string> = DatabaseExpression<Exclude<Value, null> | (null extends Value ? undefined : never), Scope> & (NonNullable<Value> extends Date | readonly unknown[] ? unknown : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope> : unknown);
@@ -5383,7 +5379,7 @@ class Placeholder {
 }
 
 // @public
-type PlainNodeRef = Readonly<{
+export type PlainNodeRef = Readonly<{
     kind: string;
     id: string;
 }>;
@@ -5473,6 +5469,9 @@ type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly strin
 
 // @public (undocumented)
 type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly ExpressionProjectionEntry[]>;
+
+// @public (undocumented)
+type ProjectedExpressionValue<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public
 type ProjectedField = Readonly<{
@@ -6460,9 +6459,7 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [
-E
-] extends ["exact"] ? N : PolymorphicNodeType<N>;
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 // @public
 type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
@@ -7795,12 +7792,12 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K & string>, PolymorphicNodeType<G["nodes"][K]["type"]>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     // (undocumented)
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor$1<T>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor<T>, PolymorphicNodeType<DynamicNodeTypeFor<T>>, PolymorphicNodeType<DynamicNodeTypeFor<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }

@@ -33,7 +33,7 @@ export type AdapterHistoryStore<G extends GraphDef, TNativeTransaction> = Resolv
 }>;
 
 // @public (undocumented)
-type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
+export type AdapterHistoryStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
     transaction: <T>(fn: (tx: AdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
     transactionWithReceipt: <T>(fn: (tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
     withEvolvedTransaction: <T>(externalTransaction: TNativeTransaction, plan: EvolutionPlan, fn: (tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: EvolvedTransactionOptions) => Promise<EvolvedTransactionOutcome<T>>;
@@ -57,13 +57,13 @@ export type AdapterStore<G extends GraphDef, TNativeTransaction> = ResolvedStore
 }>;
 
 // @public
-interface AdapterStoreReconciliation<G extends GraphDef, TNativeTransaction, Self> {
+export interface AdapterStoreReconciliation<G extends GraphDef, TNativeTransaction, Self> {
     readonly reconciledSchema: ReconciledSchema<G>;
     readonly withBackend: (backend: AdapterBackend<TNativeTransaction>) => Self;
 }
 
 // @public (undocumented)
-type AdapterStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
+export type AdapterStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly<{
     transaction: <T>(fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
     transactionWithReceipt: <T>(fn: (tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
     withTransaction: (externalTransaction: TNativeTransaction) => AdapterTransactionContext<G, TNativeTransaction>;
@@ -75,7 +75,7 @@ type AdapterStoreTransactions<G extends GraphDef, TNativeTransaction> = Readonly
 export type AdapterTransactionContext<G extends GraphDef, TNativeTransaction> = TransactionContext<G> & AdapterTransactionSqlAccess<TNativeTransaction>;
 
 // @public (undocumented)
-type AdapterTransactionSqlAccess<TNativeTransaction> = Readonly<{
+export type AdapterTransactionSqlAccess<TNativeTransaction> = Readonly<{
     sql: TNativeTransaction;
     sqlAvailability: "available";
 }> | Readonly<{
@@ -85,13 +85,13 @@ type AdapterTransactionSqlAccess<TNativeTransaction> = Readonly<{
 }>;
 
 // @public (undocumented)
-type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
+export type AddedStoreReadKey = keyof AddedStoreReadsBoundary<GraphDef>;
 
 // @public (undocumented)
-type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
+export type AddedStoreReads<G extends GraphDef> = AddedStoreReadsBoundary<G> & Required<Pick<AddedStoreReadsBoundary<G>, AddedStoreReadKey>>;
 
 // @public (undocumented)
-type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
+export type AddedStoreReadsBoundary<G extends GraphDef> = Readonly<{
     allocationOwner?: () => Promise<GraphAllocationOwner>;
     recordedReadOwner?: () => Promise<GraphAllocationOwner>;
     resolveRecordedInstant?: (wallTime: string) => Promise<RecordedInstant | undefined>;
@@ -296,7 +296,7 @@ never
 type AssignableNodeKinds<G extends GraphDef, K extends string> = true extends SubsumptionLiteralsErased<G["ontology"][number]> ? K | (keyof G["nodes"] & string) : K | Extract<AssignableKeyClosure<G["ontology"][number], K>, keyof G["nodes"] & string>;
 
 // @public (undocumented)
-type AssignableNodeTypes<G extends GraphDef, N extends NodeType> = N extends NodeType ? KindNodeTypes<G, Exclude<AssignableNodeKinds<G, N["kind"]>, N["kind"]>> : never;
+export type AssignableNodeTypes<G extends GraphDef, N extends NodeType> = N extends NodeType ? KindNodeTypes<G, Exclude<AssignableNodeKinds<G, N["kind"]>, N["kind"]>> : never;
 
 // @public
 type BackendCapabilities = Readonly<{
@@ -339,7 +339,7 @@ type BackendCatalogProbes = Readonly<{
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public
-type BackendValidityEndMutation = Readonly<{
+export type BackendValidityEndMutation = Readonly<{
     validTo?: string;
     clearValidTo?: never;
 }> | Readonly<{
@@ -707,7 +707,7 @@ type ChangeType = "added" | "removed" | "modified" | "renamed";
 export type CheckedReadScope<G extends GraphDef> = CheckedReadScopeBoundary<G> & Required<Pick<CheckedReadScopeBoundary<G>, "query">>;
 
 // @public (undocumented)
-type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
+export type CheckedReadScopeBoundary<G extends GraphDef> = Readonly<{
     query?: () => InitialQueryBuilder<G, "open">;
 }>;
 
@@ -760,7 +760,7 @@ export type ClaimOwner = Readonly<{
 }>;
 
 // @public
-type ClaimRelation = "uniques" | "edgeClaims";
+export type ClaimRelation = "uniques" | "edgeClaims";
 
 // @public
 export type ClaimTarget = Readonly<{
@@ -1061,10 +1061,10 @@ class ConfigurationError extends TypeGraphError {
 }
 
 // @public
-type ConstrainedCardinality = Exclude<Cardinality, "many">;
+export type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
 // @public
-type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
+export type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 // @public
 export type ConstraintFenceViolation = Readonly<{
@@ -1256,7 +1256,7 @@ type ContributionRepopulationStats = Readonly<{
 type ContributionScope = "deployment" | "graph";
 
 // @public
-abstract class CoordinatePinnedView<G extends GraphDef> {
+export abstract class CoordinatePinnedView<G extends GraphDef> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
     get algorithms(): StoreViewGraphAlgorithms<G>;
     get asOf(): string | undefined;
@@ -1649,10 +1649,7 @@ type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKind<K>> &
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
-// @public (undocumented)
-type DynamicNodeTypeFor$1<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
-
-// @public (undocumented)
+// @public
 type DynamicNodeTypeFor<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // @public (undocumented)
@@ -1710,7 +1707,7 @@ type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? D
 }> & EdgePropsAccessor<E>;
 
 // @public
-type EdgeAcyclicityViolation = Readonly<{
+export type EdgeAcyclicityViolation = Readonly<{
     family: "edgeAcyclicity";
     relation: string;
     edgeIds: readonly string[];
@@ -1727,7 +1724,7 @@ type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = fals
 type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 
 // @public
-type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<R["from"], R["to"]>;
+export type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<R["from"], R["to"]>;
 
 // @public
 export type EdgeBatchReads<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType, Pairs extends EdgeEndpointPairTypes = {
@@ -1736,7 +1733,7 @@ export type EdgeBatchReads<E extends AnyEdgeType, From extends NodeType = NodeTy
 }, InputId extends string = EdgeId<E>, G extends GraphDef = GraphWithoutOntology> = Pick<EdgeCollection<E, From, To, Pairs, InputId, G>, (typeof EDGE_BATCH_READ_NAMES)[number]>;
 
 // @public (undocumented)
-type EdgeBulkCreateItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.ZodObject<z.ZodRawShape>, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
+export type EdgeBulkCreateItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.ZodObject<z.ZodRawShape>, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
     from: EdgeEndpointRef<G, Pairs["from"]>;
     to: EdgeEndpointRef<G, Pairs["to"]>;
     props?: z.input<Schema>;
@@ -1754,7 +1751,7 @@ export type EdgeBulkFindOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type EdgeBulkGetOrCreateItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
+export type EdgeBulkGetOrCreateItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
     from: EdgeEndpointRef<G, Pairs["from"]>;
     to: EdgeEndpointRef<G, Pairs["to"]>;
     props: z.input<E["schema"]>;
@@ -1763,7 +1760,7 @@ type EdgeBulkGetOrCreateItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPa
 }> & ValidityEndMutation : never;
 
 // @public (undocumented)
-type EdgeBulkInsertItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.ZodObject<z.ZodRawShape>, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
+export type EdgeBulkInsertItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.ZodObject<z.ZodRawShape>, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
     from: EdgeEndpointRef<G, Pairs["from"]>;
     to: EdgeEndpointRef<G, Pairs["to"]>;
     props?: z.input<Schema>;
@@ -1773,7 +1770,7 @@ type EdgeBulkInsertItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.Zo
 }> : never;
 
 // @public (undocumented)
-type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, Id extends string, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
+export type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, Id extends string, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
     id: Id;
     from: EdgeEndpointRef<G, Pairs["from"]>;
     to: EdgeEndpointRef<G, Pairs["to"]>;
@@ -1903,13 +1900,13 @@ type EdgeConvergenceMatch = Readonly<{
 }>;
 
 // @public
-type EdgeCreateArguments<E extends AnyEdgeType> = {} extends z.input<E["schema"]> ? [
+export type EdgeCreateArguments<E extends AnyEdgeType> = {} extends z.input<E["schema"]> ? [
 props?: z.input<E["schema"]>,
 options?: EdgeCreateOptions
 ] : [props: z.input<E["schema"]>, options?: EdgeCreateOptions];
 
 // @public (undocumented)
-type EdgeCreateArgumentsTuple<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
+export type EdgeCreateArgumentsTuple<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
 from: EdgeEndpointRef<G, Pairs["from"]>,
 to: EdgeEndpointRef<G, Pairs["to"]>,
 ...args: EdgeCreateArguments<E>
@@ -1940,7 +1937,7 @@ type EdgeCreateCommandResult = Readonly<{
 }>;
 
 // @public
-type EdgeCreateOptions = Readonly<{
+export type EdgeCreateOptions = Readonly<{
     id?: string;
     validFrom?: string | null;
     validTo?: string;
@@ -1953,7 +1950,7 @@ type EdgeEndpointAllowance = Readonly<{
 }>;
 
 // @public
-type EdgeEndpointPairTypes = Readonly<{
+export type EdgeEndpointPairTypes = Readonly<{
     from: NodeType;
     to: NodeType;
 }>;
@@ -1981,7 +1978,7 @@ type EdgeExistsBetweenParams = Readonly<{
 }>;
 
 // @public (undocumented)
-type EdgeFindByEndpointsArguments<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
+export type EdgeFindByEndpointsArguments<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
 from: EdgeEndpointRef<G, Pairs["from"]>,
 to: EdgeEndpointRef<G, Pairs["to"]>,
 options?: EdgeFindByEndpointsOptions<E>,
@@ -1995,13 +1992,13 @@ export type EdgeFindByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
 }>;
 
 // @public (undocumented)
-type EdgeFromNodeTypes<R extends EdgeRegistration> = EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType;
+export type EdgeFromNodeTypes<R extends EdgeRegistration> = EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType;
 
 // @public
-type EdgeFromTypes<R extends EdgeRegistration> = R["from"] extends readonly (infer N)[] ? N : never;
+export type EdgeFromTypes<R extends EdgeRegistration> = R["from"] extends readonly (infer N)[] ? N : never;
 
 // @public (undocumented)
-type EdgeGetOrCreateByEndpointsArguments<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
+export type EdgeGetOrCreateByEndpointsArguments<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, G extends GraphDef> = Pairs extends EdgeEndpointPairTypes ? [
 from: EdgeEndpointRef<G, Pairs["from"]>,
 to: EdgeEndpointRef<G, Pairs["to"]>,
 props: z.input<E["schema"]>,
@@ -2084,7 +2081,7 @@ type EdgeMatchIdentityStorage = Readonly<{
 }>;
 
 // @public
-type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
+export type EdgeMeta = MapRowToMeta<EdgeRow, TemporalMetaFieldMap>;
 
 // @public
 type EdgeMetadataAccessor = Readonly<{
@@ -2095,7 +2092,7 @@ type EdgeMetadataAccessor = Readonly<{
 type EdgeOrderField<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? string : "id" | "kind" | "fromId" | "toId" | `meta.${keyof SelectableEdgeMeta}` | (keyof z.infer<E["schema"]> & string);
 
 // @public (undocumented)
-type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<keyof Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId" | "meta"> & string;
+export type EdgeProjectionPropertyKey<E extends AnyEdgeType> = Exclude<keyof Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId" | "meta"> & string;
 
 // @public
 type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
@@ -2159,10 +2156,10 @@ export type EdgeTemporalReads<E extends AnyEdgeType, From extends NodeType = Nod
 }, InputId extends string = EdgeId<E>, G extends GraphDef = GraphWithoutOntology> = Pick<EdgeCollection<E, From, To, Pairs, InputId, G>, (typeof EDGE_TEMPORAL_READ_NAMES)[number]>;
 
 // @public (undocumented)
-type EdgeToNodeTypes<R extends EdgeRegistration> = EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType;
+export type EdgeToNodeTypes<R extends EdgeRegistration> = EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType;
 
 // @public
-type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
+export type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
 
 // @public
 type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
@@ -2213,7 +2210,7 @@ type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 // @public (undocumented)
-type EmptyShape = Readonly<Record<never, never>>;
+export type EmptyShape = Readonly<Record<never, never>>;
 
 // @public (undocumented)
 type EncodePointerSegment<S extends string> = EncodeSlash<EncodeTilde<S>>;
@@ -2383,7 +2380,7 @@ export type EvolvedTransactionOutcome<T> = Readonly<{
 }>;
 
 // @public
-type ExactExpansion = Readonly<{
+export type ExactExpansion = Readonly<{
     expansion?: "exact" | undefined;
 }>;
 
@@ -2709,7 +2706,9 @@ type ExpressionObjectChildren<Value, Scope extends string> = {
 }>;
 
 // @public
-type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ExpressionValue$1<Fields[keyof Fields]>>];
+type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
 type ExpressionProjectionEntry<T = unknown> = Readonly<{
@@ -2730,9 +2729,6 @@ type ExpressionSubqueryRelation<Projection extends readonly ExpressionProjection
     getOneStatementReadProvenance: () => OneStatementReadProvenance;
     toAst: () => QueryAst;
 }>;
-
-// @public (undocumented)
-type ExpressionValue$1<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public (undocumented)
 type ExpressionValue<Value, Scope extends string> = DatabaseExpression<Exclude<Value, null> | (null extends Value ? undefined : never), Scope> & (NonNullable<Value> extends Date | readonly unknown[] ? unknown : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope> : unknown);
@@ -2933,7 +2929,7 @@ type ExternalRecordedReadSource = Readonly<{
 }> & RecordedReadSource;
 
 // @public (undocumented)
-type ExtractAllowedPairs<From, To> = To extends readonly (infer ToNode extends NodeType)[] ? {
+export type ExtractAllowedPairs<From, To> = To extends readonly (infer ToNode extends NodeType)[] ? {
     from: From extends readonly (infer FromNode extends NodeType)[] ? FromNode : NodeType;
     to: ToNode;
 } : To extends Record<string, readonly NodeType[]> ? {
@@ -2949,7 +2945,7 @@ type ExtractAllowedPairs<From, To> = To extends readonly (infer ToNode extends N
 };
 
 // @public (undocumented)
-type ExtractTargets<T> = T extends readonly (infer N extends NodeType)[] ? N : T extends Record<string, readonly (infer N extends NodeType)[]> ? N : never;
+export type ExtractTargets<T> = T extends readonly (infer N extends NodeType)[] ? N : T extends Record<string, readonly (infer N extends NodeType)[]> ? N : never;
 
 // @public
 type ExtraVerdict<M extends OptionalGraphBackendMember> = Readonly<{
@@ -3622,7 +3618,7 @@ type GraphTemplateRow = Readonly<{
 }>;
 
 // @public
-type GraphWithoutOntology = GraphDef<Record<string, NodeRegistration>, Record<string, EdgeRegistration>, readonly []>;
+export type GraphWithoutOntology = GraphDef<Record<string, NodeRegistration>, Record<string, EdgeRegistration>, readonly []>;
 
 // @public
 type GraphWriteFenceAcquisition = Readonly<{
@@ -3676,10 +3672,10 @@ type HardDeleteUniquesByNodeIdsParams = Readonly<{
 }>;
 
 // @public (undocumented)
-type HasMeta<Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? "meta" extends Selection[number] ? true : false : false;
+export type HasMeta<Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? "meta" extends Selection[number] ? true : false : false;
 
 // @public (undocumented)
-type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K] extends Readonly<{
+export type HeterogeneousNodeForKind<G extends GraphDef, K extends NodeKinds<G>> = G["nodes"][K] extends Readonly<{
     type: infer N extends NodeType;
 }> ? Node<N> : never;
 
@@ -3730,7 +3726,7 @@ export type HistoryStore<G extends GraphDef> = ResolvedStoreCore<G> & StoreEvolu
 export type HistoryStoreBackend = UnclassifiedHistoryStoreBackendMember extends never ? Readonly<Pick<GraphBackend, HistoryStoreBackendMember>> : never;
 
 // @public (undocumented)
-type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
+export type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
 
 // @public
 export type HistoryStoreOptions = BaseStoreOptions & Readonly<{
@@ -4276,13 +4272,13 @@ type IntentSql<I extends SqlIntent> = SqlFragment & Readonly<{
 }>;
 
 // @public (undocumented)
-type InternalBaseTraversalOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<BaseTraversalOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalBaseTraversalOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<BaseTraversalOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalDegreeOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<DegreeOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalDegreeOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<DegreeOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
+export type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
     shortestPath: (from: NodeIdentifier, to: NodeIdentifier, options: InternalShortestPathOptions<G>) => Promise<ShortestPathResult | undefined>;
     weightedShortestPath: (from: NodeIdentifier, to: NodeIdentifier, options: InternalWeightedShortestPathOptions<G>) => Promise<WeightedShortestPathResult | undefined>;
     reachable: (from: NodeIdentifier, options: InternalReachableOptions<G>) => Promise<readonly ReachableNode[]>;
@@ -4296,22 +4292,22 @@ type InternalGraphAlgorithms<G extends GraphDef> = Readonly<{
 }>;
 
 // @public (undocumented)
-type InternalLabelPropagationOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<LabelPropagationOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalLabelPropagationOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<LabelPropagationOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalNeighborsOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<NeighborsOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalNeighborsOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<NeighborsOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalPageRankOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<PageRankOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalPageRankOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<PageRankOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalPersonalizedPageRankOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<PersonalizedPageRankOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalPersonalizedPageRankOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<PersonalizedPageRankOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalReachableOptions<G extends GraphDef> = InternalBaseTraversalOptions<G> & Omit<ReachableOptions<G>, keyof BaseTraversalOptions<G>>;
+export type InternalReachableOptions<G extends GraphDef> = InternalBaseTraversalOptions<G> & Omit<ReachableOptions<G>, keyof BaseTraversalOptions<G>>;
 
 // @public (undocumented)
-type InternalShortestPathOptions<G extends GraphDef> = InternalBaseTraversalOptions<G>;
+export type InternalShortestPathOptions<G extends GraphDef> = InternalBaseTraversalOptions<G>;
 
 // @public
 type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends SubgraphCompositionSelection | undefined = undefined> = Omit<SubgraphOptions<G, EK, NK, P, C>, "recordedAsOf"> & Readonly<{
@@ -4319,15 +4315,15 @@ type InternalSubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK ext
 }>;
 
 // @public (undocumented)
-type InternalTemporalAlgorithmOptions = Omit<TemporalAlgorithmOptions, "recordedAsOf"> & Readonly<{
+export type InternalTemporalAlgorithmOptions = Omit<TemporalAlgorithmOptions, "recordedAsOf"> & Readonly<{
     recordedAsOf?: RecordedInstant;
 }>;
 
 // @public (undocumented)
-type InternalWeaklyConnectedComponentsOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalWeaklyConnectedComponentsOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeaklyConnectedComponentsOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
-type InternalWeightedShortestPathOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeightedShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
+export type InternalWeightedShortestPathOptions<G extends GraphDef> = InternalTemporalAlgorithmOptions & Omit<WeightedShortestPathOptions<G>, keyof TemporalAlgorithmOptions>;
 
 // @public (undocumented)
 const IRI_ENDPOINT: unique symbol;
@@ -4353,7 +4349,7 @@ Whole
 ] extends [T] ? false : true : never;
 
 // @public
-type IterativeMemoryOptions = Readonly<{
+export type IterativeMemoryOptions = Readonly<{
     workingMemory?: string;
 }>;
 
@@ -4427,7 +4423,7 @@ export type KindIntrospection = Readonly<{
 }>;
 
 // @public (undocumented)
-type KindNodeTypes<G extends GraphDef, K> = K extends keyof G["nodes"] ? G["nodes"][K]["type"] : never;
+export type KindNodeTypes<G extends GraphDef, K> = K extends keyof G["nodes"] ? G["nodes"][K]["type"] : never;
 
 // @public (undocumented)
 export type KindPopulationStatistics = Readonly<{
@@ -4627,7 +4623,7 @@ type ManagedNodeCreatePlan = Readonly<{
 }>;
 
 // @public
-type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonly<Record<string, string>>> = Readonly<{
+export type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonly<Record<string, string>>> = Readonly<{
     [SnakeKey in keyof M as M[SnakeKey] & string]: SnakeKey extends keyof R ? R[SnakeKey] : never;
 }>;
 
@@ -4772,7 +4768,7 @@ export type NeighborOrderField = "createdAt" | "id" | "updatedAt" | "validFrom" 
 export type NeighborReadOptions<G extends GraphDef, K extends EdgeKinds<G>> = NeighborReadOptionsBoundary<G, K> & Required<Pick<NeighborReadOptionsBoundary<G, K>, "edges">>;
 
 // @public
-type NeighborReadOptionsBoundary<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
+export type NeighborReadOptionsBoundary<G extends GraphDef, K extends EdgeKinds<G>> = Readonly<{
     edges?: readonly K[];
     direction?: "both" | "in" | "out";
     orderBy?: NeighborOrder<G>;
@@ -5091,7 +5087,7 @@ type NodeInsertProjection = Readonly<{
 type NodeKinds<G extends GraphDef> = keyof G["nodes"] & string;
 
 // @public
-type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> & Readonly<{
+export type NodeMeta = MapRowToMeta<NodeRow, TemporalMetaFieldMap> & Readonly<{
     version: NodeRow["version"];
 }>;
 
@@ -5113,7 +5109,7 @@ type NodePredicate = Readonly<{
 }>;
 
 // @public (undocumented)
-type NodeProjectionPropertyKey<N extends NodeType> = Exclude<keyof Node<N>, "id" | "kind" | "meta"> & string;
+export type NodeProjectionPropertyKey<N extends NodeType> = Exclude<keyof Node<N>, "id" | "kind" | "meta"> & string;
 
 // @public
 type NodePropertyExpectation = Readonly<{
@@ -5137,7 +5133,7 @@ type NodeRef<N extends NodeType = NodeType> = Node<N> | Readonly<{
 }>;
 
 // @public (undocumented)
-type NodeReferenceGroup<R> = R extends Readonly<{
+export type NodeReferenceGroup<R> = R extends Readonly<{
     kind: infer K extends string;
     id: infer I;
 }> ? Readonly<{
@@ -5380,7 +5376,7 @@ export type OperationHookContext = HookContext & OperationOutcomeFacts & Readonl
 }>;
 
 // @public
-type OperationOutcomeFacts = Readonly<{
+export type OperationOutcomeFacts = Readonly<{
     cascadedParts?: readonly CompositionCascadedPart[];
 }>;
 
@@ -5574,12 +5570,15 @@ type PreparedQueryConfig<R> = Readonly<{
 }>;
 
 // @public (undocumented)
-type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
+export type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
     meta: EdgeMeta;
 }> : EmptyShape);
 
 // @public (undocumented)
 type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly ExpressionProjectionEntry[]>;
+
+// @public (undocumented)
+type ProjectedExpressionValue<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public
 type ProjectedField = Readonly<{
@@ -5589,7 +5588,7 @@ type ProjectedField = Readonly<{
 }>;
 
 // @public (undocumented)
-type ProjectedNodeResult<N extends NodeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Node<N>, "id" | "kind">> & Readonly<SelectedNodeProps<N, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
+export type ProjectedNodeResult<N extends NodeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Node<N>, "id" | "kind">> & Readonly<SelectedNodeProps<N, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
     meta: NodeMeta;
 }> : EmptyShape);
 
@@ -5604,7 +5603,7 @@ type ProjectionResult<Fields extends DatabaseProjection> = {
 };
 
 // @public (undocumented)
-type ProjectionSelection<P, Key extends "nodes" | "edges", Kind extends string> = P extends Readonly<{
+export type ProjectionSelection<P, Key extends "nodes" | "edges", Kind extends string> = P extends Readonly<{
     [K in Key]?: infer Map;
 }> ? Map extends Readonly<Record<string, readonly string[] | undefined>> ? Kind extends keyof Map ? Map[Kind] : undefined : undefined : undefined;
 
@@ -5962,6 +5961,11 @@ export type ReclaimedVectorFieldEntry = Readonly<{
 }>;
 
 // @public
+export type ReconciledOption<G extends GraphDef> = Readonly<{
+    reconciled?: ReconciledSchema<G>;
+}>;
+
+// @public
 type ReconciledSchema<G extends GraphDef> = Readonly<{
     graph: G;
     version: number | undefined;
@@ -6101,7 +6105,7 @@ export type RecordedStoreViewEdgeCollections<G extends GraphDef> = {
 };
 
 // @public
-class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
+export class RecordedStoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: ReadCoordinate);
     adjacency<const K extends EdgeKinds<G> = EdgeKinds<G>>(root: GraphNodeReferenceInput<G>, options?: RecordedAdjacencyOptions<K>): Promise<RecordedAdjacencyPage<RecordedAdjacencyEntry<G, K>>>;
     get asOfRecorded(): RecordedInstant;
@@ -6130,7 +6134,7 @@ type RecordedTableNames = Readonly<{
 type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
 
 // @public
-type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
+export type RecordedTimeOwnership = "typegraph-relations" | "engine-native";
 
 // @public
 type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
@@ -6399,15 +6403,15 @@ type ResolvedSqlTableNames = Readonly<{
 }>;
 
 // @public
-type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> & Readonly<{
+export type ResolvedStoreCore<G extends GraphDef> = StoreCore<G> & AddedStoreReads<G> & Required<Pick<StoreCore<GraphDef>, "pruneRecordedInstants">> & Readonly<{
     rotateAllocationOwner: (expectedOwner: GraphAllocationOwner) => Promise<GraphAllocationOwner>;
 }>;
 
 // @public
-type ResolveNode<G extends GraphDef, K extends string, E extends DefaultAliasExpansionAxis> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<SearchNodeType<N, E>> : Node : Node;
+export type ResolveNode<G extends GraphDef, K extends string, E extends DefaultAliasExpansionAxis> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? Node<SearchNodeType<N, E>> : Node : Node;
 
 // @public
-type ResolveNodeType<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? N : NodeType : NodeType;
+export type ResolveNodeType<G extends GraphDef, K extends string> = K extends NodeKinds<G> ? G["nodes"][K] extends NodeRegistration<infer N extends NodeType> ? N : NodeType : NodeType;
 
 // @public
 type ResolvePathAlias<PC, A extends string> = PC extends string ? PC : PC extends true ? `${A}_path` : PC extends QualifiedRecursivePathOption ? PC["alias"] extends string ? PC["alias"] : `${A}_path` : never;
@@ -6595,9 +6599,7 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [
-E
-] extends ["exact"] ? N : PolymorphicNodeType<N>;
+export type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 // @public
 export type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
@@ -6651,10 +6653,10 @@ type SelectContext<Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = 
 }>;
 
 // @public (undocumented)
-type SelectedEdgeProps<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? Pick<Edge<E>, Extract<Selection[number], EdgeProjectionPropertyKey<E>>> : EmptyShape;
+export type SelectedEdgeProps<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? Pick<Edge<E>, Extract<Selection[number], EdgeProjectionPropertyKey<E>>> : EmptyShape;
 
 // @public (undocumented)
-type SelectedNodeProps<N extends NodeType, Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? Pick<Node<N>, Extract<Selection[number], NodeProjectionPropertyKey<N>>> : EmptyShape;
+export type SelectedNodeProps<N extends NodeType, Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? Pick<Node<N>, Extract<Selection[number], NodeProjectionPropertyKey<N>>> : EmptyShape;
 
 // @public
 type SelectiveField = Readonly<{
@@ -6952,7 +6954,7 @@ type SqlTextChunk = Readonly<{
 }>;
 
 // @public
-type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
+export type StatedExpansion<E extends DefaultAliasExpansionAxis> = Readonly<{
     expansion: E;
 }>;
 
@@ -6970,7 +6972,7 @@ export type StoreAnalysisSchemaCoordinate = Readonly<{
 }>;
 
 // @public (undocumented)
-type StoreCore<G extends GraphDef> = Readonly<{
+export type StoreCore<G extends GraphDef> = Readonly<{
     [STORE_RUNTIME]: StoreRuntime<G>;
     graph: G;
     graphId: string;
@@ -7091,7 +7093,7 @@ export type StoreHooks = Readonly<{
 }>;
 
 // @public
-type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
+export type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     identity: IdentityFacade<G>;
 }> : Readonly<Record<never, never>>;
 
@@ -7415,7 +7417,7 @@ export class StoreSearch<G extends GraphDef> {
 }
 
 // @public (undocumented)
-type StoreSearchContext = Readonly<{
+export type StoreSearchContext = Readonly<{
     graphId: string;
     backend: GraphBackend;
     registry: KindRegistry;
@@ -7431,7 +7433,7 @@ export type StoreTransactionOptions = TransactionOptions & Readonly<{
 }>;
 
 // @public (undocumented)
-type StoreTransactions<G extends GraphDef> = Readonly<{
+export type StoreTransactions<G extends GraphDef> = Readonly<{
     transaction: <T>(fn: (tx: TransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
     transactionWithReceipt: <T>(fn: (tx: MeasurableTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
 }>;
@@ -7524,7 +7526,7 @@ export type StoreViewGraphAlgorithms<G extends GraphDef> = Readonly<{
 }>;
 
 // @public
-class StoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
+export class StoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G> {
     constructor(store: Store<G>, coordinate: StoreViewCoordinate | ReadCoordinate);
     asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
     bulkFindEdgesFrom<const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">): Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
@@ -7637,10 +7639,10 @@ export interface SubgraphEdgeLookup<E extends SubgraphEdgeKey> {
 }
 
 // @public (undocumented)
-type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
+export type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
 
 // @public (undocumented)
-type SubgraphEdgeProjectionMap<G extends GraphDef, EK extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
+export type SubgraphEdgeProjectionMap<G extends GraphDef, EK extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
     [K in EdgeKinds<G>]?: K extends EK ? readonly SubgraphEdgeProjectionField<G["edges"][K]["type"]>[] : never;
 }>;
 
@@ -7650,7 +7652,7 @@ export type SubgraphEdgeResult<G extends GraphDef, EK extends EdgeKinds<G> = Edg
 }[EK];
 
 // @public (undocumented)
-type SubgraphEdgeResultForKind<G extends GraphDef, Kind extends EdgeKinds<G>, P> = ProjectionSelection<P, "edges", Kind> extends readonly string[] ? ProjectedEdgeResult<G["edges"][Kind]["type"], ProjectionSelection<P, "edges", Kind>> : Edge<G["edges"][Kind]["type"]>;
+export type SubgraphEdgeResultForKind<G extends GraphDef, Kind extends EdgeKinds<G>, P> = ProjectionSelection<P, "edges", Kind> extends readonly string[] ? ProjectedEdgeResult<G["edges"][Kind]["type"], ProjectionSelection<P, "edges", Kind>> : Edge<G["edges"][Kind]["type"]>;
 
 // @public
 export type SubgraphIndex<N extends SubgraphNodeKey, E extends SubgraphEdgeKey> = Readonly<{
@@ -7676,10 +7678,10 @@ export type SubgraphNodeKey<K extends string = string> = Readonly<{
 export type SubgraphNodeLookup<N extends SubgraphNodeKey> = <const K extends string>(node: SubgraphNodeKey<string extends K ? K : K & N["kind"]>) => (string extends K ? N : SubgraphKindSelection<N, K>) | undefined;
 
 // @public (undocumented)
-type SubgraphNodeProjectionField<N extends NodeType = NodeType> = NodeProjectionPropertyKey<N> | "meta";
+export type SubgraphNodeProjectionField<N extends NodeType = NodeType> = NodeProjectionPropertyKey<N> | "meta";
 
 // @public (undocumented)
-type SubgraphNodeProjectionMap<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>> = Readonly<{
+export type SubgraphNodeProjectionMap<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>> = Readonly<{
     [K in NodeKinds<G>]?: K extends NK ? readonly SubgraphNodeProjectionField<G["nodes"][K]["type"]>[] : never;
 }>;
 
@@ -7689,7 +7691,7 @@ export type SubgraphNodeResult<G extends GraphDef, NK extends NodeKinds<G> = Nod
 }[NK];
 
 // @public (undocumented)
-type SubgraphNodeResultForKind<G extends GraphDef, Kind extends NodeKinds<G>, P> = ProjectionSelection<P, "nodes", Kind> extends readonly string[] ? ProjectedNodeResult<G["nodes"][Kind]["type"], ProjectionSelection<P, "nodes", Kind>> : Node<G["nodes"][Kind]["type"]>;
+export type SubgraphNodeResultForKind<G extends GraphDef, Kind extends NodeKinds<G>, P> = ProjectionSelection<P, "nodes", Kind> extends readonly string[] ? ProjectedNodeResult<G["nodes"][Kind]["type"], ProjectionSelection<P, "nodes", Kind>> : Node<G["nodes"][Kind]["type"]>;
 
 // @public (undocumented)
 export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK extends NodeKinds<G>, P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined, C extends SubgraphCompositionSelection | undefined = undefined> = Readonly<{
@@ -7708,13 +7710,13 @@ export type SubgraphOptions<G extends GraphDef, EK extends EdgeKinds<G>, NK exte
 }>;
 
 // @public (undocumented)
-type SubgraphProject<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
+export type SubgraphProject<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>> = Readonly<{
     nodes?: SubgraphNodeProjectionMap<G, NK>;
     edges?: SubgraphEdgeProjectionMap<G, EK>;
 }>;
 
 // @public
-type SubgraphProjectFor<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, C extends SubgraphCompositionSelection | undefined> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
+export type SubgraphProjectFor<G extends GraphDef, NK extends NodeKinds<G>, EK extends EdgeKinds<G>, C extends SubgraphCompositionSelection | undefined> = SubgraphProject<G, NK, SubgraphResultEdgeKinds<G, EK, C>>;
 
 // @public
 export type SubgraphResult<G extends GraphDef, NK extends NodeKinds<G> = NodeKinds<G>, EK extends EdgeKinds<G> = EdgeKinds<G>, P extends SubgraphProject<G, NK, EK> | undefined = undefined> = Readonly<{
@@ -7821,7 +7823,7 @@ export type TemporalAlgorithmOptions = NoRecordedCoordinate & Readonly<{
 }>;
 
 // @public
-type TemporalMetaFieldMap = Readonly<{
+export type TemporalMetaFieldMap = Readonly<{
     valid_from: "validFrom";
     valid_to: "validTo";
     created_at: "createdAt";
@@ -7872,7 +7874,7 @@ const TRANSACTION_RUNTIME: unique symbol;
 type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
-type TransactionCollections<G extends GraphDef> = Readonly<{
+export type TransactionCollections<G extends GraphDef> = Readonly<{
     [TRANSACTION_RUNTIME]: TransactionRuntime;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
@@ -7992,12 +7994,12 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K & string>, PolymorphicNodeType<G["nodes"][K]["type"]>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     // (undocumented)
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor$1<T>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor<T>, PolymorphicNodeType<DynamicNodeTypeFor<T>>, PolymorphicNodeType<DynamicNodeTypeFor<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
@@ -8078,15 +8080,15 @@ export type UnboundLiveStoreOptions = LiveStoreOptions & Readonly<{
 }>;
 
 // @public
-type UnbrandParam<T> = T extends NodeId<NodeType> ? string : T extends EdgeId<AnyEdgeType> ? string : T extends readonly NodeId<NodeType>[] ? readonly string[] : T extends readonly EdgeId<AnyEdgeType>[] ? readonly string[] : T extends readonly (infer Item extends Record<string, unknown>)[] ? readonly UnbrandRecord<Item>[] : T;
+export type UnbrandParam<T> = T extends NodeId<NodeType> ? string : T extends EdgeId<AnyEdgeType> ? string : T extends readonly NodeId<NodeType>[] ? readonly string[] : T extends readonly EdgeId<AnyEdgeType>[] ? readonly string[] : T extends readonly (infer Item extends Record<string, unknown>)[] ? readonly UnbrandRecord<Item>[] : T;
 
 // @public
-type UnbrandRecord<T extends Record<string, unknown>> = {
+export type UnbrandRecord<T extends Record<string, unknown>> = {
     readonly [K in keyof T]: T[K] extends NodeId<NodeType> ? string : T[K] extends EdgeId<AnyEdgeType> ? string : T[K];
 };
 
 // @public (undocumented)
-type UnclassifiedHistoryStoreBackendMember = Exclude<keyof GraphBackend, HistoryStoreBackendMember | UnsafeHistoryStoreBackendMember>;
+export type UnclassifiedHistoryStoreBackendMember = Exclude<keyof GraphBackend, HistoryStoreBackendMember | UnsafeHistoryStoreBackendMember>;
 
 // @public (undocumented)
 type UndefinedWhenNullish<Value> = Extract<Value, null | undefined> extends never ? never : undefined;
@@ -8321,7 +8323,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "findEdgesByMatchIdentity" | "clearGraph" | "clearGraphPreservingContributionMaterializations" | "commitSchemaVersionWithPreflight" | "instantiateGraphTemplate" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "recordedTableDdl" | "repairContributions" | "registerGraphTemplate" | "schemaWriteTransaction" | "setActiveVersionWithPreflight" | "transaction" | "trustedImport";
+export type UnsafeHistoryStoreBackendMember = "findEdgesByMatchIdentity" | "clearGraph" | "clearGraphPreservingContributionMaterializations" | "commitSchemaVersionWithPreflight" | "instantiateGraphTemplate" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "recordedTableDdl" | "repairContributions" | "registerGraphTemplate" | "schemaWriteTransaction" | "setActiveVersionWithPreflight" | "transaction" | "trustedImport";
 
 // @public
 export type UpdateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
@@ -8640,7 +8642,7 @@ type VectorStrategy = Readonly<{
 }>;
 
 // @public
-type ViewIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
+export type ViewIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
     identity: IdentityReadFacade<G>;
 }> : Readonly<Record<never, never>>;
 
@@ -8676,7 +8678,7 @@ export type WeightedShortestPathResult = Readonly<{
 }>;
 
 // @public
-type WidenBrandedIds<T> = {
+export type WidenBrandedIds<T> = {
     readonly [K in keyof T]: T[K] extends (...args: infer A) => infer R ? (...args: {
         [P in keyof A]: UnbrandParam<A[P]>;
     }) => R : T[K];

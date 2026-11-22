@@ -133,7 +133,7 @@ export type ResolvedSqlTableNames = Readonly<{
   reconciliationMarkers?: string;
 }>;
 
-type SqlSchemaFields = Readonly<{
+export type SqlSchemaFields = Readonly<{
   /** Table names */
   tables: ResolvedSqlTableNames;
   /** Get a `SqlFragment` reference to the nodes table. */

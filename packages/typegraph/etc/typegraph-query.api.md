@@ -10,12 +10,12 @@ import { z } from 'zod';
 const __nodeId: unique symbol;
 
 // @public
-type AddedEntries<Out, Base> = Readonly<{
+export type AddedEntries<Out, Base> = Readonly<{
     [K in Exclude<keyof Out, keyof Base>]: Out[K];
 }>;
 
 // @public (undocumented)
-type AggregateAliasMap = Readonly<Record<string, Readonly<{
+export type AggregateAliasMap = Readonly<Record<string, Readonly<{
     type: Readonly<{
         schema: z.ZodType;
     }>;
@@ -23,7 +23,7 @@ type AggregateAliasMap = Readonly<Record<string, Readonly<{
 }>>>;
 
 // @public
-type AggregateComparisonPredicate = Readonly<{
+export type AggregateComparisonPredicate = Readonly<{
     __type: "aggregate_comparison";
     op: ComparisonOp;
     aggregate: AggregateExpr;
@@ -31,37 +31,37 @@ type AggregateComparisonPredicate = Readonly<{
 }>;
 
 // @public
-type AggregateExpr<Function extends AggregateFunction = AggregateFunction, Field extends FieldRef = FieldRef> = Readonly<{
+export type AggregateExpr<Function extends AggregateFunction = AggregateFunction, Field extends FieldRef = FieldRef> = Readonly<{
     __type: "aggregate";
     function: Function;
     field: Field;
 }>;
 
 // @public (undocumented)
-type AggregateExpressionNode = Readonly<{
+export type AggregateExpressionNode = Readonly<{
     kind: "aggregate";
     operator: AggregateOperator;
     operand?: DatabaseExpression | undefined;
 }>;
 
 // @public (undocumented)
-type AggregateFieldResult<Expression extends AggregateExpr, Aliases extends AggregateAliasMap> = Expression extends AggregateExpr<infer Function, infer Field> ? Function extends "count" | "countDistinct" ? number : Function extends "sum" | "avg" ? number | undefined : Function extends "min" | "max" ? unknown extends FieldResult<Field, Aliases> ? unknown : Exclude<FieldResult<Field, Aliases>, undefined> extends (string | number | Date) ? Extract<FieldResult<Field, Aliases>, string | number | Date> | undefined : never : never : never;
+export type AggregateFieldResult<Expression extends AggregateExpr, Aliases extends AggregateAliasMap> = Expression extends AggregateExpr<infer Function, infer Field> ? Function extends "count" | "countDistinct" ? number : Function extends "sum" | "avg" ? number | undefined : Function extends "min" | "max" ? unknown extends FieldResult<Field, Aliases> ? unknown : Exclude<FieldResult<Field, Aliases>, undefined> extends (string | number | Date) ? Extract<FieldResult<Field, Aliases>, string | number | Date> | undefined : never : never : never;
 
 // @public
-type AggregateFunction = "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
+export type AggregateFunction = "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 // @public (undocumented)
-type AggregateOperator = "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
+export type AggregateOperator = "avg" | "count" | "countDistinct" | "max" | "min" | "sum";
 
 // @public
-type AggregateOrderSpec = Readonly<{
+export type AggregateOrderSpec = Readonly<{
     outputName: string;
     direction: SortDirection;
     nulls?: NullOrdering;
 }>;
 
 // @public (undocumented)
-type AggregateRelationFields<R extends Record<string, FieldRef | AggregateExpr>, Aliases extends AggregateAliasMap> = {
+export type AggregateRelationFields<R extends Record<string, FieldRef | AggregateExpr>, Aliases extends AggregateAliasMap> = {
     [K in keyof R]: DatabaseExpression<AggregateResult<R, Aliases>[K]>;
 };
 
@@ -79,7 +79,7 @@ export type AliasExpansionOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type AliasExpressions<Entry extends Readonly<{
+export type AliasExpressions<Entry extends Readonly<{
     type: Readonly<{
         schema: z.ZodType;
         kind: string;
@@ -94,28 +94,28 @@ type AliasExpressions<Entry extends Readonly<{
 }>;
 
 // @public
-type AliasKindIdentity<Alias> = Alias extends NodeAlias<infer N, boolean> ? NonNullable<N["__nodeKind"]> : never;
+export type AliasKindIdentity<Alias> = Alias extends NodeAlias<infer N, boolean> ? NonNullable<N["__nodeKind"]> : never;
 
 // @public
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
 
 // @public
-type AliasNodeType<G extends GraphDef, K extends string> = SubsumedNodeType<G, G["nodes"][K]["type"]>;
+export type AliasNodeType<G extends GraphDef, K extends string> = SubsumedNodeType<G, G["nodes"][K]["type"]>;
 
 // @public
 export type AliasOrderField<Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, A extends string> = A extends keyof EdgeAliases ? EdgeOrderField<EdgeAliases[A]["type"]> : A extends keyof Aliases ? NodeOrderField<Aliases[A]["type"]> : never;
 
 // @public (undocumented)
-type AliasSchemaValue<Aliases extends AggregateAliasMap, Alias extends string> = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
+export type AliasSchemaValue<Aliases extends AggregateAliasMap, Alias extends string> = z.infer<AliasValue<Aliases, Alias>["type"]["schema"]>;
 
 // @public (undocumented)
-type AliasValue<Aliases extends AggregateAliasMap, Alias extends string> = Alias extends keyof Aliases ? Aliases[Alias] : never;
+export type AliasValue<Aliases extends AggregateAliasMap, Alias extends string> = Alias extends keyof Aliases ? Aliases[Alias] : never;
 
 // @public (undocumented)
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
-type AndPredicate = Readonly<{
+export type AndPredicate = Readonly<{
     __type: "and";
     predicates: readonly PredicateExpression[];
 }>;
@@ -124,15 +124,15 @@ type AndPredicate = Readonly<{
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public (undocumented)
-type AnyFragmentShape = FragmentShape<GraphDef, FragmentRequirements<GraphDef>, AliasMap, EdgeAliasMap, RecursiveAliasMap>;
+export type AnyFragmentShape = FragmentShape<GraphDef, FragmentRequirements<GraphDef>, AliasMap, EdgeAliasMap, RecursiveAliasMap>;
 
 // @public
-type AnyQueryFragment = Readonly<{
+export type AnyQueryFragment = Readonly<{
     [FRAGMENT_SHAPE]: (shape: never) => AnyFragmentShape;
 }>;
 
 // @public (undocumented)
-type ArithmeticExpressionNode = Readonly<{
+export type ArithmeticExpressionNode = Readonly<{
     kind: "arithmetic";
     operator: ArithmeticOperator;
     left: DatabaseExpression;
@@ -140,17 +140,20 @@ type ArithmeticExpressionNode = Readonly<{
 }>;
 
 // @public (undocumented)
-type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
+export type ArithmeticOperator = "add" | "divide" | "multiply" | "subtract";
 
 // @public (undocumented)
-type ArrayContainsExpressionNode = Readonly<{
+export type ArrayContainsExpressionNode = Readonly<{
     kind: "array_contains";
     array: DatabaseExpression;
     element: DatabaseExpression;
 }>;
 
+// @public (undocumented)
+export type ArrayExpressionElement<ArrayValue> = ArrayValue extends readonly (infer Element)[] ? Element : never;
+
 // @public
-type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
+export type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
     contains: (value: [U] extends [Date] ? U | string : U) => Predicate;
     containsAny: (values: readonly ([U] extends [Date] ? U | string : U)[]) => Predicate;
     containsAll: (values: readonly ([U] extends [Date] ? U | string : U)[]) => Predicate;
@@ -164,13 +167,13 @@ type ArrayFieldAccessor<U> = NullFieldAccessor & Readonly<{
 }>;
 
 // @public
-type ArrayNodeKinds<T> = T[number & keyof T]["kind" & keyof T[number & keyof T]] & string;
+export type ArrayNodeKinds<T> = T[number & keyof T]["kind" & keyof T[number & keyof T]] & string;
 
 // @public
-type ArrayOp = "contains" | "containsAll" | "containsAny" | "isEmpty" | "isNotEmpty" | "lengthEq" | "lengthGt" | "lengthGte" | "lengthLt" | "lengthLte";
+export type ArrayOp = "contains" | "containsAll" | "containsAny" | "isEmpty" | "isNotEmpty" | "lengthEq" | "lengthGt" | "lengthGte" | "lengthLt" | "lengthLte";
 
 // @public
-type ArrayPredicate = Readonly<{
+export type ArrayPredicate = Readonly<{
     __type: "array_op";
     op: ArrayOp;
     field: FieldRef;
@@ -179,7 +182,7 @@ type ArrayPredicate = Readonly<{
 }>;
 
 // @public (undocumented)
-type AssignableKeyClosure<Relation, Reached> = [
+export type AssignableKeyClosure<Relation, Reached> = [
 Exclude<DirectlyAssignableKeys<Relation, Reached>, Reached>
 ] extends ([
 never
@@ -238,7 +241,7 @@ type BackendValidityEndMutation = Readonly<{
 }>;
 
 // @public (undocumented)
-type BaseFieldAccessor<T = unknown> = Readonly<{
+export type BaseFieldAccessor<T = unknown> = Readonly<{
     eq: (value: EqualityOperand<T>) => Predicate;
     neq: (value: EqualityOperand<T>) => Predicate;
     isNull: () => Predicate;
@@ -264,7 +267,7 @@ export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
 };
 
 // @public
-type BetweenPredicate = Readonly<{
+export type BetweenPredicate = Readonly<{
     __type: "between";
     field: FieldRef;
     lower: LiteralValue | ParameterRef;
@@ -272,17 +275,17 @@ type BetweenPredicate = Readonly<{
 }>;
 
 // @public (undocumented)
-type BooleanExpressionNode = Readonly<{
+export type BooleanExpressionNode = Readonly<{
     kind: "boolean";
     operator: "and" | "or";
     operands: readonly DatabaseExpression<boolean | undefined>[];
 }>;
 
 // @public (undocumented)
-type BooleanFieldAccessor<T extends boolean = boolean> = BaseFieldAccessor<T>;
+export type BooleanFieldAccessor<T extends boolean = boolean> = BaseFieldAccessor<T>;
 
 // @public
-type BuildRecursiveAliases<DC, PC, A extends string, Optional extends boolean = false> = ([DC] extends [false] ? {} : Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) & ([PC] extends [false] ? {} : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>>);
+export type BuildRecursiveAliases<DC, PC, A extends string, Optional extends boolean = false> = ([DC] extends [false] ? {} : Record<ResolveDepthAlias<DC, A>, RecursiveAlias<"depth", "ids", Optional>>) & ([PC] extends [false] ? {} : Record<ResolvePathAlias<PC, A>, RecursiveAlias<"path", ResolvePathFormat<PC>, Optional>>);
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -347,7 +350,7 @@ type ClaimIndexMaterializationParams = Readonly<{
 }>;
 
 // @public (undocumented)
-type CoalesceExpressionNode = Readonly<{
+export type CoalesceExpressionNode = Readonly<{
     kind: "coalesce";
     operands: readonly DatabaseExpression[];
 }>;
@@ -361,7 +364,7 @@ export type CollectedRecord<Fields extends CollectRecordFields<string>> = Readon
 }>;
 
 // @public (undocumented)
-type CollectExpressionNode = Readonly<{
+export type CollectExpressionNode = Readonly<{
     kind: "collect";
     operand: DatabaseExpression | CollectRecordOperand;
     filter?: DatabaseExpression<boolean | undefined>;
@@ -391,7 +394,7 @@ export type CollectRecordOperand = Readonly<{
 }>;
 
 // @public (undocumented)
-type CollisionErrors<AddedKeys, ExistingKeys> = Extract<AddedKeys, ExistingKeys> extends infer Collision extends string ? Collision extends unknown ? `Error: fragment adds alias '${Collision}', which this query already uses` : never : never;
+export type CollisionErrors<AddedKeys, ExistingKeys> = Extract<AddedKeys, ExistingKeys> extends infer Collision extends string ? Collision extends unknown ? `Error: fragment adds alias '${Collision}', which this query already uses` : never : never;
 
 // @public
 type CommitSchemaVersionExpected = Readonly<{
@@ -425,7 +428,10 @@ export type CommonPropertyKeys<Props, Keys extends keyof Props = keyof Props> = 
 }[Keys] : Keys;
 
 // @public (undocumented)
-type Comparable = boolean | Date | number | string;
+export type Comparable = boolean | Date | number | string;
+
+// @public (undocumented)
+export type ComparableExpression<T extends Comparable, Scope extends string> = DatabaseExpression<T | undefined, Scope>;
 
 // @public (undocumented)
 type CompareAndSetNodeParams = Readonly<{
@@ -440,7 +446,7 @@ type CompareAndSetNodeParams = Readonly<{
 }>;
 
 // @public (undocumented)
-type ComparisonExpressionNode = Readonly<{
+export type ComparisonExpressionNode = Readonly<{
     kind: "comparison";
     operator: ExpressionComparisonOperator;
     left: DatabaseExpression;
@@ -448,10 +454,10 @@ type ComparisonExpressionNode = Readonly<{
 }>;
 
 // @public
-type ComparisonOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
+export type ComparisonOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn";
 
 // @public
-type ComparisonPredicate = Readonly<{
+export type ComparisonPredicate = Readonly<{
     __type: "comparison";
     op: ComparisonOp;
     left: FieldRef;
@@ -459,7 +465,7 @@ type ComparisonPredicate = Readonly<{
 }>;
 
 // @public (undocumented)
-type CompatibleRelationProjection<Fields extends RelationProjection> = Readonly<{
+export type CompatibleRelationProjection<Fields extends RelationProjection> = Readonly<{
     [Key in keyof Fields]: DatabaseExpression<RelationProjectionResult<Fields>[Key]>;
 }>;
 
@@ -479,7 +485,7 @@ type CompiledStatementSql = IntentSql<"statement">;
 type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
-type CompileQueryOptions = Readonly<{
+export type CompileQueryOptions = Readonly<{
     dialect?: SqlDialect | undefined;
     schema?: SqlSchema | undefined;
     fulltextStrategy?: FulltextStrategy | false | undefined;
@@ -496,27 +502,27 @@ type CompileQueryOptions = Readonly<{
 }>;
 
 // @public
-type ComposableQuery = QueryAst | SetOperation;
+export type ComposableQuery = QueryAst | SetOperation;
 
 // @public
-type ComposedGraph<First extends AnyFragmentShape, Second extends AnyFragmentShape> = [
+export type ComposedGraph<First extends AnyFragmentShape, Second extends AnyFragmentShape> = [
 Second["graph"]
 ] extends [First["graph"]] ? Second["graph"] : First["graph"];
 
 // @public
-type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<FragmentRequiredAliases<Shape["graph"], Shape["requires"]>> & Shape["added"];
+export type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<FragmentRequiredAliases<Shape["graph"], Shape["requires"]>> & Shape["added"];
 
 // @public (undocumented)
-type ComposedShape<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentShape<ComposedGraph<First, Second>, Readonly<First["requires"] & AddedEntries<Second["requires"], ComposedNodeAliases<First>>>, MergeMaps<First["added"], Second["added"]>, MergeMaps<First["addedEdges"], Second["addedEdges"]>, MergeMaps<First["addedRecursive"], Second["addedRecursive"]>>;
+export type ComposedShape<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentShape<ComposedGraph<First, Second>, Readonly<First["requires"] & AddedEntries<Second["requires"], ComposedNodeAliases<First>>>, MergeMaps<First["added"], Second["added"]>, MergeMaps<First["addedEdges"], Second["addedEdges"]>, MergeMaps<First["addedRecursive"], Second["addedRecursive"]>>;
 
 // @public
-type ComposeErrors<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentFitErrors<Second, ComposedGraph<First, Second>, ComposedNodeAliases<First>, First["addedEdges"], First["addedRecursive"], false>;
+export type ComposeErrors<First extends AnyFragmentShape, Second extends AnyFragmentShape> = FragmentFitErrors<Second, ComposedGraph<First, Second>, ComposedNodeAliases<First>, First["addedEdges"], First["addedRecursive"], false>;
 
 // @public
 export function composeFragments<Fragments extends readonly [AnyQueryFragment, ...AnyQueryFragment[]]>(...fragments: Fragments & FitReport<CompositionErrors<Fragments>>): ShapeFragment<CompositionShape<Fragments>>;
 
 // @public
-type ComposeStep<Composed extends AnyFragmentShape | undefined, Next extends AnyFragmentShape> = Composed extends AnyFragmentShape ? ComposedShape<Composed, Next> : Next;
+export type ComposeStep<Composed extends AnyFragmentShape | undefined, Next extends AnyFragmentShape> = Composed extends AnyFragmentShape ? ComposedShape<Composed, Next> : Next;
 
 // @public
 type CompositionClaimScope = Readonly<{
@@ -528,16 +534,16 @@ type CompositionClaimScope = Readonly<{
 }>;
 
 // @public
-type CompositionErrors<Fragments extends readonly unknown[], Composed extends AnyFragmentShape | undefined = undefined> = Fragments extends readonly [infer Next, ...infer Rest] ? UnionFragmentErrors<Next> | (Composed extends AnyFragmentShape ? ComposeErrors<Composed, ShapeOf<Next>> : never) | CompositionErrors<Rest, ComposeStep<Composed, ShapeOf<Next>>> : never;
+export type CompositionErrors<Fragments extends readonly unknown[], Composed extends AnyFragmentShape | undefined = undefined> = Fragments extends readonly [infer Next, ...infer Rest] ? UnionFragmentErrors<Next> | (Composed extends AnyFragmentShape ? ComposeErrors<Composed, ShapeOf<Next>> : never) | CompositionErrors<Rest, ComposeStep<Composed, ShapeOf<Next>>> : never;
 
 // @public
 type CompositionExistence = "optional" | "required";
 
 // @public (undocumented)
-type CompositionMetaEdgeName = "partOf" | "hasPart";
+export type CompositionMetaEdgeName = "partOf" | "hasPart";
 
 // @public
-type CompositionNavigationEdge<O> = O extends {
+export type CompositionNavigationEdge<O> = O extends {
     via: infer V extends AnyEdgeType;
 } ? V : DynamicEdgeType;
 
@@ -551,7 +557,7 @@ export type CompositionNavigationOptions<Aliases extends AliasMap> = Readonly<{
 }>;
 
 // @public
-type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>, RecursiveAliases & BuildRecursiveAliases<O extends {
+export type CompositionNavigationResult<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState, NA extends string, O> = QueryBuilder<G, Aliases & Record<NA, NodeAlias<DynamicNodeType>>, EdgeAliases & Record<`${NA}_edge`, EdgeAlias<CompositionNavigationEdge<O>>>, RecursiveAliases & BuildRecursiveAliases<O extends {
     depth: infer D extends boolean | string;
 } ? D : false, O extends ({
     path: infer P extends boolean | string | QualifiedRecursivePathOption;
@@ -585,7 +591,7 @@ type CompositionRelation = Readonly<{
 }>;
 
 // @public
-type CompositionShape<Fragments extends readonly unknown[], Composed extends AnyFragmentShape | undefined = undefined> = Fragments extends readonly [infer Next, ...infer Rest] ? CompositionShape<Rest, ComposeStep<Composed, ShapeOf<Next>>> : Composed;
+export type CompositionShape<Fragments extends readonly unknown[], Composed extends AnyFragmentShape | undefined = undefined> = Fragments extends readonly [infer Next, ...infer Rest] ? CompositionShape<Rest, ComposeStep<Composed, ShapeOf<Next>>> : Composed;
 
 // @public
 type CompositionViaRef = AnyEdgeType | string;
@@ -594,7 +600,7 @@ type CompositionViaRef = AnyEdgeType | string;
 export type CompositionWholeKinds<G extends GraphDef, K extends string> = true extends CompositionWholeKindsUndecidable<G["ontology"][number]> ? keyof G["nodes"] & string : DeclaredCompositionWholeKinds<G["ontology"][number], K>;
 
 // @public
-type CompositionWholeKindsUndecidable<Relation> = Relation extends unknown ? Relation extends ({
+export type CompositionWholeKindsUndecidable<Relation> = Relation extends unknown ? Relation extends ({
     metaEdge: {
         name: infer Name extends string;
     };
@@ -605,7 +611,7 @@ Extract<Name, CompositionMetaEdgeName>
 ] extends [never] ? false : true extends EndpointKindErased<From | To> ? true : false : true : true : never;
 
 // @public (undocumented)
-type ConditionalExpressionNode = Readonly<{
+export type ConditionalExpressionNode = Readonly<{
     kind: "conditional";
     condition: DatabaseExpression<boolean | undefined>;
     then: DatabaseExpression;
@@ -831,10 +837,10 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
 }>;
 
 // @public (undocumented)
-type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | ArrayContainsExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
+export type DatabaseExpressionNode = AggregateExpressionNode | ArithmeticExpressionNode | ArrayContainsExpressionNode | BooleanExpressionNode | CoalesceExpressionNode | CollectExpressionNode | ComparisonExpressionNode | ConditionalExpressionNode | ExistsSubqueryExpressionNode | FieldExpressionNode | LiteralExpressionNode | NotExpressionNode | NullCheckExpressionNode | NumericConversionExpressionNode | OuterReferenceExpressionNode | ParameterExpressionNode | ScalarSubqueryExpressionNode;
 
 // @public
-type DatabaseExpressionPredicate = Readonly<{
+export type DatabaseExpressionPredicate = Readonly<{
     __type: "database_expression_predicate";
     expression: DatabaseExpression<boolean | undefined>;
 }>;
@@ -843,18 +849,18 @@ type DatabaseExpressionPredicate = Readonly<{
 type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
 
 // @public (undocumented)
-type DatabaseJsonValue = boolean | number | string | null | readonly DatabaseJsonValue[] | Readonly<{
+export type DatabaseJsonValue = boolean | number | string | null | readonly DatabaseJsonValue[] | Readonly<{
     [key: string]: DatabaseJsonValue;
 }>;
 
 // @public (undocumented)
-type DatabaseLiteral = DatabaseJsonValue | Date | undefined;
+export type DatabaseLiteral = DatabaseJsonValue | Date | undefined;
 
 // @public (undocumented)
 export type DatabaseProjection = Readonly<Record<string, DatabaseExpression>>;
 
 // @public (undocumented)
-type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> & Readonly<{
+export type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> & Readonly<{
     gt: (value: Date | string | ParameterRef) => Predicate;
     gte: (value: Date | string | ParameterRef) => Predicate;
     lt: (value: Date | string | ParameterRef) => Predicate;
@@ -863,7 +869,7 @@ type DateFieldAccessor<T extends Date = Date> = BaseFieldAccessor<T> & Readonly<
 }>;
 
 // @public
-type DeclaredCompositionWholeKinds<Relation, K extends string> = Relation extends unknown ? Relation extends ({
+export type DeclaredCompositionWholeKinds<Relation, K extends string> = Relation extends unknown ? Relation extends ({
     metaEdge: {
         name: infer Name extends string;
     };
@@ -872,7 +878,7 @@ type DeclaredCompositionWholeKinds<Relation, K extends string> = Relation extend
 }) ? ([Extract<Name, "partOf">] extends [never] ? never : [Extract<EndpointKinds<From>, K>] extends [never] ? never : EndpointKinds<To>) | ([Extract<Name, "hasPart">] extends [never] ? never : [Extract<EndpointKinds<To>, K>] extends [never] ? never : EndpointKinds<From>) : never : never;
 
 // @public (undocumented)
-type Decrement<Current extends Depth> = DepthDecrementMap[Current];
+export type Decrement<Current extends Depth> = DepthDecrementMap[Current];
 
 // @public
 export const DEFAULT_SQL_SCHEMA: SqlSchema;
@@ -940,10 +946,10 @@ type DeleteUniqueParams = Readonly<{
 }>;
 
 // @public (undocumented)
-type Depth = 0 | 1 | 2 | 3 | 4 | 5;
+export type Depth = 0 | 1 | 2 | 3 | 4 | 5;
 
 // @public (undocumented)
-interface DepthDecrementMap {
+export interface DepthDecrementMap {
     // (undocumented)
     0: 0;
     // (undocumented)
@@ -959,7 +965,7 @@ interface DepthDecrementMap {
 }
 
 // @public (undocumented)
-type DerivedRelation = Readonly<{
+export type DerivedRelation = Readonly<{
     kind: "derived";
     source: RelationAst;
     sourceColumns: readonly RelationColumn[];
@@ -976,7 +982,7 @@ type DerivedRelation = Readonly<{
 }>;
 
 // @public
-type DirectlyAssignableKeys<Relation, Reached> = Relation extends unknown ? Relation extends ({
+export type DirectlyAssignableKeys<Relation, Reached> = Relation extends unknown ? Relation extends ({
     metaEdge: {
         name: infer Name extends string;
     };
@@ -1026,7 +1032,7 @@ export type DynamicEdgeType = AnyEdgeType & Readonly<{
 }>;
 
 // @public (undocumented)
-type DynamicEdgeTypeFor<T> = T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
+export type DynamicEdgeTypeFor<T> = T extends RuntimeEdgeKind ? RuntimeEdgeTypeFor<T> : DynamicEdgeType;
 
 // @public
 export type DynamicFieldBuilder = BaseFieldAccessor & Readonly<{
@@ -1057,11 +1063,8 @@ export type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKin
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
-// @public (undocumented)
-type DynamicNodeTypeFor$1<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
-
-// @public (undocumented)
-type DynamicNodeTypeFor<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
+// @public
+export type DynamicNodeTypeFor<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // @public (undocumented)
 export type DynamicSelectableEdge = Readonly<{
@@ -1092,14 +1095,14 @@ export type EdgeAccessor<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends t
 }> & EdgePropsAccessor<E>;
 
 // @public
-type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = false> = Readonly<{
+export type EdgeAlias<E extends AnyEdgeType = EdgeType, Optional extends boolean = false> = Readonly<{
     type: E;
     alias: string;
     optional: Optional;
 }>;
 
 // @public
-type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
+export type EdgeAliasMap = Readonly<Record<string, EdgeAlias<EdgeType, boolean>>>;
 
 // @public
 type EdgeCardinalityAxisRef = Readonly<{
@@ -1255,7 +1258,7 @@ export type EdgeMetadataAccessor = Readonly<{
 export type EdgeOrderField<E extends AnyEdgeType> = IsDynamicEdgeType<E> extends true ? string : "id" | "kind" | "fromId" | "toId" | `meta.${keyof SelectableEdgeMeta}` | (keyof z.infer<E["schema"]> & string);
 
 // @public
-type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
+export type EdgePropsAccessor<E extends AnyEdgeType> = Readonly<{
     [K in keyof z.infer<E["schema"]>]-?: FieldAccessor<z.infer<E["schema"]>[K]>;
 }>;
 
@@ -1291,7 +1294,7 @@ type EdgeRow = Readonly<{
 }>;
 
 // @public
-type EdgeTargetKinds<T> = T extends unknown ? ArrayNodeKinds<T> | ArrayNodeKinds<T[keyof T]> : never;
+export type EdgeTargetKinds<T> = T extends unknown ? ArrayNodeKinds<T> | ArrayNodeKinds<T[keyof T]> : never;
 
 // @public
 type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
@@ -1311,7 +1314,7 @@ type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 }>;
 
 // @public
-type EdgeTypeForKey<G extends GraphDef, EK> = string extends EK ? DynamicEdgeType : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"] : DynamicEdgeType;
+export type EdgeTypeForKey<G extends GraphDef, EK> = string extends EK ? DynamicEdgeType : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"] : DynamicEdgeType;
 
 // @public
 export type EmbeddableOneStatementRead<R> = OneStatementBatchableQuery<R> & (BatchableQuery<unknown> | CompiledOneStatementRead<R>);
@@ -1325,7 +1328,7 @@ type EmbeddingBrand = Readonly<{
 }>;
 
 // @public (undocumented)
-type EmbeddingFieldAccessor = NullFieldAccessor & Readonly<{
+export type EmbeddingFieldAccessor = NullFieldAccessor & Readonly<{
     similarTo: (queryEmbedding: readonly number[], k: number, options?: SimilarToOptions) => Predicate;
 }>;
 
@@ -1339,30 +1342,30 @@ export type EmptyAliasMap = Readonly<Record<never, never>>;
 export type EmptyEdgeAliasMap = Readonly<Record<never, never>>;
 
 // @public (undocumented)
-type EmptyFragmentRequirements = Readonly<Record<never, never>>;
+export type EmptyFragmentRequirements = Readonly<Record<never, never>>;
 
 // @public (undocumented)
 export type EmptyRecursiveAliasMap = Readonly<Record<never, never>>;
 
 // @public (undocumented)
-type EncodePointerSegment<S extends string> = EncodeSlash<EncodeTilde<S>>;
+export type EncodePointerSegment<S extends string> = EncodeSlash<EncodeTilde<S>>;
 
 // @public (undocumented)
-type EncodeSlash<S extends string> = S extends `${infer Head}/${infer Tail}` ? `${EncodeSlash<Head>}~1${EncodeSlash<Tail>}` : S;
+export type EncodeSlash<S extends string> = S extends `${infer Head}/${infer Tail}` ? `${EncodeSlash<Head>}~1${EncodeSlash<Tail>}` : S;
 
 // @public (undocumented)
-type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}` : S;
+export type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}` : S;
 
 // @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
-type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint extends {
+export type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint extends {
     kind: infer Kind extends string;
 } ? string extends Kind ? true : false : true;
 
 // @public (undocumented)
-type EndpointKinds<Endpoint> = Extract<Endpoint, {
+export type EndpointKinds<Endpoint> = Extract<Endpoint, {
     kind: string;
 }>["kind"];
 
@@ -1380,7 +1383,7 @@ type EngineRecordedInstantParts = Readonly<{
 }>;
 
 // @public
-type EngineRecordedReadSource = Readonly<{
+export type EngineRecordedReadSource = Readonly<{
     kind: "engine-native";
     schema: SqlSchema;
     [ENGINE_RECORDED_READ_SOURCE]: true;
@@ -1410,7 +1413,7 @@ type EntityKey = Readonly<{
 }>;
 
 // @public
-type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
+export type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -1584,7 +1587,7 @@ export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeA
 }
 
 // @public
-interface ExecutableQueryLike<G extends GraphDef, R> {
+export interface ExecutableQueryLike<G extends GraphDef, R> {
     // @internal
     oneStatementBatchProvenance(): Readonly<{
         graphId: string;
@@ -1685,14 +1688,14 @@ export class ExecutableRelationQuery<Fields extends RelationProjection, Result =
 }
 
 // @public
-type ExistsSubquery = Readonly<{
+export type ExistsSubquery = Readonly<{
     __type: "exists";
     subquery: QueryAst;
     negated: boolean;
 }>;
 
 // @public (undocumented)
-type ExistsSubqueryExpressionNode = Readonly<{
+export type ExistsSubqueryExpressionNode = Readonly<{
     kind: "exists_subquery";
     subquery: QueryAst;
 }>;
@@ -1721,10 +1724,10 @@ export type ExpressionAliasContext<Aliases extends AliasMap, Edges extends EdgeA
 };
 
 // @public (undocumented)
-type ExpressionComparisonOperator = "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
+export type ExpressionComparisonOperator = "eq" | "gt" | "gte" | "lt" | "lte" | "neq";
 
 // @public (undocumented)
-type ExpressionMetadata<Scope extends string, Optional extends boolean = false> = Readonly<{
+export type ExpressionMetadata<Scope extends string, Optional extends boolean = false> = Readonly<{
     validFrom: DatabaseExpression<string | undefined, Scope>;
     validTo: DatabaseExpression<string | undefined, Scope>;
     createdAt: DatabaseExpression<string | UndefinedWhenOptional<Optional>, Scope>;
@@ -1733,37 +1736,36 @@ type ExpressionMetadata<Scope extends string, Optional extends boolean = false> 
 }>;
 
 // @public (undocumented)
-type ExpressionObjectChildren<Value, Scope extends string> = {
+export type ExpressionObjectChildren<Value, Scope extends string> = {
     readonly [Key in Exclude<CommonPropertyKeys<NonNullable<Value>>, keyof DatabaseExpression | "$get">]-?: ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
 } & Readonly<{
     $get: <Key extends CommonPropertyKeys<NonNullable<Value>>>(key: Key) => ExpressionValue<NonNullable<Value>[Key] | UndefinedWhenNullish<Value>, Scope>;
 }>;
 
 // @public
-type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ExpressionValue$1<Fields[keyof Fields]>>];
+export type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
-type ExpressionProjectionEntry<T = unknown> = Readonly<{
+export type ExpressionProjectionEntry<T = unknown> = Readonly<{
     outputName: string;
     expression: DatabaseExpression<T>;
 }>;
 
 // @public (undocumented)
-type ExpressionSubqueryHelpers<Builder, OuterContext, ParentScope extends string> = Readonly<{
+export type ExpressionSubqueryHelpers<Builder, OuterContext, ParentScope extends string> = Readonly<{
     $exists: (build: (subquery: Builder, outer: OuterContext) => ProjectedExpressionSubqueryRelation) => DatabaseExpression<boolean, ParentScope>;
     $scalar: <T>(build: (subquery: Builder, outer: OuterContext) => ScalarExpressionSubqueryRelation<T>) => DatabaseExpression<T | undefined, ParentScope>;
 }>;
 
 // @public (undocumented)
-type ExpressionSubqueryRelation<Projection extends readonly ExpressionProjectionEntry[]> = Readonly<{
+export type ExpressionSubqueryRelation<Projection extends readonly ExpressionProjectionEntry[]> = Readonly<{
     getExpressionProjection: () => Projection;
     getExpressionScopeIdentity: () => symbol;
     getOneStatementReadProvenance: () => OneStatementReadProvenance;
     toAst: () => QueryAst;
 }>;
-
-// @public (undocumented)
-type ExpressionValue$1<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public (undocumented)
 export type ExpressionValue<Value, Scope extends string> = DatabaseExpression<Exclude<Value, null> | (null extends Value ? undefined : never), Scope> & (NonNullable<Value> extends Date | readonly unknown[] ? unknown : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope> : unknown);
@@ -1933,17 +1935,17 @@ type FenceSql = Readonly<{
 export type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
 // @public (undocumented)
-type FieldAccessorForType<T> = [
+export type FieldAccessorForType<T> = [
 T
 ] extends [EmbeddingValue] ? EmbeddingFieldAccessor : [T] extends [string] ? StringFieldAccessor<T> : [T] extends [number] ? NumberFieldAccessor<T> : [T] extends [boolean] ? BooleanFieldAccessor<T> : [T] extends [Date] ? DateFieldAccessor<T> : [T] extends [readonly (infer U)[]] ? ArrayFieldAccessor<U> : [T] extends [Record<string, unknown>] ? keyof T extends never ? BaseFieldAccessor : ObjectFieldAccessor<T> : BaseFieldAccessor;
 
 // @public (undocumented)
-type FieldCategory<T> = T extends unknown ? [
+export type FieldCategory<T> = T extends unknown ? [
 NonNullable<T>
 ] extends [never] ? never : [NonNullable<T>] extends [EmbeddingValue] ? "embedding" : [NonNullable<T>] extends [string] ? "string" : [NonNullable<T>] extends [number] ? "number" : [NonNullable<T>] extends [boolean] ? "boolean" : [NonNullable<T>] extends [Date] ? "date" : [NonNullable<T>] extends [readonly unknown[]] ? "array" : [NonNullable<T>] extends [Record<string, unknown>] ? string extends keyof NonNullable<T> ? "record" : "object" : "unknown" : never;
 
 // @public (undocumented)
-type FieldExpressionNode = Readonly<{
+export type FieldExpressionNode = Readonly<{
     kind: "field";
     field: FieldRef;
 }>;
@@ -1967,7 +1969,7 @@ export type FieldRef<Value = unknown, Alias extends string = string, Path extend
 export function fieldRef<Value = unknown>(alias: string, path: readonly string[], options?: FieldRefOptions): FieldRef<Value>;
 
 // @public
-type FieldRefOptions = Readonly<{
+export type FieldRefOptions = Readonly<{
     jsonPointer?: JsonPointer | undefined;
     valueType?: ValueType | undefined;
     elementType?: ValueType | undefined;
@@ -1975,12 +1977,12 @@ type FieldRefOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> = Field extends (FieldRef<infer Declared, infer Alias, readonly string[], infer PropsPath>) ? unknown extends Declared ? PropsPath extends readonly ["id"] ? string : PropsPath extends readonly ["kind"] ? AliasValue<Aliases, Alias>["type"] extends (Readonly<{
+export type FieldResult<Field extends FieldRef, Aliases extends AggregateAliasMap> = Field extends (FieldRef<infer Declared, infer Alias, readonly string[], infer PropsPath>) ? unknown extends Declared ? PropsPath extends readonly ["id"] ? string : PropsPath extends readonly ["kind"] ? AliasValue<Aliases, Alias>["type"] extends (Readonly<{
     kind: infer Kind;
 }>) ? Kind : string : WithAliasOptionality<PropertyValue<AliasSchemaValue<Aliases, Alias>, PropsPath>, Aliases, Alias> : Declared : never;
 
 // @public (undocumented)
-type FieldTypeInfo = Readonly<{
+export type FieldTypeInfo = Readonly<{
     valueType: ValueType;
     nullable?: boolean;
     elementType?: ValueType | undefined;
@@ -2089,7 +2091,7 @@ type FindRowsAcrossKindsParams = Readonly<{
 }>;
 
 // @public
-type FitReport<Errors extends string> = [
+export type FitReport<Errors extends string> = [
 Errors
 ] extends [never] ? unknown : Readonly<Record<Errors, never>>;
 
@@ -2104,10 +2106,10 @@ export type ForwardedExpansionAxes<O> = O extends Readonly<{
 const FRAGMENT_SHAPE: unique symbol;
 
 // @public (undocumented)
-type FragmentFit<Shape extends AnyFragmentShape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing extends boolean> = FitReport<FragmentFitErrors<Shape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing>>;
+export type FragmentFit<Shape extends AnyFragmentShape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing extends boolean> = FitReport<FragmentFitErrors<Shape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing>>;
 
 // @public (undocumented)
-type FragmentFitErrors<Shape extends AnyFragmentShape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing extends boolean> = GraphErrors<Shape["graph"], HostGraph> | RequirementKindErrors<Shape["requires"]> | RequirementErrors<Shape["requires"], Aliases, keyof EdgeAliases | keyof RecursiveAliases, ReportMissing> | CollisionErrors<keyof Shape["added"] | keyof Shape["addedEdges"] | keyof Shape["addedRecursive"], keyof Aliases | keyof EdgeAliases | keyof RecursiveAliases>;
+export type FragmentFitErrors<Shape extends AnyFragmentShape, HostGraph, Aliases, EdgeAliases, RecursiveAliases, ReportMissing extends boolean> = GraphErrors<Shape["graph"], HostGraph> | RequirementKindErrors<Shape["requires"]> | RequirementErrors<Shape["requires"], Aliases, keyof EdgeAliases | keyof RecursiveAliases, ReportMissing> | CollisionErrors<keyof Shape["added"] | keyof Shape["addedEdges"] | keyof Shape["addedRecursive"], keyof Aliases | keyof EdgeAliases | keyof RecursiveAliases>;
 
 // @public
 export type FragmentRequiredAliases<G extends GraphDef, Requires extends FragmentRequirements<G>> = Readonly<{
@@ -2118,7 +2120,7 @@ export type FragmentRequiredAliases<G extends GraphDef, Requires extends Fragmen
 export type FragmentRequirements<G extends GraphDef> = Readonly<Record<string, keyof G["nodes"] & string>>;
 
 // @public (undocumented)
-type FragmentShape<G extends GraphDef, Requires extends FragmentRequirements<G>, Added extends AliasMap, AddedEdges extends EdgeAliasMap, AddedRecursive extends RecursiveAliasMap> = Readonly<{
+export type FragmentShape<G extends GraphDef, Requires extends FragmentRequirements<G>, Added extends AliasMap, AddedEdges extends EdgeAliasMap, AddedRecursive extends RecursiveAliasMap> = Readonly<{
     graph: G;
     requires: Requires;
     added: Added;
@@ -2127,7 +2129,7 @@ type FragmentShape<G extends GraphDef, Requires extends FragmentRequirements<G>,
 }>;
 
 // @public
-type FulltextAccessor = Readonly<{
+export type FulltextAccessor = Readonly<{
     matches: (query: string, k?: number, options?: MatchesOptions) => Predicate;
 }>;
 
@@ -2148,7 +2150,7 @@ type FulltextCapabilities = Readonly<{
 }>;
 
 // @public
-type FulltextMatchPredicate = Readonly<{
+export type FulltextMatchPredicate = Readonly<{
     __type: "fulltext_match";
     field: FieldRef;
     query: string;
@@ -2483,7 +2485,7 @@ type GraphEntityReadBackend = NodeEntityReadBackend & EdgeEntityReadBackend;
 type GraphEntityWriteBackend = NodeEntityWriteBackend & EdgeEntityWriteBackend;
 
 // @public
-type GraphErrors<FragmentGraph, HostGraph> = [
+export type GraphErrors<FragmentGraph, HostGraph> = [
 HostGraph
 ] extends [FragmentGraph] ? never : "Error: fragment is written for another graph";
 
@@ -2530,7 +2532,7 @@ type GraphWriteFenceAcquisition = Readonly<{
 }>;
 
 // @public
-type GroupBySpec = Readonly<{
+export type GroupBySpec = Readonly<{
     fields: readonly (DatabaseExpression | FieldRef)[];
 }>;
 
@@ -2803,7 +2805,7 @@ type InsertUniqueParams = Readonly<{
 }>;
 
 // @public
-type InSubquery = Readonly<{
+export type InSubquery = Readonly<{
     __type: "in_subquery";
     field: FieldRef;
     subquery: QueryAst;
@@ -2822,22 +2824,22 @@ type InvariantShape<Shape> = (shape: Shape) => Shape;
 const IRI_ENDPOINT: unique symbol;
 
 // @public (undocumented)
-type IriEndpointKey = Readonly<{
+export type IriEndpointKey = Readonly<{
     [IRI_ENDPOINT]: true;
 }>;
 
 // @public (undocumented)
-type IsDynamicEdgeType<E> = E extends Readonly<{
+export type IsDynamicEdgeType<E> = E extends Readonly<{
     [DYNAMIC_EDGE_BRAND]: true;
 }> ? true : false;
 
 // @public (undocumented)
-type IsDynamicNodeType<N> = N extends Readonly<{
+export type IsDynamicNodeType<N> = N extends Readonly<{
     [DYNAMIC_NODE_BRAND]: true;
 }> ? true : false;
 
 // @public (undocumented)
-type IsUnion<T, Whole = T> = T extends Whole ? [
+export type IsUnion<T, Whole = T> = T extends Whole ? [
 Whole
 ] extends [T] ? false : true : never;
 
@@ -3028,19 +3030,22 @@ type LineageMembers = Readonly<{
 type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
-type ListAliasNodeType<G extends GraphDef, K extends string> = K extends unknown ? AliasNodeType<G, K> : never;
+export type ListAliasNodeType<G extends GraphDef, K extends string> = K extends unknown ? AliasNodeType<G, K> : never;
 
 // @public
-type ListPolymorphicNodeType<G extends GraphDef, K extends string> = K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
+export type ListPolymorphicNodeType<G extends GraphDef, K extends string> = K extends unknown ? PolymorphicNodeType<G["nodes"][K]["type"]> : never;
 
 // @public (undocumented)
-type LiteralExpressionNode = Readonly<{
+export type LiteralExpressionNode = Readonly<{
     kind: "literal";
     value: DatabaseLiteral;
 }>;
 
+// @public (undocumented)
+export type LiteralResult<T> = T extends null ? undefined : T;
+
 // @public
-type LiteralValue = Readonly<{
+export type LiteralValue = Readonly<{
     __type: "literal";
     value: string | number | boolean;
     valueType?: ValueType | undefined;
@@ -3079,10 +3084,10 @@ type ManagedNodeCreatePlan = Readonly<{
 }>;
 
 // @public
-type MatchedEndpoints<Name extends string, From, To> = ([Extract<Name, "subClassOf">] extends [never] ? never : To) | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never : From | To);
+export type MatchedEndpoints<Name extends string, From, To> = ([Extract<Name, "subClassOf">] extends [never] ? never : To) | ([Extract<Name, "equivalentTo" | "sameAs">] extends [never] ? never : From | To);
 
 // @public
-type MatchesOptions = Readonly<{
+export type MatchesOptions = Readonly<{
     mode?: FulltextQueryMode;
     language?: string;
     minScore?: number;
@@ -3095,10 +3100,10 @@ export const MAX_EXPLICIT_RECURSIVE_DEPTH = 1000;
 export const MAX_RECURSIVE_DEPTH = 10;
 
 // @public
-type MembershipOperand<T> = readonly T[] | ParameterRef;
+export type MembershipOperand<T> = readonly T[] | ParameterRef;
 
 // @public (undocumented)
-type MergeMaps<Existing, Added> = keyof Added extends never ? Existing : Existing & Added;
+export type MergeMaps<Existing, Added> = keyof Added extends never ? Existing : Existing & Added;
 
 // @public
 const META_EDGE_BRAND: "__metaEdge";
@@ -3262,7 +3267,7 @@ export type NodeMetadataAccessor = Readonly<{
 export type NodeOrderField<N extends NodeType> = IsDynamicNodeType<N> extends true ? string : "id" | "kind" | `meta.${keyof SelectableNodeMeta}` | (keyof z.infer<N["schema"]> & string);
 
 // @public
-type NodePredicate = Readonly<{
+export type NodePredicate = Readonly<{
     targetAlias: string;
     targetType?: KindEntity;
     expression: PredicateExpression;
@@ -3318,25 +3323,28 @@ type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 }>;
 
 // @public (undocumented)
-type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
+export type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
+
+// @public (undocumented)
+export type NonNull<T> = Exclude<T, undefined>;
 
 // @public
 type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public (undocumented)
-type NotExpressionNode = Readonly<{
+export type NotExpressionNode = Readonly<{
     kind: "not";
     operand: DatabaseExpression<boolean | undefined>;
 }>;
 
 // @public
-type NotPredicate = Readonly<{
+export type NotPredicate = Readonly<{
     __type: "not";
     predicate: PredicateExpression;
 }>;
 
 // @public (undocumented)
-type NullCheckExpressionNode = Readonly<{
+export type NullCheckExpressionNode = Readonly<{
     kind: "null_check";
     operator: "isNull" | "isNotNull";
     operand: DatabaseExpression;
@@ -3346,23 +3354,26 @@ type NullCheckExpressionNode = Readonly<{
 type NullCheckOp = "isNull" | "isNotNull";
 
 // @public (undocumented)
-type NullFieldAccessor = Readonly<{
+export type NullFieldAccessor = Readonly<{
     isNull: () => Predicate;
     isNotNull: () => Predicate;
 }>;
 
-// @public
-type NullOrdering = "first" | "last";
+// @public (undocumented)
+export type NullIfEitherUndefined<Left, Right, Value> = undefined extends Left | Right ? Value | undefined : Value;
 
 // @public
-type NullPredicate = Readonly<{
+export type NullOrdering = "first" | "last";
+
+// @public
+export type NullPredicate = Readonly<{
     __type: "null_check";
     op: NullCheckOp;
     field: FieldRef;
 }>;
 
 // @public (undocumented)
-type NumberFieldAccessor<T extends number = number> = BaseFieldAccessor<T> & Readonly<{
+export type NumberFieldAccessor<T extends number = number> = BaseFieldAccessor<T> & Readonly<{
     gt: (value: number | ParameterRef) => Predicate;
     gte: (value: number | ParameterRef) => Predicate;
     lt: (value: number | ParameterRef) => Predicate;
@@ -3371,16 +3382,19 @@ type NumberFieldAccessor<T extends number = number> = BaseFieldAccessor<T> & Rea
 }>;
 
 // @public (undocumented)
-type NumericConversionExpressionNode = Readonly<{
+export type NumericConversionExpressionNode = Readonly<{
     kind: "numeric_conversion";
     operand: DatabaseExpression;
 }>;
 
 // @public (undocumented)
-type ObjectComparisonAccessor<T> = string extends keyof T ? BaseFieldAccessor<T> : NullFieldAccessor;
+export type NumericExpression<Scope extends string> = DatabaseExpression<number | undefined, Scope>;
 
 // @public (undocumented)
-type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> & Readonly<{
+export type ObjectComparisonAccessor<T> = string extends keyof T ? BaseFieldAccessor<T> : NullFieldAccessor;
+
+// @public (undocumented)
+export type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> & Readonly<{
     get: <K extends CommonPropertyKeys<T> & string>(key: K) => T[K] extends Record<string, unknown> ? ObjectFieldAccessor<T[K]> : FieldAccessor<T[K]>;
     hasKey: (key: string) => Predicate;
     hasPath: <P extends JsonPointerInput<T>>(pointer: P) => Predicate;
@@ -3391,13 +3405,13 @@ type ObjectFieldAccessor<T> = ObjectComparisonAccessor<T> & Readonly<{
 }>;
 
 // @public
-type ObjectOp = "hasKey" | "hasPath" | "pathEquals" | "pathContains" | "pathIsNull" | "pathIsNotNull";
+export type ObjectOp = "hasKey" | "hasPath" | "pathEquals" | "pathContains" | "pathIsNull" | "pathIsNotNull";
 
 // @public (undocumented)
-type ObjectPointerKey<T> = Exclude<Extract<keyof T, string>, NonNegativeIntegerString>;
+export type ObjectPointerKey<T> = Exclude<Extract<keyof T, string>, NonNegativeIntegerString>;
 
 // @public
-type ObjectPredicate = Readonly<{
+export type ObjectPredicate = Readonly<{
     __type: "object_op";
     op: ObjectOp;
     field: FieldRef;
@@ -3431,12 +3445,15 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
 }>;
 
 // @public
+export type OneStatementBatchReads = readonly EmbeddableOneStatementRead<unknown>[];
+
+// @public
 export type OneStatementBatchResults<Queries extends readonly EmbeddableOneStatementRead<unknown>[]> = {
     -readonly [K in keyof Queries]: Queries[K] extends (EmbeddableOneStatementRead<infer R>) ? R : never;
 };
 
 // @public (undocumented)
-type OneStatementReadProvenance = Readonly<{
+export type OneStatementReadProvenance = Readonly<{
     graphId: string;
     executionTarget: object | undefined;
 }>;
@@ -3451,6 +3468,9 @@ type OntologyRelation = Readonly<{
 // @public
 export function orderByFragment<G extends GraphDef, A extends string>(alias: A, field: GraphOrderField<G>, direction?: "asc" | "desc"): QueryFragment<G>;
 
+// @public (undocumented)
+export type OrderedComparable = Date | number | string;
+
 // @public
 export type OrderSpec = Readonly<{
     field: DatabaseExpression | FieldRef;
@@ -3459,13 +3479,13 @@ export type OrderSpec = Readonly<{
 }>;
 
 // @public
-type OrPredicate = Readonly<{
+export type OrPredicate = Readonly<{
     __type: "or";
     predicates: readonly PredicateExpression[];
 }>;
 
 // @public (undocumented)
-type OuterReferenceExpressionNode = Readonly<{
+export type OuterReferenceExpressionNode = Readonly<{
     kind: "outer_reference";
     expression: DatabaseExpression;
     outerScopeIdentity: symbol;
@@ -3489,7 +3509,7 @@ export type PaginateOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type ParameterExpressionNode = Readonly<{
+export type ParameterExpressionNode = Readonly<{
     kind: "parameter";
     name: string;
 }>;
@@ -3501,6 +3521,9 @@ export type ParameterRef = Readonly<{
     valueType?: ValueType | undefined;
 }>;
 
+// @public (undocumented)
+export type ParameterValue<Value extends ValueType> = Value extends "boolean" ? boolean : Value extends "date" ? Date : Value extends "number" ? number : Value extends "string" ? string : Value extends "array" ? readonly DatabaseJsonValue[] : Value extends "object" ? Readonly<Record<string, DatabaseJsonValue>> : unknown;
+
 // @public
 class Placeholder {
     // (undocumented)
@@ -3511,18 +3534,18 @@ class Placeholder {
 }
 
 // @public (undocumented)
-type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
+export type PointerForArray<T, Current extends Depth> = `/${NonNegativeIntegerString}` | (Current extends 1 ? never : `/${NonNegativeIntegerString}${JsonPointerFor<T, Decrement<Current>>}`);
 
 // @public (undocumented)
-type PointerForObject<T, Current extends Depth> = {
+export type PointerForObject<T, Current extends Depth> = {
     [K in ObjectPointerKey<T>]: `/${EncodePointerSegment<K>}` | (Current extends 1 ? never : `/${EncodePointerSegment<K>}${JsonPointerFor<T[K], Decrement<Current>>}`);
 }[ObjectPointerKey<T>];
 
 // @public (undocumented)
-type PointerSegmentsForArray<T, Current extends Depth> = readonly [number] | (Current extends 1 ? readonly [number] : readonly [number, ...JsonPointerSegmentsFor<T, Decrement<Current>>]);
+export type PointerSegmentsForArray<T, Current extends Depth> = readonly [number] | (Current extends 1 ? readonly [number] : readonly [number, ...JsonPointerSegmentsFor<T, Decrement<Current>>]);
 
 // @public (undocumented)
-type PointerSegmentsForObject<T, Current extends Depth> = {
+export type PointerSegmentsForObject<T, Current extends Depth> = {
     [K in ObjectPointerKey<T>]: readonly [K] | (Current extends 1 ? readonly [K] : readonly [K, ...JsonPointerSegmentsFor<T[K], Decrement<Current>>]);
 }[ObjectPointerKey<T>];
 
@@ -3546,7 +3569,7 @@ type Predicate = Readonly<{
 }>;
 
 // @public
-type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+export type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 export type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -3564,7 +3587,7 @@ export class PreparedQuery<R> {
 }
 
 // @public
-type PreparedQueryConfig<R> = Readonly<{
+export type PreparedQueryConfig<R> = Readonly<{
     ast: QueryAst;
     unoptimizedAst: QueryAst;
     backend: GraphBackend;
@@ -3578,17 +3601,20 @@ type PreparedQueryConfig<R> = Readonly<{
 }>;
 
 // @public (undocumented)
-type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly ExpressionProjectionEntry[]>;
+export type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly ExpressionProjectionEntry[]>;
+
+// @public (undocumented)
+export type ProjectedExpressionValue<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public
-type ProjectedField = Readonly<{
+export type ProjectedField = Readonly<{
     outputName: string;
     source: AggregateExpr | DatabaseExpression | FieldRef;
     cteAlias?: string;
 }>;
 
 // @public
-type Projection = Readonly<{
+export type Projection = Readonly<{
     fields: readonly ProjectedField[];
 }>;
 
@@ -3598,7 +3624,7 @@ export type ProjectionResult<Fields extends DatabaseProjection> = {
 };
 
 // @public (undocumented)
-type PropertyValue<Value, Path extends readonly string[]> = Path extends readonly [] ? Value : Path extends (readonly [
+export type PropertyValue<Value, Path extends readonly string[]> = Path extends readonly [] ? Value : Path extends (readonly [
 infer Head extends PropertyKey,
 ...infer Tail extends readonly string[]
 ]) ? Head extends keyof Value ? PropertyValue<Value[Head], Tail> : unknown : unknown;
@@ -3642,7 +3668,7 @@ export type QualifiedRecursivePathOption = Readonly<{
 }>;
 
 // @public
-type QueryAst = Readonly<{
+export type QueryAst = Readonly<{
     expressionScope?: symbol;
     graphId?: string;
     start: QueryStart;
@@ -3765,7 +3791,7 @@ export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAl
 }
 
 // @public
-type QueryBuilderConfig = Readonly<{
+export type QueryBuilderConfig = Readonly<{
     graphId: string;
     registry: KindRegistry;
     schemaIntrospector: SchemaIntrospector;
@@ -3779,7 +3805,7 @@ type QueryBuilderConfig = Readonly<{
 }>;
 
 // @public
-type QueryBuilderState = Readonly<{
+export type QueryBuilderState = Readonly<{
     startAlias: string;
     startKinds: readonly string[];
     startRequestedKinds: readonly string[];
@@ -3830,7 +3856,7 @@ export interface QueryFragmentFactory<G extends GraphDef> {
 }
 
 // @public
-type QueryStart = Readonly<{
+export type QueryStart = Readonly<{
     alias: string;
     kinds: readonly string[];
     expansion: AliasExpansionAxis;
@@ -3852,7 +3878,7 @@ type ReadConstraintFenceViolationsParams = Readonly<{
 }>;
 
 // @public
-type ReadInstantMode = "literal" | "placeholder";
+export type ReadInstantMode = "literal" | "placeholder";
 
 // @public
 type RecordContributionMaterializationParams = Readonly<{
@@ -3878,7 +3904,7 @@ type RecordedInstant = string & {
 type RecordedInstantParts = TypeGraphRecordedInstantParts | EngineRecordedInstantParts;
 
 // @public (undocumented)
-type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource | EngineRecordedReadSource;
+export type RecordedReadBinding = ExternalRecordedReadSource | TypeGraphRecordedReadSource | EngineRecordedReadSource;
 
 // @public
 export type RecordedReadSource = Readonly<{
@@ -3947,22 +3973,22 @@ type RecordKindRemovalParams = Readonly<{
 const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
 
 // @public
-type RecursiveAlias<T extends "depth" | "path", PathFormat extends "ids" | "qualified" = "ids", Optional extends boolean = false> = Readonly<{
+export type RecursiveAlias<T extends "depth" | "path", PathFormat extends "ids" | "qualified" = "ids", Optional extends boolean = false> = Readonly<{
     type: T;
     pathFormat?: PathFormat;
     optional?: Optional;
 }>;
 
 // @public
-type RecursiveAliasMap = Readonly<Record<string, RecursiveAlias<"depth" | "path", "ids" | "qualified", boolean>>>;
+export type RecursiveAliasMap = Readonly<Record<string, RecursiveAlias<"depth" | "path", "ids" | "qualified", boolean>>>;
 
 // @public (undocumented)
-type RecursiveAliasValue<RA> = RA extends {
+export type RecursiveAliasValue<RA> = RA extends {
     optional?: true;
 } ? RequiredRecursiveAliasValue<RA> | undefined : RequiredRecursiveAliasValue<RA>;
 
 // @public
-type RecursiveCyclePolicy = "prevent" | "allow";
+export type RecursiveCyclePolicy = "prevent" | "allow";
 
 // @public
 type RecursiveTraversalCapability = Readonly<{
@@ -4013,10 +4039,10 @@ type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 type RelationalIndexMethod = "btree" | "gin" | "trigram";
 
 // @public (undocumented)
-type RelationAst = DerivedRelation | RelationSource | SetRelation | TopPerPartitionRelation;
+export type RelationAst = DerivedRelation | RelationSource | SetRelation | TopPerPartitionRelation;
 
 // @public (undocumented)
-type RelationColumn = Readonly<{
+export type RelationColumn = Readonly<{
     outputName: string;
     valueType: ValueType;
     elementValueType?: ValueType;
@@ -4034,7 +4060,7 @@ export type RelationColumnContext<Fields extends RelationProjection> = {
 };
 
 // @public (undocumented)
-type RelationDefinition<Fields extends RelationProjection, Result> = Readonly<{
+export type RelationDefinition<Fields extends RelationProjection, Result> = Readonly<{
     ast: RelationAst;
     columns: readonly RelationColumn[];
     fields: Fields;
@@ -4045,7 +4071,7 @@ type RelationDefinition<Fields extends RelationProjection, Result> = Readonly<{
 }>;
 
 // @public (undocumented)
-type RelationOrder = Readonly<{
+export type RelationOrder = Readonly<{
     expression: DatabaseExpression;
     direction: SortDirection;
     nulls: "first" | "last";
@@ -4060,7 +4086,7 @@ export type RelationProjectionResult<Fields extends RelationProjection> = {
 };
 
 // @public (undocumented)
-type RelationProvenance = Readonly<{
+export type RelationProvenance = Readonly<{
     graphId: string;
     executionTarget: object | undefined;
     recordedAsOf: string | undefined;
@@ -4069,7 +4095,7 @@ type RelationProvenance = Readonly<{
 }>;
 
 // @public (undocumented)
-type RelationSource = Readonly<{
+export type RelationSource = Readonly<{
     kind: "source";
     query: QueryAst;
     graphId: string;
@@ -4077,7 +4103,7 @@ type RelationSource = Readonly<{
 }>;
 
 // @public (undocumented)
-type RelationState = Readonly<{
+export type RelationState = Readonly<{
     predicate?: DatabaseExpression<boolean | undefined>;
     groupBy?: readonly DatabaseExpression[];
     distinct: boolean;
@@ -4096,22 +4122,22 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
 // @public
-type RequiredRecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number : RA extends RecursiveAlias<"path", "qualified", boolean> ? QualifiedRecursivePath : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[] : never;
+export type RequiredRecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number : RA extends RecursiveAlias<"path", "qualified", boolean> ? QualifiedRecursivePath : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[] : never;
 
 // @public
-type RequirementErrors<Requires, Aliases, OtherKeys, ReportMissing extends boolean> = {
+export type RequirementErrors<Requires, Aliases, OtherKeys, ReportMissing extends boolean> = {
     [A in keyof Requires & string]: A extends keyof Aliases ? [
     AliasKindIdentity<Aliases[A]>
     ] extends [Requires[A]] ? never : `Error: fragment requires alias '${A}' to be a '${Requires[A] & string}' node` : A extends OtherKeys ? `Error: fragment requires alias '${A}' to be a '${Requires[A] & string}' node, but it is an edge or recursive alias here` : ReportMissing extends true ? `Error: fragment requires alias '${A}' (a '${Requires[A] & string}' node), which this query does not have` : never;
 }[keyof Requires & string];
 
 // @public
-type RequirementKindErrors<Requires> = {
+export type RequirementKindErrors<Requires> = {
     [A in keyof Requires & string]: true extends IsUnion<Requires[A]> ? `Error: fragment requirement '${A}' must name one node kind, not a union of kinds` : never;
 }[keyof Requires & string];
 
 // @public
-type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
+export type ResolveDepthAlias<DC, A extends string> = DC extends string ? DC : DC extends true ? `${A}_depth` : never;
 
 // @public
 type ResolvedNodeUpdateBatchEntry = Readonly<{
@@ -4156,10 +4182,10 @@ type ResolvedSqlTableNames = Readonly<{
 }>;
 
 // @public
-type ResolvePathAlias<PC, A extends string> = PC extends string ? PC : PC extends true ? `${A}_path` : PC extends QualifiedRecursivePathOption ? PC["alias"] extends string ? PC["alias"] : `${A}_path` : never;
+export type ResolvePathAlias<PC, A extends string> = PC extends string ? PC : PC extends true ? `${A}_path` : PC extends QualifiedRecursivePathOption ? PC["alias"] extends string ? PC["alias"] : `${A}_path` : never;
 
 // @public (undocumented)
-type ResolvePathFormat<PC> = PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
+export type ResolvePathFormat<PC> = PC extends QualifiedRecursivePathOption ? "qualified" : "ids";
 
 // @public
 type RowProps = string | Readonly<Record<string, unknown>>;
@@ -4188,10 +4214,10 @@ type RuntimeNodeKind<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 type RuntimeNodeTypeFor<T extends RuntimeNodeKind> = T extends RuntimeNodeKind<infer K, infer S> ? NodeType<K, S> : never;
 
 // @public (undocumented)
-type ScalarExpressionSubqueryRelation<T> = ExpressionSubqueryRelation<readonly [ExpressionProjectionEntry<T>]>;
+export type ScalarExpressionSubqueryRelation<T> = ExpressionSubqueryRelation<readonly [ExpressionProjectionEntry<T>]>;
 
 // @public (undocumented)
-type ScalarSubqueryExpressionNode = Readonly<{
+export type ScalarSubqueryExpressionNode = Readonly<{
     kind: "scalar_subquery";
     subquery: QueryAst;
 }>;
@@ -4208,7 +4234,7 @@ type SchemaGraphWriteFenceParams = SchemaWriteFenceParams & Readonly<{
 }>;
 
 // @public (undocumented)
-type SchemaIntrospector = Readonly<{
+export type SchemaIntrospector = Readonly<{
     getFieldTypeInfo: (kindName: string, fieldName: string) => FieldTypeInfo | undefined;
     getSharedFieldTypeInfo: (kindNames: readonly string[], fieldName: string) => FieldTypeInfo | undefined;
     getEdgeFieldTypeInfo: (edgeKindName: string, fieldName: string) => FieldTypeInfo | undefined;
@@ -4262,7 +4288,7 @@ export type SelectableEdge<E extends AnyEdgeType = EdgeType> = IsDynamicEdgeType
 }> & Readonly<z.infer<E["schema"]>>;
 
 // @public
-type SelectableEdgeMeta = Readonly<{
+export type SelectableEdgeMeta = Readonly<{
     validFrom: string | undefined;
     validTo: string | undefined;
     createdAt: string;
@@ -4278,7 +4304,7 @@ export type SelectableNode<N extends NodeType> = N extends NodeType ? IsDynamicN
 }> & Readonly<z.infer<N["schema"]>> : never;
 
 // @public
-type SelectableNodeMeta = Readonly<{
+export type SelectableNodeMeta = Readonly<{
     version: number;
     validFrom: string | undefined;
     validTo: string | undefined;
@@ -4297,7 +4323,7 @@ export type SelectContext<Aliases extends AliasMap, EdgeAliases extends EdgeAlia
 }>;
 
 // @public
-type SelectiveField = Readonly<{
+export type SelectiveField = Readonly<{
     alias: string;
     field: string;
     outputName: string;
@@ -4406,7 +4432,7 @@ type SetActiveVersionParams = Readonly<{
 }>;
 
 // @public
-type SetOperation = Readonly<{
+export type SetOperation = Readonly<{
     __type: "set_operation";
     operator: SetOperationType;
     left: ComposableQuery;
@@ -4417,10 +4443,10 @@ type SetOperation = Readonly<{
 }>;
 
 // @public
-type SetOperationType = "union" | "unionAll" | "intersect" | "except";
+export type SetOperationType = "union" | "unionAll" | "intersect" | "except";
 
 // @public (undocumented)
-type SetRelation = Readonly<{
+export type SetRelation = Readonly<{
     kind: "set";
     operator: "union" | "unionAll" | "intersect" | "except";
     left: RelationAst;
@@ -4429,15 +4455,15 @@ type SetRelation = Readonly<{
 }>;
 
 // @public (undocumented)
-type ShapeFragment<Shape> = Shape extends AnyFragmentShape ? QueryFragment<Shape["graph"], Shape["requires"], Shape["added"], Shape["addedEdges"], Shape["addedRecursive"]> : never;
+export type ShapeFragment<Shape> = Shape extends AnyFragmentShape ? QueryFragment<Shape["graph"], Shape["requires"], Shape["added"], Shape["addedEdges"], Shape["addedRecursive"]> : never;
 
 // @public (undocumented)
-type ShapeOf<Fragment> = Fragment extends (Readonly<{
+export type ShapeOf<Fragment> = Fragment extends (Readonly<{
     [FRAGMENT_SHAPE]: (shape: never) => infer Shape extends AnyFragmentShape;
 }>) ? Shape : never;
 
 // @public
-type SimilarToOptions = Readonly<{
+export type SimilarToOptions = Readonly<{
     metric?: VectorMetricType;
     minScore?: number;
     approximate?: boolean;
@@ -4447,7 +4473,7 @@ type SimilarToOptions = Readonly<{
 export type SortDirection = "asc" | "desc";
 
 // @public
-type SourceKindList<G extends GraphDef> = readonly [
+export type SourceKindList<G extends GraphDef> = readonly [
 keyof G["nodes"] & string,
 ...(keyof G["nodes"] & string)[]
 ];
@@ -4528,7 +4554,7 @@ export abstract class SqlSchema implements SqlSchemaFields {
 }
 
 // @public (undocumented)
-type SqlSchemaFields = Readonly<{
+export type SqlSchemaFields = Readonly<{
     tables: ResolvedSqlTableNames;
     nodesTable: SqlFragment;
     edgesTable: SqlFragment;
@@ -4588,7 +4614,7 @@ export type StreamOptions = Readonly<{
 }>;
 
 // @public (undocumented)
-type StringFieldAccessor<T extends string = string> = BaseFieldAccessor<T> & Readonly<{
+export type StringFieldAccessor<T extends string = string> = BaseFieldAccessor<T> & Readonly<{
     gt: (value: string | ParameterRef) => Predicate;
     gte: (value: string | ParameterRef) => Predicate;
     lt: (value: string | ParameterRef) => Predicate;
@@ -4601,10 +4627,10 @@ type StringFieldAccessor<T extends string = string> = BaseFieldAccessor<T> & Rea
 }>;
 
 // @public
-type StringOp = "contains" | "startsWith" | "endsWith" | "like" | "ilike";
+export type StringOp = "contains" | "startsWith" | "endsWith" | "like" | "ilike";
 
 // @public
-type StringPredicate = Readonly<{
+export type StringPredicate = Readonly<{
     __type: "string_op";
     op: StringOp;
     field: FieldRef;
@@ -4615,10 +4641,10 @@ type StringPredicate = Readonly<{
 export type SubsumedNodeType<G extends GraphDef, N extends NodeType> = N extends NodeType ? SubsumptionAffected<G, N["kind"]> extends true ? PolymorphicNodeType<N> : N : never;
 
 // @public
-type SubsumptionAffected<G extends GraphDef, K extends string> = true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true : false;
+export type SubsumptionAffected<G extends GraphDef, K extends string> = true extends SubsumptionLiteralsErased<G["ontology"][number]> ? true : true extends SubsumptionElementNamesKind<G["ontology"][number], K> ? true : false;
 
 // @public
-type SubsumptionElementNamesKind<Relation, K extends string> = Relation extends unknown ? Relation extends ({
+export type SubsumptionElementNamesKind<Relation, K extends string> = Relation extends unknown ? Relation extends ({
     metaEdge: {
         name: infer Name extends string;
     };
@@ -4631,12 +4657,12 @@ never
 ]) ? false : true : false : never;
 
 // @public
-type SubsumptionEndpointKeys<Endpoint> = Endpoint extends string ? IriEndpointKey : Endpoint extends {
+export type SubsumptionEndpointKeys<Endpoint> = Endpoint extends string ? IriEndpointKey : Endpoint extends {
     kind: infer Kind extends string;
 } ? Kind : never;
 
 // @public
-type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation extends ({
+export type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation extends ({
     metaEdge: {
         name: infer Name extends string;
     };
@@ -4645,7 +4671,7 @@ type SubsumptionLiteralsErased<Relation> = Relation extends unknown ? Relation e
 }) ? string extends Name ? true : true extends EndpointKindErased<MatchedEndpoints<Name, From, To>> ? true : false : true : never;
 
 // @public
-type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
+export type SubsumptionMetaEdgeName = "subClassOf" | "equivalentTo" | "sameAs";
 
 // @public (undocumented)
 type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
@@ -4686,13 +4712,13 @@ type TableState = Readonly<{
 type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public (undocumented)
-type TemporalMethod<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState> = CoordinateState extends "open" ? (mode: TemporalMode, asOf?: string) => QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, "open"> : never;
+export type TemporalMethod<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap, RecursiveAliases extends RecursiveAliasMap, CoordinateState extends QueryCoordinateState> = CoordinateState extends "open" ? (mode: TemporalMode, asOf?: string) => QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, "open"> : never;
 
 // @public
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TemporalOptions = Readonly<{
+export type TemporalOptions = Readonly<{
     mode: TemporalMode;
     asOf?: string;
 }>;
@@ -4712,7 +4738,7 @@ export type TopPerPartitionOrder = Readonly<{
 }>;
 
 // @public (undocumented)
-type TopPerPartitionRelation = Readonly<{
+export type TopPerPartitionRelation = Readonly<{
     kind: "topPerPartition";
     source: RelationAst;
     columns: readonly RelationColumn[];
@@ -4731,7 +4757,7 @@ type TransactionOptions = Readonly<{
 }>;
 
 // @public
-type Traversal = Readonly<{
+export type Traversal = Readonly<{
     edgeAlias: string;
     edgeKinds: readonly string[];
     inverseEdgeKinds?: readonly string[];
@@ -4750,7 +4776,7 @@ type Traversal = Readonly<{
 }>;
 
 // @public
-class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap, EK extends keyof G["edges"] & string = keyof G["edges"] & string, EA extends string = string, Dir extends TraversalDirection = "out", Optional extends boolean = false, DC extends boolean | string = false, PC extends boolean | string | QualifiedRecursivePathOption = false, RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, CoordinateState extends QueryCoordinateState = "open", ET extends AnyEdgeType = EdgeTypeForKey<G, EK>> {
+export class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap, EK extends keyof G["edges"] & string = keyof G["edges"] & string, EA extends string = string, Dir extends TraversalDirection = "out", Optional extends boolean = false, DC extends boolean | string = false, PC extends boolean | string | QualifiedRecursivePathOption = false, RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, CoordinateState extends QueryCoordinateState = "open", ET extends AnyEdgeType = EdgeTypeForKey<G, EK>> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, edgeKinds: readonly string[], edgeAlias: EA, direction: Dir, fromAlias: string, inverseEdgeKinds?: readonly string[], optional?: Optional, variableLength?: VariableLengthState, pendingEdgePredicates?: readonly NodePredicate[], includeIdentityMembers?: boolean, compositionMembership?: Traversal["compositionMembership"]);
     recursive<const O extends RecursiveTraversalOptions = Record<string, never>>(options?: O): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, O extends {
         depth: infer D extends boolean | string;
@@ -4771,18 +4797,18 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K & string>, PolymorphicNodeType<G["nodes"][K]["type"]>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     // (undocumented)
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor$1<T>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor<T>, PolymorphicNodeType<DynamicNodeTypeFor<T>>, PolymorphicNodeType<DynamicNodeTypeFor<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
 
 // @public
-type TraversalDirection = "out" | "in";
+export type TraversalDirection = "out" | "in";
 
 // @public
 export type TraversalExpansion = "none" | "implying" | "inverse" | "all";
@@ -4797,7 +4823,7 @@ type TrustedImportSession = Readonly<{
 }>;
 
 // @public
-type TupleComparisonPredicate = Readonly<{
+export type TupleComparisonPredicate = Readonly<{
     __type: "tuple_comparison";
     op: "gt" | "lt";
     fields: readonly [FieldRef, ...FieldRef[]];
@@ -4836,17 +4862,17 @@ type TypeGraphRecordedInstantParts = Readonly<{
 }>;
 
 // @public (undocumented)
-type TypeGraphRecordedReadSource = Readonly<{
+export type TypeGraphRecordedReadSource = Readonly<{
     kind: "typegraph-capture";
     schema: SqlSchema;
     [TYPEGRAPH_RECORDED_READ_SOURCE]: true;
 }> & RecordedReadSource;
 
 // @public (undocumented)
-type UndefinedWhenNullish<Value> = Extract<Value, null | undefined> extends never ? never : undefined;
+export type UndefinedWhenNullish<Value> = Extract<Value, null | undefined> extends never ? never : undefined;
 
 // @public (undocumented)
-type UndefinedWhenOptional<Optional extends boolean> = Optional extends true ? undefined : never;
+export type UndefinedWhenOptional<Optional extends boolean> = Optional extends true ? undefined : never;
 
 // @public (undocumented)
 export class UnionableQuery<G extends GraphDef, R> {
@@ -4890,7 +4916,7 @@ export class UnionableQuery<G extends GraphDef, R> {
 }
 
 // @public
-type UnionableQueryState = Readonly<{
+export type UnionableQueryState = Readonly<{
     left: ComposableQuery;
     operator: SetOperationType;
     right: ComposableQuery;
@@ -4902,10 +4928,10 @@ type UnionableQueryState = Readonly<{
 }>;
 
 // @public
-type UnionFragmentErrors<Fragment> = true extends IsUnion<Fragment> ? "Error: composeFragments() takes a fragment, not a union of fragments; compose each branch separately" : never;
+export type UnionFragmentErrors<Fragment> = true extends IsUnion<Fragment> ? "Error: composeFragments() takes a fragment, not a union of fragments; compose each branch separately" : never;
 
 // @public
-type UniqueAlias<A extends string, Aliases extends AliasMap> = A extends keyof Aliases ? `Error: Alias '${A}' is already in use` : A;
+export type UniqueAlias<A extends string, Aliases extends AliasMap> = A extends keyof Aliases ? `Error: Alias '${A}' is already in use` : A;
 
 // @public
 type UniqueConstraint<S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
@@ -5042,13 +5068,13 @@ type UpsertFulltextParams = Readonly<{
 }>;
 
 // @public
-type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? ArrayNodeKinds<G["edges"][EK]["to"]> | EdgeTargetKinds<G["edges"][EK]["to"]> : G["edges"][EK]["from"][number]["kind"] : never;
+export type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? ArrayNodeKinds<G["edges"][EK]["to"]> | EdgeTargetKinds<G["edges"][EK]["to"]> : G["edges"][EK]["from"][number]["kind"] : never;
 
 // @public
 export type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";
 
 // @public
-type VariableLengthSpec = Readonly<{
+export type VariableLengthSpec = Readonly<{
     minDepth: number;
     maxDepth: number;
     exhaustive?: boolean;
@@ -5063,7 +5089,7 @@ type VariableLengthSpec = Readonly<{
 }>;
 
 // @public
-interface VariableLengthState {
+export interface VariableLengthState {
     // (undocumented)
     cyclePolicy: RecursiveCyclePolicy;
     // (undocumented)
@@ -5129,7 +5155,7 @@ type VectorIndexType = "hnsw" | "ivfflat" | "none";
 type VectorMetric = "cosine" | "l2" | "inner_product";
 
 // @public
-type VectorMetricType = "cosine" | "l2" | "inner_product";
+export type VectorMetricType = "cosine" | "l2" | "inner_product";
 
 // @public (undocumented)
 type VectorOperationBackend = Pick<GraphBackend, "upsertEmbedding" | "upsertEmbeddingBatch" | "deleteEmbedding" | "deleteEmbeddingBatch" | "vectorSearch" | "createVectorIndex" | "dropVectorIndex">;
@@ -5168,7 +5194,7 @@ type VectorSearchResult = Readonly<{
 }>;
 
 // @public
-type VectorSimilarityPredicate = Readonly<{
+export type VectorSimilarityPredicate = Readonly<{
     __type: "vector_similarity";
     field: FieldRef;
     queryEmbedding: readonly number[];
@@ -5194,14 +5220,14 @@ type VectorSlot = Readonly<{
 }>;
 
 // @public
-type VectorSlotDescriptor = Readonly<{
+export type VectorSlotDescriptor = Readonly<{
     dimensions: number;
     metric: VectorMetric;
     indexType: VectorIndexType;
 }>;
 
 // @public
-type VectorSlotMap = ReadonlyMap<string, VectorSlotDescriptor>;
+export type VectorSlotMap = ReadonlyMap<string, VectorSlotDescriptor>;
 
 // @public
 type VectorStrategy = Readonly<{
@@ -5227,7 +5253,7 @@ type VectorStrategy = Readonly<{
 }>;
 
 // @public (undocumented)
-type WithAliasOptionality<Value, Aliases extends AggregateAliasMap, Alias extends string> = AliasValue<Aliases, Alias>["optional"] extends true ? Value | undefined : Value;
+export type WithAliasOptionality<Value, Aliases extends AggregateAliasMap, Alias extends string> = AliasValue<Aliases, Alias>["optional"] extends true ? Value | undefined : Value;
 
 // @public
 type WriteFenceDeclaration = Readonly<{

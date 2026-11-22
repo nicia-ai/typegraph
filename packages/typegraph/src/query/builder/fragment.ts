@@ -60,7 +60,7 @@ export type FragmentRequirements<G extends GraphDef> = Readonly<
   Record<string, keyof G["nodes"] & string>
 >;
 
-type EmptyFragmentRequirements = Readonly<Record<never, never>>;
+export type EmptyFragmentRequirements = Readonly<Record<never, never>>;
 
 /**
  * The alias map a fragment body is typed against: each required alias as
@@ -74,7 +74,7 @@ export type FragmentRequiredAliases<
 }>;
 
 /** The node kind identity an alias binds, kept even where `kind` widens. */
-type AliasKindIdentity<Alias> =
+export type AliasKindIdentity<Alias> =
   Alias extends NodeAlias<infer N, boolean> ? NonNullable<N["__nodeKind"]>
   : never;
 
@@ -86,7 +86,7 @@ type AliasKindIdentity<Alias> =
  * union and then be refused. The factory and every fit check consult this
  * one predicate.
  */
-type RequirementKindErrors<Requires> = {
+export type RequirementKindErrors<Requires> = {
   [A in keyof Requires & string]: true extends IsUnion<Requires[A]> ?
     `Error: fragment requirement '${A}' must name one node kind, not a union of kinds`
   : never;
@@ -99,7 +99,7 @@ type RequirementKindErrors<Requires> = {
  * `OtherKeys` (the edge and recursive aliases) holds is always an error: no
  * query can bind it as a node.
  */
-type RequirementErrors<
+export type RequirementErrors<
   Requires,
   Aliases,
   OtherKeys,
@@ -122,11 +122,11 @@ type RequirementErrors<
  * schemas, so it applies only to a query (or a composition) over that graph
  * or one that extends it; a broad `GraphDef` fragment applies to every graph.
  */
-type GraphErrors<FragmentGraph, HostGraph> =
+export type GraphErrors<FragmentGraph, HostGraph> =
   [HostGraph] extends [FragmentGraph] ? never
   : "Error: fragment is written for another graph";
 
-type CollisionErrors<AddedKeys, ExistingKeys> =
+export type CollisionErrors<AddedKeys, ExistingKeys> =
   Extract<AddedKeys, ExistingKeys> extends infer Collision extends string ?
     Collision extends unknown ?
       `Error: fragment adds alias '${Collision}', which this query already uses`
@@ -138,10 +138,10 @@ type CollisionErrors<AddedKeys, ExistingKeys> =
  * keys are the reasons it does not, which the builder lacks, so the misfit is
  * reported at the `pipe()` (or `composeFragments()`) call that caused it.
  */
-type FitReport<Errors extends string> =
+export type FitReport<Errors extends string> =
   [Errors] extends [never] ? unknown : Readonly<Record<Errors, never>>;
 
-type FragmentFitErrors<
+export type FragmentFitErrors<
   Shape extends AnyFragmentShape,
   HostGraph,
   Aliases,
@@ -164,7 +164,7 @@ type FragmentFitErrors<
       keyof Aliases | keyof EdgeAliases | keyof RecursiveAliases
     >;
 
-type FragmentFit<
+export type FragmentFit<
   Shape extends AnyFragmentShape,
   HostGraph,
   Aliases,
@@ -186,17 +186,17 @@ type FragmentFit<
 // Fragment Types
 // ============================================================
 
-type MergeMaps<Existing, Added> =
+export type MergeMaps<Existing, Added> =
   keyof Added extends never ? Existing : Existing & Added;
 
 /** The entries of `Out` that are not keys of `Base`. */
-type AddedEntries<Out, Base> = Readonly<{
+export type AddedEntries<Out, Base> = Readonly<{
   [K in Exclude<keyof Out, keyof Base>]: Out[K];
 }>;
 
 declare const FRAGMENT_SHAPE: unique symbol;
 
-type FragmentShape<
+export type FragmentShape<
   G extends GraphDef,
   Requires extends FragmentRequirements<G>,
   Added extends AliasMap,
@@ -210,7 +210,7 @@ type FragmentShape<
   addedRecursive: AddedRecursive;
 }>;
 
-type AnyFragmentShape = FragmentShape<
+export type AnyFragmentShape = FragmentShape<
   GraphDef,
   FragmentRequirements<GraphDef>,
   AliasMap,
@@ -288,7 +288,7 @@ export interface QueryFragment<
 type InvariantShape<Shape> = (shape: Shape) => Shape;
 
 /** Every fragment: the shape's parameter is `never`, which any shape accepts. */
-type AnyQueryFragment = Readonly<{
+export type AnyQueryFragment = Readonly<{
   [FRAGMENT_SHAPE]: (shape: never) => AnyFragmentShape;
 }>;
 
@@ -486,7 +486,7 @@ export function createFragment<G extends GraphDef>(): QueryFragmentFactory<G> {
 // Composition
 // ============================================================
 
-type ShapeOf<Fragment> =
+export type ShapeOf<Fragment> =
   Fragment extends (
     Readonly<{
       [FRAGMENT_SHAPE]: (shape: never) => infer Shape extends AnyFragmentShape;
@@ -499,7 +499,7 @@ type ShapeOf<Fragment> =
  * The aliases a composition holds after `First` ran: its required aliases,
  * at their declared kinds, and the ones it added.
  */
-type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<
+export type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<
   FragmentRequiredAliases<Shape["graph"], Shape["requires"]>
 > &
   Shape["added"];
@@ -510,13 +510,13 @@ type ComposedNodeAliases<Shape extends AnyFragmentShape> = Readonly<
  * for one graph yields a fragment for that graph, in either order.
  * {@link ComposeFit} refuses two graphs neither of which extends the other.
  */
-type ComposedGraph<
+export type ComposedGraph<
   First extends AnyFragmentShape,
   Second extends AnyFragmentShape,
 > =
   [Second["graph"]] extends [First["graph"]] ? Second["graph"] : First["graph"];
 
-type ComposedShape<
+export type ComposedShape<
   First extends AnyFragmentShape,
   Second extends AnyFragmentShape,
 > = FragmentShape<
@@ -537,7 +537,7 @@ type ComposedShape<
  * adds an alias `First` holds. Requirements `First` does not hold pass to
  * the query.
  */
-type ComposeErrors<
+export type ComposeErrors<
   First extends AnyFragmentShape,
   Second extends AnyFragmentShape,
 > = FragmentFitErrors<
@@ -555,19 +555,19 @@ type ComposeErrors<
  * from one would drop the requirements of whichever branch runs; it is
  * refused, and each branch is composed (or piped) on its own.
  */
-type UnionFragmentErrors<Fragment> =
+export type UnionFragmentErrors<Fragment> =
   true extends IsUnion<Fragment> ?
     "Error: composeFragments() takes a fragment, not a union of fragments; compose each branch separately"
   : never;
 
 /** The shape of `Composed` followed by `Next`. */
-type ComposeStep<
+export type ComposeStep<
   Composed extends AnyFragmentShape | undefined,
   Next extends AnyFragmentShape,
 > = Composed extends AnyFragmentShape ? ComposedShape<Composed, Next> : Next;
 
 /** The shape of a composition: its fragments' shapes folded left to right. */
-type CompositionShape<
+export type CompositionShape<
   Fragments extends readonly unknown[],
   Composed extends AnyFragmentShape | undefined = undefined,
 > =
@@ -576,7 +576,7 @@ type CompositionShape<
   : Composed;
 
 /** Every reason a fragment of `Fragments` cannot follow the ones before it. */
-type CompositionErrors<
+export type CompositionErrors<
   Fragments extends readonly unknown[],
   Composed extends AnyFragmentShape | undefined = undefined,
 > =
@@ -588,7 +588,7 @@ type CompositionErrors<
     | CompositionErrors<Rest, ComposeStep<Composed, ShapeOf<Next>>>
   : never;
 
-type ShapeFragment<Shape> =
+export type ShapeFragment<Shape> =
   Shape extends AnyFragmentShape ?
     QueryFragment<
       Shape["graph"],

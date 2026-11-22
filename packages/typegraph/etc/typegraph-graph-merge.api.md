@@ -321,12 +321,12 @@ type BaseFieldAccessor<T = unknown> = Readonly<{
 }>;
 
 // @public
-type BaseLookupStore = Readonly<{
+export type BaseLookupStore = Readonly<{
     nodes: Readonly<Record<string, BaseNodeLookup>>;
 }>;
 
 // @public
-type BaseMember = Readonly<{
+export type BaseMember = Readonly<{
     id: NodeId<NodeType>;
     kind: string;
     props: Readonly<Record<string, JsonValue>>;
@@ -601,7 +601,28 @@ function buildProvenanceGraph(targetGraphId: string): Readonly<{
             }>;
         };
     };
-    edges: {};
+    edges: NormalizedEdges<{
+        readonly Provenance: {
+            readonly type: Readonly<{
+                __nodeKind?: "Provenance";
+                kind: "Provenance";
+                schema: z.ZodObject<{
+                    targetGraphId: z.ZodString;
+                    role: z.ZodEnum<{
+                        node: "node";
+                        edge: "edge";
+                    }>;
+                    canonicalId: z.ZodString;
+                    canonicalKind: z.ZodString;
+                    branchId: z.ZodString;
+                    sourceId: z.ZodString;
+                }, z.core.$strip>;
+                description: string | undefined;
+                annotations: KindAnnotations | undefined;
+                __nodeType: true;
+            }>;
+        };
+    }, {}>;
     ontology: readonly [];
     identity: undefined;
     defaults: Readonly<{
@@ -719,7 +740,7 @@ export type CandidateDiagnosticsOptions = Readonly<{
 }>;
 
 // @public
-type CandidateEdge = Readonly<{
+export type CandidateEdge = Readonly<{
     a: MergeKey;
     b: MergeKey;
     score: number;
@@ -727,7 +748,7 @@ type CandidateEdge = Readonly<{
 }>;
 
 // @public
-type CandidatePair<K extends NodeType = NodeType> = Readonly<{
+export type CandidatePair<K extends NodeType = NodeType> = Readonly<{
     a: MergeKey;
     b: MergeKey;
     left: Node<K>;
@@ -2255,10 +2276,7 @@ type DynamicNodeType<K extends string = string> = NodeType<DynamicNodeKind<K>> &
     [DYNAMIC_NODE_BRAND]: true;
 }>;
 
-// @public (undocumented)
-type DynamicNodeTypeFor$1<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
-
-// @public (undocumented)
+// @public
 type DynamicNodeTypeFor<T> = T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // @public (undocumented)
@@ -2578,6 +2596,9 @@ type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countE
 
 // @public (undocumented)
 type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+
+// @public
+type EdgeEntry = EdgeRegistration | AnyEdgeType;
 
 // @public
 type EdgeExistsBetweenParams = Readonly<{
@@ -3316,7 +3337,9 @@ type ExpressionObjectChildren<Value, Scope extends string> = {
 }>;
 
 // @public
-type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ExpressionValue$1<Fields[keyof Fields]>>];
+type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
 type ExpressionProjectionEntry<T = unknown> = Readonly<{
@@ -3337,9 +3360,6 @@ type ExpressionSubqueryRelation<Projection extends readonly ExpressionProjection
     getOneStatementReadProvenance: () => OneStatementReadProvenance;
     toAst: () => QueryAst;
 }>;
-
-// @public (undocumented)
-type ExpressionValue$1<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public (undocumented)
 type ExpressionValue<Value, Scope extends string> = DatabaseExpression<Exclude<Value, null> | (null extends Value ? undefined : never), Scope> & (NonNullable<Value> extends Date | readonly unknown[] ? unknown : NonNullable<Value> extends object ? ExpressionObjectChildren<Value, Scope> : unknown);
@@ -5637,7 +5657,7 @@ export type MergeIncrementalArgs<G extends GraphDef = GraphDef> = Readonly<{
 }>;
 
 // @public
-type MergeKey = string & {
+export type MergeKey = string & {
     readonly __mergeKey: unique symbol;
 };
 
@@ -6130,7 +6150,7 @@ export class MergeReviewError extends MergeError {
 }
 
 // @public (undocumented)
-type MergeReviewFormatVersion = (typeof SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)[number];
+export type MergeReviewFormatVersion = (typeof SUPPORTED_MERGE_REVIEW_FORMAT_VERSIONS)[number];
 
 // @public
 export type MergeReviewPolicy = Readonly<{
@@ -6844,6 +6864,11 @@ type NoRecordedCoordinate = Readonly<{
 type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
+type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
+    [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TEdges[K]["to"] extends (Record<string, readonly (infer N extends NodeType)[]>) ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"] : readonly TNodes[keyof TNodes]["type"][]> : never;
+};
+
+// @public
 export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
     resolve: Readonly<Record<string, ResolveConfig<G>>>;
     reconcileTypes: ReconcileTypesMode;
@@ -7292,6 +7317,9 @@ type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly strin
 
 // @public (undocumented)
 type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<readonly ExpressionProjectionEntry[]>;
+
+// @public (undocumented)
+type ProjectedExpressionValue<Expression> = Expression extends DatabaseExpression<infer Value> ? Value : never;
 
 // @public
 type ProjectedField = Readonly<{
@@ -8099,7 +8127,7 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<DurableGraphBranch<G>, BranchError>>;
 
 // @public
-type ReportNodeIdentity = Readonly<{
+export type ReportNodeIdentity = Readonly<{
     kind: string;
     id: NodeId<NodeType>;
 }>;
@@ -8413,9 +8441,7 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [
-E
-] extends ["exact"] ? N : PolymorphicNodeType<N>;
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 // @public
 type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
@@ -8662,7 +8688,7 @@ keyof G["nodes"] & string,
 ];
 
 // @public
-type SourceResult = Readonly<{
+export type SourceResult = Readonly<{
     pairs: readonly CandidatePair[];
     forcedEdges: readonly CandidateEdge[];
     baseMembers: readonly BaseMember[];
@@ -9857,12 +9883,12 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string, O extends AliasExpansionOptions | undefined>(kind: K, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, G["nodes"][K]["type"], AliasNodeType<G, K & string>, PolymorphicNodeType<G["nodes"][K]["type"]>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
         expansion: "exact";
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     // (undocumented)
     toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
         expansion?: "subclasses" | undefined;
-    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor$1<T>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, PolymorphicNodeType<DynamicNodeTypeFor$1<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string, O extends AliasExpansionOptions | undefined>(kind: T, alias: UniqueAlias<A, Aliases>, options: O): QueryBuilder<G, Aliases & Record<A, NodeAlias<ExpansionAliasNodeType<ForwardedExpansionAxes<O>, DynamicNodeTypeFor<T>, PolymorphicNodeType<DynamicNodeTypeFor<T>>, PolymorphicNodeType<DynamicNodeTypeFor<T>>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     toKindSet<A extends string>(kinds: readonly string[], alias: A): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A, Optional>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }

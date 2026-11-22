@@ -142,7 +142,8 @@ export function uniqueConstraintKey(
     : undefined;
 }
 
-type UniquePredicate = Readonly<{
+/** The predicate a unique constraint's `where` builder returns. */
+export type UniquePredicate = Readonly<{
   __type: "unique_predicate";
   field: string;
   op: NullCheckOp;

@@ -431,7 +431,7 @@ export type SchemaManagerOptions = Readonly<{
  * capability of the standalone entry point (see the field's own doc), so it
  * stays on the type every `ensureSchema` caller sees.
  */
-type EnsureSchemaPreloadedOptions = Readonly<{
+export type EnsureSchemaPreloadedOptions = Readonly<{
   /**
    * Pre-fetched active row + parsed stored schema. When the loader
    * (`createStoreWithSchema`) has already paid for `getActiveSchema`

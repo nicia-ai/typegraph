@@ -1,19 +1,15 @@
 /**
- * Declaration-emit consumer: every export below has an INFERRED type, so a
- * consumer compiling with `declaration: true` makes TypeScript name each type
- * the package's factories put into it. The runner (`scripts/test-types.ts
- * consumer`) compiles this file from a packed-tarball install under both
- * `moduleResolution: "bundler"` and `"node16"`, then refuses any emitted
- * declaration that references a module other than a public entrypoint (a
- * hashed `dist/` chunk path is exactly what TypeScript falls back to when a
- * type is not exported from an entrypoint the program already imports).
- *
- * The file deliberately imports only the package root, `/indexes` (for the
- * index definers) and zod: a consumer must not need an extra entrypoint
- * import merely so its declarations can be emitted.
+ * Declaration-emit consumer of the package root, and ONLY the root (plus
+ * zod): every export below has an INFERRED type, so compiling it with
+ * `declaration: true` makes TypeScript name each type the root's factories put
+ * into it, through modules already in this file's program. The runner
+ * (`scripts/test-types.ts consumer`) compiles each fixture in this directory
+ * as its own program, so an entrypoint another fixture imports cannot make a
+ * type nameable here.
  */
 import {
   broader,
+  count,
   createStore,
   defineEdge,
   defineGraph,
@@ -21,18 +17,30 @@ import {
   disjointWith,
   embedding,
   equivalentTo,
+  expr,
+  field,
   type GraphBackend,
   implies,
   inverseOf,
   narrower,
+  param,
   partOf,
   relatedTo,
   searchable,
   type Store,
   subClassOf,
 } from "@nicia-ai/typegraph";
-import { defineEdgeIndex, defineNodeIndex } from "@nicia-ai/typegraph/indexes";
 import { z } from "zod";
+
+// The issue's reproduction, verbatim: a graph with no indexes, ontology or
+// extension, from a module that imports only the root.
+const Member = defineNode("Member", { schema: z.object({ name: z.string() }) });
+
+export const minimalGraph = defineGraph({
+  id: "g",
+  nodes: { Member: { type: Member } },
+  edges: {},
+});
 
 export const Organization = defineNode("Organization", {
   schema: z.object({ name: z.string() }),
@@ -70,12 +78,6 @@ export const knows = defineEdge("knows");
 export const mentors = defineEdge("mentors");
 export const memberOf = defineEdge("memberOf");
 export const teamOf = defineEdge("teamOf");
-
-export const personEmail = defineNodeIndex(Person, { fields: ["email"] });
-export const workRole = defineEdgeIndex(worksAt, {
-  fields: ["role"],
-  direction: "out",
-});
 
 export const ontology = [
   subClassOf(Company, Organization),
@@ -122,7 +124,6 @@ export const graph = defineGraph({
     teamOf: { type: teamOf, from: [Team], to: [Organization] },
   },
   ontology,
-  indexes: [personEmail, workRole],
   identity: { sameIdAcrossKinds: "fold" },
   defaults: { onNodeDelete: "restrict", temporalMode: "current" },
   annotations: { domain: "consumer" },
@@ -171,3 +172,28 @@ export const queryPeople = (store: DeclaredStore) =>
     .query()
     .from("Person", "person")
     .select((context) => context.person);
+
+export const preparedPeople = (store: DeclaredStore) =>
+  store
+    .query()
+    .from("Person", "person")
+    .whereNode("person", (person) => person.name.eq(param("name")))
+    .select((context) => ({ id: context.person.id, name: context.person.name }))
+    .prepare();
+
+export const jobsPerOrganization = (store: DeclaredStore) =>
+  store
+    .query()
+    .from("Person", "person")
+    .traverse("worksAt", "job")
+    .to("Organization", "org")
+    .groupBy("org", "name")
+    .aggregate({ org: field("org", "name"), people: count("person") });
+
+export const expressions = expr;
+
+export const peopleNamedCount = (store: DeclaredStore) =>
+  store.nodes.Person.count();
+
+export const minimalStore = (backend: GraphBackend) =>
+  createStore(minimalGraph, backend);
