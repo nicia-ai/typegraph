@@ -22,7 +22,6 @@ import {
 import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
-import { isAggregatedStatement } from "./aggregated-statement";
 import { compileDatabaseExpression } from "./database-expressions";
 import { emitRecursiveQuerySql } from "./emitter";
 import {
@@ -333,7 +332,11 @@ export function compileVariableLengthQuery(
 
 /** Applies the shared output contract to single and composed recursion. */
 export function assertRecursiveOutputSupported(ast: QueryAst): void {
-  if (isAggregatedStatement(ast) || (ast.aggregateOrderBy?.length ?? 0) > 0)
+  if (
+    ast.groupBy !== undefined ||
+    ast.having !== undefined ||
+    (ast.aggregateOrderBy?.length ?? 0) > 0
+  )
     throw new UnsupportedPredicateError(
       "Aggregating recursive traversals is not yet supported; project nodes as a relation before aggregating.",
     );

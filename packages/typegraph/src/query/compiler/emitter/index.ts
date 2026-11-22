@@ -32,7 +32,6 @@ export {
   buildStandardOrderBy,
   buildStandardProjection,
   buildStandardRelevanceOrderBy,
-  buildStandardRelevanceSortColumns,
   buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,

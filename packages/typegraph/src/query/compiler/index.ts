@@ -107,7 +107,6 @@ import {
   buildStandardOrderBy,
   buildStandardProjection,
   buildStandardRelevanceOrderBy,
-  buildStandardRelevanceSortColumns,
   buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
@@ -519,16 +518,6 @@ function compileQueryInExpressionContext(
 
   // Check for variable-length traversals
   if (variableLength && loweredRecursive === undefined) {
-    // Only the standard statement projects relevance sort columns; a
-    // recursive statement refuses the request rather than dropping it.
-    if (
-      ast.relevanceSortColumns === true &&
-      describeRelevanceOrder(ast).length > 0
-    )
-      throw new CompilerInvariantError(
-        "Relevance sort columns were requested for a recursive statement, which cannot project them",
-        { phase: "recursive" },
-      );
     const recursive =
       ast.traversals.length > 1 || ast.traversals[0]?.optional === true ?
         compileMultiStageRecursiveQuery(ast, graphId, ctx)
@@ -1384,7 +1373,7 @@ function resolveLateMaterializationPlan(
   }
 
   // Aggregation owns the count fast path / group-by shape, not this transform.
-  if (isAggregatedStatement(ast)) {
+  if (ast.groupBy !== undefined || ast.having !== undefined) {
     return undefined;
   }
   if (ast.aggregateOrderBy !== undefined && ast.aggregateOrderBy.length > 0) {
@@ -1760,7 +1749,7 @@ function compileStandardQueryWithCteStrategy(
   // Build main SELECT
   const relevanceKeys = describeRelevanceOrder(ast);
   const aggregated = isAggregatedStatement(ast);
-  const userProjection = buildStandardProjection({
+  const projection = buildStandardProjection({
     ast,
     ...(collapsedTraversalCteAlias === undefined ?
       {}
@@ -1768,22 +1757,6 @@ function compileStandardQueryWithCteStrategy(
     ctx,
     names,
   });
-  const projection =
-    ast.relevanceSortColumns === true && relevanceKeys.length > 0 ?
-      sql.join(
-        [
-          userProjection,
-          ...buildStandardRelevanceSortColumns({
-            aggregated,
-            dialect,
-            fusion,
-            keys: relevanceKeys,
-            names,
-          }),
-        ],
-        sql`, `,
-      )
-    : userProjection;
   const fromClause = buildStandardFromClause({
     ast,
     ...(collapsedTraversalCteAlias === undefined ?

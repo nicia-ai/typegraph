@@ -16,10 +16,6 @@ import {
   type RelationOrder,
   type TopPerPartitionRelation,
 } from "../compiler/relations";
-import {
-  describeRelevanceOrder,
-  type RelevanceSortKey,
-} from "../compiler/relevance-order";
 import { type SqlNameUsage } from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
 import {
@@ -1305,150 +1301,6 @@ export function createExecutableRelation<
   return new ExecutableRelationQuery(definition);
 }
 
-/**
- * One sort key of the statement a source relation reads, named by the result
- * column that carries it, so the relation can reproduce the statement's order
- * outside it.
- */
-export type SourceColumnOrder = Readonly<{
-  outputName: string;
-  valueType: RelationColumn["valueType"];
-  nullable: boolean;
-  direction: SortDirection;
-  nulls: "first" | "last";
-}>;
-
-/**
- * The statement a relation reads from `ast`, with the order, limit and offset
- * lifted out for the relation to apply. Each caller `orderBy()` field that the
- * projection does not already carry is projected as a hidden column, and a
- * full-text, vector or hybrid statement also projects its relevance sort keys
- * (`QueryAst.relevanceSortColumns`). The returned order is the statement's own
- * ORDER BY: the leading relevance keys, the caller's field terms, the
- * `aggregateOrderBy` terms the caller supplies, then the trailing relevance
- * keys, so every terminal of the relation selects the rows the statement's
- * own execution selects.
- */
-export function liftSourceStatementOrder(
-  ast: QueryAst,
-  aggregateOrders: readonly SourceColumnOrder[] = [],
-): Readonly<{
-  sourceAst: QueryAst;
-  orderBy: readonly SourceColumnOrder[];
-  limit: number | undefined;
-  offset: number | undefined;
-}> {
-  const ordering = ast.orderBy ?? [];
-  const orderOutputNames = ordering.map(
-    (order) =>
-      ast.projection.fields.find(
-        (projected) =>
-          projected.source === order.field ||
-          (projected.source.__type === "database_expression" &&
-            order.field.__type === "database_expression" &&
-            projected.source.node.kind === "field" &&
-            order.field.node.kind === "field" &&
-            projected.source.node.field.alias ===
-              order.field.node.field.alias &&
-            projected.source.node.field.path.join("\u0000") ===
-              order.field.node.field.path.join("\u0000") &&
-            projected.source.node.field.jsonPointer ===
-              order.field.node.field.jsonPointer),
-      )?.outputName,
-  );
-  const relevanceKeys = describeRelevanceOrder(ast);
-  const {
-    limit,
-    offset,
-    orderBy: _orderBy,
-    aggregateOrderBy: _aggregateOrderBy,
-    ...unorderedAst
-  } = ast;
-  const sourceAst: QueryAst = {
-    ...unorderedAst,
-    ...(relevanceKeys.length === 0 ? {} : { relevanceSortColumns: true }),
-    projection: {
-      ...ast.projection,
-      fields: [
-        ...ast.projection.fields,
-        ...ordering.flatMap((order, index) =>
-          orderOutputNames[index] === undefined ?
-            [
-              {
-                outputName: `__tg_relation_source_order_${index}`,
-                source: order.field,
-              },
-            ]
-          : [],
-        ),
-      ],
-    },
-  };
-  const fieldOrders = ordering.map((order, index): SourceColumnOrder => ({
-    outputName:
-      orderOutputNames[index] ?? `__tg_relation_source_order_${index}`,
-    valueType: order.field.valueType ?? "unknown",
-    nullable: true,
-    direction: order.direction,
-    nulls: resolveNullOrdering(order),
-  }));
-  const relevanceOrders = (placement: RelevanceSortKey["placement"]) =>
-    relevanceKeys
-      .filter((key) => key.placement === placement)
-      .map((key): SourceColumnOrder => ({
-        outputName: key.outputName,
-        valueType: key.valueType,
-        nullable: false,
-        direction: key.direction,
-        nulls: resolveNullOrdering({ direction: key.direction }),
-      }));
-  return {
-    sourceAst,
-    orderBy: [
-      ...relevanceOrders("leading"),
-      ...fieldOrders,
-      ...aggregateOrders,
-      ...relevanceOrders("trailing"),
-    ],
-    limit,
-    offset,
-  };
-}
-
-/**
- * A relation over a source statement that applies `orderBy`, `limit` and
- * `offset` (see {@link liftSourceStatementOrder}) to the statement's rows. The
- * order keys read result columns of the source by name, hidden ones included.
- */
-export function createOrderedSourceRelation<
-  Fields extends RelationProjection,
-  Result,
->(
-  definition: RelationDefinition<Fields, Result>,
-  lifted: Readonly<{
-    orderBy: readonly SourceColumnOrder[];
-    limit: number | undefined;
-    offset: number | undefined;
-  }>,
-): ExecutableRelationQuery<Fields, Result> {
-  const scopeIdentity = relationScope();
-  const state: RelationState = {
-    distinct: false,
-    ...(lifted.limit === undefined ? {} : { limit: lifted.limit }),
-    ...(lifted.offset === undefined ? {} : { offset: lifted.offset }),
-    orderBy: lifted.orderBy.map((order) => ({
-      expression: createFieldExpression(
-        outputField(order.outputName, order.valueType),
-        scopeIdentity,
-        order.nullable,
-      ),
-      direction: order.direction,
-      nulls: order.nulls,
-    })),
-  };
-  return new ExecutableRelationQuery(definition, state, scopeIdentity);
-}
-
 export function createProjectionRelation<
   Fields extends RelationProjection,
   Result,
@@ -1467,11 +1319,53 @@ export function createProjectionRelation<
     ...input.ast.traversals.map((traversal) => traversal.nodeAlias),
   ]);
   const columns = relationColumns(input.fields, { nodeAliases });
-  const lifted = liftSourceStatementOrder(input.ast);
+  const ordering = input.ast.orderBy ?? [];
+  const orderOutputNames = ordering.map(
+    (order) =>
+      input.ast.projection.fields.find(
+        (projected) =>
+          projected.source === order.field ||
+          (projected.source.__type === "database_expression" &&
+            order.field.__type === "database_expression" &&
+            projected.source.node.kind === "field" &&
+            order.field.node.kind === "field" &&
+            projected.source.node.field.alias ===
+              order.field.node.field.alias &&
+            projected.source.node.field.path.join("\u0000") ===
+              order.field.node.field.path.join("\u0000") &&
+            projected.source.node.field.jsonPointer ===
+              order.field.node.field.jsonPointer),
+      )?.outputName,
+  );
+  const {
+    limit: sourceLimit,
+    offset: sourceOffset,
+    orderBy: _sourceOrderBy,
+    ...unboundedSourceAst
+  } = input.ast;
+  const sourceAst: QueryAst = {
+    ...unboundedSourceAst,
+    projection: {
+      ...input.ast.projection,
+      fields: [
+        ...input.ast.projection.fields,
+        ...ordering.flatMap((order, index) =>
+          orderOutputNames[index] === undefined ?
+            [
+              {
+                outputName: `__tg_relation_source_order_${index}`,
+                source: order.field,
+              },
+            ]
+          : [],
+        ),
+      ],
+    },
+  };
   const definition: RelationDefinition<Fields, Result> = {
     ast: {
       kind: "source",
-      query: lifted.sourceAst,
+      query: sourceAst,
       graphId: input.config.graphId,
       options: buildCompileOptions(input.config),
     },
@@ -1491,5 +1385,23 @@ export function createProjectionRelation<
     decodeRow: input.decodeRow,
     ...(input.mapped === undefined ? {} : { mapped: input.mapped }),
   };
-  return createOrderedSourceRelation(definition, lifted);
+  const scopeIdentity = relationScope();
+  const state: RelationState = {
+    distinct: false,
+    ...(sourceLimit === undefined ? {} : { limit: sourceLimit }),
+    ...(sourceOffset === undefined ? {} : { offset: sourceOffset }),
+    orderBy: ordering.map((order, index) => ({
+      expression: createFieldExpression(
+        outputField(
+          orderOutputNames[index] ?? `__tg_relation_source_order_${index}`,
+          order.field.valueType ?? "unknown",
+        ),
+        scopeIdentity,
+        true,
+      ),
+      direction: order.direction,
+      nulls: resolveNullOrdering(order),
+    })),
+  };
+  return new ExecutableRelationQuery(definition, state, scopeIdentity);
 }

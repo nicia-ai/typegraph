@@ -716,13 +716,6 @@ export type QueryAst = Readonly<{
   selectiveFields?: readonly SelectiveField[];
   /** Fusion options for hybrid queries. Ignored unless both predicates present. */
   fusion?: HybridFusionOptions;
-  /**
-   * Also project each relevance sort key of the statement (see
-   * `describeRelevanceOrder`) as a hidden result column, so a relation that
-   * wraps the statement can order by relevance exactly as the statement does.
-   * A statement without a full-text or vector predicate has no such key.
-   */
-  relevanceSortColumns?: boolean;
 }>;
 
 // ============================================================

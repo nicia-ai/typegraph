@@ -6579,7 +6579,6 @@ type QueryAst = Readonly<{
     aggregateOrderBy?: readonly AggregateOrderSpec[];
     selectiveFields?: readonly SelectiveField[];
     fusion?: HybridFusionOptions;
-    relevanceSortColumns?: boolean;
 }>;
 
 // @public

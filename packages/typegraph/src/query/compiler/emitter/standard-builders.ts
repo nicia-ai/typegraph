@@ -1860,30 +1860,6 @@ export function buildStandardRelevanceOrderBy(
   return sql`ORDER BY ${sql.join([...terms("leading"), ...userOrders, ...terms("trailing")], sql`, `)}`;
 }
 
-type BuildStandardRelevanceSortColumnsInput = RelevanceSortValueInput &
-  Readonly<{
-    keys: readonly RelevanceSortKey[];
-    names: SqlStatementNames;
-  }>;
-
-/**
- * The hidden result columns `QueryAst.relevanceSortColumns` asks for: each
- * relevance sort key under its `outputName`, with the value the statement's
- * ORDER BY sorts by.
- */
-export function buildStandardRelevanceSortColumns(
-  input: BuildStandardRelevanceSortColumnsInput,
-): readonly SqlFragment[] {
-  return input.keys.map((key) => {
-    const outputName = declareResultColumn(
-      input.names,
-      key.outputName,
-      `relevance sort key (${key.source})`,
-    );
-    return sql`${compileRelevanceSortValue(key, input)} AS ${quoteIdentifier(outputName)}`;
-  });
-}
-
 type BuildLimitOffsetClauseInput = Readonly<{
   dialect: DialectAdapter;
   limit: number | undefined;
