@@ -204,6 +204,8 @@ export {
   StaleVersionError,
   StoreNotInitializedError,
   TransactionConflictError,
+  TransactionOutcomeUnknownError,
+  TransactionRolledBackError,
   TypeGraphError,
   UniquenessError,
   ValidationError,

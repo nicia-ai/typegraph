@@ -113,6 +113,12 @@ export function finalizeEngineCapabilities(
       "root"
     );
   const recordedAnchorLookup = declared.recordedAnchorLookup ?? true;
+  // Commit-outcome evidence describes the transactions this backend opens; a
+  // backend that cannot hold one (an HTTP-only driver) has none to describe.
+  const {
+    commitOutcome: declaredCommitOutcome,
+    ...declaredExecutionWithoutCommitOutcome
+  } = declared.execution;
   return assertBundledCapabilityDeclarations({
     ...declaredWithoutStrategyCapabilities,
     recordedAnchorLookup,
@@ -126,7 +132,11 @@ export function finalizeEngineCapabilities(
       (declared.execution.interactiveTransactions &&
         deps.writeFenceConflict !== "commit-time"),
     execution: {
-      ...declared.execution,
+      ...declaredExecutionWithoutCommitOutcome,
+      ...(declaredCommitOutcome === undefined ||
+      !declared.execution.interactiveTransactions ?
+        {}
+      : { commitOutcome: declaredCommitOutcome }),
       atomicBatch,
       // Derived from the facts above, never taken from `declared`: a profile
       // that hand-set this field would drift the moment one of them changed

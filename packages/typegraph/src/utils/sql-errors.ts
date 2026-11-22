@@ -856,6 +856,21 @@ const SERIALIZATION_FAILURE_SQL_STATES = ["40001", "40P01"] as const;
 const SQL_STATE_SHAPE = /^[0-9A-Z]{5}$/;
 
 /**
+ * Whether `error` (or anything in its `.cause` chain) carries a SQLSTATE: the
+ * engine received the statement and refused it. A driver's client-side
+ * refusal — a parameter it could not serialize, a closed connection — never
+ * reached the engine and carries none.
+ */
+export function carriesEngineSqlState(error: unknown): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code === "string" && SQL_STATE_SHAPE.test(code)) return true;
+  }
+  return false;
+}
+
+/**
  * Driver-message fallback for a serialization failure whose SQLSTATE was
  * dropped by a wrapper. Matches the fixed PostgreSQL texts for the two
  * SQLSTATEs above.
@@ -927,6 +942,57 @@ export function carrySerializationFailureClassifier(
   }
 }
 
+/** `TransactionRolledBackError`'s code. */
+const TRANSACTION_ROLLED_BACK_CODE = "TRANSACTION_ROLLED_BACK";
+/** `TransactionOutcomeUnknownError`'s code. */
+const TRANSACTION_OUTCOME_UNKNOWN_CODE = "TRANSACTION_OUTCOME_UNKNOWN";
+
+/**
+ * The TypeGraph error code of `link`, read structurally rather than by
+ * `instanceof`: a Store loaded from one copy of this package classifies the
+ * errors an adapter loaded from another copy raised.
+ */
+function typeGraphErrorCode(link: unknown): unknown {
+  if (!(link instanceof Error)) return undefined;
+  return Reflect.get(link, "code");
+}
+
+/**
+ * Whether `error` is a `TransactionOutcomeUnknownError`, from whichever copy
+ * of this package raised it.
+ */
+export function isTransactionOutcomeUnknown(error: unknown): boolean {
+  return typeGraphErrorCode(error) === TRANSACTION_OUTCOME_UNKNOWN_CODE;
+}
+
+/**
+ * The conflict verdict of a transaction outcome TypeGraph already decided,
+ * found anywhere in `error`'s chain: a rolled-back transaction is a conflict
+ * exactly when one of the engine errors it observed was, whichever of them is
+ * its `cause`; a transaction whose outcome is unknown is never one, whatever
+ * its `cause` says — a serialization failure after the native handle was
+ * released included — because re-running it could repeat committed writes.
+ * `undefined` when the chain holds no such outcome. Consulted before any
+ * classifier, which could otherwise find a conflict in the `cause` below it.
+ * Matched by code, so an outcome raised by another copy of this package is
+ * decided the same way.
+ */
+function decidedTransactionConflict(error: unknown): boolean | undefined {
+  for (const link of errorChain(error)) {
+    const code = typeGraphErrorCode(link);
+    if (code === TRANSACTION_ROLLED_BACK_CODE) {
+      const details: unknown = Reflect.get(new Object(link), "details");
+      return (
+        typeof details === "object" &&
+        details !== null &&
+        Reflect.get(details, "conflict") === true
+      );
+    }
+    if (code === TRANSACTION_OUTCOME_UNKNOWN_CODE) return false;
+  }
+  return undefined;
+}
+
 /**
  * Whether `error` (or anything in its `.cause` chain) is a PostgreSQL
  * transaction-conflict failure that the documented protocol says to retry by
@@ -949,6 +1015,8 @@ export function isSerializationFailure(
   error: unknown,
   target?: object,
 ): boolean {
+  const decided = decidedTransactionConflict(error);
+  if (decided !== undefined) return decided;
   if (target !== undefined) {
     const classifier = SERIALIZATION_FAILURE_CLASSIFIERS.get(target);
     if (classifier?.(error)) return true;

@@ -10,6 +10,7 @@
  */
 import { type RawBackend } from "../backend/branded";
 import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
+import { ownSchemaDdl } from "../backend/native-transaction-release";
 import {
   type GraphBackend,
   type KindRemovalRow,
@@ -498,6 +499,7 @@ async function materializeOne(
         await dropEmbeddingTableStorage(ctx, row, target);
         return "removed";
       },
+      ownSchemaDdl(),
     );
 
     if (outcome === "skipped") {
@@ -930,6 +932,7 @@ async function reclaimRemovedVectorFieldTables(
           await target.deleteSchemaVectorSlotContribution(field.slot);
           return true;
         },
+        ownSchemaDdl(),
       );
       if (!reclaimed) {
         skippedAfterLockedRecheck = true;

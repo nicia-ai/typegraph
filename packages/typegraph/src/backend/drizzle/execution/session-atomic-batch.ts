@@ -6,6 +6,7 @@ import type {
 import {
   type DriverSavepointScope,
   runSessionSavepoint,
+  type SavepointGuard,
   SavepointRecoveryFailure,
 } from "../../session-savepoint";
 import type { SqlExecutionAdapter } from "./types";
@@ -14,6 +15,7 @@ type SessionAtomicBatchExecution = Readonly<{
   executeCompiled: NonNullable<SqlExecutionAdapter["executeCompiled"]>;
   runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
   enterDriverScope?: DriverSavepointScope | undefined;
+  guardSavepoint?: SavepointGuard | undefined;
 }>;
 
 type SessionAtomicBatchAdapter = Readonly<{
@@ -36,11 +38,13 @@ const ATOMIC_PROGRAM_SAVEPOINT = "typegraph_atomic_program";
 export function createSessionAtomicBatchAdapter(
   execution: SessionAtomicBatchExecution,
 ): SessionAtomicBatchAdapter {
-  const { executeCompiled, runExclusive, enterDriverScope } = execution;
+  const { executeCompiled, runExclusive, enterDriverScope, guardSavepoint } =
+    execution;
   const port = {
     executeControl: (statement: string) =>
       executeCompiled({ sql: statement, params: [] }),
     enterDriverScope,
+    guardSavepoint,
   };
 
   return {

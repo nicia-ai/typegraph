@@ -63,6 +63,10 @@ import {
   heterogeneousNodeUpsertBatchBindParameterCount,
   heterogeneousNodeUpsertBatchFitsBindBudget,
 } from "../backend/heterogeneous-node-upsert-batch";
+import {
+  deferNativeHandle,
+  releaseNativeTransaction,
+} from "../backend/native-transaction-release";
 import { installRevisionChangesJournal } from "../backend/revision-journal";
 import {
   createEdgeRowMapper,
@@ -4691,7 +4695,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           : await this.#adapterBackend.transactionWithNative(
               (txBackend, nativeTransaction) =>
                 run(txBackend, nativeTransaction),
-              transactionOptions,
+              deferNativeHandle(transactionOptions),
             );
         // The COMMIT above already succeeded: flushing `onOperationEnd` is
         // done by the caller of `runRetriedUnit`, not here, so a hook that
@@ -5614,7 +5618,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       withSql =
         exposedSql === undefined ?
           { ...base, sqlAvailability: "unavailable" }
-        : { ...base, sql: exposedSql, sqlAvailability: "available" };
+        : {
+            ...base,
+            // A getter, not a value: reading `tx.sql` is the moment the
+            // native handle leaves TypeGraph's hands, and the backend that
+            // opened the transaction is told so before the caller can send
+            // anything through it.
+            get sql(): TNativeTransaction {
+              return releaseNativeTransaction(exposedSql);
+            },
+            sqlAvailability: "available",
+          };
     }
     Object.defineProperty(withSql, TRANSACTION_RUNTIME, {
       configurable: false,

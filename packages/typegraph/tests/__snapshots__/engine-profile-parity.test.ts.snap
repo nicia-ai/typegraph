@@ -14,6 +14,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
+    "commitOutcome": "commit-reply",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -252,6 +253,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "root",
+    "commitOutcome": "commit-reply",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -465,6 +467,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
+    "commitOutcome": "statement-scoped",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },
@@ -677,6 +680,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "durableStoreOperations": true,
   "execution": {
     "atomicBatch": "none",
+    "commitOutcome": "statement-scoped",
     "interactiveTransactions": true,
     "unitOfWork": "interactive",
   },

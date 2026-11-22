@@ -25,6 +25,7 @@
  * that import it at module scope), so this import adds no new reach into a
  * real Drizzle package that was not already there.
  */
+import { resolveRawSqlReleasingView } from "../../../raw-sql-release-view";
 import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
@@ -86,6 +87,25 @@ export type SchemaVersionMembers = Readonly<{
 }>;
 
 /**
+ * Runs a caller's preflight on the schema-write transaction. Its
+ * `executeSchemaDdl` forwards whatever SQL text it is given, transaction
+ * control included, so the preflight is handed the transaction's
+ * control-releasing view: the first call releases control of the transaction
+ * exactly as handing over the native handle does, and from then on the schema
+ * write commits only with the marker read back and is never retried
+ * automatically. A preflight that caught a failed statement on PostgreSQL has
+ * left the session aborted: the schema write that follows is refused with
+ * `25P02`, which the transaction's owner reports as the
+ * `TransactionRolledBackError` it is.
+ */
+async function runPreflight(
+  preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
+  target: SchemaWriteTransactionBackend,
+): Promise<void> {
+  await preflight(resolveRawSqlReleasingView(target));
+}
+
+/**
  * Builds the schema-commit member group. Moved out of the two dialect files
  * unchanged: same fenced commit, same populated-kind guard, same
  * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
@@ -122,7 +142,7 @@ export function createSchemaVersionMembers(
     ): Promise<SchemaVersionRow> {
       await assertBaseSchemaCurrent();
       return runSchemaWriteTransaction(params.graphId, async (target) => {
-        await preflight(target);
+        await runPreflight(preflight, target);
         return target.commitSchemaVersion(params);
       });
     },
@@ -138,7 +158,7 @@ export function createSchemaVersionMembers(
       preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
     ): Promise<void> {
       await runSchemaWriteTransaction(params.graphId, async (target) => {
-        await preflight(target);
+        await runPreflight(preflight, target);
         await target.setActiveVersion(params);
       });
     },

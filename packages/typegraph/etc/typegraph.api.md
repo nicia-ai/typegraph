@@ -312,6 +312,7 @@ type BackendCapabilities = Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+        commitOutcome?: "commit-reply" | "statement-scoped";
     }>;
     windowFunctions: boolean;
     orderedAggregates?: boolean;
@@ -4042,7 +4043,10 @@ export type GraphBackend = Readonly<{
         tableExists: (this: void, tableName: string) => Promise<boolean>;
         executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
         deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
-    }>) => Promise<T>) => Promise<T>;
+    }>) => Promise<T>,
+    options?: Readonly<{
+        nativeHandle?: symbol;
+    }>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
     deleteEmbedding?: (this: void, params: DeleteEmbeddingParams) => Promise<void>;
@@ -9001,6 +9005,20 @@ type TransactionOutcome<T> = Readonly<{
 }>;
 
 // @public
+export class TransactionOutcomeUnknownError extends TypeGraphError {
+    constructor(details: TransactionOutcomeUnknownErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionOutcomeUnknownErrorDetails;
+}
+
+// @public
+type TransactionOutcomeUnknownErrorDetails = Readonly<{
+    reason: "transaction-ended" | "native-handle-released" | "commit-reply-unread";
+}>;
+
+// @public
 type TransactionReadBackend = Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & SqlCompilationBackend>;
 
 // @public
@@ -9013,6 +9031,22 @@ type TransactionReceipt = Readonly<{
     }>;
     cascadedParts: readonly CompositionCascadedPart[];
     recorded?: RecordedInstant;
+}>;
+
+// @public
+export class TransactionRolledBackError extends TypeGraphError {
+    constructor(details: TransactionRolledBackErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionRolledBackErrorDetails;
+}
+
+// @public
+type TransactionRolledBackErrorDetails = Readonly<{
+    conflict: boolean;
+    detectedBy: "commit-reply" | "refused-statement" | "driver";
+    causeObserved: boolean;
 }>;
 
 // @public (undocumented)

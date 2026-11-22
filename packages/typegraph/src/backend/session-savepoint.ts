@@ -33,10 +33,22 @@ export type SavepointDecision<T> =
  */
 export type DriverSavepointScope = <T>(scope: () => Promise<T>) => Promise<T>;
 
+/**
+ * Called with the `SAVEPOINT` statement as TypeGraph is about to send it;
+ * returns what to run right after TypeGraph rolls back to that savepoint, or
+ * `undefined` when nothing needs restoring. A transaction whose commit
+ * evidence can land inside one of TypeGraph's savepoints supplies one (see
+ * `native-transaction-release.ts`).
+ */
+export type SavepointGuard = (
+  savepointStatement: string,
+) => (() => void) | undefined;
+
 type SessionSavepointPort = Readonly<{
   /** Issues one savepoint control statement on the enclosing session handle. */
   executeControl: (statement: string) => Promise<unknown>;
   enterDriverScope?: DriverSavepointScope | undefined;
+  guardSavepoint?: SavepointGuard | undefined;
 }>;
 
 /** The scope failed and rolling its savepoint back failed too. */
@@ -96,11 +108,14 @@ export async function runSessionSavepoint<T>(
   scope: () => Promise<SavepointDecision<T>>,
   onRolledBack?: (cause: unknown) => void,
 ): Promise<T> {
-  const { executeControl, enterDriverScope } = port;
+  const { executeControl, enterDriverScope, guardSavepoint } = port;
+  const openStatement = `SAVEPOINT ${savepoint}`;
+  const afterRollback = guardSavepoint?.(openStatement);
 
   async function rollBack(cause: unknown): Promise<void> {
     try {
       await executeControl(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      afterRollback?.();
       onRolledBack?.(cause);
       await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
     } catch (recoveryError) {
@@ -108,7 +123,7 @@ export async function runSessionSavepoint<T>(
     }
   }
 
-  await executeControl(`SAVEPOINT ${savepoint}`);
+  await executeControl(openStatement);
   let decision: SavepointDecision<T>;
   try {
     decision = await decideInsideDriverScope(enterDriverScope, scope);
@@ -125,6 +140,33 @@ export async function runSessionSavepoint<T>(
 }
 
 const DRIVER_SAVEPOINT_SCOPES = new WeakMap<object, DriverSavepointScope>();
+const SAVEPOINT_GUARDS = new WeakMap<object, SavepointGuard>();
+
+/**
+ * Registers the savepoint guard of one transaction session's backend: the
+ * session of a transaction whose commit evidence a rollback to one of
+ * TypeGraph's savepoints can undo.
+ */
+export function registerSavepointGuard(
+  backend: object,
+  guardSavepoint: SavepointGuard,
+): void {
+  SAVEPOINT_GUARDS.set(backend, guardSavepoint);
+}
+
+/**
+ * The savepoint guard of the session `target` executes on, resolved along
+ * its derivation chain like {@link resolveDriverSavepointScope}.
+ */
+export function resolveSavepointGuard(
+  target: object,
+): SavepointGuard | undefined {
+  for (const link of backendDerivationChain(target)) {
+    const guardSavepoint = SAVEPOINT_GUARDS.get(link);
+    if (guardSavepoint !== undefined) return guardSavepoint;
+  }
+  return undefined;
+}
 
 /**
  * Registers the driver scope of one transaction session's backend. Only a

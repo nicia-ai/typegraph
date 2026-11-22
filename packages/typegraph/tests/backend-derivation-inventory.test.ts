@@ -126,6 +126,12 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/postgres.ts",
+    line: "deriveBackend(txBackend, {",
+    reason:
+      "The control-releasing view of a schema-write transaction, handed to a preflight and to a public schemaWriteTransaction callback: executeSchemaDdl is overridden to release control of the transaction first (that port forwards arbitrary SQL); every other member, and the transaction's connection, stays the same.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
     line: "const trustedTx = deriveBackend(tx, {",
     reason:
       "Trusted import runs its bulk path against the caller's transaction with the temporary-write members overridden; the rest of the transaction backend must stay reachable.",

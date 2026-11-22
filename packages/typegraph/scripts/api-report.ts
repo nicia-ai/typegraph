@@ -1267,9 +1267,14 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `ExpressionValue` that collided with the public one was renamed
   // `ProjectedExpressionValue`: −1 at every Store-bearing entrypoint. The
   // names in each fingerprint below are the measured sets after the change.
+  // Transaction commit outcomes: the root entrypoint exports
+  // `TransactionRolledBackError` and `TransactionOutcomeUnknownError` beside
+  // `TransactionConflictError` and, like it, leaves their details types to
+  // `./errors`, so `.` gains exactly `TransactionRolledBackErrorDetails` and
+  // `TransactionOutcomeUnknownErrorDetails` (+2). No other entrypoint changed.
   ".": {
-    count: 1079,
-    sha256: "fb5c85cadafc90b329fc623268601e61a7b0e2356141f6330b47745c5026bee2",
+    count: 1081,
+    sha256: "79be40e108ddc7bc8ea8a7f6703da2843cbf85b3c8e823af4232ab7e1161c83a",
   },
   "./adapters/drizzle/engine": {
     count: 353,

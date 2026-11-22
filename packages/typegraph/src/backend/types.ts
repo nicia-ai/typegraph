@@ -400,6 +400,36 @@ export type BackendCapabilities = Readonly<{
      * never earned.
      */
     unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
+    /**
+     * What tells this backend whether a transaction it opened, whose
+     * callback returned normally, committed. One of:
+     *
+     * - `"commit-reply"`: the database's reply to the closing `COMMIT`
+     *   decides. PostgreSQL answers the `COMMIT` of a transaction a failed
+     *   statement aborted with `ROLLBACK`, whatever caused the abort and
+     *   whether or not the client saw the failure; the backend reads that
+     *   reply (node-postgres, neon-serverless, PGlite) or relies on the
+     *   driver refusing to commit after a failed statement (postgres-js),
+     *   and rejects with `TransactionRolledBackError`. A clean transaction
+     *   adds no statement. Once a raw-SQL port (`tx.sql`, a schema write's
+     *   `executeSchemaDdl`) was handed out, the backend also sets a marker
+     *   that lives exactly as long as the transaction and reads it back
+     *   before `COMMIT`, and never retries the attempt automatically: a
+     *   missing marker or a failure is `TransactionOutcomeUnknownError`.
+     *   Transaction control sent through a raw-SQL port is unsupported. The
+     *   bundled PostgreSQL backends declare this.
+     * - `"statement-scoped"`: a failed statement undoes only itself and
+     *   leaves the transaction usable, and an engine that ends a
+     *   transaction on its own refuses the closing `COMMIT`, so the
+     *   `COMMIT`'s own result is the outcome. The bundled SQLite backends
+     *   declare this.
+     *
+     * Absent: the backend supplies no such evidence. TypeGraph commits
+     * whatever its callback returned on, as it always has, apart from
+     * re-checking the session after a failure it caught itself while
+     * compensating a constraint claim.
+     */
+    commitOutcome?: "commit-reply" | "statement-scoped";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -2236,6 +2266,13 @@ export const INTERNAL_TEMPORARY_WRITES: unique symbol = typeGraphGlobalSymbol(
 );
 
 /**
+ * @internal Capability token: the caller of `transactionWithNative` releases
+ * the native handle itself, on demand (see `native-transaction-release.ts`).
+ */
+export const INTERNAL_DEFERRED_NATIVE_HANDLE: unique symbol =
+  typeGraphGlobalSymbol("internal-deferred-native-handle-v1");
+
+/**
  * Transaction options.
  */
 export type TransactionOptions = Readonly<{
@@ -2258,7 +2295,31 @@ export type InternalTransactionOptions = TransactionOptions &
      * read-only transaction.
      */
     temporaryWrites?: typeof INTERNAL_TEMPORARY_WRITES;
+    /**
+     * The caller of `transactionWithNative` keeps the native handle to
+     * itself and releases it, through `releaseNativeTransaction`, only if and
+     * when it hands the handle on (the Store's `tx.sql` getter). Without this
+     * option the handle counts as released the moment the callback receives
+     * it.
+     */
+    nativeHandle?: typeof INTERNAL_DEFERRED_NATIVE_HANDLE;
   }>;
+
+/**
+ * @internal Options of `schemaWriteTransaction` available only to
+ * TypeGraph-owned execution.
+ */
+export type InternalSchemaWriteTransactionOptions = Readonly<{
+  /**
+   * The callback sends only DDL TypeGraph generated through
+   * `executeSchemaDdl`, so it is handed the transaction backend itself.
+   * Without this option the callback's `executeSchemaDdl` releases control
+   * of the transaction (`releaseNativeTransaction`) before its first
+   * statement, since it forwards whatever SQL text it is given. Only
+   * {@link INTERNAL_DEFERRED_NATIVE_HANDLE} has that effect.
+   */
+  nativeHandle?: symbol;
+}>;
 
 // ============================================================
 // Backend Interface
@@ -3013,6 +3074,13 @@ export type GraphBackend = Readonly<{
           ) => Promise<void>;
         }>,
     ) => Promise<T>,
+    /**
+     * @internal TypeGraph-owned execution only: a callback that sends only
+     * DDL TypeGraph generated passes `{ nativeHandle: <internal token> }`,
+     * and its `executeSchemaDdl` then releases nothing. Without it, the
+     * callback's `executeSchemaDdl` releases control of the transaction.
+     */
+    options?: Readonly<{ nativeHandle?: symbol }>,
   ) => Promise<T>;
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
@@ -5093,6 +5161,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
     unitOfWork: "interactive",
+    commitOutcome: "statement-scoped",
   }),
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   clearValidTo: true,
@@ -5119,6 +5188,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
     unitOfWork: "interactive",
+    commitOutcome: "commit-reply",
   }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   orderedAggregates: true,
