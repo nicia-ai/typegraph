@@ -21,8 +21,13 @@
  *
  * The map is a star through the root: the root loads each subpath that
  * exports a name some covered entrypoint needs, and every other entrypoint
- * loads the root (an adapter's runtime-specific variant loads its adapter
- * instead). `tests/public-type-reachability.test.ts` (contract 3) proves
+ * loads the root, except the adapters' runtime-specific variants
+ * (`/adapters/drizzle/sqlite/local`, `/adapters/drizzle/sqlite/libsql`,
+ * `/adapters/drizzle/postgres/pglite`), which load nothing: the only types
+ * they reference from elsewhere are reached through their adapter's
+ * `SqliteTables` / `PostgresTables`, aliases of `ReturnType<typeof …>` that
+ * declaration emit always spells out, never names. An entrypoint with no
+ * entry here gets no load block. `tests/public-type-reachability.test.ts` (contract 3) proves
  * that, with each entrypoint's own exports, this map names every type the
  * entrypoint's public declarations reference, and that removing any one load
  * leaves some entrypoint unable to name a type it needs. Loads are
@@ -64,11 +69,8 @@ export const DECLARATION_LOADS: Readonly<Record<string, readonly string[]>> = {
   "./sqlite/local": LOADS_ROOT,
   "./postgres/pglite": LOADS_ROOT,
   "./adapters/drizzle/sqlite": LOADS_ROOT,
-  "./adapters/drizzle/sqlite/local": ["./adapters/drizzle/sqlite"],
-  "./adapters/drizzle/sqlite/libsql": ["./adapters/drizzle/sqlite"],
   "./adapters/drizzle/postgres": LOADS_ROOT,
   "./adapters/drizzle/postgres/working-copy": LOADS_ROOT,
-  "./adapters/drizzle/postgres/pglite": ["./adapters/drizzle/postgres"],
   "./adapters/drizzle/indexes": LOADS_ROOT,
 };
 
@@ -77,9 +79,9 @@ export type PackageExports = Readonly<
 >;
 
 /**
- * Where `package.json` says the declarations live. Every `types` path is
- * under it; a build into another directory (`--out-dir`) lays the same
- * relative tree out there.
+ * Where `package.json` says the declarations live: the build's output
+ * directory (`OUT_DIR` in `tsup.config.ts`). Every `types` path is under it,
+ * and each load is written relative to it.
  */
 const MANIFEST_OUT_DIR = "./dist/";
 
@@ -135,7 +137,11 @@ export function declarationLoadBlock(
   return `${[LOAD_BLOCK_MARKER, ...directives].join("\n")}\n`;
 }
 
-/** Whether `source` starts with exactly the block `declarationLoadBlock` builds. */
+/**
+ * Whether `source` carries exactly the loads `declarationLoadBlock` builds:
+ * it starts with the block, and no reference directive follows it. An
+ * entrypoint that loads nothing therefore carries none.
+ */
 export function hasDeclarationLoadBlock(
   source: string,
   exports: PackageExports,
@@ -143,7 +149,11 @@ export function hasDeclarationLoadBlock(
   extension: string,
 ): boolean {
   const block = declarationLoadBlock(exports, exportPath, extension);
-  return block === "" || source.startsWith(block);
+  if (!source.startsWith(block)) return false;
+  const rest = source.slice(block.length);
+  return (
+    !rest.includes(LOAD_BLOCK_MARKER) && !/^\/\/\/ <reference path=/m.test(rest)
+  );
 }
 
 /**

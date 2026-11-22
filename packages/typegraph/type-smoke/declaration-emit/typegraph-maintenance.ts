@@ -16,3 +16,9 @@ export const graphIds = (...args: Parameters<typeof listGraphIds>) =>
 export const repair = (
   ...args: Parameters<typeof repairInvertedValidityWindows>
 ) => repairInvertedValidityWindows(...args);
+
+// Needs a load: `Store` is exported by the root, not by `/maintenance`, so
+// this inferred return type is nameable only through the root the entrypoint
+// loads.
+export const storeOf = (...args: Parameters<typeof inspectGraphStorage>) =>
+  args[0];

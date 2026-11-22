@@ -268,9 +268,10 @@ async function readDeclarationEmitFixtures(
 }
 
 /**
- * Refuses a packed artifact whose entry declarations do not carry the
- * declaration loads `scripts/build.ts` writes: without them a consumer
- * importing one entrypoint cannot name the types it loads from others.
+ * Refuses a packed artifact whose entry declarations do not carry exactly
+ * the declaration loads `scripts/build.ts` writes: without them a consumer
+ * importing one entrypoint cannot name the types it loads from others, and
+ * an entrypoint that loads nothing must carry no load.
  */
 async function assertPackedDeclarationLoads(
   installedPackageDir: string,
@@ -292,7 +293,7 @@ async function assertPackedDeclarationLoads(
   }
   if (missing.length > 0) {
     throw new Error(
-      `Packed declarations lack their declaration loads: ${missing.join(", ")}`,
+      `Packed declarations do not carry exactly their declaration loads: ${missing.join(", ")}`,
     );
   }
 }

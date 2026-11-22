@@ -12,3 +12,12 @@ import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite
 export const openDatabase = async (
   ...args: Parameters<typeof createLibsqlBackend>
 ) => (await createLibsqlBackend(...args)).db;
+
+// Needs no load, and its declarations carry none (the packed-artifact check
+// asserts it): the only types this entrypoint references from elsewhere come
+// through `SqliteTables` from `/adapters/drizzle/sqlite`, an alias of
+// `ReturnType<typeof …>` that declaration emit spells out rather than names,
+// as this inferred return type shows.
+export const tablesOption = (
+  options: NonNullable<Parameters<typeof createLibsqlBackend>[1]>,
+) => options.tables;

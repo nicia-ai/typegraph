@@ -19,3 +19,8 @@ export const importData = (...args: Parameters<typeof importGraph>) =>
   importGraph(...args);
 export const graphDataSchema = GraphDataSchema;
 export const importOptions = ImportOptionsSchema.parse({});
+
+// Needs a load: `Store` is exported by the root, not by `/interchange`, so
+// this inferred return type is nameable only through the root the entrypoint
+// loads.
+export const storeOf = (...args: Parameters<typeof exportGraph>) => args[0];

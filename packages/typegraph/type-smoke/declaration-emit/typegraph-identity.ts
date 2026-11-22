@@ -14,3 +14,8 @@ export const prune = (...args: Parameters<typeof pruneIdentityTransitions>) =>
   pruneIdentityTransitions(...args);
 export const rebuild = (...args: Parameters<typeof rebuildIdentityClosure>) =>
   rebuildIdentityClosure(...args);
+
+// Needs a load: `Store` is exported by the root, not by `/identity`, so this
+// inferred return type is nameable only through the root the entrypoint loads.
+export const storeOf = (...args: Parameters<typeof rebuildIdentityClosure>) =>
+  args[0];

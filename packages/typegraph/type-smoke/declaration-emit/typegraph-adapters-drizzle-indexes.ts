@@ -22,3 +22,10 @@ export const postgresNodeIndexes = (
 export const postgresEdgeIndexes = (
   ...args: Parameters<typeof buildPostgresEdgeIndexBuilders>
 ) => buildPostgresEdgeIndexBuilders(...args);
+
+// Needs a load: `IndexDeclaration` is exported by `/indexes`, not by this
+// entrypoint, so this inferred return type is nameable only through the root
+// the entrypoint loads (which loads `/indexes`).
+export const firstDeclaration = (
+  ...args: Parameters<typeof buildSqliteNodeIndexBuilders>
+) => args[1][0];

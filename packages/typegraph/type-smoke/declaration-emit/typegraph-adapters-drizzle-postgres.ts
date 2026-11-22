@@ -18,3 +18,10 @@ export const customTables = (
 export const ddl = (...args: Parameters<typeof generatePostgresDDL>) =>
   generatePostgresDDL(...args);
 export const defaultTables = tables;
+
+// Needs a load: `IndexDeclaration` is exported by `/indexes`, not by this
+// adapter, so this inferred return type is nameable only through the root the
+// entrypoint loads (which loads `/indexes`).
+export const declaredIndexes = (
+  options: NonNullable<Parameters<typeof createPostgresTables>[1]>,
+) => options.indexes ?? [];

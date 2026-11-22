@@ -7,7 +7,7 @@
  * package's, so the watch sequence below can drive many rebuilds quickly; the
  * functions under test are the ones `scripts/build.ts` calls.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type * as FsPromises from "node:fs/promises";
 import {
   mkdir,
@@ -24,7 +24,9 @@ import type { RollupWatcher, RollupWatcherEvent } from "rollup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DECLARATION_LOADS,
   declarationLoadBlock,
+  hasDeclarationLoadBlock,
   type PackageExports,
 } from "../scripts/declaration-loads";
 import {
@@ -133,6 +135,55 @@ async function entriesMissingLoads(
   }
   return missing;
 }
+
+describe("declaration load check", () => {
+  const manifest = JSON.parse(
+    readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf8"),
+  ) as Readonly<{ exports: PackageExports }>;
+  const reference = '/// <reference path="../../index.d.ts" />\n';
+
+  it("requires an entrypoint that loads nothing to carry no load", () => {
+    for (const exportPath of [
+      "./adapters/drizzle/sqlite/local",
+      "./adapters/drizzle/sqlite/libsql",
+      "./adapters/drizzle/postgres/pglite",
+    ]) {
+      expect(DECLARATION_LOADS[exportPath]).toBeUndefined();
+      for (const extension of [".d.ts", ".d.cts"]) {
+        expect(
+          hasDeclarationLoadBlock(
+            "export {};\n",
+            manifest.exports,
+            exportPath,
+            extension,
+          ),
+        ).toBe(true);
+        expect(
+          hasDeclarationLoadBlock(
+            `${reference}export {};\n`,
+            manifest.exports,
+            exportPath,
+            extension,
+          ),
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("requires an entrypoint that loads others to carry exactly its block", () => {
+    const block = declarationLoadBlock(manifest.exports, "./store", ".d.ts");
+    expect(block).not.toBe("");
+    for (const [source, expected] of [
+      [`${block}export {};\n`, true],
+      ["export {};\n", false],
+      [`${block}${reference}export {};\n`, false],
+    ] as const) {
+      expect(
+        hasDeclarationLoadBlock(source, manifest.exports, "./store", ".d.ts"),
+      ).toBe(expected);
+    }
+  });
+});
 
 describe("declaration build", () => {
   it("cleans only declaration files inside the output directory", async () => {

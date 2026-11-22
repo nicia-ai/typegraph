@@ -459,19 +459,66 @@ function typeQueryNeedsName(report: ParsedReport, name: string): boolean {
   });
 }
 
-type Reference = Readonly<{ name: string; viaTypeQuery: boolean }>;
+/**
+ * A name a declaration references. `viaTypeQuery` marks a reference that is
+ * only a `typeof` query; `returnOnly` marks one that is only
+ * `ReturnType<typeof name>`, which exposes `name`'s return type and nothing
+ * else of its signature (declaration emit spells the resolved return type,
+ * never the query or the parameters).
+ */
+/**
+ * Whether `name` is a type alias for `ReturnType<typeof f>`. Declaration emit
+ * never writes such an alias's name: the alias resolves to `f`'s return type
+ * itself, which carries no alias, so emit spells that type out wherever the
+ * alias is used. What the return type references still surfaces.
+ */
+function isReturnTypeAlias(report: ParsedReport, name: string): boolean {
+  const statements = report.declarations.get(name) ?? [];
+  return (
+    statements.length > 0 &&
+    statements.every(
+      (statement) =>
+        ts.isTypeAliasDeclaration(statement) &&
+        statement.typeParameters === undefined &&
+        returnTypeQueryName(statement.type) !== undefined,
+    )
+  );
+}
+
+type Reference = Readonly<{
+  name: string;
+  viaTypeQuery: boolean;
+  returnOnly: boolean;
+}>;
+
+/** `ReturnType<typeof name>`'s `name`, or `undefined` for any other node. */
+function returnTypeQueryName(node: ts.Node): string | undefined {
+  if (
+    !ts.isTypeReferenceNode(node) ||
+    !ts.isIdentifier(node.typeName) ||
+    node.typeName.text !== "ReturnType" ||
+    node.typeArguments?.length !== 1
+  ) {
+    return undefined;
+  }
+  const [argument] = node.typeArguments;
+  return argument !== undefined && ts.isTypeQueryNode(argument) ?
+      leftmostIdentifier(argument.exprName)
+    : undefined;
+}
 
 /**
- * The local names a declaration's consumer-visible shape references, each
- * marked when the reference is only a `typeof` query. Skips what
- * `referencedNames` skips.
+ * The local names a node's consumer-visible shape references, each marked
+ * when the reference is only a `typeof` query or only
+ * `ReturnType<typeof …>`. Skips what `referencedNames` skips.
  */
 function referencesOf(
-  statement: ts.Statement,
+  statement: ts.Node,
   source: string,
   exportedAnywhere: ReadonlySet<string>,
 ): readonly Reference[] {
   const references = new Map<string, boolean>();
+  const returnOnly = new Set<string>();
   function record(name: string, viaTypeQuery: boolean): void {
     references.set(name, (references.get(name) ?? true) && viaTypeQuery);
   }
@@ -481,6 +528,11 @@ function referencesOf(
       (isInternal(node, source) ||
         hasUnexportedSymbolKey(node, exportedAnywhere))
     ) {
+      return;
+    }
+    const returnOf = returnTypeQueryName(node);
+    if (returnOf !== undefined) {
+      returnOnly.add(returnOf);
       return;
     }
     if (ts.isTypeReferenceNode(node))
@@ -498,10 +550,31 @@ function referencesOf(
     });
   }
   visit(statement);
-  return [...references].map(([name, viaTypeQuery]) => ({
-    name,
-    viaTypeQuery,
-  }));
+  return [
+    ...[...references].map(([name, viaTypeQuery]) => ({
+      name,
+      viaTypeQuery,
+      returnOnly: false,
+    })),
+    ...[...returnOnly]
+      .filter((name) => !references.has(name))
+      .map((name) => ({ name, viaTypeQuery: true, returnOnly: true })),
+  ];
+}
+
+/**
+ * The parts of `statement` the walk descends into: the whole declaration, or
+ * for a function reached only through `ReturnType<typeof …>`, its return
+ * type alone.
+ */
+function walkedNodes(
+  statement: ts.Statement,
+  returnOnly: boolean,
+): readonly ts.Node[] {
+  if (!returnOnly) return [statement];
+  return ts.isFunctionDeclaration(statement) && statement.type !== undefined ?
+      [statement.type]
+    : [statement];
 }
 
 type Unnameable = Readonly<{
@@ -542,16 +615,23 @@ function namesNeededFromElsewhere(
   const report = reportFor(entrypoint);
   const needed = new Map<string, string>();
   const visited = new Set<string>();
-  const pending = [...report.exported];
-  for (let name = pending.pop(); name !== undefined; name = pending.pop()) {
-    if (visited.has(name) || OPAQUE_BACKEND_HANDLES.has(name)) continue;
-    visited.add(name);
+  const pending: { name: string; returnOnly: boolean }[] = [
+    ...report.exported,
+  ].map((name) => ({ name, returnOnly: false }));
+  for (let item = pending.pop(); item !== undefined; item = pending.pop()) {
+    const { name, returnOnly } = item;
+    const key = `${returnOnly ? "return:" : ""}${name}`;
+    if (visited.has(key) || OPAQUE_BACKEND_HANDLES.has(name)) continue;
+    visited.add(key);
     const statements = (report.declarations.get(name) ?? []).filter(
       (statement) => !isInternal(statement, report.source),
     );
-    for (const statement of statements) {
+    const nodes = statements.flatMap((statement) =>
+      walkedNodes(statement, returnOnly),
+    );
+    for (const node of nodes) {
       for (const reference of referencesOf(
-        statement,
+        node,
         report.source,
         EXPORTED_ANYWHERE,
       )) {
@@ -567,7 +647,10 @@ function namesNeededFromElsewhere(
           continue;
         }
         const needsName =
-          !reference.viaTypeQuery || typeQueryNeedsName(report, reference.name);
+          !reference.returnOnly &&
+          !isReturnTypeAlias(report, reference.name) &&
+          (!reference.viaTypeQuery ||
+            typeQueryNeedsName(report, reference.name));
         if (
           needsName &&
           !report.exported.has(reference.name) &&
@@ -575,7 +658,10 @@ function namesNeededFromElsewhere(
         ) {
           needed.set(reference.name, name);
         }
-        pending.push(reference.name);
+        pending.push({
+          name: reference.name,
+          returnOnly: reference.returnOnly,
+        });
       }
     }
   }

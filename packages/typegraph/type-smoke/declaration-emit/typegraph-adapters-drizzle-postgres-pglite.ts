@@ -15,3 +15,12 @@ export const openDatabase = async (
   const { client, db } = await createLocalPgliteBackend(...args);
   return { client, db };
 };
+
+// Needs no load, and its declarations carry none (the packed-artifact check
+// asserts it): the only types this entrypoint references from elsewhere come
+// through `PostgresTables` from `/adapters/drizzle/postgres`, an alias of
+// `ReturnType<typeof …>` that declaration emit spells out rather than names,
+// as this inferred return type shows.
+export const tablesOption = (
+  options: NonNullable<Parameters<typeof createLocalPgliteBackend>[0]>,
+) => options.tables;
