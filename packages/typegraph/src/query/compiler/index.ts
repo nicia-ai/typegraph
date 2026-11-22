@@ -85,6 +85,7 @@ import {
   aliasCteName,
   lateMaterializedPhysicalAlias,
 } from "./alias-names";
+import { assertAliasPredicatesReadOnlyTheirTarget } from "./alias-predicate-scope";
 import {
   readAliasColumn,
   readColumn,
@@ -341,6 +342,10 @@ export function compileQueryWithSqlNames(
   graphId: string,
   options: CompileQueryOptions | SqlDialect,
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
+  // Every compile enters here; the check covers the subqueries nested in the
+  // statement while their aliases are still the caller's, before
+  // `compileExpressionSubquery` renames them.
+  assertAliasPredicatesReadOnlyTheirTarget(ast);
   return compileQueryInExpressionContext(ast, graphId, options, {
     aliasScopes: new Map(),
     depth: 0,
@@ -355,6 +360,8 @@ function compileQueryInExpressionContext(
     aliasScopes: ReadonlyMap<symbol, ExpressionAliasScope>;
     depth: number;
     recursiveResultAliases?: ReadonlyMap<symbol, string>;
+    /** The caller's name of each alias renamed for this subquery. */
+    callerAliases?: ReadonlyMap<string, string>;
   }>,
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
@@ -418,6 +425,8 @@ function compileQueryInExpressionContext(
     schema,
     annIndexTypes,
     readInstant: options_.readInstant ?? "literal",
+    callerAlias: (alias) =>
+      expressionContext.callerAliases?.get(alias) ?? alias,
     ...(options_.recordedReadBinding === undefined ?
       {}
     : { recordedReadBinding: options_.recordedReadBinding }),
@@ -452,6 +461,7 @@ function compileQueryInExpressionContext(
           aliasScopes: scopes,
           depth,
           recursiveResultAliases,
+          callerAliases: namespaced.callerAliases,
         },
       ).compiled;
     },
