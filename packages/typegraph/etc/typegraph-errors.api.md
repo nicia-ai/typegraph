@@ -1422,6 +1422,12 @@ type SerializedUniqueConstraint = Readonly<{
 }>;
 
 // @public
+export const SQL_IDENTIFIER_COLLISION_CODE = "SQL_IDENTIFIER_COLLISION";
+
+// @public
+export const SQL_IDENTIFIER_TOO_LONG_CODE = "SQL_IDENTIFIER_TOO_LONG";
+
+// @public
 export class StaleVersionError extends TypeGraphError {
     constructor(details: StaleVersionErrorDetails, options?: {
         cause?: unknown;

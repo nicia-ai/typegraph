@@ -259,6 +259,114 @@ This is about identity, not values. A conflict on a declared `unique` constraint
 raises `UniquenessError` instead, and a violated `unique: true` index declaration
 surfaces as the engine's own failure — neither is reshaped into this error.
 
+#### `SQL_IDENTIFIER_COLLISION` and `SQL_IDENTIFIER_TOO_LONG`
+
+A query compiles each alias into SQL names: a WITH relation `cte_<alias>`, columns
+`<alias>_<column>`, and result columns named after the alias and field you select.
+PostgreSQL clips every name to its first 63 bytes, and both engines compare relation,
+column and output-key names without regard to letter case wherever SQL refers to
+them. When two different values of one statement would end up with the same name
+under those rules, or a result column the library reads back by name would be longer
+than 63 bytes, the statement fails on one engine (an error such as `column reference
+is ambiguous`) or returns another value's data on the other. Such a statement is
+refused instead, on every backend, with a `ValidationError` raised before any SQL is
+sent.
+
+- `SQL_IDENTIFIER_COLLISION`: two values share a name. Examples: node aliases `item`
+  and `Item`; two 60-character aliases that share their first 59 characters; an edge
+  alias `e` beside a node alias `e_from` when the statement reads the edge's `from_id`
+  and the node's `id` (both are `e_from_id`), whether in the selection or in a
+  `having()` comparison on either side; selecting a property `edge_id` of alias `p`
+  together with the id of alias `p_edge`; `aggregate()` or `project()` keys that
+  differ only by letter case, such as `total` and `Total`.
+- `SQL_IDENTIFIER_TOO_LONG`: a result column read back by name would exceed 63
+  bytes. Examples: reading `id` under a 61-character alias (`<alias>_id` is 64
+  bytes), or an `aggregate()` key longer than 63 bytes; bytes are counted, so 32
+  two-byte characters are too long.
+
+Each issue's `path` names the SQL scope (`the WITH list`, `the columns of cte_<alias>`,
+`the result columns`, or `aggregate() keys` / `project() keys`) and its message names
+both generated names and the value each stands for. Fix the query by renaming: use
+aliases that differ in more than letter case and early in the name, keep aliases short
+enough that `<alias>_<field>` fits in 63 bytes, or pick a different key.
+
+`aggregate()` and `project()` refuse two keys that are equal ignoring letter case, such
+as `total` and `Total`, when the keys are declared: the call to `aggregate()` or
+`project()` itself throws, so every terminal of the query is refused alike. SQLite
+compares result names without regard to case wherever SQL refers to them, so such
+keys return the wrong value through some terminals on SQLite (`orderBy("Total")`,
+`first()`, `store.batchOnce()`) and the right one through others. Refusing the builder
+gives one rule instead of a per-terminal one; it also refuses queries such as
+`.orderBy("total")` or `count()` that happened to work. This is a restriction: rename
+one of the keys.
+
+```typescript
+import { SQL_IDENTIFIER_COLLISION_CODE } from "@nicia-ai/typegraph/errors";
+import { ValidationError } from "@nicia-ai/typegraph";
+
+try {
+  await store
+    .query()
+    .from("Person", "item")
+    .traverse("knows", "e")
+    .to("Person", "Item")
+    .select((ctx) => ({ from: ctx.item.id, to: ctx.Item.id }))
+    .execute();
+} catch (error) {
+  if (
+    error instanceof ValidationError &&
+    error.details.issues.some((issue) => issue.code === SQL_IDENTIFIER_COLLISION_CODE)
+  ) {
+    // Rename one alias, for example "item" and "related".
+  }
+}
+```
+
+The decision does not depend on the backend, so a statement is accepted or refused
+the same way everywhere. Every entry point checks the statement it actually sends or
+hands out, so no entry point returns or runs SQL that would be refused:
+
+- `execute()` checks the statement it sends. When the selector reads only plain
+  fields, that is a statement that selects just those fields; if `execute()` falls
+  back to the full statement, the full statement is checked before it is sent.
+- `compile()` and `toSQL()` check the SQL they return, which always selects every
+  column of every alias.
+- `prepare()` checks every statement the prepared query can run.
+
+The verdicts can therefore differ for one query. Node `k` beside edge `K` selecting
+only ids executes and returns the right rows, but its `compile()`, `toSQL()` and
+`prepare()` are refused: the SQL they would hand out reads both `k_id` and `K_id`,
+which SQLite resolves to the node's id and PostgreSQL rejects as ambiguous.
+
+Two names that meet are not refused when the statement never refers to that name in
+the relation that holds both: `.project((ctx) => ({ name: ctx.e_from.name }))` and
+`.aggregate({ age: max("e_from", "age") })` beside an edge `e` read neither
+`e_from_id` and work. Which names a statement refers to is taken from the statement
+itself: the function that writes each column reference into the SQL also records it,
+so the check and the SQL cannot disagree about what is read. A name the statement
+writes without its relation (as `having()` does) is resolved in every relation the
+statement reads from, and refused when more than one of them has a column by that
+name, which both engines reject as ambiguous. Where a statement is embedded in SQL
+that refers to its result columns by name (relations, checked reads, `batchOnce()`,
+set operations), result names that differ only by letter case are refused too; for a
+`select()` they come from aliases, such as node `k` beside edge `K`.
+
+The check covers every terminal of queries built with `from()`, `traverse()`,
+`select()`, `project()` and `aggregate()`: `execute()`, `first()`, `count()`,
+`exists()`, `executeOn()`, `executeChecked()`, `compile()`, `toSQL()`, `prepare()`,
+`paginate()`, `stream()` and `page()`, the terminals `project()` and `aggregate()`
+queries run through `asRelation()`, `store.batch()`, `store.batchOnce()`,
+`withCheckedReads()`, the operands of `union()`, `intersect()` and `except()`, and
+`updateWhere()` candidate queries. A prepared query checks the statement its
+executions send, including inside `withCheckedReads()`. `store.batch()` checks the
+first statement of every item before it runs any of them, so a refused item leaves
+no statement sent; `store.batchOnce()` sends one statement, compiled and checked
+before it is sent. One exception remains: when a `select()` selector reads a field the
+optimized statement did not extract, `execute()` falls back to the full statement
+after the optimized one has run, and that full statement is checked only then.
+Recursive traversals, subqueries, and the names a relation or set operation adds
+around its operands are not checked yet.
+
 ### `DisjointError`
 
 Thrown when attempting to create a node that violates a disjointness constraint.

@@ -15,6 +15,7 @@ export {
 } from "./set-operations";
 export {
   emitStandardQuerySql,
+  type StandardFromClause,
   type StandardQueryEmitterInput,
 } from "./standard";
 export {
@@ -36,8 +37,8 @@ export {
   buildStandardStartCte,
   buildStandardTraversalCte,
   buildStandardVectorOrderBy,
+  describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
-  lateMaterializedPhysicalAlias,
   lateMaterializedProjectedNodeAliases,
   type StandardEmitterPredicateIndex,
 } from "./standard-builders";

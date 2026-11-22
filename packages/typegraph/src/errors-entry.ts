@@ -113,6 +113,8 @@ export {
   SchemaMismatchError,
   type SchemaMismatchErrorDetails,
   type SchemaTighteningRefusalDetails,
+  SQL_IDENTIFIER_COLLISION_CODE,
+  SQL_IDENTIFIER_TOO_LONG_CODE,
   StaleVersionError,
   type StaleVersionErrorDetails,
   StoreNotInitializedError,
