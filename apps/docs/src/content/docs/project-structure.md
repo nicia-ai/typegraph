@@ -392,13 +392,18 @@ under `declaration: true`. Each entrypoint's declarations load the public
 subpaths that export the types they name, through `/// <reference path>`
 lines at the top of each entry `.d.ts`, so TypeScript writes those types as
 `import("@nicia-ai/typegraph/query").…` and so on, never as a path into
-`dist`. This holds under `moduleResolution` `bundler` and `node16`, with
-`skipLibCheck` on or off, and for a library whose bundler (tsup or another
+`dist`. This holds for ESM consumers under `moduleResolution` `bundler` and
+`node16`, with `skipLibCheck` on or off, and for a library whose bundler (tsup or another
 rollup-plugin-dts setup) rolls its declarations while keeping TypeGraph as an
 external import. It does not hold under the legacy `moduleResolution: "node10"`
 (`"node"`), which ignores the package's `exports`: there TypeScript names these
 types through a deep path into a content-hashed `dist` file, which breaks on
-the next release, so use `bundler`, `node16` or `nodenext`.
+the next release, so use `bundler`, `node16` or `nodenext`. A CommonJS module
+(a `.cts` file, or a `.ts` file in a package without `"type": "module"`)
+compiled under `node16` or `nodenext` is not covered: TypeScript resolves the
+ESM declarations for its `require` and reports TS1479, a gap that predates
+these loads and is tracked in
+[issue #966](https://github.com/nicia-ai/typegraph/issues/966).
 
 The exception is a public signature whose type names a backend-authoring
 contract, which only `@nicia-ai/typegraph/backend` exports and semver does not
