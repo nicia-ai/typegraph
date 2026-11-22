@@ -12,155 +12,127 @@
  * such types. Rather than re-export every one from every entrypoint that
  * names it, each type is exported once, from the subpath that owns its
  * concept (`/store`, `/query`, `/core`, ...), and an entrypoint whose
- * declarations name it LOADS that subpath's declarations: the build writes a
- * `/// <reference path>` directive to the subpath's `.d.ts` at the top of the
- * entrypoint's emitted `.d.ts`. The directive brings the subpath into the
- * consumer's program without a runtime import, and TypeScript then names the
- * type through the subpath's public specifier.
+ * declarations name it LOADS that subpath's declarations: the declaration
+ * rollup (`scripts/declaration-rollup.ts`) writes a `/// <reference path>`
+ * directive to the subpath's `.d.ts` at the top of the entrypoint's `.d.ts`
+ * while it generates the bundle, before anything is written. The directive
+ * brings the subpath into the consumer's program without a runtime import,
+ * and TypeScript then names the type through the subpath's public specifier.
  *
- * `tests/public-type-reachability.test.ts` (contract 3) proves this map, with
- * each entrypoint's own exports, names every type the entrypoint's public
- * declarations reference, and that every listed load supplies at least one of
- * them. Loads are transitive: an entrypoint's program also holds whatever the
- * entrypoints it loads load in turn.
+ * The map is a star through the root: the root loads each subpath that
+ * exports a name some covered entrypoint needs, and every other entrypoint
+ * loads the root (an adapter's runtime-specific variant loads its adapter
+ * instead). `tests/public-type-reachability.test.ts` (contract 3) proves
+ * that, with each entrypoint's own exports, this map names every type the
+ * entrypoint's public declarations reference, and that removing any one load
+ * leaves some entrypoint unable to name a type it needs. Loads are
+ * transitive: an entrypoint's program also holds whatever the entrypoints it
+ * loads load in turn.
  */
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-/** The subpaths that mirror the root's Store surface load the root. */
+import type { NormalizedOutputOptions, OutputBundle, Plugin } from "rollup";
+
 const LOADS_ROOT = ["."] as const;
 
 export const DECLARATION_LOADS: Readonly<Record<string, readonly string[]>> = {
   ".": [
     "./store",
     "./query",
+    "./errors",
+    "./identity",
     "./core",
     "./schema",
-    "./identity",
-    "./graph-extension",
-    "./errors",
     "./indexes",
+    "./graph-extension",
+    "./graph-merge",
+    "./profiler",
   ],
   "./store": LOADS_ROOT,
   "./query": LOADS_ROOT,
   "./errors": LOADS_ROOT,
   "./identity": LOADS_ROOT,
   "./maintenance": LOADS_ROOT,
+  "./core": LOADS_ROOT,
   "./schema": LOADS_ROOT,
+  "./indexes": LOADS_ROOT,
+  "./graph-extension": LOADS_ROOT,
   "./graph-merge": LOADS_ROOT,
   "./interchange": LOADS_ROOT,
   "./profiler": LOADS_ROOT,
   "./provenance": LOADS_ROOT,
   "./sqlite/local": LOADS_ROOT,
   "./postgres/pglite": LOADS_ROOT,
-  "./core": ["./graph-extension", "./indexes", "./query"],
-  "./indexes": ["./core", "./query", "./profiler"],
-  "./graph-extension": ["./core", "./errors", "./schema", "./graph-merge"],
-  "./adapters/drizzle/sqlite": ["./core", "./indexes", "./query"],
+  "./adapters/drizzle/sqlite": LOADS_ROOT,
   "./adapters/drizzle/sqlite/local": ["./adapters/drizzle/sqlite"],
   "./adapters/drizzle/sqlite/libsql": ["./adapters/drizzle/sqlite"],
-  "./adapters/drizzle/postgres": ["./core", "./indexes", "./query"],
-  "./adapters/drizzle/postgres/working-copy": [".", "./graph-merge"],
+  "./adapters/drizzle/postgres": LOADS_ROOT,
+  "./adapters/drizzle/postgres/working-copy": LOADS_ROOT,
   "./adapters/drizzle/postgres/pglite": ["./adapters/drizzle/postgres"],
-  "./adapters/drizzle/indexes": ["./core", "./indexes", "./query"],
+  "./adapters/drizzle/indexes": LOADS_ROOT,
 };
 
-type PackageExports = Readonly<
+export type PackageExports = Readonly<
   Record<string, Readonly<{ types: string }> | undefined>
 >;
 
-/** The first line of the block the build writes; marks it for replacement. */
+/**
+ * Where `package.json` says the declarations live. Every `types` path is
+ * under it; a build into another directory (`--out-dir`) lays the same
+ * relative tree out there.
+ */
+const MANIFEST_OUT_DIR = "./dist/";
+
+/** The first line of the block the rollup writes. */
 const LOAD_BLOCK_MARKER =
   "// Declaration loads (scripts/declaration-loads.ts): name the types this entrypoint's declarations reference through the entrypoints that export them.";
 
-const REFERENCE_DIRECTIVE_PATTERN = /^\/\/\/ <reference path="[^"]*" \/>$/;
-
-/** The two declaration flavours the rollup writes for every entry. */
-const DECLARATION_EXTENSIONS = [".d.ts", ".d.cts"] as const;
-
-function typesFileOf(exports: PackageExports, exportPath: string): string {
+/**
+ * `exportPath`'s declaration file with `extension`, relative to the output
+ * directory: `./store` → `store-entry.d.ts` (or `store-entry.d.cts`).
+ */
+function declarationFileOf(
+  exports: PackageExports,
+  exportPath: string,
+  extension: string,
+): string {
   const types = exports[exportPath]?.types;
   if (types === undefined) {
     throw new Error(
       `scripts/declaration-loads.ts names ${exportPath}, which package.json exports without a "types" file.`,
     );
   }
-  return types;
-}
-
-function withExtension(typesFile: string, extension: string): string {
-  if (!typesFile.endsWith(".d.ts")) {
-    throw new Error(`Entry declarations ${typesFile} do not end with .d.ts.`);
+  if (!types.startsWith(MANIFEST_OUT_DIR) || !types.endsWith(".d.ts")) {
+    throw new Error(
+      `package.json exports ${exportPath} with types ${types}, which is not a ${MANIFEST_OUT_DIR}….d.ts file.`,
+    );
   }
-  return `${typesFile.slice(0, -".d.ts".length)}${extension}`;
+  return `${types.slice(MANIFEST_OUT_DIR.length, -".d.ts".length)}${extension}`;
 }
 
 /**
  * The block written at the top of `exportPath`'s declaration file with the
  * given extension: the marker, then one reference per loaded entrypoint, each
  * relative to the declaration file and pointing at the loaded entrypoint's
- * declaration file of the same extension.
+ * declaration file of the same extension. Empty for an entrypoint that loads
+ * nothing.
  */
 export function declarationLoadBlock(
   exports: PackageExports,
   exportPath: string,
   extension: string,
+  loads: Readonly<Record<string, readonly string[]>> = DECLARATION_LOADS,
 ): string {
-  const loads = DECLARATION_LOADS[exportPath] ?? [];
-  if (loads.length === 0) return "";
+  const loaded = loads[exportPath] ?? [];
+  if (loaded.length === 0) return "";
   const from = path.posix.dirname(
-    withExtension(typesFileOf(exports, exportPath), extension),
+    declarationFileOf(exports, exportPath, extension),
   );
-  const directives = loads.map((loaded) => {
-    const target = withExtension(typesFileOf(exports, loaded), extension);
-    return `/// <reference path="${path.posix.relative(from, target)}" />`;
+  const directives = loaded.map((target) => {
+    const targetFile = declarationFileOf(exports, target, extension);
+    return `/// <reference path="${path.posix.relative(from, targetFile)}" />`;
   });
   return `${[LOAD_BLOCK_MARKER, ...directives].join("\n")}\n`;
-}
-
-/** A declaration file's text without a block an earlier write left. */
-function withoutLoadBlock(source: string): string {
-  const lines = source.split("\n");
-  if (lines[0] !== LOAD_BLOCK_MARKER) return source;
-  let end = 1;
-  while (REFERENCE_DIRECTIVE_PATTERN.test(lines[end] ?? "")) end += 1;
-  return lines.slice(end).join("\n");
-}
-
-/**
- * Writes each entrypoint's load block into its emitted declaration files,
- * replacing any block a previous run wrote. Refuses a load whose target
- * declaration file does not exist: a dangling reference fails every
- * consumer's compilation, `skipLibCheck` or not.
- */
-export async function writeDeclarationLoads(
-  packageRoot: string,
-  exports: PackageExports,
-): Promise<void> {
-  for (const exportPath of Object.keys(DECLARATION_LOADS)) {
-    for (const extension of DECLARATION_EXTENSIONS) {
-      const file = path.join(
-        packageRoot,
-        withExtension(typesFileOf(exports, exportPath), extension),
-      );
-      const block = declarationLoadBlock(exports, exportPath, extension);
-      for (const loaded of DECLARATION_LOADS[exportPath] ?? []) {
-        const target = path.join(
-          packageRoot,
-          withExtension(typesFileOf(exports, loaded), extension),
-        );
-        if (!existsSync(target)) {
-          throw new Error(
-            `${path.relative(packageRoot, file)} loads ${loaded}, whose declarations ${path.relative(packageRoot, target)} were not emitted.`,
-          );
-        }
-      }
-      const source = await readFile(file, "utf8");
-      const next = `${block}${withoutLoadBlock(source)}`;
-      if (next !== source) await writeFile(file, next, "utf8");
-    }
-  }
 }
 
 /** Whether `source` starts with exactly the block `declarationLoadBlock` builds. */
@@ -172,4 +144,56 @@ export function hasDeclarationLoadBlock(
 ): boolean {
   const block = declarationLoadBlock(exports, exportPath, extension);
   return block === "" || source.startsWith(block);
+}
+
+/**
+ * Writes each entrypoint's load block into its entry chunk while rollup
+ * generates the bundle, so the declaration files are written with their
+ * loads already in place: no pass after the write, and nothing for a later
+ * rebuild or clean to race. Fails the build (a watch session reports the
+ * error and keeps watching) when an entrypoint the map names, or one it
+ * loads, is not an entry chunk of this output: a dangling reference fails
+ * every consumer's compilation, `skipLibCheck` or not.
+ */
+export function declarationLoadsPlugin(
+  options: Readonly<{
+    exports: PackageExports;
+    extension: string;
+    loads?: Readonly<Record<string, readonly string[]>>;
+  }>,
+): Plugin {
+  const loads = options.loads ?? DECLARATION_LOADS;
+  return {
+    name: "typegraph:declaration-loads",
+    generateBundle(
+      _outputOptions: NormalizedOutputOptions,
+      bundle: OutputBundle,
+    ) {
+      const entryChunk = (exportPath: string) => {
+        const fileName = declarationFileOf(
+          options.exports,
+          exportPath,
+          options.extension,
+        );
+        const output = bundle[fileName];
+        if (output?.type !== "chunk" || !output.isEntry) {
+          this.error(
+            `Declaration loads name ${exportPath}, but this declaration build has no entry ${fileName}.`,
+          );
+        }
+        return output;
+      };
+      for (const exportPath of Object.keys(loads)) {
+        const chunk = entryChunk(exportPath);
+        for (const loaded of loads[exportPath] ?? []) entryChunk(loaded);
+        const block = declarationLoadBlock(
+          options.exports,
+          exportPath,
+          options.extension,
+          loads,
+        );
+        chunk.code = `${block}${chunk.code}`;
+      }
+    },
+  };
 }

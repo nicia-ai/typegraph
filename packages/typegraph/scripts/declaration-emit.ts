@@ -2,7 +2,8 @@
  * The declaration-pipeline facts `scripts/build.ts` runs on.
  *
  * The package's declarations are emitted ONCE by `tsc` into the directory
- * `tsup.config.ts` names, and tsup's declaration rollup then bundles the
+ * `tsup.config.ts` names, and the declaration rollup
+ * (`scripts/declaration-rollup.ts`) then bundles the
  * per-entrypoint `.d.ts` out of that emit instead of re-deriving declarations
  * from source inside the rollup graph. Rolling from source made
  * rollup-plugin-dts build a live TypeScript program and call `program.emit()`
@@ -16,7 +17,7 @@
  * emit the rollup used to drive.
  *
  * The emit directory and the entry mapping belong to `tsup.config.ts`, which
- * the rollup reads directly; this module resolves them against the package root
+ * the declaration rollup reads directly; this module resolves them against the package root
  * and adds the facts only the pipeline needs.
  */
 import path from "node:path";
@@ -41,7 +42,7 @@ export const DECLARATION_EMIT_DIR = path.resolve(
 /**
  * Every declaration file the rollup takes as an entry, resolved for
  * file-system use. A watch session waits for exactly these before starting
- * tsup, so the files it waits on are the files the rollup will open.
+ * the declaration rollup, so the files it waits on are the files the rollup will open.
  */
 export const DECLARATION_ENTRY_FILES: readonly string[] = Object.values(
   DECLARATION_ENTRY,

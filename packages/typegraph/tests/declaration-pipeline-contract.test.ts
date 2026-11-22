@@ -1,8 +1,9 @@
 /**
  * Pins the two-stage declaration pipeline: `tsc` emits declarations once into
- * `scripts/declaration-emit.ts`'s directory, and tsup's rollup bundles each
- * entrypoint's `.d.ts` out of THAT emit rather than deriving declarations from
- * source inside the rollup graph.
+ * `scripts/declaration-emit.ts`'s directory, and the declaration rollup
+ * (`scripts/declaration-rollup.ts`) bundles each entrypoint's `.d.ts` out of
+ * THAT emit rather than deriving declarations from source inside the rollup
+ * graph. tsup builds the JavaScript only.
  *
  * The distinction is all but invisible in the published artifacts — the routes
  * differ only in the member order of two inferred enum literals on the
@@ -24,7 +25,10 @@ import {
   DECLARATION_TSCONFIG,
   PACKAGE_ROOT,
 } from "../scripts/declaration-emit";
-import tsupConfig, { declarationEntryFor } from "../tsup.config";
+import tsupConfig, {
+  DECLARATION_ENTRY,
+  declarationEntryFor,
+} from "../tsup.config";
 
 type EntryMap = Readonly<Record<string, string>>;
 
@@ -42,21 +46,22 @@ function readEntryMaps(): Readonly<{
   const config = tsupConfig as Readonly<{
     entry?: unknown;
     dts?: unknown;
+    clean?: unknown;
   }>;
   const entry = config.entry;
-  const dts = config.dts;
 
   expect(typeof entry).toBe("object");
-  // `dts: true` is the regression this file exists to catch: it re-roots the
-  // rollup at `src`, which is what cost ~10 GiB.
-  expect(typeof dts).toBe("object");
-
-  const declarationEntry = (dts as Readonly<{ entry?: unknown }>).entry;
-  expect(typeof declarationEntry).toBe("object");
+  // tsup must not build declarations: `dts: true` re-roots its rollup at
+  // `src` (~10 GiB), and any tsup declaration build would race the
+  // declaration rollup that writes each entry's loads.
+  expect(config.dts).toBe(false);
+  // tsup re-cleans its output directory on every watch rebuild; the clean must
+  // spare the declaration files the declaration rollup owns.
+  expect(config.clean).toEqual(["!**/*.d.{ts,cts,mts}"]);
 
   return {
     entry: entry as EntryMap,
-    declarationEntry: declarationEntry as EntryMap,
+    declarationEntry: DECLARATION_ENTRY,
   };
 }
 
@@ -81,7 +86,7 @@ describe("declaration pipeline", () => {
   });
 
   it("waits on exactly the declaration files the rollup opens", () => {
-    // A watch session starts tsup once these files exist. Waiting on a
+    // A watch session starts the rollups once these files exist. Waiting on a
     // narrower list would start the rollup before its inputs are all there;
     // waiting on a wider one would hang a session forever.
     const { declarationEntry } = readEntryMaps();
@@ -155,5 +160,7 @@ describe("declaration pipeline", () => {
 
     const pipeline = readFileSync(BUILD_PIPELINE_PATH, "utf8");
     expect(pipeline).toContain("DECLARATION_TSCONFIG");
+    expect(pipeline).toContain("buildDeclarations");
+    expect(pipeline).toContain("watchDeclarations");
   });
 });
