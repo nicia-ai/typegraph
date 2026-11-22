@@ -1381,20 +1381,35 @@ export function objectField<
  * Creates an EXISTS subquery predicate.
  * Returns true if the subquery returns at least one row.
  *
+ * The subquery is uncorrelated: it is evaluated independently of the outer
+ * row, and its alias predicates can read only their own alias. Correlate a
+ * subquery with the outer row through the expression context's `$exists()`.
+ *
  * @param subquery - The subquery AST to check for existence
  *
  * @example
  * ```typescript
- * // Find persons who have at least one order
+ * // Find persons, provided at least one order exists
  * query
  *   .from("Person", "p")
  *   .whereNode("p", () =>
  *     exists(
  *       query.from("Order", "o")
- *         .whereNode("o", (o) => o.customerId.eq(field("p.id")))
  *         .select((ctx) => ({ id: ctx.o.id }))
  *         .toAst()
  *     )
+ *   )
+ *
+ * // Find persons who have at least one order
+ * query
+ *   .from("Person", "p")
+ *   .where((ctx) =>
+ *     ctx.$exists((subquery, outer) =>
+ *       subquery
+ *         .from("Order", "o")
+ *         .whereNode("o", (_o, inner) => expr.eq(inner.o.customerId, outer.p.id))
+ *         .project((inner) => ({ id: inner.o.id })),
+ *     ),
  *   )
  * ```
  */

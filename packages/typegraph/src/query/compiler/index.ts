@@ -84,6 +84,7 @@ import {
   aliasCteName,
   lateMaterializedPhysicalAlias,
 } from "./alias-names";
+import { assertAliasPredicatesReadOnlyTheirTarget } from "./alias-predicate-scope";
 import {
   readAliasColumn,
   readColumn,
@@ -354,6 +355,7 @@ function compileQueryInExpressionContext(
     recursiveResultAliases?: ReadonlyMap<symbol, string>;
   }>,
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
+  assertAliasPredicatesReadOnlyTheirTarget(ast);
   // Support legacy signature: compileQuery(ast, graphId, dialect)
   const options_: CompileQueryOptions =
     typeof options === "string" ? { dialect: options } : options;

@@ -1,0 +1,7 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+A `whereNode()` or `whereEdge()` predicate that reads a field of another alias is now refused with `UnsupportedPredicateError` (`details.targetAlias`, `details.readAlias`) before any SQL is sent (#967). Such a predicate compiles inside the CTE that produces its target alias, where every field is written as that CTE's own column, so the other alias's field compiled as the target's: `whereNode("b", (b) => b.score.gt(field("a", "score")))` compared `b.score` with itself and returned wrong rows on every backend, with no error. The same held for the expression form (`whereNode("b", (_b, ctx) => expr.gt(ctx.b.score, ctx.a.score))`), for `whereEdge("k", (k) => k.toId.eq(field("b", "id")))`, for optional traversal targets, and for the inner query of `exists()`, `notExists()`, `inSubquery()` and `notInSubquery()` when its `whereNode()` named an outer alias through `fieldRef()`: those subqueries were never correlated, and the outer reference compiled as the inner alias's own column.
+
+Compare two aliases in `where((ctx) => ...)`, which filters completed matches, and correlate a subquery with the outer row through `ctx.$exists()` / `ctx.$scalar()`, whose outer references are unaffected. The Subqueries page now shows those forms instead of the `fieldRef()` correlation it presented before. A predicate that reads only its own alias, including a comparison between two of its own fields, compiles to the same SQL as before.
