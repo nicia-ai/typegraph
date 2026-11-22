@@ -1,0 +1,29 @@
+### node.create attached to a whole
+hook start create node:Item item-part
+hook error create node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### node.create attached to a missing whole
+hook start create node:Item item-part
+hook error create node ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create attaching an unattached part
+hook start create edge:memberOf <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create attaching an attached part
+hook start create edge:memberOf <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create attaching a part to a missing whole
+hook start create edge:memberOf <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+
+### edge.create attaching an attached part to a missing whole
+hook start create edge:memberOf <id1>
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:CONSTRAINT_WRITE_FENCE_UNSUPPORTED]

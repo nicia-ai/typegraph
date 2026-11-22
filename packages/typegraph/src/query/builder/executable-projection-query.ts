@@ -3,12 +3,12 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
-import { compileQuery } from "../compiler";
+import { compileNameCheckedQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
-import { asCompiledSelectSql } from "../sql-intent";
+import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
@@ -166,10 +166,11 @@ export class ExecutableProjectionQuery<
   }
 
   compile() {
-    return compileQuery(
+    return compileNameCheckedQuery(
       this.toAst(),
       this.#config.graphId,
       buildCompileOptions(this.#config),
+      "decoded",
     );
   }
   toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
@@ -206,6 +207,9 @@ export class ExecutableProjectionQuery<
   }> {
     const ast = this.toAst();
     const backend = this.#requireBackend();
+    // Refuse at prepare() what every execute() would refuse: the statement
+    // execute() sends, checked by the function that compiles it.
+    this.#compileRowsStatement(ast);
     return {
       execute: async (bindings) => {
         validateQueryBindings([ast], bindings);
@@ -232,10 +236,12 @@ export class ExecutableProjectionQuery<
     this.#assertBound(ast);
     const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
     return {
-      query: compileQuery(
+      // batchOnce() embeds the statement as a CTE and reads its columns by name.
+      query: compileNameCheckedQuery(
         envelope,
         this.#config.graphId,
         buildCompileOptions(this.#config),
+        "wrapped",
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -297,31 +303,16 @@ export class ExecutableProjectionQuery<
             ),
           )
         : backend.execute<Record<string, unknown>>(
-            compileQuery(
+            this.#compileRowsStatement(
               bindings === undefined ? ast : bindQueryParameters(ast, bindings),
-              this.#config.graphId,
-              buildCompileOptions(this.#config),
-            ),
+            ).query,
           ),
         backend,
       );
     }
     const concreteAst =
       bindings === undefined ? ast : bindQueryParameters(ast, bindings);
-    const compiled = compileQuery(
-      concreteAst,
-      this.#config.graphId,
-      buildCompileOptions(this.#config),
-    );
-    const { ast: envelope, orderBy } = buildProjectionEnvelope(concreteAst);
-    const ordered =
-      orderBy.length === 0 ?
-        compiled
-      : compileQuery(
-          envelope,
-          this.#config.graphId,
-          buildCompileOptions(this.#config),
-        );
+    const { query: ordered, orderBy } = this.#compileRowsStatement(concreteAst);
     const resultOrderBy =
       orderBy.length === 0 ?
         sql.empty()
@@ -351,6 +342,50 @@ export class ExecutableProjectionQuery<
       backend,
     );
   }
+  /**
+   * The statement a row read sends for `ast`, refused when its generated SQL
+   * names collide: the projection itself, or inside `withCheckedReads()` the
+   * projection envelope the checked read selects `projected.*` from and reads
+   * back by name. The one decision prepare(), the batch pre-check and every
+   * execution use.
+   */
+  #compileRowsStatement(ast: QueryAst): Readonly<{
+    query: CompiledSelectSql;
+    orderBy: ReturnType<typeof buildProjectionEnvelope>["orderBy"];
+  }> {
+    const graphId = this.#config.graphId;
+    const options = buildCompileOptions(this.#config);
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
+      undefined
+    )
+      return {
+        query: compileNameCheckedQuery(ast, graphId, options, "decoded"),
+        orderBy: [],
+      };
+    const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
+    return {
+      query: compileNameCheckedQuery(
+        orderBy.length === 0 ? ast : envelope,
+        graphId,
+        options,
+        "wrapped",
+      ),
+      orderBy,
+    };
+  }
+
+  /**
+   * @internal Refuses, before any statement is sent, a projection whose row
+   * statement has colliding generated SQL names. `store.batch()` runs it for
+   * every item before its first statement.
+   */
+  checkSqlNamesBeforeExecution?(): void {
+    const ast = this.toAst();
+    if (hasParameterReferences(ast)) return;
+    this.#compileRowsStatement(ast);
+  }
+
   /**
    * Builds at most one reusable template for this immutable projection shape.
    * The template belongs to the configured backend compiler, while execution
@@ -410,10 +445,13 @@ export class ExecutableProjectionQuery<
     operation: "count" | "exists",
     readInstant: "literal" | "placeholder" = "literal",
   ) {
-    const relation = compileQuery(ast, this.#config.graphId, {
-      ...buildCompileOptions(this.#config),
-      readInstant,
-    });
+    // The scalar wrapper reads no result column of the relation by name.
+    const relation = compileNameCheckedQuery(
+      ast,
+      this.#config.graphId,
+      { ...buildCompileOptions(this.#config), readInstant },
+      "embedded",
+    );
     return asCompiledSelectSql(
       operation === "count" ?
         sql`SELECT COUNT(*) AS __tg_scalar FROM (${relation}) AS projected`

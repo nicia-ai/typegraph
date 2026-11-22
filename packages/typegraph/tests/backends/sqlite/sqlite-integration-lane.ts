@@ -40,6 +40,6 @@ export function registerSqliteIntegrationLane(
         },
       };
     },
-    { slice: params.slice },
+    { slice: params.slice, driver: "better-sqlite3" },
   );
 }

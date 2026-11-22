@@ -92,6 +92,7 @@ export function registerPgliteIntegrationLane(
     }),
     {
       slice: params.slice,
+      driver: "pglite",
       // Branches and review targets need independent transactions. Reuse an
       // engine only after its fixture schema has been dropped at test cleanup.
       createIsolatedBackend: () => isolatedPool.makeFixture(),

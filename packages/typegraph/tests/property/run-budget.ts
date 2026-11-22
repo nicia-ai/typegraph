@@ -11,6 +11,16 @@ export function propertyRuns(
   return Math.max(1, Math.round(base * propertyRunScale()));
 }
 
+/**
+ * A Vitest project's default `testTimeout`, stretched by the same
+ * `TYPEGRAPH_PROPERTY_RUNS_SCALE` that multiplies {@link propertyRuns}: a
+ * deep run that asks a test for ten times the runs gives it ten times the
+ * time. A scale below 1 never shortens the timeout.
+ */
+export function propertyTestTimeout(milliseconds: number): number {
+  return Math.round(milliseconds * Math.max(1, propertyRunScale()));
+}
+
 const PROPERTY_RUNS_SCALE_ENV = "TYPEGRAPH_PROPERTY_RUNS_SCALE";
 
 function propertyRunScale(): number {

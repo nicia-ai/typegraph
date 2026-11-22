@@ -1,0 +1,1790 @@
+### node.create generated id
+hook start create node:Item <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","Item","<id1>","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item <id1> written
+=> ok
+revision +1
+
+### node.create supplied id
+hook start create node:Item item-new
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+revision +1
+
+### node.createFromRecord supplied id
+hook start create node:Item item-new
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+revision +1
+
+### node.create over a tombstone
+hook start create node:Item item-dead
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-dead","{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-dead"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-dead","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item item-dead written
+=> ok
+revision +1
+
+### node.create occupied id
+hook start create node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"dup\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql ROLLBACK
+hook error create node ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### node.create id owned by another kind
+hook start create node:Item other-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","other-a","{\"name\":\"cross\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"other-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","other-a","{\"name\":\"cross\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item other-a written
+=> ok
+revision +1
+
+### node.create after a schema bump
+hook start create node:Item item-stale
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql ROLLBACK
+hook error create node StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+revision +0
+
+### node.create generated id already occupied
+hook start create node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"collides\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+hook error create node ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### node.create generated id when the statement misses its fence
+hook start create node:Item <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"fence-miss\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","Item","<id1>","{\"name\":\"fence-miss\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item <id1> written
+fault not reached: the next statement misses its schema fence
+=> ok
+revision +1
+
+### node.create of an unregistered kind
+=> KindNotFoundError[KIND_NOT_FOUND]
+revision +0
+
+### node.bulkCreate generated ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id3>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"<id1>","<id2>"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id4>","<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkCreate generated id already occupied
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","item-a","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id1>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### node.bulkCreate supplied ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkInsert generated ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?)
+    ["<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id3>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"<id1>","<id2>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","<id1>","<id2>"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id4>","<graph1>","Item","<id1>","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","Item","<id2>","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkInsert generated id already occupied
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?)
+    ["<graph1>","Item","item-a","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","<id1>","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### node.bulkInsert supplied ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?), (?, ?, ?, ?, 1, ?, NULL, ?, ?)
+    ["<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"bulk-1","bulk-2"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","bulk-1","bulk-2"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","bulk-1","{\"name\":\"bulk-1\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","bulk-2","{\"name\":\"bulk-2\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.update
+hook start update node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"renamed\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+revision +1
+
+### node.update clearValidTo on a missing row
+hook start update node:Item item-missing
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-missing"]
+sql ROLLBACK
+hook error update node NodeNotFoundError[NODE_NOT_FOUND]
+=> NodeNotFoundError[NODE_NOT_FOUND]
+revision +0
+
+### node.update clearValidTo on a live row
+hook start update node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"renamed\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+revision +1
+
+### node.update after a schema bump
+hook start update node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql ROLLBACK
+hook error update node StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+revision +0
+
+### node.upsertById live row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+hook start update node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+revision +1
+
+### node.upsertById absent row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-new"]
+hook start create node:Item item-new
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"upserted\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item item-new written
+=> ok
+revision +1
+
+### node.upsertById tombstone
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-dead"]
+hook start update node:Item item-dead
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-dead"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-dead","{\"name\":\"item-dead\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end update node:Item item-dead written
+=> ok
+revision +1
+
+### node.upsertById coalesced
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql COMMIT
+=> ok
+revision +0
+
+### node.upsertByIdFromRecord live row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+hook start update node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update node:Item item-a written
+=> ok
+revision +1
+
+### node.bulkUpsertById with a repeated id
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?, ?)
+    ["<graph1>","Item","item-a","item-new","item-a"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-new"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"second\"}",3,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkUpsertById live and absent ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-new"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-new"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-a"]
+sql WITH "expected_updates" ("id", "props", "expected_version") AS ( VALUES (CAST(? AS text), CAST(? AS text), CAST(? AS integer)) ), "eligible_updates" ("id") AS ( SELECT "expected_updates"."id" FROM "typegraph_nodes" JOIN "expected_updates" ON "typegraph_nodes"."id" = "expected_updates"."id" AND "typegraph_nodes"."version" = "expected_updates"."expected_version" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL ORDER BY "typegraph_nodes"."id" ) UPDATE "typegraph_nodes" SET "props" = ( SELECT "expected_updates"."props" FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" ), "updated_at" = ?, "version" = "typegraph_nodes"."version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL AND "typegraph_nodes"."id" IN (SELECT "id" FROM "eligible_updates") AND EXISTS ( SELECT 1 FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" AND "expected_updates"."expected_version" = "typegraph_nodes"."version" ) AND (SELECT COUNT(*) FROM "eligible_updates") = ? RETURNING *
+    ["item-a","{\"name\":\"upserted\"}",1,"<graph1>","Item","<timestamp>","<graph1>","Item",1]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"upserted\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkReplaceById
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-new"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-new"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-a"]
+sql WITH "expected_updates" ("id", "props", "expected_version") AS ( VALUES (CAST(? AS text), CAST(? AS text), CAST(? AS integer)) ), "eligible_updates" ("id") AS ( SELECT "expected_updates"."id" FROM "typegraph_nodes" JOIN "expected_updates" ON "typegraph_nodes"."id" = "expected_updates"."id" AND "typegraph_nodes"."version" = "expected_updates"."expected_version" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL ORDER BY "typegraph_nodes"."id" ) UPDATE "typegraph_nodes" SET "props" = ( SELECT "expected_updates"."props" FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" ), "updated_at" = ?, "version" = "typegraph_nodes"."version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL AND "typegraph_nodes"."id" IN (SELECT "id" FROM "eligible_updates") AND EXISTS ( SELECT 1 FROM "expected_updates" WHERE "expected_updates"."id" = "typegraph_nodes"."id" AND "expected_updates"."expected_version" = "typegraph_nodes"."version" ) AND (SELECT COUNT(*) FROM "eligible_updates") = ? RETURNING *
+    ["item-a","{\"name\":\"replaced\"}",1,"<graph1>","Item","<timestamp>","<graph1>","Item",1]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-new","item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-new","{\"name\":\"item-new\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","Item","item-a","{\"name\":\"replaced\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.compareAndSet match
+hook bulk-start compareAndSet node:Item
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS MATERIALIZED ( SELECT DISTINCT CAST(? AS TEXT) AS "tg_set_key_graph_id", CAST(? AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE BINARY AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = ? AND kind = ? AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?) AND id = ? ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = json_set("props", '$."name"', json(?)), "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND json_type("props", '$."name"') = 'text' AND json_extract("props", '$."name"') = ? AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","\"swapped\"","<timestamp>","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"swapped\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook bulk-end compareAndSet node:Item affected=1
+=> ok applied
+revision +1
+
+### node.compareAndSet mismatch
+hook bulk-start compareAndSet node:Item
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS MATERIALIZED ( SELECT DISTINCT CAST(? AS TEXT) AS "tg_set_key_graph_id", CAST(? AS TEXT) AS "tg_set_key_kind", tg_set_candidates."compare_and_set_candidate_id" COLLATE BINARY AS "tg_set_key_id" FROM (WITH cte_compare_and_set_candidate AS ( SELECT id AS compare_and_set_candidate_id, kind AS compare_and_set_candidate_kind, props AS compare_and_set_candidate_props, version AS compare_and_set_candidate_version, valid_from AS compare_and_set_candidate_valid_from, valid_to AS compare_and_set_candidate_valid_to, created_at AS compare_and_set_candidate_created_at, updated_at AS compare_and_set_candidate_updated_at, deleted_at AS compare_and_set_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = ? AND kind = ? AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?) AND id = ? ) SELECT cte_compare_and_set_candidate.compare_and_set_candidate_id AS "compare_and_set_candidate_id", cte_compare_and_set_candidate.compare_and_set_candidate_kind AS "compare_and_set_candidate_kind", cte_compare_and_set_candidate.compare_and_set_candidate_props AS "compare_and_set_candidate_props", cte_compare_and_set_candidate.compare_and_set_candidate_version AS "compare_and_set_candidate_version", cte_compare_and_set_candidate.compare_and_set_candidate_valid_from AS "compare_and_set_candidate_valid_from", cte_compare_and_set_candidate.compare_and_set_candidate_valid_to AS "compare_and_set_candidate_valid_to", cte_compare_and_set_candidate.compare_and_set_candidate_created_at AS "compare_and_set_candidate_created_at", cte_compare_and_set_candidate.compare_and_set_candidate_updated_at AS "compare_and_set_candidate_updated_at", cte_compare_and_set_candidate.compare_and_set_candidate_deleted_at AS "compare_and_set_candidate_deleted_at" FROM cte_compare_and_set_candidate) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = json_set("props", '$."name"', json(?)), "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND json_type("props", '$."name"') = 'text' AND json_extract("props", '$."name"') = ? AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id") IN ( SELECT "tg_set_keys"."tg_set_key_graph_id", "tg_set_keys"."tg_set_key_kind", "tg_set_keys"."tg_set_key_id" FROM "tg_set_keys" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","\"swapped\"","<timestamp>","not-the-name"]
+sql COMMIT
+hook bulk-end compareAndSet node:Item affected=0
+=> ok rejected
+revision +0
+
+### node.updateWhere
+hook bulk-start updateWhere node:Item
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS MATERIALIZED ( SELECT DISTINCT CAST(? AS TEXT) AS "tg_set_key_graph_id", CAST(? AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE BINARY AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = ? AND kind = ? AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?) AND json_extract(props, '$."name"') = ? ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = json_set("props", '$."name"', json(?)), "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-a","\"set-updated\"","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-a"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-a","{\"name\":\"set-updated\"}",2,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook bulk-end updateWhere node:Item affected=1
+=> ok affected=1
+revision +1
+
+### node.updateWhere matching no row
+hook bulk-start updateWhere node:Item
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH "tg_set_keys" AS MATERIALIZED ( SELECT DISTINCT CAST(? AS TEXT) AS "tg_set_key_graph_id", CAST(? AS TEXT) AS "tg_set_key_kind", tg_set_candidates."update_candidate_id" COLLATE BINARY AS "tg_set_key_id" FROM ( SELECT "update_candidate_id" FROM (WITH cte_update_candidate AS ( SELECT id AS update_candidate_id, kind AS update_candidate_kind, props AS update_candidate_props, version AS update_candidate_version, valid_from AS update_candidate_valid_from, valid_to AS update_candidate_valid_to, created_at AS update_candidate_created_at, updated_at AS update_candidate_updated_at, deleted_at AS update_candidate_deleted_at FROM "typegraph_nodes" WHERE graph_id = ? AND kind = ? AND deleted_at IS NULL AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?) AND json_extract(props, '$."name"') = ? ) SELECT cte_update_candidate.update_candidate_id AS "update_candidate_id", cte_update_candidate.update_candidate_kind AS "update_candidate_kind", cte_update_candidate.update_candidate_props AS "update_candidate_props", cte_update_candidate.update_candidate_version AS "update_candidate_version", cte_update_candidate.update_candidate_valid_from AS "update_candidate_valid_from", cte_update_candidate.update_candidate_valid_to AS "update_candidate_valid_to", cte_update_candidate.update_candidate_created_at AS "update_candidate_created_at", cte_update_candidate.update_candidate_updated_at AS "update_candidate_updated_at", cte_update_candidate.update_candidate_deleted_at AS "update_candidate_deleted_at" FROM cte_update_candidate) AS "update_branch_0" ) AS tg_set_candidates ) UPDATE "typegraph_nodes" SET "props" = json_set("props", '$."name"', json(?)), "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."graph_id", "typegraph_nodes"."kind", "typegraph_nodes"."id", "typegraph_nodes"."version") IN ( SELECT "tg_set_selected"."graph_id", "tg_set_selected"."kind", "tg_set_selected"."id", "tg_set_selected"."version" FROM "tg_set_keys" JOIN "typegraph_nodes" AS "tg_set_selected" ON "tg_set_selected"."graph_id" = "tg_set_keys"."tg_set_key_graph_id" AND "tg_set_selected"."kind" = "tg_set_keys"."tg_set_key_kind" AND "tg_set_selected"."id" = "tg_set_keys"."tg_set_key_id" ) RETURNING *
+    ["<graph1>","Item","<graph1>","Item","<timestamp>","<timestamp>","item-missing","\"set-updated\"","<timestamp>"]
+sql COMMIT
+hook bulk-end updateWhere node:Item affected=0
+=> ok affected=0
+revision +0
+
+### node.delete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) ORDER BY "id"
+    ["<graph1>","Item","item-c"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql UPDATE "typegraph_nodes" SET "deleted_at" = ? WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","Item","item-c"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-c","{\"name\":\"item-c\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
+sql COMMIT
+hook end delete node:Item item-c written
+=> ok
+revision +1
+
+### node.delete missing row
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-missing"]
+=> ok
+revision +0
+
+### node.delete with a live edge
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-a"]
+hook start delete node:Item item-a
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) ORDER BY "id"
+    ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error delete node RestrictedDeleteError[RESTRICTED_DELETE]
+=> RestrictedDeleteError[RESTRICTED_DELETE]
+revision +0
+
+### node.bulkDelete
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-c","item-missing"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql UPDATE "typegraph_nodes" SET "deleted_at" = ? WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","Item","item-c"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-c","{\"name\":\"item-c\"}",1,"<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkDelete absent rows
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-dead","item-missing"]
+sql COMMIT
+=> ok
+revision +0
+
+### node.hardDelete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-c"]
+hook start delete node:Item item-c
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
+sql SELECT id FROM "typegraph_edges" WHERE (graph_id = ? AND from_kind = ? AND from_id = ?) OR (graph_id = ? AND to_kind = ? AND to_id = ?)
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = ? AND "node_kind" = ? AND "node_id" = ?
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_edges" WHERE ( ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ?) OR ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ?) )
+    ["<graph1>","Item","item-c","<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-c"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-dead"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-dead"]
+sql COMMIT
+hook end delete node:Item item-c unknown
+=> ok
+revision +1
+
+### node.bulkHardDelete
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-c","item-missing"]
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-c","item-missing"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND ( ("typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" IN (?)) OR ("typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?)) ) AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","Item","item-c","Item","item-c"]
+sql DELETE FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = ? AND "node_kind" = ? AND "node_id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND ( ("typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" IN (?)) OR ("typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?)) ) RETURNING "typegraph_edges"."id"
+    ["<graph1>","Item","item-c","Item","item-c"]
+sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) RETURNING "typegraph_nodes"."id"
+    ["<graph1>","Item","item-c"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-c"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-dead"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-dead"]
+sql COMMIT
+=> ok
+revision +1
+
+### node.bulkHardDelete with a live edge and a tombstone
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-dead"]
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-dead"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND ( ("typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" IN (?, ?)) OR ("typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?, ?)) ) AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","Item","item-a","item-dead","Item","item-a","item-dead"]
+sql ROLLBACK
+=> RestrictedDeleteError[RESTRICTED_DELETE]
+revision +0
+
+### edge.create generated id
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+revision +1
+
+### edge.create supplied id
+hook start create edge:link link-new
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-new"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link link-new written
+=> ok
+revision +1
+
+### edge.create over a tombstone
+hook start create edge:link link-dead
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-a"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### edge.create occupied id
+hook start create edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### edge.create generated id already occupied
+hook start create edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"collides\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql ROLLBACK
+hook error create edge ValidationError[VALIDATION_ERROR]
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### edge.create of an unregistered kind
+=> KindNotFoundError[KIND_NOT_FOUND]
+revision +0
+
+### edge.create endpoint of an unregistered kind
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql ROLLBACK
+hook error create edge EndpointError[ENDPOINT_ERROR]
+=> EndpointError[ENDPOINT_ERROR]
+revision +0
+
+### edge.create parallel to a live edge
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+revision +1
+
+### edge.create second edge from one source
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-c"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-c","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok
+revision +1
+
+### edge.create missing endpoint
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-missing","{\"label\":\"missing\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-missing"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-c","item-missing"]
+sql ROLLBACK
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+revision +0
+
+### edge.create tombstoned endpoint
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-dead","{\"label\":\"tombstoned\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-c","item-dead"]
+sql ROLLBACK
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+revision +0
+
+### edge.create after a schema bump
+hook start create edge:link link-stale
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql ROLLBACK
+hook error create edge StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+revision +0
+
+### edge.bulkCreate
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id3>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>","<id2>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id4>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.bulkCreate generated id already occupied
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","link-live","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id1>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql ROLLBACK
+=> ValidationError[VALIDATION_ERROR]
+revision +0
+
+### edge.bulkInsert
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id3>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>","<id2>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","<id1>","<id2>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id4>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"bulk-1\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id5>","<graph1>","<id2>","link","Item","item-b","Item","item-c","{\"label\":\"bulk-2\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.update
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update edge:link link-live written
+=> ok
+revision +1
+
+### edge.update clearValidTo on a missing row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-missing"]
+=> EdgeNotFoundError[EDGE_NOT_FOUND]
+revision +0
+
+### edge.update clearValidTo on a live row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ?, "valid_to" = NULL WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+hook end update edge:link link-live written
+=> ok
+revision +1
+
+### edge.update after a schema bump
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start update edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql ROLLBACK
+hook error update edge StaleVersionError[STALE_SCHEMA_VERSION]
+=> StaleVersionError[STALE_SCHEMA_VERSION]
+revision +0
+
+### edge.bulkUpsertById with a repeated id
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?, ?)
+    ["<graph1>","link-live","link-new","link-live"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"first\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"second\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-new","link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"second\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.bulkUpsertById live and absent ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-live","link-new"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"upserted\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-new","link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-new","link","Item","item-c","Item","item-b","{\"label\":\"new\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id3>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"upserted\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.delete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql UPDATE "typegraph_edges" SET "deleted_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","link-live","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
+sql COMMIT
+hook end delete edge:link link-live unknown
+=> ok
+revision +1
+
+### edge.bulkDelete
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-live","link-dead"]
+sql UPDATE "typegraph_edges" SET "deleted_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?) AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<timestamp>","<graph1>","link-live","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"delete","{}"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.bulkDelete absent rows
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-dead","link-missing"]
+sql COMMIT
+=> ok
+revision +0
+
+### edge.hardDelete
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+hook start delete edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? RETURNING "typegraph_edges"."id"
+    ["<graph1>","link-live","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-live"]
+sql COMMIT
+hook end delete edge:link link-live unknown
+=> ok
+revision +1
+
+### edge.bulkHardDelete live, tombstoned and absent ids
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?, ?)
+    ["<graph1>","link-live","link-dead","link-missing"]
+sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?) AND "typegraph_edges"."kind" = ? RETURNING "typegraph_edges"."id"
+    ["<graph1>","link-live","link-dead","link"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live","link-dead"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-live","link-dead"]
+sql COMMIT
+=> ok
+revision +1
+
+### edge.getOrCreateByEndpoints found
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+=> ok found
+revision +0
+
+### edge.getOrCreateByEndpoints created
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-b"]
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-b"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-c","<graph1>","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok created
+revision +1
+
+### edge.getOrCreateByEndpoints matchOn label
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ? FROM "typegraph_nodes" AS "from_node" CROSS JOIN "typegraph_nodes" AS "to_node" WHERE "from_node"."graph_id" = ? AND "from_node"."kind" = ? AND "from_node"."id" = ? AND "from_node"."deleted_at" IS NULL AND "to_node"."graph_id" = ? AND "to_node"."kind" = ? AND "to_node"."id" = ? AND "to_node"."deleted_at" IS NULL RETURNING *
+    ["<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"other\"}","<timestamp>","<timestamp>","<timestamp>","<graph1>","Item","item-a","<graph1>","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-a","Item","item-b","{\"label\":\"other\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create edge:link <id1> written
+=> ok created
+revision +1
+
+### edge.bulkGetOrCreateByEndpoints
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?), (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?), (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok found,created
+revision +1
+
+### edge.bulkGetOrCreateByEndpoints found only
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","<graph1>","link"]
+=> ok found
+revision +0
+
+### edge.bulkGetOrCreateByEndpoints ifExists update all found unchanged
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","<graph1>","link"]
+sql UPDATE "typegraph_nodes" SET graph_id = graph_id WHERE 0
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql COMMIT
+=> ok found
+revision +0
+
+### edge.getOrCreateByEndpoints ifExists update found and changed
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok updated
+revision +1
+
+### edge.getOrCreateByEndpoints ifExists update found and changed coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"renamed\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"renamed\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok updated
+revision +1
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-live"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}"]
+sql COMMIT
+=> ok updated
+revision +1
+
+### edge.getOrCreateByEndpoints ifExists update found unchanged coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-live"]
+sql COMMIT
+=> ok found
+revision +0
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ?, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-dead"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok resurrected
+revision +1
+
+### edge.getOrCreateByEndpoints ifExists update over a tombstone coalescing
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql BEGIN
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-c","Item","item-a"]
+sql COMMIT
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ?, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-dead"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok resurrected
+revision +1
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-a","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?)
+    ["<graph1>","link-live","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ? WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND "typegraph_edges"."deleted_at" IS NULL RETURNING *
+    ["{\"label\":\"live\"}","<timestamp>","<graph1>","link-live","link","Item","item-a","Item","item-b"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ?, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>","link-live","link-dead"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id4>","<graph1>","link-live","link","Item","item-a","Item","item-b","{\"label\":\"live\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"update","{}","<id5>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok updated,resurrected,created
+revision +1
+
+### edge.bulkGetOrCreateByEndpoints ifExists update live, tombstoned and fresh coalescing
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS ( VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?) ) SELECT "typegraph_edges".* FROM "typegraph_edges" INNER JOIN requested_endpoints ON "typegraph_edges"."from_kind" = requested_endpoints."endpoint_kind" AND "typegraph_edges"."from_id" = requested_endpoints."endpoint_id" AND "typegraph_edges"."to_kind" = requested_endpoints."opposite_kind" AND "typegraph_edges"."to_id" = requested_endpoints."opposite_id" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" IN (?) ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["Item","item-a","Item","item-b","Item","item-c","Item","item-a","Item","item-c","Item","item-b","<graph1>","link"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-b","item-c"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql UPDATE "typegraph_nodes" SET graph_id = graph_id WHERE 0
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ?
+    ["<graph1>","link-dead"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-a","item-c"]
+sql UPDATE "typegraph_edges" SET "props" = ?, "updated_at" = ?, "deleted_at" = NULL WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? RETURNING *
+    ["{\"label\":\"dead\"}","<timestamp>","<graph1>","link-dead","link","Item","item-c","Item","item-a"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?, ?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>","link-dead"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","<id1>","link","Item","item-c","Item","item-b","{\"label\":\"fresh\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}","<id4>","<graph1>","link-dead","link","Item","item-c","Item","item-a","{\"label\":\"dead\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+=> ok found,resurrected,created
+revision +1
+
+### tx.writeNodeUpsertBatch live, absent and tombstoned ids
+sql BEGIN IMMEDIATE
+sql ROLLBACK
+=> UnsupportedBackendCapabilityError[UNSUPPORTED_BACKEND_CAPABILITY]
+revision +0
+
+### tx.writeNodeUpsertBatch after a schema bump
+sql BEGIN IMMEDIATE
+sql ROLLBACK
+=> UnsupportedBackendCapabilityError[UNSUPPORTED_BACKEND_CAPABILITY]
+revision +0
+
+### tx.writeNodeUpsertBatch of an unregistered kind
+sql BEGIN IMMEDIATE
+sql ROLLBACK
+=> KindNotFoundError[KIND_NOT_FOUND]
+revision +0
+
+### tx.assertUnchangedSince over an unchanged read set
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql SELECT scope_index, kind, id FROM ( SELECT CAST(? AS INTEGER) AS scope_index, kind, id FROM ( SELECT kind, id FROM ( SELECT DISTINCT kind, id FROM "typegraph_recorded_nodes" WHERE graph_id = ? AND kind = ? AND id = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ) AS region_changed_keys ORDER BY "kind", "id" LIMIT ? ) AS region_reported_keys ) AS read_set_changed_keys ORDER BY scope_index, "kind", "id"
+    [0,"<graph1>","Item","item-a",1,1,9007199254740991,101]
+sql SELECT scope_index, kind, id FROM ( SELECT CAST(? AS INTEGER) AS scope_index, kind, id FROM ( SELECT kind, id FROM ( SELECT DISTINCT kind, id FROM "typegraph_recorded_edges" WHERE graph_id = ? AND from_kind = ? AND from_id = ? AND kind = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ) AS region_changed_keys ORDER BY "kind", "id" LIMIT ? ) AS region_reported_keys ) AS read_set_changed_keys ORDER BY scope_index, "kind", "id"
+    [1,"<graph1>","Item","item-a","link",1,1,9007199254740991,101]
+sql COMMIT
+=> ok unchanged
+revision +0
+
+### tx.assertUnchangedSince after a change in the read set
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql SELECT COUNT(DISTINCT rev) AS evidenced FROM ( SELECT recorded_from AS rev FROM "typegraph_recorded_nodes" WHERE graph_id = ? AND recorded_from > ? AND recorded_from <= ? UNION ALL SELECT recorded_to AS rev FROM "typegraph_recorded_nodes" WHERE graph_id = ? AND recorded_to <> ? AND recorded_to > ? AND recorded_to <= ? UNION ALL SELECT recorded_from AS rev FROM "typegraph_recorded_edges" WHERE graph_id = ? AND recorded_from > ? AND recorded_from <= ? UNION ALL SELECT recorded_to AS rev FROM "typegraph_recorded_edges" WHERE graph_id = ? AND recorded_to <> ? AND recorded_to > ? AND recorded_to <= ? UNION ALL SELECT recorded_from AS rev FROM "typegraph_recorded_identity_assertions" WHERE graph_id = ? AND recorded_from > ? AND recorded_from <= ? UNION ALL SELECT recorded_to AS rev FROM "typegraph_recorded_identity_assertions" WHERE graph_id = ? AND recorded_to <> ? AND recorded_to > ? AND recorded_to <= ? ) AS lineage_evidenced_revisions
+    ["<graph1>",1,2,"<graph1>",9007199254740991,1,2,"<graph1>",1,2,"<graph1>",9007199254740991,1,2,"<graph1>",1,2,"<graph1>",9007199254740991,1,2]
+sql SELECT scope_index, kind, id FROM ( SELECT CAST(? AS INTEGER) AS scope_index, kind, id FROM ( SELECT kind, id FROM ( SELECT DISTINCT kind, id FROM "typegraph_recorded_nodes" WHERE graph_id = ? AND kind = ? AND id = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ) AS region_changed_keys ORDER BY "kind", "id" LIMIT ? ) AS region_reported_keys ) AS read_set_changed_keys ORDER BY scope_index, "kind", "id"
+    [0,"<graph1>","Item","item-a",1,1,9007199254740991,101]
+sql SELECT scope_index, kind, id FROM ( SELECT CAST(? AS INTEGER) AS scope_index, kind, id FROM ( SELECT kind, id FROM ( SELECT DISTINCT kind, id FROM "typegraph_recorded_edges" WHERE graph_id = ? AND from_kind = ? AND from_id = ? AND kind = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ) AS region_changed_keys ORDER BY "kind", "id" LIMIT ? ) AS region_reported_keys ) AS read_set_changed_keys ORDER BY scope_index, "kind", "id"
+    [1,"<graph1>","Item","item-a","link",1,1,9007199254740991,101]
+sql ROLLBACK
+=> ReadSetChangedError[READ_SET_CHANGED]
+revision +0
+
+### store import
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-imported","item-a"]
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, 1, ?, NULL, ?, ?)
+    ["<graph1>","Item","item-imported","{\"name\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) ORDER BY "id"
+    ["<graph1>","Item","item-b"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-imported"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)
+    ["<graph1>","link-imported","link","Item","item-imported","Item","item-b","{\"label\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id1>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-imported"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-imported"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id2>","<graph1>","Item","item-imported","{\"name\":\"imported\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"link-imported"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","link-imported"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","link-imported","link","Item","item-imported","Item","item-b","{\"label\":\"imported\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+sql PRAGMA analysis_limit = 1000
+sql ANALYZE "typegraph_nodes"
+sql ANALYZE "typegraph_edges"
+sql ANALYZE "typegraph_node_uniques"
+sql ANALYZE "typegraph_node_fulltext"
+sql ANALYZE "typegraph_recorded_nodes"
+sql ANALYZE "typegraph_recorded_edges"
+sql ANALYZE "typegraph_recorded_clock"
+sql ANALYZE "typegraph_recorded_identity_assertions"
+sql ANALYZE "typegraph_identity_assertions"
+sql ANALYZE "typegraph_identity_closure"
+sql ANALYZE "typegraph_identity_separation"
+=> ok nodes created=1 skipped=1 edges created=1 skipped=0
+revision +1
+
+### store graph-merge apply
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql SELECT DISTINCT kind, id FROM "typegraph_recorded_nodes" WHERE graph_id = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ORDER BY kind, id
+    ["<graph1>",1,1,9007199254740991]
+sql SELECT DISTINCT kind, id FROM "typegraph_recorded_edges" WHERE graph_id = ? AND ( recorded_from > ? OR (recorded_to > ? AND recorded_to <> ?) ) ORDER BY kind, id
+    ["<graph1>",1,1,9007199254740991]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-branched"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","<id1>"]
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT origin FROM "typegraph_revision_origins" WHERE graph_id = ?
+    ["<graph1>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?)
+    ["<graph1>","Item","item-branched"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
+    ["<graph1>","Item","item-branched"]
+hook start create node:Item item-branched
+sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["<graph1>","Item","item-branched","{\"name\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?)
+    ["<graph1>","<id1>"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+    ["<graph1>","Item","item-branched","item-c"]
+sql INSERT INTO "typegraph_edges" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "match_identity_key", "valid_from", "valid_to", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?) RETURNING *
+    ["<graph1>","<id1>","link","Item","item-c","Item","item-branched","{\"label\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>"]
+sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
+    ["<graph1>","<graph1>"]
+sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
+    ["<graph1>",2,"<timestamp>"]
+sql INSERT INTO "typegraph_recorded_anchors" (graph_id, origin, revision, recorded_at) VALUES (?, ?, ?, ?)
+    ["<graph1>","<id2>",2,"<timestamp>"]
+sql UPDATE "typegraph_recorded_nodes" SET recorded_to = ? WHERE graph_id = ? AND kind = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>","Item",9007199254740991,"item-branched"]
+sql INSERT INTO "typegraph_recorded_nodes" (history_id, graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id3>","<graph1>","Item","item-branched","{\"name\":\"branched\"}",1,"<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql UPDATE "typegraph_recorded_edges" SET recorded_to = ? WHERE graph_id = ? AND recorded_to = ? AND id IN (?) RETURNING id, deleted_at
+    [2,"<graph1>",9007199254740991,"<id1>"]
+sql INSERT INTO "typegraph_recorded_edges" (history_id, graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at, deleted_at, recorded_from, recorded_to, op, schema_version, tx_id, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+    ["<id4>","<graph1>","<id1>","link","Item","item-c","Item","item-branched","{\"label\":\"branched\"}","<timestamp>","<timestamp>","<timestamp>",2,9007199254740991,"create","{}"]
+sql COMMIT
+hook end create node:Item item-branched written
+=> ok merged nodes=1 edges=1
+revision +1

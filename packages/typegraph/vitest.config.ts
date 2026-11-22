@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { configDefaults, defineConfig } from "vitest/config";
 
+import { propertyTestTimeout } from "./tests/property/run-budget";
 import { PGLITE_GLOBS } from "./vitest.pglite-project";
 import { DurationBalancedSequencer } from "./vitest.shard-sequencer";
 
@@ -142,7 +143,9 @@ export default defineConfig({
           name: "main",
           // Keep the coverage lane's 15s allowance on this project. A CLI
           // override also shortens the PGlite and graph-merge budgets below.
-          testTimeout: 15_000,
+          // Every project default stretches with the deep property lane's
+          // run multiplier (tests/property/run-budget.ts); it is 1 elsewhere.
+          testTimeout: propertyTestTimeout(15_000),
           include: ["tests/**/*.test.ts"],
           // Graph-merge runs under its own (serialized) project below.
           exclude: [
@@ -167,7 +170,7 @@ export default defineConfig({
           // files (scripts/test-postgres.sh), and the 60s budgets below
           // already absorb concurrent PGlite startup latency.
           fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
-          testTimeout: 60_000,
+          testTimeout: propertyTestTimeout(60_000),
           hookTimeout: 60_000,
         },
       },
@@ -183,7 +186,7 @@ export default defineConfig({
           // the rest of the package keeps default parallelism + fast timeouts.
           // The PostgreSQL lane opts back in (see the pglite project note).
           fileParallelism: process.env.TYPEGRAPH_HEAVY_FILE_PARALLELISM === "1",
-          testTimeout: 60_000,
+          testTimeout: propertyTestTimeout(60_000),
           hookTimeout: 60_000,
         },
       },

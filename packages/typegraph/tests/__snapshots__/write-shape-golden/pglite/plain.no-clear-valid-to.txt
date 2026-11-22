@@ -1,0 +1,15 @@
+### node.update clearValidTo on a missing row
+=> ConfigurationError[CONFIGURATION_ERROR:CLEAR_VALID_TO_UNSUPPORTED]
+
+### node.update clearValidTo on a live row
+=> ConfigurationError[CONFIGURATION_ERROR:CLEAR_VALID_TO_UNSUPPORTED]
+
+### edge.update clearValidTo on a missing row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-missing"]
+=> EdgeNotFoundError[EDGE_NOT_FOUND]
+
+### edge.update clearValidTo on a live row
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2
+    ["<graph1>","link-live"]
+=> ConfigurationError[CONFIGURATION_ERROR:CLEAR_VALID_TO_UNSUPPORTED]

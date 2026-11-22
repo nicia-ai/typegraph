@@ -9,12 +9,14 @@ import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { QueryAst, SortDirection } from "../ast";
 import {
   assertCompatibleRelationColumns,
+  assertRelationSourceSqlNames,
   compileRelation,
   type RelationAst,
   type RelationColumn,
   type RelationOrder,
   type TopPerPartitionRelation,
 } from "../compiler/relations";
+import { type SqlNameUsage } from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
 import {
   createFieldExpression,
@@ -877,16 +879,18 @@ export class ExecutableRelationQuery<
     return this.#compileForBackend(
       this.#definition.config.backend,
       this.#materialize(),
+      "decoded",
     );
   }
 
   #compileForBackend(
     backend: GraphBackend | TransactionBackend | undefined,
     relation: RelationAst,
+    usage: SqlNameUsage,
   ) {
     this.#assertWindowFunctionsSupported(backend, relation);
     this.#assertRelationBound(relation);
-    return compileRelation(relation, getDialect(this.#dialect()));
+    return compileRelation(relation, getDialect(this.#dialect()), usage);
   }
 
   toSQL(): Readonly<{ sql: string; params: readonly unknown[] }> {
@@ -917,6 +921,8 @@ export class ExecutableRelationQuery<
     const expressions = relationExpressions(definition.ast);
     if (parameters !== undefined)
       validatePreparedBindingsDeclaration(parameters, queries, expressions);
+    // Refuse here what every execute() would refuse.
+    assertRelationSourceSqlNames(definition.ast, "decoded");
     const bind = (bindings: Readonly<Record<string, unknown>>) => {
       validateQueryBindings(queries, bindings, expressions);
       return new ExecutableRelationQuery(
@@ -944,6 +950,16 @@ export class ExecutableRelationQuery<
 
   execute(): Promise<readonly Result[]> {
     return this.executeOn(this.#requireBackend());
+  }
+
+  /**
+   * @internal Refuses, before any statement is sent, a relation whose source
+   * queries have colliding generated SQL names, under the check every
+   * execution applies. `store.batch()` runs it for every item before its
+   * first statement.
+   */
+  checkSqlNamesBeforeExecution?(): void {
+    assertRelationSourceSqlNames(this.#materialize(), "decoded");
   }
 
   async executeOn(
@@ -1105,9 +1121,11 @@ export class ExecutableRelationQuery<
     operation: "count" | "exists",
     placeholderReadInstant = false,
   ) {
+    // The scalar wrapper names none of the relation's columns.
     const compiledRelation = compileRelation(
       placeholderReadInstant ? withPlaceholderReadInstants(relation) : relation,
       getDialect(this.#dialect()),
+      "embedded",
     );
     return asCompiledSelectSql(
       operation === "count" ?
@@ -1142,7 +1160,12 @@ export class ExecutableRelationQuery<
       );
     const backend = this.#requireBackend();
     return {
-      query: this.compile(),
+      // batchOnce() embeds the statement as a CTE and reads its columns by name.
+      query: this.#compileForBackend(
+        this.#definition.config.backend,
+        this.#materialize(),
+        "wrapped",
+      ),
       provenance: {
         graphId: this.#definition.provenance.graphId,
         executionTarget: backendDerivationRoot(backend),

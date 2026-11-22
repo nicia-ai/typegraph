@@ -11,10 +11,11 @@ import {
   compileDatabaseExpression,
   type DatabaseExpressionCompilerContext,
 } from "./database-expressions";
-import { compileQuery, type CompileQueryOptions } from "./index";
+import { compileNameCheckedQuery, type CompileQueryOptions } from "./index";
 import { compileLimitOffsetClauses } from "./limit-offset";
 import { validateRelationAggregation } from "./relation-aggregate-validation";
 import { setOperationKeyword } from "./set-operations";
+import { type SqlNameUsage } from "./sql-name-registry";
 import { withPinnedReadInstant } from "./temporal";
 
 export type RelationColumn = Readonly<{
@@ -167,7 +168,7 @@ function compileDerived(
     relation.projection.map(({ expression }) => expression),
     relation.groupBy,
   );
-  const source = compileRelation(relation.source, dialect);
+  const source = compileRelation(relation.source, dialect, "wrapped");
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
@@ -198,7 +199,7 @@ function compileTopPerPartition(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
 ): CompiledSelectSql {
-  const source = compileRelation(relation.source, dialect);
+  const source = compileRelation(relation.source, dialect, "wrapped");
   const partition = sql.join(
     relation.partitionBy.map((expression) =>
       compileExpression(expression, dialect, false, orderedAggregates),
@@ -224,15 +225,52 @@ function compileTopPerPartition(
   );
 }
 
+/**
+ * Compiles a query a relation reads from, refusing it when its generated SQL
+ * names collide under `usage` (see `sql-name-registry.ts`): the caller's
+ * use when the query is the whole relation, and `"wrapped"` when a derived,
+ * top-per-partition or set relation refers to its columns by name.
+ */
+function compileRelationSource(
+  source: RelationSource,
+  usage: SqlNameUsage,
+): CompiledSelectSql {
+  return compileNameCheckedQuery(
+    source.query,
+    source.graphId,
+    source.options,
+    usage,
+  );
+}
+
+/**
+ * Refuses a relation, before any SQL is sent, when a query it reads from has
+ * generated SQL names that collide under the use `compileRelation` would
+ * check: the check a prepared relation runs once, for the statement every
+ * execution sends.
+ */
+export function assertRelationSourceSqlNames(
+  relation: RelationAst,
+  usage: SqlNameUsage,
+): void {
+  if (relation.kind === "source") {
+    compileRelationSource(relation, usage);
+    return;
+  }
+  for (const source of relationSources(relation))
+    compileRelationSource(source, "wrapped");
+}
+
 /** Compiles a structural relation tree without selecting a dialect strategy path. */
 function compileRelationInner(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
+  usage: SqlNameUsage,
 ): CompiledSelectSql {
   switch (relation.kind) {
     case "source": {
-      return compileQuery(relation.query, relation.graphId, relation.options);
+      return compileRelationSource(relation, usage);
     }
     case "derived": {
       return compileDerived(relation, dialect, orderedAggregates);
@@ -241,8 +279,8 @@ function compileRelationInner(
       return compileTopPerPartition(relation, dialect, orderedAggregates);
     }
     case "set": {
-      const left = compileRelation(relation.left, dialect);
-      const right = compileRelation(relation.right, dialect);
+      const left = compileRelation(relation.left, dialect, "wrapped");
+      const right = compileRelation(relation.right, dialect, "wrapped");
       const columns = sql.join(
         relation.columns.map(
           (column) =>
@@ -265,15 +303,21 @@ function compileRelationInner(
   }
 }
 
+/**
+ * Compiles a relation. `usage` is how the caller reads the statement's result
+ * columns (see `SqlNameUsage`); a query the relation reads from is checked
+ * under it when it is the whole relation.
+ */
 export function compileRelation(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
+  usage: SqlNameUsage = "decoded",
 ): CompiledSelectSql {
   const orderedAggregates = relationSources(relation).every(
     (source) => source.options.orderedAggregates === true,
   );
   return withPinnedReadInstant(() =>
-    compileRelationInner(relation, dialect, orderedAggregates),
+    compileRelationInner(relation, dialect, orderedAggregates, usage),
   );
 }
 

@@ -1,0 +1,223 @@
+### edge.create on free axes, generated id
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create on free axes, supplied id
+hook start create edge:link link-new
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create born ended on free axes
+hook start create edge:link link-ended
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create to a missing target
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create to a tombstoned target
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create from a tombstoned source
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-dead"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create on a taken source axis
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+=> CardinalityError[CARDINALITY_ERROR]
+
+### edge.create on a taken target axis
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-c"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create on both taken axes
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+=> CardinalityError[CARDINALITY_ERROR]
+
+### edge.create on a taken source axis to a tombstoned target
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+=> CardinalityError[CARDINALITY_ERROR]
+
+### edge.create on a taken target axis from a tombstoned source
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-dead"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create with an occupied id
+hook start create edge:link link-live
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.create duplicating a durable identity
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+=> CardinalityError[CARDINALITY_ERROR]
+
+### edge.getOrCreateByEndpoints created
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-b","Item","item-c"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-b"]
+port transaction edge.converge-create claims=0 match=durable -> declined endpointPredicate
+sql ROLLBACK
+hook error create edge ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+=> ConfigurationError[CONFIGURATION_ERROR:DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED]
+
+### edge.getOrCreateByEndpoints found
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-b"]
+sql COMMIT
+hook end create edge:link <id1> unchanged
+=> ok found
+
+### edge.getOrCreateByEndpoints on a taken source axis to a tombstoned target
+hook start create edge:link <id1>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+hook start create edge:link <id2>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+hook start create edge:link <id3>
+sql BEGIN IMMEDIATE
+sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
+    ["<graph1>"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
+    ["<graph1>","link","Item","item-a","Item","item-dead"]
+sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."deleted_at" IS NULL
+    ["<graph1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? AND NOT ( "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? )
+    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql ROLLBACK
+hook error create edge CardinalityError[CARDINALITY_ERROR]
+=> CardinalityError[CARDINALITY_ERROR]
