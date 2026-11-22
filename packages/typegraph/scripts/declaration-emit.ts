@@ -62,22 +62,3 @@ export const DECLARATION_TSCONFIG = path.join(
  * must not fall below this one.
  */
 export const DECLARATION_HEAP_MB = 8192;
-
-/**
- * tsup's declaration CLI flags (`--dts`, `--dts-only`, `--dts-resolve`,
- * `--experimental-dts`) REPLACE the config's `dts` option, which would discard
- * the emitted declaration roots and silently re-root the rollup at `src` — the
- * ~10 GiB path this pipeline exists to avoid, which then dies on the heap
- * ceiling. Refuse them by name instead of forwarding them.
- */
-export function assertNoDeclarationOverride(args: readonly string[]): void {
-  const DECLARATION_FLAG_PREFIXES = ["--dts", "--experimental-dts"] as const;
-  const override = args.find((argument) =>
-    DECLARATION_FLAG_PREFIXES.some((prefix) => argument.startsWith(prefix)),
-  );
-  if (override !== undefined) {
-    throw new Error(
-      `${override} cannot be passed to the build: it replaces the declaration roots this pipeline emits, re-rooting the declaration rollup at "src". Edit tsup.config.ts's declaration entry instead.`,
-    );
-  }
-}

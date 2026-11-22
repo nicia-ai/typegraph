@@ -13,15 +13,12 @@
  * The configuration reproduces tsup's: the same entries, externals, plugin
  * options, file names and per-format extensions.
  *
- * The output directory and formats follow the build invocation's tsup flags
- * (`--out-dir` / `-d`, `--format`), so `pnpm build --out-dir custom` or
- * `pnpm build --format esm` writes the declarations the JavaScript build
- * writes, where it writes them. Flags that would make tsup's JavaScript
- * output diverge from what this rollup can mirror are refused.
+ * It writes both formats into the JavaScript build's output directory
+ * (`OUT_DIR` in `tsup.config.ts`); the build takes no flag that moves either
+ * (`scripts/build-options.ts`).
  */
 import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { parseArgs } from "node:util";
 
 import {
   type OutputOptions,
@@ -34,11 +31,7 @@ import {
 } from "rollup";
 import { dts } from "rollup-plugin-dts";
 
-import {
-  DECLARATION_EMIT_DIR,
-  DECLARATION_ENTRY,
-  EXTERNAL,
-} from "../tsup.config";
+import { DECLARATION_ENTRY, EXTERNAL, OUT_DIR } from "../tsup.config";
 import {
   declarationLoadsPlugin,
   type PackageExports,
@@ -50,126 +43,13 @@ const DECLARATION_EXTENSIONS = {
   cjs: ".d.cts",
 } as const;
 
-type DeclarationFormat = keyof typeof DECLARATION_EXTENSIONS;
-
-/** tsup's defaults for the two flags, given `tsup.config.ts`. */
-const DEFAULT_OUT_DIR = "dist";
-const DEFAULT_FORMATS: readonly DeclarationFormat[] = ["esm", "cjs"];
-
-/**
- * tsup flags whose effect on the output this rollup cannot mirror: another
- * entry set or config file changes what the JavaScript build emits,
- * `--legacy-output` moves each format to its own directory, and
- * `--cjsInterop` rewrites the CommonJS declarations.
- */
-const UNMIRRORED_FLAGS = [
-  "--entry",
-  "--config",
-  "--no-config",
-  "--legacy-output",
-  "--cjsInterop",
-] as const;
-
-export type DeclarationBuild = Readonly<{
-  /** Absolute output directory. */
-  outDir: string;
-  formats: readonly DeclarationFormat[];
-}>;
-
-function isDeclarationFormat(format: string): format is DeclarationFormat {
-  return Object.hasOwn(DECLARATION_EXTENSIONS, format);
-}
-
-/**
- * The output directory and formats a build invocation's arguments give tsup,
- * read the way tsup's CLI reads them: `--out-dir <dir>`, `--out-dir=<dir>` or
- * `-d <dir>`; `--format` repeated or comma-separated. Refuses a format with
- * no declaration flavour here and a flag in `UNMIRRORED_FLAGS`.
- */
-export function declarationBuildOf(
-  args: readonly string[],
-  packageRoot: string,
-): DeclarationBuild {
-  const unmirrored = args.find((argument) =>
-    UNMIRRORED_FLAGS.some(
-      (flag) =>
-        argument === flag ||
-        argument.startsWith(`${flag}=`) ||
-        argument.startsWith(`${flag}.`),
-    ),
-  );
-  if (unmirrored !== undefined) {
-    throw new Error(
-      `${unmirrored} cannot be passed to the build: the declaration rollup (scripts/declaration-rollup.ts) cannot mirror its effect on tsup's output.`,
-    );
-  }
-  const { values } = parseArgs({
-    args: [...args],
-    strict: false,
-    allowPositionals: true,
-    options: {
-      "out-dir": { type: "string", short: "d" },
-      format: { type: "string", multiple: true },
-    },
-  });
-  const outDirValue = values["out-dir"];
-  if (outDirValue !== undefined && typeof outDirValue !== "string") {
-    throw new Error("--out-dir needs a directory.");
-  }
-  const formatValues = values.format;
-  const requested =
-    formatValues === undefined ? DEFAULT_FORMATS : (
-      formatValues.flatMap((value) =>
-        typeof value === "string" ? value.split(",") : [],
-      )
-    );
-  if (requested.length === 0) {
-    throw new Error("--format needs at least one format.");
-  }
-  const formats = requested.map((format) => {
-    if (!isDeclarationFormat(format)) {
-      throw new Error(
-        `--format ${format} is not built here: the package ships ${Object.keys(DECLARATION_EXTENSIONS).join(" and ")} only.`,
-      );
-    }
-    return format;
-  });
-  const outDir = path.resolve(packageRoot, outDirValue ?? DEFAULT_OUT_DIR);
-  assertDisposableOutDir(outDir, packageRoot);
-  return { outDir, formats: [...new Set(formats)] };
-}
-
-function isWithin(directory: string, candidate: string): boolean {
-  const relative = path.relative(directory, candidate);
-  return !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
-/**
- * Refuses an output directory the build's cleans would damage: tsup empties
- * it and this rollup removes every declaration file under it, so it must not
- * hold the package, its sources, its emitted declaration tree or installed
- * dependencies.
- */
-function assertDisposableOutDir(outDir: string, packageRoot: string): void {
-  const protectedDirectories = [
-    path.join(packageRoot, "src"),
-    path.join(packageRoot, "node_modules"),
-    path.resolve(packageRoot, DECLARATION_EMIT_DIR),
-  ];
-  if (
-    isWithin(outDir, packageRoot) ||
-    protectedDirectories.some((directory) => isWithin(directory, outDir)) ||
-    outDir.split(path.sep).includes("node_modules")
-  ) {
-    throw new Error(
-      `--out-dir ${outDir} would be emptied by the build; choose a directory that holds no sources, dependencies or the package itself.`,
-    );
-  }
+/** The output directory the rollup writes, and cleans, for a package root. */
+export function declarationOutDir(packageRoot: string): string {
+  return path.join(packageRoot, OUT_DIR);
 }
 
 export type DeclarationRollupInput = Readonly<{
   packageRoot: string;
-  build: DeclarationBuild;
   exports: PackageExports;
   /** Entry name → emitted declaration file; defaults to `tsup.config.ts`'s. */
   entry?: Readonly<Record<string, string>>;
@@ -238,10 +118,9 @@ async function declarationRollupOptions(
       }),
     ],
     external: [...(await externalsOf(input.packageRoot))],
-    output: input.build.formats.map((format) => {
-      const extension = DECLARATION_EXTENSIONS[format];
+    output: Object.values(DECLARATION_EXTENSIONS).map((extension) => {
       return {
-        dir: input.build.outDir,
+        dir: declarationOutDir(input.packageRoot),
         format: "esm",
         exports: "named",
         entryFileNames: `[name]${extension}`,
@@ -318,7 +197,7 @@ export async function buildDeclarations(
   input: DeclarationRollupInput,
 ): Promise<void> {
   const { output, ...options } = await declarationRollupOptions(input);
-  await removeDeclarationFiles(input.build.outDir);
+  await removeDeclarationFiles(declarationOutDir(input.packageRoot));
   const bundle = await rollup(options);
   try {
     for (const outputOptions of output) await bundle.write(outputOptions);
@@ -338,7 +217,7 @@ export async function watchDeclarations(
   onEvent: (event: RollupWatcherEvent) => void,
 ): Promise<RollupWatcher> {
   const options = await declarationRollupOptions(input);
-  await removeDeclarationFiles(input.build.outDir);
+  await removeDeclarationFiles(declarationOutDir(input.packageRoot));
   const watcher = watch({
     ...options,
     watch: { clearScreen: false, buildDelay: 100 },

@@ -16,9 +16,10 @@
  * `tsc --watch` does — it keeps watching and recovers on the next save — so
  * the one-shot compile, whose non-zero exit is fatal, runs only for a
  * non-watch build; a failed declaration rebuild is reported and the rollup
- * keeps watching too. Every argument other than `--watch` is forwarded to
- * tsup unchanged, and the declaration rollup writes to the output directory
- * and formats those arguments give tsup.
+ * keeps watching too.
+ *
+ * `--watch` is the only argument the build accepts
+ * (`scripts/build-options.ts`); nothing else reaches tsup or the rollup.
  */
 import {
   type ChildProcess,
@@ -28,8 +29,8 @@ import {
 import { access, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
+import { type BuildOptions, parseBuildOptions } from "./build-options";
 import {
-  assertNoDeclarationOverride,
   DECLARATION_EMIT_DIR,
   DECLARATION_ENTRY_FILES,
   DECLARATION_HEAP_MB,
@@ -39,12 +40,9 @@ import {
 import type { PackageExports } from "./declaration-loads";
 import {
   buildDeclarations,
-  type DeclarationBuild,
-  declarationBuildOf,
+  declarationOutDir,
   watchDeclarations,
 } from "./declaration-rollup";
-
-const WATCH_FLAG = "--watch";
 
 const TSC_BIN = path.join(PACKAGE_ROOT, "node_modules/typescript/lib/tsc.js");
 const TSUP_BIN = path.join(
@@ -109,12 +107,17 @@ async function runToCompletion(
   }
 }
 
-function declarationEmitArguments(watch: boolean): readonly string[] {
+function declarationEmitArguments(options: BuildOptions): readonly string[] {
   return [
     "--project",
     DECLARATION_TSCONFIG,
-    ...(watch ? ["--watch", "--preserveWatchOutput"] : []),
+    ...(options.watch ? ["--watch", "--preserveWatchOutput"] : []),
   ];
+}
+
+/** tsup's arguments: its configuration (`tsup.config.ts`) plus watch mode. */
+function bundleArguments(options: BuildOptions): readonly string[] {
+  return options.watch ? ["--watch"] : [];
 }
 
 /**
@@ -184,15 +187,13 @@ async function readPackageExports(): Promise<PackageExports> {
  * the rollup watcher closes on its own; a failed rebuild is logged and the
  * watcher keeps going, recovering on the next declaration emit.
  */
-async function superviseDeclarationRollup(
-  build: DeclarationBuild,
-): Promise<never> {
+async function superviseDeclarationRollup(): Promise<never> {
   const watcher = await watchDeclarations(
-    { packageRoot: PACKAGE_ROOT, build, exports: await readPackageExports() },
+    { packageRoot: PACKAGE_ROOT, exports: await readPackageExports() },
     (event) => {
       if (event.code === "BUNDLE_END") {
         console.log(
-          `Declarations rolled into ${path.relative(PACKAGE_ROOT, build.outDir) || "."} in ${event.duration}ms`,
+          `Declarations rolled into ${path.relative(PACKAGE_ROOT, declarationOutDir(PACKAGE_ROOT))} in ${event.duration}ms`,
         );
       } else if (event.code === "ERROR") {
         console.error(
@@ -217,35 +218,31 @@ async function superviseDeclarationRollup(
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  assertNoDeclarationOverride(args);
-  const watch = args.includes(WATCH_FLAG);
-  const build = declarationBuildOf(args, PACKAGE_ROOT);
+  const options = parseBuildOptions(process.argv.slice(2));
 
   await rm(DECLARATION_EMIT_DIR, { force: true, recursive: true });
 
-  if (!watch) {
+  if (!options.watch) {
     await runToCompletion(
       "Declaration emit (tsc)",
       TSC_BIN,
-      declarationEmitArguments(false),
+      declarationEmitArguments(options),
     );
-    await runToCompletion("Bundle (tsup)", TSUP_BIN, args);
+    await runToCompletion("Bundle (tsup)", TSUP_BIN, bundleArguments(options));
     await buildDeclarations({
       packageRoot: PACKAGE_ROOT,
-      build,
       exports: await readPackageExports(),
     });
     return;
   }
 
-  const watcher = spawnNode(TSC_BIN, declarationEmitArguments(true));
+  const watcher = spawnNode(TSC_BIN, declarationEmitArguments(options));
   const watcherClosed = superviseWatcher(watcher);
   await Promise.race([waitForFirstDeclarationEmit(), watcherClosed]);
   await Promise.race([
-    runToCompletion("Bundle (tsup)", TSUP_BIN, args),
+    runToCompletion("Bundle (tsup)", TSUP_BIN, bundleArguments(options)),
     watcherClosed,
-    superviseDeclarationRollup(build),
+    superviseDeclarationRollup(),
   ]);
 }
 

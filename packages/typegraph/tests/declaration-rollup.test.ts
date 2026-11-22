@@ -1,13 +1,14 @@
 /**
  * The declaration rollup (`scripts/declaration-rollup.ts`) writes each entry's
- * declaration loads while it generates the bundle, into the output directory
- * and formats the build invocation gives tsup.
+ * declaration loads while it generates the bundle, into the build's output
+ * directory, in both formats.
  *
  * Runs the rollup over a small emitted-declaration tree rather than the
  * package's, so the watch sequence below can drive many rebuilds quickly; the
  * functions under test are the ones `scripts/build.ts` calls.
  */
 import { existsSync } from "node:fs";
+import type * as FsPromises from "node:fs/promises";
 import {
   mkdir,
   mkdtemp,
@@ -20,7 +21,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { RollupWatcher, RollupWatcherEvent } from "rollup";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   declarationLoadBlock,
@@ -28,9 +29,23 @@ import {
 } from "../scripts/declaration-loads";
 import {
   buildDeclarations,
-  declarationBuildOf,
+  declarationOutDir,
   watchDeclarations,
 } from "../scripts/declaration-rollup";
+
+/** Every path the code under test passes to `rm`, in call order. */
+const removedPaths = vi.hoisted((): string[] => []);
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return {
+    ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      removedPaths.push(String(args[0]));
+      await actual.rm(...args);
+    },
+  };
+});
 
 const EXPORTS: PackageExports = {
   ".": { types: "./dist/index.d.ts" },
@@ -119,98 +134,56 @@ async function entriesMissingLoads(
   return missing;
 }
 
-describe("declaration build options", () => {
-  it("follows tsup's defaults and its --out-dir / --format spellings", () => {
-    const root = "/package";
-    expect(declarationBuildOf(["--silent"], root)).toEqual({
-      outDir: "/package/dist",
-      formats: ["esm", "cjs"],
-    });
-    for (const args of [
-      ["--out-dir", "custom"],
-      ["--out-dir=custom"],
-      ["-d", "custom"],
-    ]) {
-      expect(declarationBuildOf(args, root).outDir).toBe("/package/custom");
-    }
-    expect(declarationBuildOf(["--format", "esm"], root).formats).toEqual([
-      "esm",
-    ]);
-    expect(declarationBuildOf(["--format=cjs"], root).formats).toEqual(["cjs"]);
-    expect(
-      declarationBuildOf(["--format", "esm", "--format", "cjs"], root).formats,
-    ).toEqual(["esm", "cjs"]);
-    expect(declarationBuildOf(["--format", "cjs,esm"], root).formats).toEqual([
-      "cjs",
-      "esm",
-    ]);
-    expect(
-      declarationBuildOf(["--watch", "--minify", "--target", "es2022"], root),
-    ).toEqual({ outDir: "/package/dist", formats: ["esm", "cjs"] });
-  });
-
-  it("refuses a flag whose effect on tsup's output it cannot mirror", () => {
-    const root = "/package";
-    expect(() => declarationBuildOf(["--format", "iife"], root)).toThrow(
-      /--format iife is not built here/,
-    );
-    for (const flag of [
-      "--legacy-output",
-      "--entry.main=src/index.ts",
-      "--config=other.ts",
-      "--no-config",
-      "--cjsInterop",
-    ]) {
-      expect(() => declarationBuildOf([flag], root)).toThrow(
-        /cannot be passed to the build/,
-      );
-    }
-    for (const outDir of [".", "src", "src/x", "node_modules/x", ".."]) {
-      expect(() => declarationBuildOf(["--out-dir", outDir], root)).toThrow(
-        /would be emptied by the build/,
-      );
-    }
-  });
-});
-
 describe("declaration build", () => {
-  it("writes the formats an invocation asks for into its output directory, with their loads", async () => {
-    const outDir = path.join(packageRoot, "custom");
-    await mkdir(outDir, { recursive: true });
-    // A stale flavour from an earlier build must not survive.
-    await writeFile(path.join(outDir, "index.d.cts"), "stale\n");
+  it("cleans only declaration files inside the output directory", async () => {
+    const outDir = declarationOutDir(packageRoot);
+    expect(outDir).toBe(path.join(packageRoot, "dist"));
+    // Stale declarations inside the output directory: an earlier build's
+    // chunk and a flavour this build does not write.
+    await mkdir(path.join(outDir, "old"), { recursive: true });
+    const stale = [
+      path.join(outDir, "index-0ldHa5h0.d.ts"),
+      path.join(outDir, "old", "index.d.mts"),
+    ];
+    // Declarations outside it, which no clean may touch: a source file, a
+    // sibling directory whose name extends the output directory's, the
+    // package root itself; and the emitted tree the rollup reads.
+    await mkdir(path.join(packageRoot, "src"), { recursive: true });
+    await mkdir(path.join(packageRoot, "dist-other"), { recursive: true });
+    const outside = [
+      path.join(packageRoot, "src", "types.d.ts"),
+      path.join(packageRoot, "dist-other", "index.d.ts"),
+      path.join(packageRoot, "root.d.ts"),
+    ];
+    const emitted = path.join(packageRoot, "emit", "shared.d.ts");
+    for (const file of [...stale, ...outside]) {
+      await writeFile(file, "export {};\n");
+    }
 
+    removedPaths.length = 0;
     await buildDeclarations({
       packageRoot,
-      build: declarationBuildOf(
-        ["--out-dir", "custom", "--format", "esm"],
-        packageRoot,
-      ),
       exports: EXPORTS,
       entry: ENTRY,
       loads: LOADS,
     });
 
-    const written = await declarationFiles(outDir);
-    expect(written).toContain("index.d.ts");
-    expect(written).toContain("store-entry.d.ts");
-    expect(written).toContain("sub/index.d.ts");
-    expect(written.filter((file) => !file.endsWith(".d.ts"))).toEqual([]);
-    expect(await entriesMissingLoads(outDir, ".d.ts")).toEqual([]);
+    for (const file of stale) expect(existsSync(file)).toBe(false);
+    for (const file of [...outside, emitted]) {
+      expect(existsSync(file)).toBe(true);
+    }
+    expect(removedPaths.length).toBeGreaterThan(0);
     expect(
-      await readFile(path.join(outDir, "sub", "index.d.ts"), "utf8"),
-    ).toMatch(
-      /^\/\/ Declaration loads[^\n]*\n\/\/\/ <reference path="\.\.\/index\.d\.ts" \/>\n/,
-    );
-    // The manifest's directory is not written to.
-    expect(await declarationFiles(path.join(packageRoot, "dist"))).toEqual([]);
+      removedPaths.filter(
+        (removed) => !removed.startsWith(`${outDir}${path.sep}`),
+      ),
+    ).toEqual([]);
   });
 
   it("writes both flavours, each loading its own flavour, by default", async () => {
     const outDir = path.join(packageRoot, "dist");
     await buildDeclarations({
       packageRoot,
-      build: declarationBuildOf([], packageRoot),
       exports: EXPORTS,
       entry: ENTRY,
       loads: LOADS,
@@ -226,7 +199,6 @@ describe("declaration build", () => {
     await expect(
       buildDeclarations({
         packageRoot,
-        build: declarationBuildOf(["--format", "esm"], packageRoot),
         exports: EXPORTS,
         entry: { index: ENTRY.index, "store-entry": ENTRY["store-entry"] },
         loads: LOADS,
@@ -252,7 +224,6 @@ describe("declaration watch", () => {
     watcher = await watchDeclarations(
       {
         packageRoot,
-        build: declarationBuildOf([], packageRoot),
         exports: EXPORTS,
         entry: ENTRY,
         loads: LOADS,

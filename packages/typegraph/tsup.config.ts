@@ -94,6 +94,14 @@ export const DECLARATION_ENTRY = Object.fromEntries(
 );
 
 /**
+ * The build's output directory, relative to the package root. tsup writes
+ * the JavaScript here and the declaration rollup writes the declarations
+ * here; `package.json#exports` names files under it. The build accepts no
+ * flag that changes it (`scripts/build-options.ts`).
+ */
+export const OUT_DIR = "dist";
+
+/**
  * Modules both bundles leave as imports, on top of the package's
  * dependencies and peers. The declaration rollup reads the same list.
  */
@@ -116,6 +124,7 @@ export const EXTERNAL = [
  */
 export default defineConfig({
   entry: ENTRY,
+  outDir: OUT_DIR,
   format: ["esm", "cjs"],
   dts: false,
   splitting: true,

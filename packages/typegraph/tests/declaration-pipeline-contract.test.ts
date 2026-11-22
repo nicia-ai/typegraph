@@ -19,7 +19,6 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
-  assertNoDeclarationOverride,
   DECLARATION_EMIT_DIR,
   DECLARATION_ENTRY_FILES,
   DECLARATION_TSCONFIG,
@@ -105,26 +104,6 @@ describe("declaration pipeline", () => {
     expect(() => declarationEntryFor("src/index.tsx")).toThrow(
       /does not end with "\.ts"/,
     );
-  });
-
-  it("refuses a tsup declaration flag that would re-root the rollup at source", () => {
-    // These CLI flags replace the config's whole `dts` option, so forwarding
-    // one would discard the emitted roots and silently rebuild the ~10 GiB way.
-    for (const flag of [
-      "--dts",
-      "--dts-only",
-      "--dts-resolve",
-      "--experimental-dts",
-    ]) {
-      expect(() => {
-        assertNoDeclarationOverride(["--silent", flag]);
-      }).toThrow(/re-rooting the declaration rollup/);
-    }
-    // `--no-dts` skips declarations outright rather than re-rooting them, and
-    // every unrelated flag is forwarded untouched.
-    expect(() => {
-      assertNoDeclarationOverride(["--no-dts", "--watch", "--silent"]);
-    }).not.toThrow();
   });
 
   it("emits declarations only, into the pipeline's own disposable directory", () => {
