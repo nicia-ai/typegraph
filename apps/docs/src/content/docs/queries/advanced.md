@@ -8,59 +8,87 @@ exist, or if values appear in another query's results.
 
 ## EXISTS
 
-Check if related records exist:
+Check if related records exist. A subquery that depends on the outer row is correlated with
+`$exists()`, whose callback receives the outer query's fields:
 
 ```typescript
-import { exists } from "@nicia-ai/typegraph";
-import { fieldRef } from "@nicia-ai/typegraph/query";
+import { expr } from "@nicia-ai/typegraph";
 
 // Find people who have authored at least one PR
 const authors = await store
   .query()
   .from("Person", "p")
-  .whereNode("p", () =>
-    exists(
-      store
-        .query()
+  .where((ctx) =>
+    ctx.$exists((subquery, outer) =>
+      subquery
         .from("PullRequest", "pr")
         .traverse("author", "e", { direction: "in" })
         .to("Person", "author")
-        .whereNode("author", (a) => a.id.eq(fieldRef("p", ["id"])))
-        .select((ctx) => ({ id: ctx.pr.id }))
-        .toAst()
-    )
+        .whereNode("author", (_author, inner) =>
+          expr.eq(inner.author.id, outer.p.id),
+        )
+        .project((inner) => ({ id: inner.pr.id })),
+    ),
   )
   .select((ctx) => ctx.p)
   .execute();
 ```
+
+A `whereNode()` or `whereEdge()` predicate reads only its own alias, so the outer row reaches
+the subquery through `outer`, never through a field reference naming an outer alias. A predicate
+that names another alias is refused with `UnsupportedPredicateError` before any SQL is sent.
+To compare two aliases of the same query, use `where()`:
+
+```typescript
+// Pairs where the person known is older than the person who knows them
+const olderFriends = await store
+  .query()
+  .from("Person", "a")
+  .traverse("knows", "k")
+  .to("Person", "b")
+  .where(({ a, b }) => expr.gt(b.age, a.age))
+  .select((ctx) => ({ person: ctx.a.name, friend: ctx.b.name }))
+  .execute();
+```
+
+A subquery with a recursive traversal and more than one hop compiles each fixed (non-recursive)
+hop, and the start of an optional first recursive hop, as a separate statement that cannot see
+the outer row, so a `whereNode()` or `whereEdge()` predicate on one of those aliases that reads
+`outer` is refused with `UnsupportedPredicateError` (`details.targetAlias`). The same predicate on
+a recursive hop's alias is evaluated; otherwise correlate in the subquery's `where()`, which can
+read `outer`.
 
 ## NOT EXISTS
 
 Find records without related records:
 
 ```typescript
-import { notExists } from "@nicia-ai/typegraph";
-import { fieldRef } from "@nicia-ai/typegraph/query";
+import { expr } from "@nicia-ai/typegraph";
 
 // Find people with no pull requests
 const nonContributors = await store
   .query()
   .from("Person", "p")
-  .whereNode("p", () =>
-    notExists(
-      store
-        .query()
-        .from("PullRequest", "pr")
-        .traverse("author", "e", { direction: "in" })
-        .to("Person", "author")
-        .whereNode("author", (a) => a.id.eq(fieldRef("p", ["id"])))
-        .select((ctx) => ({ id: ctx.pr.id }))
-        .toAst()
-    )
+  .where((ctx) =>
+    expr.not(
+      ctx.$exists((subquery, outer) =>
+        subquery
+          .from("PullRequest", "pr")
+          .traverse("author", "e", { direction: "in" })
+          .to("Person", "author")
+          .whereNode("author", (_author, inner) =>
+            expr.eq(inner.author.id, outer.p.id),
+          )
+          .project((inner) => ({ id: inner.pr.id })),
+      ),
+    ),
   )
   .select((ctx) => ctx.p)
   .execute();
 ```
+
+`exists()` and `notExists()` take an uncorrelated subquery: it is evaluated once, independent of
+the outer row.
 
 ## IN
 
@@ -121,7 +149,8 @@ const allowedUsers = await store
 
 ## fieldRef()
 
-The `fieldRef()` function creates a reference to a field in the outer query for use in subquery predicates:
+The `fieldRef()` function creates a reference to a field of a query alias: the outer field an
+`inSubquery()` or `notInSubquery()` tests, or the column an `aggregate()` subquery projects:
 
 ```typescript
 import { fieldRef } from "@nicia-ai/typegraph/query";
@@ -134,15 +163,16 @@ fieldRef("alias", ["nested", "path"])  // Reference a nested field
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `alias` | `string` | The alias of the node/edge in the outer query |
+| `alias` | `string` | The alias of the node/edge the field belongs to |
 | `path` | `string[]` | Path to the field (array for nested access) |
 
 ## Helpers Reference
 
 | Function | Description |
 |----------|-------------|
-| `exists(subqueryAst)` | True if subquery returns any rows |
-| `notExists(subqueryAst)` | True if subquery returns no rows |
+| `exists(subqueryAst)` | True if the uncorrelated subquery returns any rows |
+| `notExists(subqueryAst)` | True if the uncorrelated subquery returns no rows |
+| `ctx.$exists((subquery, outer) => …)` | Correlated EXISTS; see [Expressions](/queries/expressions#scope-safety) |
 | `inSubquery(fieldRef, subqueryAst)` | True if field value is in subquery results |
 | `notInSubquery(fieldRef, subqueryAst)` | True if field value is not in subquery results |
 
@@ -158,18 +188,18 @@ scalar column. Prefer `aggregate({ ... })` with a single field.
 const activeUsers = await store
   .query()
   .from("User", "u")
-  .whereNode("u", () =>
-    exists(
-      store
-        .query()
+  .where((ctx) =>
+    ctx.$exists((subquery, outer) =>
+      subquery
         .from("LoginEvent", "e")
-        .whereNode("e", (e) =>
-          e.userId.eq(fieldRef("u", ["id"]))
-           .and(e.timestamp.gte(sevenDaysAgo))
+        .whereNode("e", (_event, inner) =>
+          expr.and(
+            expr.eq(inner.e.userId, outer.u.id),
+            expr.gte(inner.e.timestamp, expr.literal(sevenDaysAgo)),
+          ),
         )
-        .select((ctx) => ({ id: ctx.e.id }))
-        .toAst()
-    )
+        .project((inner) => ({ id: inner.e.id })),
+    ),
   )
   .select((ctx) => ctx.u)
   .execute();
@@ -182,15 +212,17 @@ const activeUsers = await store
 const unpopularProducts = await store
   .query()
   .from("Product", "p")
-  .whereNode("p", () =>
-    notExists(
-      store
-        .query()
-        .from("CartItem", "ci")
-        .whereNode("ci", (ci) => ci.productId.eq(fieldRef("p", ["id"])))
-        .select((ctx) => ({ id: ctx.ci.id }))
-        .toAst()
-    )
+  .where((ctx) =>
+    expr.not(
+      ctx.$exists((subquery, outer) =>
+        subquery
+          .from("CartItem", "ci")
+          .whereNode("ci", (_item, inner) =>
+            expr.eq(inner.ci.productId, outer.p.id),
+          )
+          .project((inner) => ({ id: inner.ci.id })),
+      ),
+    ),
   )
   .select((ctx) => ctx.p)
   .execute();
