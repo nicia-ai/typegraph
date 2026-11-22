@@ -1,7 +1,9 @@
 /**
  * A prepared projection checks the generated SQL names of the statement its
  * executions send: inside `withCheckedReads()` that is the projection envelope
- * the checked read wraps and reads back by name, not the bare projection.
+ * the checked read wraps and reads back by name, not the bare projection. The
+ * query is ordered: only then does the envelope differ from the bare
+ * projection (it carries the ordering column).
  * Every name-checked compile is observed through `compileNameCheckedQuery`,
  * the one function each entry point checks through.
  */
@@ -64,6 +66,9 @@ describe("a prepared projection inside withCheckedReads()", () => {
           .query()
           .from("Person", "p")
           .whereNode("p", (person) => person.name.eq(parameter("name")))
+          // Ordered, so the checked read sends the projection envelope that
+          // carries the ordering column, not the bare projection.
+          .orderBy("p", "age")
           .project((fields) => ({ name: fields.p.name, age: fields.p.age }));
         checks.length = 0;
         const preparedQuery = query.prepare();
@@ -83,7 +88,9 @@ describe("a prepared projection inside withCheckedReads()", () => {
     );
     expect(prepared.map((check) => check.usage)).toEqual(["wrapped"]);
     expect(executed.map((check) => check.usage)).toEqual(["wrapped"]);
-    // The same statement up to its bound value.
+    // The same statement up to its bound value: the envelope, which selects
+    // the ordering column under the reserved `__tg_order_` prefix.
     expect(prepared[0]?.sql).toEqual(executed[0]?.sql);
+    expect(executed[0]?.sql).toContain("__tg_order_0");
   });
 });
