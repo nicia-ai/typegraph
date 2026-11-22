@@ -25,7 +25,7 @@
  *       },
  *     };
  *   },
- *   { slice: { index: 0, count: 2 } },
+ *   { slice: { index: 0, count: 2 }, driver: "better-sqlite3" },
  * );
  * ```
  */
@@ -40,6 +40,7 @@ import {
 } from "./integration";
 import type {
   InspectableHistoryStore,
+  IntegrationLaneDriver,
   SerializedBackendHandle,
   SerializedBackendOverrides,
 } from "./integration/test-context";
@@ -115,6 +116,8 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * `true`.
    */
   serverLaneConcurrency?: boolean;
+  /** The driver the lane runs on — see {@link IntegrationLaneDriver}. */
+  driver: IntegrationLaneDriver;
 }>;
 
 /**
@@ -202,6 +205,7 @@ export function createIntegrationTestSuite<
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
+      driver: options.driver,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {

@@ -93,6 +93,7 @@ export function registerPostgresIntegrationLane(
         },
         {
           slice,
+          driver: "node-postgres",
           createIsolatedBackend: async () => {
             const { backend } = await createLocalPgliteBackend();
             return { backend, cleanup: () => backend.close() };

@@ -127,6 +127,7 @@ export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";
 export { registerTransactionBoundaryIntegrationTests } from "./transaction-boundaries";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
+export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
