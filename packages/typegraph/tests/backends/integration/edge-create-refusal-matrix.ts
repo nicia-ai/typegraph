@@ -116,22 +116,20 @@ function d2ClaimResidue(
 /**
  * D7 (not in the design note): on PostgreSQL a duplicate-id INSERT fails
  * inside the caller's transaction with no savepoint around it, so catching
- * the refusal cannot keep the transaction: COMMIT rolls everything back,
- * the sentinel included — reported as a success on node-postgres and
- * PGlite, raised as the 23505 on postgres-js.
+ * the refusal cannot keep the transaction: the sentinel is lost. The
+ * transaction reports it, rejecting with `TransactionRolledBackError` on
+ * every driver.
  */
 const D7_POISONED_TRANSACTION: readonly CreateDefect[] = [
   {
     label: "D7",
-    on: { lane: ["PGlite", "PostgreSQL"], receiver: ["transaction"] },
-    today: { error: DUPLICATE_ID, commit: "ok", sentinel: "lost" },
-  },
-  {
-    label: "D7",
-    on: { lane: ["PostgreSQL (postgres-js)"], receiver: ["transaction"] },
+    on: {
+      lane: ["PGlite", "PostgreSQL", "PostgreSQL (postgres-js)"],
+      receiver: ["transaction"],
+    },
     today: {
       error: DUPLICATE_ID,
-      commit: "PostgresError[23505]",
+      commit: "TransactionRolledBackError[TRANSACTION_ROLLED_BACK]",
       sentinel: "lost",
     },
   },

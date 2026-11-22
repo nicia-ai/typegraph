@@ -755,17 +755,6 @@ export function registerTransactionSessionHazardTests(
                 unhandled: [],
               },
             },
-            {
-              label: "hazard 2c",
-              on: { driver: ["postgres-js"] },
-              today: {
-                transaction: { status: "fulfilled", receiptTotal: 0 },
-                late: "rejected",
-                items: ["s3"],
-                claims: { s1: 0, s2: 0 },
-                unhandled: [],
-              },
-            },
           ],
         );
       });

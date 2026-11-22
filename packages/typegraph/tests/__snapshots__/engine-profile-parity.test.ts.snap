@@ -1635,10 +1635,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
-    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
-  },
-  {
-    "params": [],
     "sql": "LOCK TABLE "typegraph_nodes", "typegraph_edges" IN ACCESS EXCLUSIVE MODE",
   },
   {
@@ -1819,10 +1815,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
-    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
-  },
-  {
-    "params": [],
     "sql": "-- COMMIT --",
   },
   {
@@ -1854,10 +1846,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "set transaction isolation level read committed",
-  },
-  {
-    "params": [],
-    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
   },
   {
     "params": [
@@ -1915,10 +1903,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     )
     RETURNING *
   ",
-  },
-  {
-    "params": [],
-    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
@@ -2180,10 +2164,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "-- BEGIN (native transaction) --",
   },
   {
-    "params": [],
-    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
-  },
-  {
     "params": [
       "engine_profile_parity_script",
       "Document",
@@ -2278,10 +2258,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
           "language" = EXCLUDED."language",
           "updated_at" = EXCLUDED."updated_at"
       ",
-  },
-  {
-    "params": [],
-    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
@@ -3254,10 +3230,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     "sql": "set transaction isolation level read committed",
   },
   {
-    "params": [],
-    "sql": "SET LOCAL typegraph.transaction_marker = 'open'",
-  },
-  {
     "params": [
       "engine_profile_parity_template_source",
     ],
@@ -3313,10 +3285,6 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
     )
     RETURNING *
   ",
-  },
-  {
-    "params": [],
-    "sql": "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
   },
   {
     "params": [],
