@@ -753,6 +753,32 @@ export class ExecutableQuery<
   }
 
   /**
+   * @internal Refuses, before any statement is sent, a query whose first
+   * statement `executeOn()` would send has colliding generated SQL names: the
+   * checked read, the selective statement when the selector's fields can be
+   * extracted, or the full one. `store.batch()` runs it for every item before
+   * its first statement.
+   */
+  checkSqlNamesBeforeExecution(): void {
+    if (this.#hasParameterReferences()) return;
+    const ast = this.toAst();
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
+      undefined
+    ) {
+      this.#compileCheckedRead(ast);
+      return;
+    }
+    const selectiveFields = this.#getSelectiveFieldsForExecute();
+    compileNameCheckedQuery(
+      selectiveFields === undefined ? ast : { ...ast, selectiveFields },
+      this.#config.graphId,
+      this.#compileOptions(),
+      "decoded",
+    );
+  }
+
+  /**
    * Compiles the statement a checked read wraps: its rows are selected through
    * `checked_rows.*` and read back by name.
    */

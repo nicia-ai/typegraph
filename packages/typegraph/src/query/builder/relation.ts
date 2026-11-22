@@ -952,6 +952,16 @@ export class ExecutableRelationQuery<
     return this.executeOn(this.#requireBackend());
   }
 
+  /**
+   * @internal Refuses, before any statement is sent, a relation whose source
+   * queries have colliding generated SQL names, under the check every
+   * execution applies. `store.batch()` runs it for every item before its
+   * first statement.
+   */
+  checkSqlNamesBeforeExecution(): void {
+    assertRelationSourceSqlNames(this.#materialize(), "decoded");
+  }
+
   async executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly Result[]> {

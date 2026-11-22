@@ -334,6 +334,15 @@ export class ExecutableAggregateQuery<
     return relation;
   }
 
+  /**
+   * @internal Refuses, before any statement is sent, an aggregate whose
+   * statement has colliding generated SQL names. `store.batch()` runs it for
+   * every item before its first statement.
+   */
+  checkSqlNamesBeforeExecution(): void {
+    this.asRelation().checkSqlNamesBeforeExecution();
+  }
+
   /** Runs on a target with the same database and transaction provenance. */
   executeOn(
     backend: GraphBackend | TransactionBackend,

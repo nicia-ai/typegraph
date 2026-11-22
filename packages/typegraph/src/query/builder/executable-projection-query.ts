@@ -8,7 +8,7 @@ import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import type { DatabaseExpression } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
-import { asCompiledSelectSql } from "../sql-intent";
+import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
@@ -207,14 +207,9 @@ export class ExecutableProjectionQuery<
   }> {
     const ast = this.toAst();
     const backend = this.#requireBackend();
-    // Refuse at prepare() what every execute() would refuse: a query whose
-    // generated SQL names collide (see sql-name-registry.ts).
-    compileNameCheckedQuery(
-      ast,
-      this.#config.graphId,
-      buildCompileOptions(this.#config),
-      "decoded",
-    );
+    // Refuse at prepare() what every execute() would refuse: the statement
+    // execute() sends, checked by the function that compiles it.
+    this.#compileRowsStatement(ast);
     return {
       execute: async (bindings) => {
         validateQueryBindings([ast], bindings);
@@ -308,27 +303,16 @@ export class ExecutableProjectionQuery<
             ),
           )
         : backend.execute<Record<string, unknown>>(
-            compileNameCheckedQuery(
+            this.#compileRowsStatement(
               bindings === undefined ? ast : bindQueryParameters(ast, bindings),
-              this.#config.graphId,
-              buildCompileOptions(this.#config),
-              "decoded",
-            ),
+            ).query,
           ),
         backend,
       );
     }
     const concreteAst =
       bindings === undefined ? ast : bindQueryParameters(ast, bindings);
-    // The checked read selects `projected.*` from this statement and reads
-    // every column back by name.
-    const { ast: envelope, orderBy } = buildProjectionEnvelope(concreteAst);
-    const ordered = compileNameCheckedQuery(
-      orderBy.length === 0 ? concreteAst : envelope,
-      this.#config.graphId,
-      buildCompileOptions(this.#config),
-      "wrapped",
-    );
+    const { query: ordered, orderBy } = this.#compileRowsStatement(concreteAst);
     const resultOrderBy =
       orderBy.length === 0 ?
         sql.empty()
@@ -358,6 +342,50 @@ export class ExecutableProjectionQuery<
       backend,
     );
   }
+  /**
+   * The statement a row read sends for `ast`, refused when its generated SQL
+   * names collide: the projection itself, or inside `withCheckedReads()` the
+   * projection envelope the checked read selects `projected.*` from and reads
+   * back by name. The one decision prepare(), the batch pre-check and every
+   * execution use.
+   */
+  #compileRowsStatement(ast: QueryAst): Readonly<{
+    query: CompiledSelectSql;
+    orderBy: ReturnType<typeof buildProjectionEnvelope>["orderBy"];
+  }> {
+    const graphId = this.#config.graphId;
+    const options = buildCompileOptions(this.#config);
+    if (
+      getQueryBuilderInternalContext(this.#config).expectedSchemaVersion ===
+      undefined
+    )
+      return {
+        query: compileNameCheckedQuery(ast, graphId, options, "decoded"),
+        orderBy: [],
+      };
+    const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
+    return {
+      query: compileNameCheckedQuery(
+        orderBy.length === 0 ? ast : envelope,
+        graphId,
+        options,
+        "wrapped",
+      ),
+      orderBy,
+    };
+  }
+
+  /**
+   * @internal Refuses, before any statement is sent, a projection whose row
+   * statement has colliding generated SQL names. `store.batch()` runs it for
+   * every item before its first statement.
+   */
+  checkSqlNamesBeforeExecution(): void {
+    const ast = this.toAst();
+    if (hasParameterReferences(ast)) return;
+    this.#compileRowsStatement(ast);
+  }
+
   /**
    * Builds at most one reusable template for this immutable projection shape.
    * The template belongs to the configured backend compiler, while execution
