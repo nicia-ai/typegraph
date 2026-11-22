@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { count, expr, field } from "../../../src";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { requireDefined } from "../../../src/utils/presence";
+import {
+  expectObservation,
+  type KnownDefect,
+} from "../../helpers/known-defect";
 import type { IntegrationStore } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -93,11 +100,33 @@ type CategoryCount = Readonly<{ category: string; n: number }>;
 
 type SearchKind = "fulltext" | "vector" | "hybrid";
 
+/**
+ * The issue tracking terminals that read a search statement through a
+ * relation (`first()`, `executeOn()`, `prepare()`, `batchOnce()`,
+ * `asRelation()`): the relation orders by the caller's terms alone and drops
+ * the statement's relevance order, so an ordered search query can select a
+ * different row or group there than through `execute()`.
+ */
+const RELATION_ORDER_DEFECT = "#974";
+
 async function firstRow<Row>(
   rows: Promise<readonly Row[]>,
 ): Promise<Row | undefined> {
   const [first] = await rows;
   return first;
+}
+
+/** A query's rows, or the name of the error it threw. */
+type Settled<Value> = Readonly<{ value: Value }> | Readonly<{ error: string }>;
+
+async function settle<Value>(
+  run: () => Promise<Value>,
+): Promise<Settled<Value>> {
+  try {
+    return { value: await run() };
+  } catch (error) {
+    return { error: error instanceof Error ? error.name : String(error) };
+  }
 }
 
 function capabilitiesOf(kind: SearchKind): readonly ("fulltext" | "vector")[] {
@@ -164,6 +193,48 @@ function searchGroups(store: IntegrationStore, kind: SearchKind) {
 }
 
 const SEARCH_KINDS: readonly SearchKind[] = ["fulltext", "vector", "hybrid"];
+
+/** A PostgreSQL collation that sorts text as a dictionary does. */
+const LINGUISTIC_COLLATION = "tg_grouped_search_linguistic";
+
+/**
+ * Makes the fulltext table's `node_id` column sort under a linguistic
+ * collation this creates (ICU `en-US`, which puts `tie-a` before `tie-B`), so
+ * a node-id comparison without an explicit byte-order collation follows it.
+ * The collation is the column's own, not the database default, so the case
+ * discriminates on every PostgreSQL whatever its default collation. Returns
+ * the restore step, or `undefined` when the engine cannot apply such a
+ * collation (it takes the DDL but still compares in byte order).
+ */
+async function linguisticFulltextNodeIds(
+  store: IntegrationStore,
+): Promise<(() => Promise<void>) | undefined> {
+  const { backend } = store;
+  const executeDdl = requireDefined(backend.executeDdl);
+  const table = requireDefined(backend.tableNames).fulltext;
+  await executeDdl(
+    `CREATE COLLATION IF NOT EXISTS ${LINGUISTIC_COLLATION} (provider = icu, locale = 'en-US')`,
+  );
+  const alter = (collation: string) =>
+    executeDdl(
+      `ALTER TABLE "${table}" ALTER COLUMN node_id TYPE text COLLATE ${collation}`,
+    );
+  await alter(LINGUISTIC_COLLATION);
+  const restore = async () => {
+    await alter(`"default"`);
+    await executeDdl(`DROP COLLATION IF EXISTS ${LINGUISTIC_COLLATION}`);
+  };
+  const [probe] = await backend.execute<{ linguistic: unknown }>(
+    asCompiledRowsSql(
+      sql.raw(
+        `SELECT CASE WHEN 'tie-a' COLLATE ${LINGUISTIC_COLLATION} < 'tie-B' COLLATE ${LINGUISTIC_COLLATION} THEN 1 ELSE 0 END AS linguistic`,
+      ),
+    ),
+  );
+  if (Number(probe?.linguistic) === 1) return restore;
+  await restore();
+  return undefined;
+}
 
 export function registerGroupedSearchIntegrationTests(
   context: IntegrationTestContext,
@@ -251,81 +322,198 @@ export function registerGroupedSearchIntegrationTests(
         expect(await searchGroups(store, kind).limit(1).execute()).toEqual([
           expected[0],
         ]);
+        expect(
+          await searchGroups(store, kind)
+            .orderBy("n", "desc")
+            .limit(1)
+            .execute(),
+        ).toEqual([expected[0]]);
       });
 
-      it(`selects the same ${kind} groups from every aggregate terminal`, async (ctx) => {
+      it(`selects ${kind} groups through each aggregate terminal (relation-backed ones pinned at ${RELATION_ORDER_DEFECT})`, async (ctx) => {
         const store = storeWith(context, ctx, capabilitiesOf(kind));
         await seedMixedScores(store);
 
-        // `steady` has more members: an outer `ORDER BY n DESC` that
-        // outranked relevance would select it first.
+        // `steady` has more members: a relation that orders by the caller's
+        // `n DESC` alone, without the statement's relevance key, selects it
+        // first.
         const ordered = () => searchGroups(store, kind).orderBy("n", "desc");
-        const expected: readonly CategoryCount[] = [
+        const correct: readonly CategoryCount[] = [
           { category: "peak", n: 2 },
           { category: "steady", n: 3 },
         ];
+        const today: readonly CategoryCount[] = [
+          { category: "steady", n: 3 },
+          { category: "peak", n: 2 },
+        ];
+        const relationDefect: readonly KnownDefect<readonly CategoryCount[]>[] =
+          [{ label: RELATION_ORDER_DEFECT, on: {}, today }];
         const [batched] = await store.batchOnce(() => [ordered()] as const);
+        const [batchedFirst] = await store.batchOnce(
+          () => [ordered().limit(1)] as const,
+        );
         const terminals: readonly (readonly [
           string,
           () => Promise<readonly CategoryCount[]>,
+          readonly KnownDefect<readonly CategoryCount[]>[],
         ])[] = [
-          ["execute()", () => ordered().execute()],
-          ["executeOn()", () => ordered().executeOn(store.backend)],
-          ["prepare().execute()", () => ordered().prepare().execute({})],
-          ["batchOnce()", () => Promise.resolve(batched)],
-          ["asRelation().execute()", () => ordered().asRelation().execute()],
+          ["execute()", () => ordered().execute(), []],
+          [
+            "executeOn()",
+            () => ordered().executeOn(store.backend),
+            relationDefect,
+          ],
+          [
+            "prepare().execute()",
+            () => ordered().prepare().execute({}),
+            relationDefect,
+          ],
+          ["batchOnce()", () => Promise.resolve(batched), relationDefect],
+          [
+            "asRelation().execute()",
+            () => ordered().asRelation().execute(),
+            relationDefect,
+          ],
         ];
-        for (const [terminal, run] of terminals) {
-          expect({ terminal, rows: await run() }).toEqual({
-            terminal,
-            rows: expected,
+        for (const [terminal, run, defects] of terminals) {
+          expectObservation({
+            lane: { lane: context.lane, terminal },
+            observed: await run(),
+            correct,
+            defects,
           });
         }
 
+        const firstDefect: readonly KnownDefect<CategoryCount | undefined>[] = [
+          { label: RELATION_ORDER_DEFECT, on: {}, today: today[0] },
+        ];
         const firstTerminals: readonly (readonly [
           string,
           () => Promise<CategoryCount | undefined>,
+          readonly KnownDefect<CategoryCount | undefined>[],
         ])[] = [
-          ["limit(1).execute()", () => firstRow(ordered().limit(1).execute())],
-          ["first()", () => ordered().first()],
+          [
+            "limit(1).execute()",
+            () => firstRow(ordered().limit(1).execute()),
+            [],
+          ],
+          ["first()", () => ordered().first(), firstDefect],
           [
             "limit(1).executeOn()",
             () => firstRow(ordered().limit(1).executeOn(store.backend)),
+            firstDefect,
           ],
           [
             "limit(1).prepare().execute()",
             () => firstRow(ordered().limit(1).prepare().execute({})),
+            firstDefect,
           ],
           [
             "limit(1) batchOnce()",
-            async () => {
-              const [rows] = await store.batchOnce(
-                () => [ordered().limit(1)] as const,
-              );
-              return rows[0];
-            },
+            () => Promise.resolve(batchedFirst[0]),
+            firstDefect,
           ],
-          ["asRelation().first()", () => ordered().asRelation().first()],
+          [
+            "asRelation().first()",
+            () => ordered().asRelation().first(),
+            firstDefect,
+          ],
         ];
-        for (const [terminal, run] of firstTerminals) {
-          expect({ terminal, row: await run() }).toEqual({
-            terminal,
-            row: expected[0],
+        for (const [terminal, run, defects] of firstTerminals) {
+          expectObservation({
+            lane: { lane: context.lane, terminal },
+            observed: await run(),
+            correct: correct[0],
+            defects,
           });
         }
 
-        expect(await ordered().count()).toBe(expected.length);
+        // Counting and existence do not depend on which group comes first.
+        expect(await ordered().count()).toBe(correct.length);
         expect(await ordered().limit(1).count()).toBe(1);
         expect(await ordered().exists()).toBe(true);
       });
     }
 
-    it("breaks tied hybrid scores by node id in byte order", async (ctx) => {
+    it(`keeps relevance order through a projected search relation (pinned at ${RELATION_ORDER_DEFECT})`, async (ctx) => {
+      const store = storeWith(context, ctx, ["fulltext"]);
+      await seedMixedScores(store);
+
+      // The caller's title order only breaks relevance ties; alphabetically
+      // the weak text comes first, so a relation that lost the relevance key
+      // leads with it.
+      const projected = () =>
+        searchArticles(store, "fulltext")
+          .orderBy("a", "title", "asc")
+          .project((expressions) => ({ title: expressions.a.title }));
+      const executed = await projected().execute();
+      expect(executed[0]).toEqual({ title: STRONG_TEXT });
+      expect(executed.at(-1)).toEqual({ title: WEAK_TEXT });
+
+      type Title = Readonly<{ title: string }>;
+      const relationDefect: readonly KnownDefect<Title | undefined>[] = [
+        { label: RELATION_ORDER_DEFECT, on: {}, today: { title: WEAK_TEXT } },
+      ];
+      const [batched] = await store.batchOnce(
+        () => [projected().limit(1)] as const,
+      );
+      const terminals: readonly (readonly [
+        string,
+        () => Promise<Title | undefined>,
+        readonly KnownDefect<Title | undefined>[],
+      ])[] = [
+        ["first()", () => projected().first(), []],
+        [
+          "limit(1).execute()",
+          () => firstRow(projected().limit(1).execute()),
+          [],
+        ],
+        [
+          "limit(1).executeOn()",
+          () => firstRow(projected().limit(1).executeOn(store.backend)),
+          [],
+        ],
+        [
+          "limit(1).prepare().execute()",
+          () => firstRow(projected().limit(1).prepare().execute({})),
+          [],
+        ],
+        ["limit(1) batchOnce()", () => Promise.resolve(batched[0]), []],
+        [
+          "batchOnce()",
+          async () => {
+            const [rows] = await store.batchOnce(() => [projected()] as const);
+            return rows[0];
+          },
+          relationDefect,
+        ],
+        [
+          "asRelation().first()",
+          () => projected().asRelation().first(),
+          relationDefect,
+        ],
+        [
+          "asRelation().execute()",
+          () => firstRow(projected().asRelation().execute()),
+          relationDefect,
+        ],
+      ];
+      for (const [terminal, run, defects] of terminals) {
+        expectObservation({
+          lane: { lane: context.lane, terminal },
+          observed: await run(),
+          correct: { title: STRONG_TEXT },
+          defects,
+        });
+      }
+    });
+
+    it("breaks tied hybrid scores by node id in byte order under a linguistic column collation", async (ctx) => {
       const store = storeWith(context, ctx, ["fulltext", "vector"]);
       // `tie-B` leads the fulltext leg and trails the vector leg; `tie-a` the
       // reverse. Their fused scores are the same sum, so the node-id tiebreak
       // alone orders them: byte order puts "tie-B" first (B < a), a linguistic
-      // collation such as en_US puts "tie-a" first.
+      // collation such as en-US puts "tie-a" first.
       await store.nodes.Article.create(
         {
           title: STRONG_TEXT,
@@ -347,67 +535,140 @@ export function registerGroupedSearchIntegrationTests(
         { id: "tie-a" },
       );
 
-      const groups = [
-        { category: "upper", n: 1 },
-        { category: "lower", n: 1 },
-      ];
-      expect({
-        matches: await searchArticles(store, "hybrid")
-          .select((selected) => ({ id: selected.a.id }))
-          .execute(),
-        groups: await searchGroups(store, "hybrid").execute(),
-        relation: await searchGroups(store, "hybrid").asRelation().execute(),
-        first: await searchGroups(store, "hybrid").first(),
-      }).toEqual({
-        matches: [{ id: "tie-B" }, { id: "tie-a" }],
-        groups,
-        relation: groups,
-        first: groups[0],
-      });
+      // On PostgreSQL, sort the compared ids under a linguistic collation so
+      // the case fails if the tiebreak loses its byte-order collation.
+      // SQLite compares text in byte order (BINARY) by definition.
+      const restore =
+        store.backend.dialect === "postgres" ?
+          await linguisticFulltextNodeIds(store)
+        : undefined;
+      if (store.backend.dialect === "postgres" && restore === undefined) {
+        ctx.skip(
+          "this PostgreSQL engine cannot apply an ICU linguistic collation, so byte order and its absence are indistinguishable here",
+        );
+      }
+      try {
+        expect({
+          matches: await searchArticles(store, "hybrid")
+            .select((selected) => ({ id: selected.a.id }))
+            .execute(),
+          groups: await searchGroups(store, "hybrid").execute(),
+        }).toEqual({
+          matches: [{ id: "tie-B" }, { id: "tie-a" }],
+          groups: [
+            { category: "upper", n: 1 },
+            { category: "lower", n: 1 },
+          ],
+        });
+      } finally {
+        await restore?.();
+      }
     });
 
-    it("keeps relevance order through a projected search relation", async (ctx) => {
+    it("projects a search relation that distinct() and distinctNodes() accept", async (ctx) => {
       const store = storeWith(context, ctx, ["fulltext"]);
       await seedMixedScores(store);
 
-      // The caller's title order only breaks relevance ties; alphabetically
-      // the weak text comes first, so a relation that lost the relevance key
-      // would lead with it.
-      const projected = () =>
-        searchArticles(store, "fulltext")
-          .orderBy("a", "title", "asc")
-          .project((expressions) => ({
-            title: expressions.a.title,
-          }));
-      const executed = await projected().execute();
-      expect(executed[0]).toEqual({ title: STRONG_TEXT });
-      expect(executed.at(-1)).toEqual({ title: WEAK_TEXT });
-      expect(await projected().asRelation().execute()).toEqual(executed);
-      expect(await projected().asRelation().first()).toEqual(executed[0]);
+      const titles = await searchArticles(store, "fulltext")
+        .project((expressions) => ({ title: expressions.a.title }))
+        .asRelation()
+        .distinct()
+        .execute();
+      expect(titles).toHaveLength(3);
+      expect(titles).toEqual(
+        expect.arrayContaining([
+          { title: STRONG_TEXT },
+          { title: MEDIUM_TEXT },
+          { title: WEAK_TEXT },
+        ]),
+      );
+
+      const identities = await searchArticles(store, "fulltext")
+        .project((expressions) => ({
+          kind: expressions.a.kind,
+          id: expressions.a.id,
+        }))
+        .asRelation()
+        .distinctNodes({ kind: "kind", id: "id" })
+        .execute();
+      expect(identities).toHaveLength(5);
     });
 
-    it("keeps the caller's field order through an aggregate relation", async () => {
+    it("counts every member of a search group on each terminal when the caller orders by a member field", async (ctx) => {
+      const store = storeWith(context, ctx, ["fulltext"]);
+      await seedMixedScores(store);
+
+      // `peak` has two members with different titles. Ordering a grouped
+      // statement by a member field must not make that field a grouping key
+      // on any terminal (which would count `peak` as two groups of one).
+      const grouped = () =>
+        searchArticles(store, "fulltext")
+          .orderBy("a", "title", "asc")
+          .groupBy("a", "category")
+          .aggregate({ category: field("a", "category"), n: count("a") });
+      const members: Readonly<Record<string, number>> = { peak: 2, steady: 3 };
+
+      const executed = await settle(() => grouped().execute());
+      const first = await settle(() => grouped().first());
+      const counted = await settle(() => grouped().count());
+      if ("error" in executed) {
+        // PostgreSQL refuses ordering groups by a member field outside the
+        // GROUP BY; every terminal must refuse alike.
+        expect({ first, counted }).toEqual({
+          first: executed,
+          counted: executed,
+        });
+        return;
+      }
+      expect(
+        executed.value.map((row) => ({ ...row, n: members[row.category] })),
+      ).toEqual(executed.value);
+      expect(executed.value).toHaveLength(2);
+      expect(counted).toEqual({ value: 2 });
+      const firstRowValue = "value" in first ? first.value : undefined;
+      expect(firstRowValue?.n).toBe(
+        members[requireDefined(firstRowValue).category],
+      );
+    });
+  });
+
+  describe("A grouped query ordered by an edge field", () => {
+    it("runs through every relation-backed terminal", async () => {
       const store = context.getStore();
-      await seedCategories(store);
+      const author = await store.nodes.Person.create({ name: "Author" });
+      for (const [name, role] of [
+        ["Acme", "advisor"],
+        ["Globex", "advisor"],
+        ["Initech", "engineer"],
+      ] as const) {
+        const company = await store.nodes.Company.create({ name });
+        await store.edges.worksAt.create(author, company, { role });
+      }
 
       const grouped = () =>
         store
           .query()
-          .from("Article", "a")
-          .orderBy("a", "category", "desc")
-          .groupBy("a", "category")
-          .aggregate({ category: field("a", "category"), n: count("a") })
-          // The field order leads; this aggregate order only breaks its ties.
-          .orderBy("n", "asc");
+          .from("Person", "p")
+          .traverse("worksAt", "employment")
+          .to("Company", "c")
+          .orderBy("employment", "role", "asc")
+          .groupBy((expressions) => expressions.employment.role)
+          .aggregate({ role: field("employment", "role"), n: count("c") });
       const expected = [
-        { category: "z", n: 3 },
-        { category: "y", n: 2 },
-        { category: "x", n: 1 },
-        { category: "w", n: 1 },
+        { role: "advisor", n: 2 },
+        { role: "engineer", n: 1 },
       ];
+      const sortedByRole = (rows: readonly { role: string; n: number }[]) =>
+        rows.toSorted((left, right) => (left.role < right.role ? -1 : 1));
+
       expect(await grouped().execute()).toEqual(expected);
-      expect(await grouped().asRelation().execute()).toEqual(expected);
-      expect(await grouped().first()).toEqual(expected[0]);
+      expect(sortedByRole(await grouped().prepare().execute({}))).toEqual(
+        expected,
+      );
+      const [batched] = await store.batchOnce(() => [grouped()] as const);
+      expect(sortedByRole(batched)).toEqual(expected);
+      expect(expected).toContainEqual(await grouped().first());
+      expect(await grouped().count()).toBe(2);
     });
   });
 }
