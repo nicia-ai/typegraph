@@ -20,12 +20,12 @@
  */
 import type { SqlStatementNames } from "../src/query/compiler/sql-name-registry";
 
-type Token = Readonly<{
+export type Token = Readonly<{
   kind: "word" | "quoted" | "dot" | "star" | "other";
   value: string;
 }>;
 
-function tokenize(text: string): readonly Token[] {
+export function tokenize(text: string): readonly Token[] {
   const tokens: Token[] = [];
   let index = 0;
   while (index < text.length) {

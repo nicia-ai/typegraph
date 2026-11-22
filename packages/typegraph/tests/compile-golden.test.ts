@@ -60,7 +60,14 @@ import { separationRebuildRequired } from "../src/identity/separation";
 import { createFragment } from "../src/query";
 import type { FulltextMatchPredicate, QueryAst } from "../src/query/ast";
 import { createQueryBuilder } from "../src/query/builder";
-import { compileQuery } from "../src/query/compiler";
+import type * as QueryCompiler from "../src/query/compiler";
+import {
+  compileQuery,
+  type CompileQueryOptions,
+  type SqlDialect,
+} from "../src/query/compiler";
+import { LATE_MAT_TOPK_CTE_ALIAS } from "../src/query/compiler/emitter/standard-builders";
+import type * as QueryRelations from "../src/query/compiler/relations";
 import {
   createRecordedReadBinding,
   createSqlSchema,
@@ -81,7 +88,7 @@ import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strateg
 import { pgvectorStrategy } from "../src/query/dialect/vector/pgvector-strategy";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { fieldRef } from "../src/query/predicates";
-import type { SqlFragment } from "../src/query/sql-fragment";
+import { renderSql, type SqlFragment } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { readGraphAllocationOwner } from "../src/store/allocation-owner";
 import {
@@ -97,6 +104,11 @@ import {
   recordedColumnReferences,
   textColumnReferences,
 } from "./column-read-gate";
+import {
+  cteSpellingMismatches,
+  declaredCteNames,
+} from "./cte-name-spelling-gate";
+import type * as SqlTestUtilities from "./sql-test-utils";
 import { toSqlWithParams } from "./sql-test-utils";
 import { createTestBackend, disableTransactions } from "./test-utils";
 
@@ -131,6 +143,106 @@ vi.mock("../src/query/compiler/sql-name-registry", async (importOriginal) => {
   };
 });
 
+// ============================================================
+// CTE-name spelling gate over the corpus and its mixed-case variants
+// ============================================================
+
+/**
+ * Every statement the corpus renders, plus a mixed-case variant of every query
+ * it compiles: each compiler entry point the corpus reaches (directly, through
+ * a builder or through a store) also compiles the same input with every alias
+ * capitalized (`mixed-case-alias-variant.ts`) and renders it on the same
+ * dialect. A variant that fails to compile where its original compiled is
+ * recorded as a failure. The last test of this file runs the CTE-spelling gate
+ * (`tests/cte-name-spelling-gate.ts`) over every entry.
+ */
+const spellingCorpus = vi.hoisted(() => ({
+  statements: [] as { sql: string; mixedCase: boolean }[],
+  variantFailures: [] as string[],
+}));
+
+vi.mock("./sql-test-utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof SqlTestUtilities>();
+  return {
+    ...actual,
+    toSqlWithParams: (...args: Parameters<typeof actual.toSqlWithParams>) => {
+      const rendered = actual.toSqlWithParams(...args);
+      spellingCorpus.statements.push({ sql: rendered.sql, mixedCase: false });
+      return rendered;
+    },
+  };
+});
+
+/**
+ * Wraps a compiler entry point so it also compiles the mixed-case variant of
+ * the input at `inputIndex` and records it rendered on `dialectOf(args)`.
+ */
+async function withMixedCaseVariants<
+  Arguments extends unknown[],
+  Result extends SqlFragment,
+>(
+  compile: (...args: Arguments) => Result,
+  inputIndex: number,
+  dialectOf: (args: Arguments) => "sqlite" | "postgres",
+): Promise<(...args: Arguments) => Result> {
+  const { mixedCaseAliasVariant } = await import("./mixed-case-alias-variant");
+  const { renderSql } = await import("../src/query/sql-fragment");
+  return (...args: Arguments) => {
+    const compiled = compile(...args);
+    const variant = mixedCaseAliasVariant(args[inputIndex]);
+    if (variant !== undefined) {
+      const variantArguments = args.with(inputIndex, variant) as Arguments;
+      try {
+        spellingCorpus.statements.push({
+          sql: renderSql(compile(...variantArguments), dialectOf(args)).sql,
+          mixedCase: true,
+        });
+      } catch (error) {
+        spellingCorpus.variantFailures.push(String(error));
+      }
+    }
+    return compiled;
+  };
+}
+
+function compileOptionsDialect(
+  options: CompileQueryOptions | SqlDialect | undefined,
+): SqlDialect {
+  if (typeof options === "string") return options;
+  return options?.dialect ?? "sqlite";
+}
+
+vi.mock("../src/query/compiler", async (importOriginal) => {
+  const actual = await importOriginal<typeof QueryCompiler>();
+  return {
+    ...actual,
+    compileQuery: await withMixedCaseVariants(actual.compileQuery, 0, (args) =>
+      compileOptionsDialect(args[2]),
+    ),
+    compileNameCheckedQuery: await withMixedCaseVariants(
+      actual.compileNameCheckedQuery,
+      0,
+      (args) => compileOptionsDialect(args[2]),
+    ),
+    compileSetOperation: await withMixedCaseVariants(
+      actual.compileSetOperation,
+      0,
+      (args) => compileOptionsDialect(args[2]),
+    ),
+  };
+});
+
+vi.mock("../src/query/compiler/relations", async (importOriginal) => {
+  const actual = await importOriginal<typeof QueryRelations>();
+  return {
+    ...actual,
+    compileRelation: await withMixedCaseVariants(
+      actual.compileRelation,
+      0,
+      (args) => args[1].name,
+    ),
+  };
+});
 // ============================================================
 // Faked clock
 // ============================================================
@@ -331,6 +443,26 @@ function goldenGrid(
     }
   });
 }
+
+/** The vector slot, vector strategies and fulltext strategies the search cells compile against. */
+const VECTOR_SLOTS: VectorSlotMap = new Map([
+  [
+    vectorSlotKey("Document", "embedding"),
+    {
+      dimensions: 3,
+      metric: "cosine" as const,
+      indexType: "hnsw" as const,
+    },
+  ],
+]);
+const VECTOR_STRATEGY = {
+  sqlite: sqliteVecStrategy,
+  postgres: pgvectorStrategy,
+} as const;
+const FULLTEXT_STRATEGY = {
+  sqlite: fts5Strategy,
+  postgres: tsvectorStrategy,
+} as const;
 
 function vectorAst(approximate: boolean): QueryAst {
   return builder()
@@ -958,21 +1090,6 @@ describe("compile-golden: query compiler ASTs", () => {
   });
 
   describe("approximate vector similarity", () => {
-    const VECTOR_SLOTS: VectorSlotMap = new Map([
-      [
-        vectorSlotKey("Document", "embedding"),
-        {
-          dimensions: 3,
-          metric: "cosine" as const,
-          indexType: "hnsw" as const,
-        },
-      ],
-    ]);
-    const VECTOR_STRATEGY = {
-      sqlite: sqliteVecStrategy,
-      postgres: pgvectorStrategy,
-    } as const;
-
     // `sqliteVecStrategy` declares `searchIsExact: true`, so both values of
     // `approximate` use the same engine form and produce identical SQL. The
     // libsql cells below pin a SQLite strategy whose two forms diverge.
@@ -1038,11 +1155,6 @@ describe("compile-golden: query compiler ASTs", () => {
   });
 
   describe("fulltext match", () => {
-    const FULLTEXT_STRATEGY = {
-      sqlite: fts5Strategy,
-      postgres: tsvectorStrategy,
-    } as const;
-
     for (const dialect of DIALECTS) {
       for (const variant of fullMatrix().filter((entry) => !entry.recorded)) {
         it(`websearch match, ${variant.label} / ${dialect}`, () => {
@@ -2408,6 +2520,90 @@ describe("compile-golden: updateWhere candidate selection", () => {
   }
 });
 
+// ============================================================
+// Search and late-materialized shapes for the CTE-spelling gate
+// ============================================================
+
+/** {@link vectorAst} with a fulltext predicate on the same alias: hybrid search. */
+function hybridAst(approximate: boolean): QueryAst {
+  const vector = vectorAst(approximate);
+  const fulltext = fulltextAst();
+  return {
+    ...vector,
+    predicates: [...vector.predicates, ...fulltext.predicates],
+  };
+}
+
+describe("compile-golden: shapes the CTE-spelling gate reads without a golden cell", () => {
+  // Compiled for the CTE-spelling gate at the end of this file (and the
+  // column-read gate above it), not snapshotted: the golden cells stay as
+  // they are, and these shapes reach the builders that read an alias CTE from
+  // a second relation (the hybrid relevance union, the approximate candidate
+  // list inside it, and the late-materialized top-K page).
+  const HYBRID_STRATEGIES = [
+    {
+      label: "postgres",
+      dialect: "postgres",
+      vectorStrategy: pgvectorStrategy,
+    },
+    { label: "sqlite", dialect: "sqlite", vectorStrategy: sqliteVecStrategy },
+    {
+      label: "sqlite (libsql strategy)",
+      dialect: "sqlite",
+      vectorStrategy: libsqlVectorStrategy,
+    },
+  ] as const;
+
+  for (const { label, dialect, vectorStrategy } of HYBRID_STRATEGIES) {
+    for (const approximate of [false, true]) {
+      it(`hybrid, ${approximate ? "approximate" : "exact"} vector candidates / ${label}`, () => {
+        const compiled = compileQuery(hybridAst(approximate), graph.id, {
+          dialect,
+          vectorStrategy,
+          vectorSlots: VECTOR_SLOTS,
+          fulltextStrategy: FULLTEXT_STRATEGY[dialect],
+        });
+        expect(toSqlWithParams(compiled, dialect).sql).toContain(
+          "cte_relevance_candidates",
+        );
+      });
+    }
+  }
+
+  for (const dialect of DIALECTS) {
+    it(`late-materialized traversal page / ${dialect}`, () => {
+      const ast = builder()
+        .from("Person", "root")
+        .traverse("knows", "edge", { expand: "none" })
+        .to("Person", "friend")
+        .select((ctx) => ({ name: ctx.friend.name }))
+        .orderBy("friend", "age", "desc")
+        .limit(2)
+        .toAst();
+      // The selective fields `execute()` derives from the select callback.
+      const selectiveAst: QueryAst = {
+        ...ast,
+        selectiveFields: [
+          {
+            alias: "friend",
+            field: "name",
+            outputName: "name",
+            isSystemField: false,
+            valueType: "string",
+          },
+        ],
+      };
+      const compiled = compileQuery(selectiveAst, graph.id, {
+        dialect,
+        schema: DEFAULT_SQL_SCHEMA,
+      });
+      expect(toSqlWithParams(compiled, dialect).sql).toContain(
+        LATE_MAT_TOPK_CTE_ALIAS,
+      );
+    });
+  }
+});
+
 describe("compile-golden: column reads", () => {
   // Runs after every test above has compiled its statements.
   it("records, for every standard statement compiled above, exactly the column references its SQL makes", () => {
@@ -2415,7 +2611,10 @@ describe("compile-golden: column reads", () => {
     const rendered = recordedStatements.map(({ names, statement }) => ({
       names,
       relations: new Set(names.relations.entries().map((entry) => entry.name)),
-      text: toSqlWithParams(statement, "sqlite").sql,
+      // Rendered directly, not through the recording `toSqlWithParams`:
+      // these include statements the name registry refuses after recording
+      // their reads, which the CTE-spelling gate must not read as sent SQL.
+      text: renderSql(statement, "sqlite").sql,
     }));
     const mismatches = rendered.flatMap((current, index) => {
       // A nested statement (an EXISTS or IN subquery) was recorded just
@@ -2439,6 +2638,59 @@ describe("compile-golden: column reads", () => {
           []
         : [{ text: current.text, recorded, written }];
     });
+    expect(mismatches).toEqual([]);
+  });
+});
+
+/**
+ * Text each builder that reads an alias CTE from a second relation leaves in
+ * its statement. The gate below requires a mixed-case variant containing each
+ * one, so a corpus change that stops reaching a builder fails loudly instead
+ * of shrinking the gate's reach.
+ */
+const ALIAS_CTE_READER_MARKERS = [
+  // fulltext and exact vector relevance, scoped to the alias's candidates
+  "scoped_relevance_nodes",
+  // the candidate list of an approximate vector index scan
+  "tg_ann_src",
+  "vector_top_k",
+  // hybrid search's relevance union
+  "cte_relevance_candidates",
+  // the late-materialized top-K page
+  LATE_MAT_TOPK_CTE_ALIAS,
+  // recursive traversal and set operations
+  "WITH RECURSIVE",
+  "UNION",
+] as const;
+
+describe("compile-golden: CTE-name spelling", () => {
+  // Runs last: after every test above has rendered its statements and
+  // compiled their mixed-case variants.
+  it("spells every reference to a CTE exactly like its declaration, in every statement and its mixed-case variant", () => {
+    expect(spellingCorpus.variantFailures).toEqual([]);
+    const mixedCase = spellingCorpus.statements.filter(
+      (statement) => statement.mixedCase,
+    );
+    expect(mixedCase.length).toBeGreaterThan(200);
+    const unreached = ALIAS_CTE_READER_MARKERS.filter(
+      (marker) =>
+        !mixedCase.some(
+          (statement) =>
+            statement.sql.includes(marker) &&
+            declaredCteNames(statement.sql).some((name) => /[A-Z]/u.test(name)),
+        ),
+    );
+    expect(unreached).toEqual([]);
+
+    const texts = new Set(
+      spellingCorpus.statements.map((statement) => statement.sql),
+    );
+    const mismatches = [...texts].flatMap((text) =>
+      cteSpellingMismatches(text).map((mismatch) => ({
+        ...mismatch,
+        statement: text,
+      })),
+    );
     expect(mismatches).toEqual([]);
   });
 });
