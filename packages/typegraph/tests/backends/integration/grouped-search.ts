@@ -194,6 +194,12 @@ function searchGroups(store: IntegrationStore, kind: SearchKind) {
 
 const SEARCH_KINDS: readonly SearchKind[] = ["fulltext", "vector", "hybrid"];
 
+type RoleCount = Readonly<{ role: string; n: number }>;
+
+function sortedByRole(rows: readonly RoleCount[]): readonly RoleCount[] {
+  return rows.toSorted((left, right) => (left.role < right.role ? -1 : 1));
+}
+
 /** A PostgreSQL collation that sorts text as a dictionary does. */
 const LINGUISTIC_COLLATION = "tg_grouped_search_linguistic";
 
@@ -611,24 +617,32 @@ export function registerGroupedSearchIntegrationTests(
       const executed = await settle(() => grouped().execute());
       const first = await settle(() => grouped().first());
       const counted = await settle(() => grouped().count());
-      if ("error" in executed) {
-        // PostgreSQL refuses ordering groups by a member field outside the
-        // GROUP BY; every terminal must refuse alike.
-        expect({ first, counted }).toEqual({
-          first: executed,
-          counted: executed,
-        });
-        return;
-      }
-      expect(
-        executed.value.map((row) => ({ ...row, n: members[row.category] })),
-      ).toEqual(executed.value);
-      expect(executed.value).toHaveLength(2);
-      expect(counted).toEqual({ value: 2 });
-      const firstRowValue = "value" in first ? first.value : undefined;
-      expect(firstRowValue?.n).toBe(
-        members[requireDefined(firstRowValue).category],
-      );
+      const countsAllMembers = (row: CategoryCount | undefined) =>
+        row !== undefined && row.n === members[row.category];
+      // PostgreSQL refuses ordering groups by a member field outside the
+      // GROUP BY, so there every terminal must refuse alike; elsewhere every
+      // terminal must see two groups, each counting all of its members.
+      const observed =
+        "error" in executed ?
+          { first, counted }
+        : {
+            groups: executed.value.length,
+            executeCountsAll: executed.value.every((row) =>
+              countsAllMembers(row),
+            ),
+            firstCountsAll: "value" in first && countsAllMembers(first.value),
+            counted,
+          };
+      const correct =
+        "error" in executed ?
+          { first: executed, counted: executed }
+        : {
+            groups: 2,
+            executeCountsAll: true,
+            firstCountsAll: true,
+            counted: { value: 2 },
+          };
+      expect(observed).toEqual(correct);
     });
   });
 
@@ -658,9 +672,6 @@ export function registerGroupedSearchIntegrationTests(
         { role: "advisor", n: 2 },
         { role: "engineer", n: 1 },
       ];
-      const sortedByRole = (rows: readonly { role: string; n: number }[]) =>
-        rows.toSorted((left, right) => (left.role < right.role ? -1 : 1));
-
       expect(await grouped().execute()).toEqual(expected);
       expect(sortedByRole(await grouped().prepare().execute({}))).toEqual(
         expected,
