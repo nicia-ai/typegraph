@@ -25,7 +25,7 @@
  *       },
  *     };
  *   },
- *   { slice: { index: 0, count: 2 } },
+ *   { slice: { index: 0, count: 2 }, driver: "better-sqlite3" },
  * );
  * ```
  */
