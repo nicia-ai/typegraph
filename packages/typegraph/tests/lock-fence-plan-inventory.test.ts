@@ -255,10 +255,10 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/operations/write-fence-prelude.ts",
-    line: 'if (resolveWriteFencePlan(txBackend).kind === "engine-serialized") return;',
+    line: "const plan = resolveWriteFencePlan(txBackend);",
     site: "J21",
     reason:
-      "The store write-fence prelude (composed merge application, durable store operations, the read-set fence) requires observed read-committed isolation unless the resolved plan proves engine serialization; missing coordination evidence is refused.",
+      "The store write-fence prelude's one freshness decision (composed merge application, durable store operations, the read-set fence, and provenance's support reads) admits a plan that serializes writers per its caller's rule (engine-serialized always; caller-serialized for provenance only) and otherwise requires observed read-committed isolation; missing coordination evidence is refused.",
   },
   {
     file: "backend/drizzle/sqlite.ts",

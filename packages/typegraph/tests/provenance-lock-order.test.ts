@@ -10,6 +10,8 @@
  * Contract under test:
  *  - `assertHolds` and `retract` take the schema fence BEFORE the graph write
  *    lock, whether `assertHolds` runs before any write or after one;
+ *  - `retract` and `unRetract`, in their own or a caller's transaction, read
+ *    and write no graph row before the graph lock;
  *  - `holding(tx)` in a read-write transaction takes the schema fence BEFORE
  *    the graph lock, so a write or `assertHolds` after it inverts nothing;
  *  - `holding()` and `holding(tx)` in a read-only transaction take the graph
@@ -27,7 +29,11 @@
  * any `FOR SHARE`, and a write-free `assertHolds` shows no fence at all, so the
  * order and presence assertions below fail. Making the store's
  * `acquireReadFences` take the graph lock alone in a read-write transaction
- * fails the read-write `holding(tx)` assertions the same way.
+ * fails the read-write `holding(tx)` assertions the same way. Moving
+ * `acquireCapabilityWriteLocks` in `transitionInTransaction`
+ * (`src/provenance/transition.ts`) below `loadSupportGraph` keeps both forms'
+ * statements equal and the lock before the first write, but puts the source
+ * and support reads before the graph lock, so the read-order assertions fail.
  *
  * The fused PostgreSQL statement carries both locks in one query; its SQL
  * takes the schema row first, so position inside a statement is part of the
@@ -180,6 +186,29 @@ function indexOfFirstGraphLock(): number {
   return statements.findIndex((statement) => isGraphLock(statement));
 }
 
+/**
+ * The first statement that reads a graph row: a source row, or the support
+ * graph's nodes and edges. A transition computes its support from these
+ * reads, so they must follow the graph lock, or PostgreSQL could compute it
+ * from rows a concurrent transition is about to change.
+ */
+function indexOfFirstGraphRowRead(): number {
+  return statements.findIndex(
+    (statement) =>
+      !statement.query.includes("pg_advisory_xact_lock") &&
+      /^\s*select\b/iu.test(statement.query) &&
+      /\bfrom\s+"typegraph_(?:nodes|edges)"/iu.test(statement.query),
+  );
+}
+
+/** Asserts the graph lock comes before the first graph row read and write. */
+function expectGraphLockBeforeRowWork(): void {
+  const graphLock = indexOfFirstGraphLock();
+  expect(graphLock).toBeGreaterThanOrEqual(0);
+  expect(indexOfFirstGraphRowRead()).toBeGreaterThan(graphLock);
+  expect(indexOfFirstRowWrite()).toBeGreaterThan(graphLock);
+}
+
 async function seedChain(store: LockStore, suffix: string): Promise<void> {
   await store.transaction(async (tx) => {
     await tx.nodes.Source.create({ label: `s${suffix}` }, { id: `s${suffix}` });
@@ -201,7 +230,7 @@ async function seedChain(store: LockStore, suffix: string): Promise<void> {
   });
 }
 
-const SEEDS = ["A", "B", "C", "D", "E", "F", "G"] as const;
+const SEEDS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K"] as const;
 
 beforeAll(async () => {
   const client = await PGlite.create();
@@ -259,14 +288,29 @@ function fact(suffix: string) {
   return { kind: "Fact", id: `f${suffix}` } as const;
 }
 
+// Per store: a chain `retract` closes, one a caller's transaction retracts
+// and restores, and one a caller's transaction retracts after its own write.
 const STORES = [
-  ["fused PostgreSQL statement", () => fusedStore, "E"],
-  ["portable two-statement fence", () => portableStore, "G"],
+  ["fused PostgreSQL statement", () => fusedStore, "E", "H", "I"],
+  ["portable two-statement fence", () => portableStore, "G", "J", "K"],
 ] as const;
+
+/** The isolation a retraction opens its own transaction at. */
+const READ_COMMITTED = { isolationLevel: "read_committed" } as const;
+
+function queryTexts(): readonly string[] {
+  return statements.map((statement) => statement.query);
+}
 
 describe.each(STORES)(
   "lock order on the %s",
-  (_label, getStore, retractableSuffix) => {
+  (
+    _label,
+    getStore,
+    retractableSuffix,
+    callerRoundTripSuffix,
+    callerAfterWriteSuffix,
+  ) => {
     it("assertHolds before any write takes the schema fence, then the graph lock, before any row work", async () => {
       const store = getStore();
       const provenance = createRetractionCapability(store, config);
@@ -336,7 +380,74 @@ describe.each(STORES)(
 
       expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
       expect(countGraphLockStatements()).toBe(1);
-      expect(indexOfFirstRowWrite()).toBeGreaterThan(indexOfFirstGraphLock());
+      expectGraphLockBeforeRowWork();
+    });
+
+    // Load-bearing for "no transaction behaves exactly as before": both
+    // forms run one implementation, so the caller's form inside a fresh
+    // transaction at the own form's isolation (read committed, which the own
+    // form requests explicitly) issues the same statements, locks first.
+    it("retract and unRetract on a caller's transaction issue exactly the statements of their own transaction, schema fence then graph lock first", async () => {
+      const store = getStore();
+      const provenance = createRetractionCapability(store, config);
+      const source = {
+        kind: "Source",
+        id: `s${callerRoundTripSuffix}`,
+      } as const;
+
+      const ownRetract = await provenance.retract(source);
+      const ownRetractQueries = queryTexts();
+      statements.splice(0);
+      const ownRestore = await provenance.unRetract(source);
+      const ownRestoreQueries = queryTexts();
+      statements.splice(0);
+
+      expect(ownRetractQueries[0]).toBe(
+        "set transaction isolation level read committed",
+      );
+      const callerRetract = await store.transaction(
+        (tx) => provenance.retract(source, tx),
+        READ_COMMITTED,
+      );
+      expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
+      expect(countGraphLockStatements()).toBe(1);
+      expectGraphLockBeforeRowWork();
+      const callerRetractQueries = queryTexts();
+      statements.splice(0);
+      const callerRestore = await store.transaction(
+        (tx) => provenance.unRetract(source, tx),
+        READ_COMMITTED,
+      );
+      expect(lockEvents().slice(0, 2)).toEqual(["schema fence", "graph lock"]);
+      expectGraphLockBeforeRowWork();
+      const callerRestoreQueries = queryTexts();
+
+      expect(ownRetract.died).toEqual([fact(callerRoundTripSuffix)]);
+      expect(callerRetract).toEqual(ownRetract);
+      expect(callerRestore).toEqual(ownRestore);
+      expect(callerRetractQueries).toEqual(ownRetractQueries);
+      expect(callerRestoreQueries).toEqual(ownRestoreQueries);
+    });
+
+    it("retract on a caller's transaction after the caller's own write inverts no lock", async () => {
+      const store = getStore();
+      const provenance = createRetractionCapability(store, config);
+
+      await store.transaction(async (tx) => {
+        await tx.nodes.Fact.create(
+          { label: "before retract" },
+          { id: `before-retract-${_label}` },
+        );
+        await provenance.retract(
+          { kind: "Source", id: `s${callerAfterWriteSuffix}` },
+          tx,
+        );
+      });
+
+      const events = lockEvents();
+      expect(events[0]).toBe("schema fence");
+      expect(events.indexOf("graph lock")).toBeGreaterThan(0);
+      expect(countGraphLockStatements()).toBe(1);
     });
 
     it("holding(tx) in a read-write transaction takes the schema fence, then the graph lock, and a later write and assertHolds add no inverted acquisition", async () => {
