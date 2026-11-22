@@ -8,10 +8,8 @@ import type {
 } from "../ast";
 import { type DialectAdapter } from "../dialect/types";
 import { type DatabaseExpression } from "../expressions";
-import {
-  expressionContainsAggregate,
-  visitExpressionChildren,
-} from "./expression-inspection";
+import { isAggregatedStatement } from "./aggregated-statement";
+import { visitExpressionChildren } from "./expression-inspection";
 import { visitCorrelatedExpressionFields } from "./expression-subquery-scope";
 import {
   createTemporalFilterPass,
@@ -29,6 +27,7 @@ import {
 } from "./predicate-utils";
 import { type PredicateCompilerContext } from "./predicates";
 import { assertRecordedQueryDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
+import { describeRelevanceOrder } from "./relevance-order";
 import {
   addRequiredColumn,
   findSelectivePropsFieldForFieldRef,
@@ -45,24 +44,6 @@ import {
  */
 const TRAVERSAL_LIMIT_PUSHDOWN_MULTIPLIER = 8;
 const TRAVERSAL_LIMIT_PUSHDOWN_MAX = 10_000;
-
-/**
- * Whether the statement's result rows are groups rather than matches: it
- * groups, filters groups, or projects an aggregate (an ungrouped aggregate
- * folds every match into one row). A per-match value read in such a
- * statement's SELECT or ORDER BY must itself be aggregated.
- */
-export function isAggregatedStatement(ast: QueryAst): boolean {
-  if (ast.groupBy || ast.having) {
-    return true;
-  }
-  return ast.projection.fields.some(
-    (field) =>
-      field.source.__type === "aggregate" ||
-      (field.source.__type === "database_expression" &&
-        expressionContainsAggregate(field.source)),
-  );
-}
 
 function isColumnPruningEnabled(ast: QueryAst): boolean {
   if (ast.selectiveFields && ast.selectiveFields.length > 0) {
@@ -374,11 +355,20 @@ function resolveTraversalCteLimit(
     return 0;
   }
 
-  if (ast.groupBy || ast.having || ast.resultPredicate !== undefined) {
+  // The pushdown keeps the first rows each traversal CTE produces, so it is
+  // sound only when the final LIMIT keeps a prefix of those rows unchanged.
+  // A statement whose rows are groups folds the truncated rows into fewer or
+  // smaller groups (an ungrouped count() of ten matches counts eight), and a
+  // caller or relevance ORDER BY picks its rows from all of them.
+  if (ast.resultPredicate !== undefined || isAggregatedStatement(ast)) {
     return undefined;
   }
 
   if (ast.orderBy && ast.orderBy.length > 0) {
+    return undefined;
+  }
+
+  if (describeRelevanceOrder(ast).length > 0) {
     return undefined;
   }
 

@@ -316,9 +316,16 @@ source nodes.
 
 A search predicate also composes with `groupBy()` and `aggregate()`. The top-k
 candidates are grouped like any other matches, and the groups are ordered by
-their best member: the highest rank for fulltext, the smallest distance for
-`similarTo()`, the highest fused score for hybrid. `.orderBy()` terms,
-including ones naming an `aggregate()` key, break ties between groups:
+their best member under the backend's native scoring: the highest rank for
+fulltext, the smallest distance for `similarTo()`, the highest fused score for
+hybrid. Native scores differ between engines (SQLite's BM25 and PostgreSQL's
+`ts_rank_cd` can rank the same documents differently), so the rule is the
+same on every backend but the ranks it reads are not. `.orderBy()` terms,
+including ones naming an `aggregate()` key, break ties between groups, and a
+hybrid group still tied after them falls back to its smallest node id in byte
+order on every backend. `.limit()` counts groups, and every terminal —
+`execute()`, `first()`, `executeOn()`, `prepare()`, `batchOnce()`, and
+`asRelation()` — returns the same groups in the same order:
 
 ```typescript
 const categories = await store

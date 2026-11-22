@@ -78,6 +78,7 @@ import {
   type CompiledSelectSql,
   markAnnIndexScan,
 } from "../sql-intent";
+import { isAggregatedStatement } from "./aggregated-statement";
 import {
   aliasCountColumnName,
   aliasCountCteName,
@@ -100,17 +101,16 @@ import {
   buildStandardEmbeddingsCte,
   buildStandardFromClause,
   buildStandardFulltextCte,
-  buildStandardFulltextOrderBy,
   buildStandardGroupBy,
   buildStandardHaving,
   buildStandardHybridCandidateCte,
-  buildStandardHybridRrfOrderBy,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardRelevanceOrderBy,
+  buildStandardRelevanceSortColumns,
   buildStandardResultWhere,
   buildStandardStartCte,
   buildStandardTraversalCte,
-  buildStandardVectorOrderBy,
   describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
   lateMaterializedProjectedNodeAliases,
@@ -140,6 +140,10 @@ import {
 } from "./recursive";
 import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
+  describeRelevanceOrder,
+  type RelevanceSortKey,
+} from "./relevance-order";
+import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
   recordedReadSchemaFor,
@@ -163,7 +167,6 @@ import {
 } from "./sql-name-registry";
 import {
   collectRequiredColumnsByAlias,
-  isAggregatedStatement,
   runStandardQueryPassPipeline,
   shouldMaterializeTraversalCte,
 } from "./standard-pass-pipeline";
@@ -516,6 +519,16 @@ function compileQueryInExpressionContext(
 
   // Check for variable-length traversals
   if (variableLength && loweredRecursive === undefined) {
+    // Only the standard statement projects relevance sort columns; a
+    // recursive statement refuses the request rather than dropping it.
+    if (
+      ast.relevanceSortColumns === true &&
+      describeRelevanceOrder(ast).length > 0
+    )
+      throw new CompilerInvariantError(
+        "Relevance sort columns were requested for a recursive statement, which cannot project them",
+        { phase: "recursive" },
+      );
     const recursive =
       ast.traversals.length > 1 || ast.traversals[0]?.optional === true ?
         compileMultiStageRecursiveQuery(ast, graphId, ctx)
@@ -1371,7 +1384,7 @@ function resolveLateMaterializationPlan(
   }
 
   // Aggregation owns the count fast path / group-by shape, not this transform.
-  if (ast.groupBy !== undefined || ast.having !== undefined) {
+  if (isAggregatedStatement(ast)) {
     return undefined;
   }
   if (ast.aggregateOrderBy !== undefined && ast.aggregateOrderBy.length > 0) {
@@ -1559,34 +1572,33 @@ function compileStandardQuery(
 }
 
 type SelectStandardOrderByInput = Readonly<{
+  aggregated: boolean;
   ast: QueryAst;
   collapsedTraversalCteAlias: string | undefined;
   dialect: DialectAdapter;
-  fulltextPredicate: FulltextMatchPredicate | undefined;
   fusion: HybridFusionOptions | undefined;
-  vectorPredicate: VectorSimilarityPredicate | undefined;
+  relevanceKeys: readonly RelevanceSortKey[];
 }>;
 
 function selectStandardOrderBy(
   input: SelectStandardOrderByInput,
 ): SqlFragment | undefined {
   const {
+    aggregated,
     ast,
     collapsedTraversalCteAlias,
     dialect,
-    fulltextPredicate,
     fusion,
-    vectorPredicate,
+    relevanceKeys,
   } = input;
-  const aggregated = isAggregatedStatement(ast);
-  if (vectorPredicate && fulltextPredicate) {
-    return buildStandardHybridRrfOrderBy({ aggregated, ast, dialect, fusion });
-  }
-  if (vectorPredicate) {
-    return buildStandardVectorOrderBy({ aggregated, ast, dialect });
-  }
-  if (fulltextPredicate) {
-    return buildStandardFulltextOrderBy({ aggregated, ast, dialect });
+  if (relevanceKeys.length > 0) {
+    return buildStandardRelevanceOrderBy({
+      aggregated,
+      ast,
+      dialect,
+      fusion,
+      keys: relevanceKeys,
+    });
   }
   return buildStandardOrderBy({
     ast,
@@ -1746,7 +1758,9 @@ function compileStandardQueryWithCteStrategy(
   }
 
   // Build main SELECT
-  const projection = buildStandardProjection({
+  const relevanceKeys = describeRelevanceOrder(ast);
+  const aggregated = isAggregatedStatement(ast);
+  const userProjection = buildStandardProjection({
     ast,
     ...(collapsedTraversalCteAlias === undefined ?
       {}
@@ -1754,6 +1768,22 @@ function compileStandardQueryWithCteStrategy(
     ctx,
     names,
   });
+  const projection =
+    ast.relevanceSortColumns === true && relevanceKeys.length > 0 ?
+      sql.join(
+        [
+          userProjection,
+          ...buildStandardRelevanceSortColumns({
+            aggregated,
+            dialect,
+            fusion,
+            keys: relevanceKeys,
+            names,
+          }),
+        ],
+        sql`, `,
+      )
+    : userProjection;
   const fromClause = buildStandardFromClause({
     ast,
     ...(collapsedTraversalCteAlias === undefined ?
@@ -1767,12 +1797,12 @@ function compileStandardQueryWithCteStrategy(
   const having = buildStandardHaving({ ast, ctx });
 
   const orderBy = selectStandardOrderBy({
+    aggregated,
     ast,
     collapsedTraversalCteAlias,
     dialect,
-    fulltextPredicate,
     fusion,
-    vectorPredicate,
+    relevanceKeys,
   });
 
   const limitOffset = buildLimitOffsetClause({

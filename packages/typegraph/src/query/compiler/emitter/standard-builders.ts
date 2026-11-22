@@ -58,6 +58,10 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
+  type RelevanceSortKey,
+  type RelevanceSortSource,
+} from "../relevance-order";
+import {
   EMBEDDINGS_CTE_ALIAS,
   FULLTEXT_CTE_ALIAS,
   HYBRID_CANDIDATES_CTE_ALIAS,
@@ -1748,66 +1752,26 @@ export function buildStandardHybridCandidateCte(
   `;
 }
 
-/**
- * A per-match relevance value as one sort key of the statement's result rows.
- * When those rows are groups (`isAggregatedStatement`), a group sorts by its
- * best member: `best` is `MAX` for a value ordered descending and `MIN` for
- * one ordered ascending, so the relevance order of groups extends the order
- * of matches and every engine accepts the term.
- */
-function relevanceSortKey(
-  value: SqlFragment,
-  best: "MAX" | "MIN",
-  aggregated: boolean,
-): SqlFragment {
-  return aggregated ? sql`${sql.raw(best)}(${value})` : value;
-}
-
-type BuildStandardFulltextOrderByInput = Readonly<{
+type RelevanceSortValueInput = Readonly<{
+  /** Whether the statement's result rows are groups (`isAggregatedStatement`). */
   aggregated: boolean;
-  ast: QueryAst;
-  dialect: DialectAdapter;
-}>;
-
-/**
- * ORDER BY clause when only a fulltext predicate is present.
- * Orders by rank DESC then any user-supplied ORDER BY as tiebreakers.
- */
-export function buildStandardFulltextOrderBy(
-  input: BuildStandardFulltextOrderByInput,
-): SqlFragment {
-  const { aggregated, ast, dialect } = input;
-  const rankOrder = sql`${relevanceSortKey(readColumn(FULLTEXT_CTE_ALIAS, "rank"), "MAX", aggregated)} DESC`;
-  const userOrders = compileStandardOrderTerms({ ast, dialect });
-  return sql`ORDER BY ${sql.join([rankOrder, ...userOrders], sql`, `)}`;
-}
-
-/**
- * ORDER BY clause when BOTH vector and fulltext predicates are present.
- *
- * Reciprocal Rank Fusion at SQL level. Each CTE emits an `ord` ordinal
- * via ROW_NUMBER; the outer ORDER BY blends them as
- * `w_vec / (k + ord_vec) + w_ft / (k + ord_ft)`. NULL `ord` (a node
- * matched by only one source) makes that source's term NULL → COALESCE-to-0
- * absorbs it. User-supplied `orderBy` clauses follow as tiebreakers,
- * matching the single-source paths so pagination stays stable across
- * RRF score ties.
- *
- * Defaults: k=60, vector weight = fulltext weight = 1. Override via
- * `.fuseWith({ k, weights })` on the query builder.
- */
-
-type BuildStandardHybridRrfOrderByInput = Readonly<{
-  aggregated: boolean;
-  ast: QueryAst;
   dialect: DialectAdapter;
   fusion: HybridFusionOptions | undefined;
 }>;
 
-export function buildStandardHybridRrfOrderBy(
-  input: BuildStandardHybridRrfOrderByInput,
+/**
+ * The reciprocal-rank-fusion score of one hybrid match. Each CTE emits an
+ * `ord` ordinal via ROW_NUMBER; the score blends them as
+ * `w_vec / (k + ord_vec) + w_ft / (k + ord_ft)`. NULL `ord` (a node matched
+ * by only one source) makes that source's term NULL → COALESCE-to-0 absorbs
+ * it.
+ *
+ * Defaults: k=60, vector weight = fulltext weight = 1. Override via
+ * `.fuseWith({ k, weights })` on the query builder.
+ */
+function compileHybridRrfScore(
+  fusion: HybridFusionOptions | undefined,
 ): SqlFragment {
-  const { aggregated, ast, dialect, fusion } = input;
   const k = fusion?.k ?? DEFAULT_RRF_K;
   const vectorWeight = fusion?.weights?.vector ?? DEFAULT_RRF_WEIGHT;
   const fulltextWeight = fusion?.weights?.fulltext ?? DEFAULT_RRF_WEIGHT;
@@ -1819,32 +1783,105 @@ export function buildStandardHybridRrfOrderBy(
   // `* 1.0` is also deliberate: PostgreSQL otherwise performs integer
   // division when the default weight and rank constant are integers. Keep
   // this promotion in lockstep with the backend hybrid statement emitter.
-  const rrfScore = sql`${sql.raw(`(COALESCE((${vectorWeight} * 1.0) / (${k} + `)}${readColumn(EMBEDDINGS_CTE_ALIAS, "ord")}${sql.raw(`), 0) + COALESCE((${fulltextWeight} * 1.0) / (${k} + `)}${readColumn(FULLTEXT_CTE_ALIAS, "ord")}${sql.raw("), 0))")}`;
-  const rrfOrder = sql`${relevanceSortKey(rrfScore, "MAX", aggregated)} DESC`;
-  // Deterministic tiebreak on the CTE-projected node_id. At least one of
-  // the two CTEs always has a non-NULL node_id for any row returned by
-  // the LEFT JOIN-union shape, so COALESCE always resolves. This matches
-  // `store.search.hybrid`'s JS-side code-unit `compareStrings(nodeId)`
-  // tiebreak so the two paths produce identical top-k under ties (SQLite
-  // BINARY collation is code-unit order for the ASCII id alphabet).
-  const idTiebreak = sql`${relevanceSortKey(sql`COALESCE(${readColumn(FULLTEXT_CTE_ALIAS, "node_id")}, ${readColumn(EMBEDDINGS_CTE_ALIAS, "node_id")})`, "MIN", aggregated)} ASC`;
-  const userOrders = compileStandardOrderTerms({ ast, dialect });
-  return sql`ORDER BY ${sql.join([rrfOrder, ...userOrders, idTiebreak], sql`, `)}`;
+  return sql`${sql.raw(`(COALESCE((${vectorWeight} * 1.0) / (${k} + `)}${readColumn(EMBEDDINGS_CTE_ALIAS, "ord")}${sql.raw(`), 0) + COALESCE((${fulltextWeight} * 1.0) / (${k} + `)}${readColumn(FULLTEXT_CTE_ALIAS, "ord")}${sql.raw("), 0))")}`;
 }
 
-type BuildStandardVectorOrderByInput = Readonly<{
-  aggregated: boolean;
-  ast: QueryAst;
-  dialect: DialectAdapter;
-}>;
-
-export function buildStandardVectorOrderBy(
-  input: BuildStandardVectorOrderByInput,
+/** The value one relevance sort key reads from a single match row. */
+function compileRelevancePerMatchValue(
+  source: RelevanceSortSource,
+  input: RelevanceSortValueInput,
 ): SqlFragment {
-  const { aggregated, ast, dialect } = input;
-  const distanceOrder = sql`${relevanceSortKey(readColumn(EMBEDDINGS_CTE_ALIAS, "distance"), "MIN", aggregated)} ASC`;
+  switch (source) {
+    case "fulltext_rank": {
+      return readColumn(FULLTEXT_CTE_ALIAS, "rank");
+    }
+    case "vector_distance": {
+      return readColumn(EMBEDDINGS_CTE_ALIAS, "distance");
+    }
+    case "hybrid_score": {
+      return compileHybridRrfScore(input.fusion);
+    }
+    case "hybrid_node_id": {
+      // Deterministic tiebreak on the CTE-projected node_id. At least one of
+      // the two CTEs always has a non-NULL node_id for any row returned by
+      // the LEFT JOIN-union shape, so COALESCE always resolves. It compares
+      // in byte order (`binaryText`) on every backend, the order of
+      // `store.search.hybrid`'s JS-side code-unit tiebreak and of SQLite's
+      // BINARY collation, so ties never follow a PostgreSQL database's
+      // linguistic collation.
+      return input.dialect.binaryText(
+        sql`COALESCE(${readColumn(FULLTEXT_CTE_ALIAS, "node_id")}, ${readColumn(EMBEDDINGS_CTE_ALIAS, "node_id")})`,
+      );
+    }
+  }
+}
+
+/**
+ * The value of one relevance sort key for a result row. When the rows are
+ * groups (`isAggregatedStatement`), a group sorts by its best member: `MAX`
+ * of a value ordered descending, `MIN` of one ordered ascending, so the
+ * relevance order of groups extends the order of matches and every engine
+ * accepts the term.
+ */
+function compileRelevanceSortValue(
+  key: RelevanceSortKey,
+  input: RelevanceSortValueInput,
+): SqlFragment {
+  const perMatch = compileRelevancePerMatchValue(key.source, input);
+  if (!input.aggregated) return perMatch;
+  return sql`${sql.raw(key.direction === "desc" ? "MAX" : "MIN")}(${perMatch})`;
+}
+
+type BuildStandardRelevanceOrderByInput = RelevanceSortValueInput &
+  Readonly<{
+    ast: QueryAst;
+    /** `describeRelevanceOrder(ast)`; never empty. */
+    keys: readonly RelevanceSortKey[];
+  }>;
+
+/**
+ * ORDER BY clause of a full-text, vector or hybrid statement: the leading
+ * relevance keys (rank DESC, distance ASC, or the fused RRF score DESC), then
+ * the caller's `orderBy()` terms as tiebreakers, then the trailing relevance
+ * keys (the hybrid node_id tiebreak), so pagination stays stable across ties.
+ */
+export function buildStandardRelevanceOrderBy(
+  input: BuildStandardRelevanceOrderByInput,
+): SqlFragment {
+  const { ast, dialect, keys } = input;
+  const terms = (placement: RelevanceSortKey["placement"]) =>
+    keys
+      .filter((key) => key.placement === placement)
+      .map(
+        (key) =>
+          sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`,
+      );
   const userOrders = compileStandardOrderTerms({ ast, dialect });
-  return sql`ORDER BY ${sql.join([distanceOrder, ...userOrders], sql`, `)}`;
+  return sql`ORDER BY ${sql.join([...terms("leading"), ...userOrders, ...terms("trailing")], sql`, `)}`;
+}
+
+type BuildStandardRelevanceSortColumnsInput = RelevanceSortValueInput &
+  Readonly<{
+    keys: readonly RelevanceSortKey[];
+    names: SqlStatementNames;
+  }>;
+
+/**
+ * The hidden result columns `QueryAst.relevanceSortColumns` asks for: each
+ * relevance sort key under its `outputName`, with the value the statement's
+ * ORDER BY sorts by.
+ */
+export function buildStandardRelevanceSortColumns(
+  input: BuildStandardRelevanceSortColumnsInput,
+): readonly SqlFragment[] {
+  return input.keys.map((key) => {
+    const outputName = declareResultColumn(
+      input.names,
+      key.outputName,
+      `relevance sort key (${key.source})`,
+    );
+    return sql`${compileRelevanceSortValue(key, input)} AS ${quoteIdentifier(outputName)}`;
+  });
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{

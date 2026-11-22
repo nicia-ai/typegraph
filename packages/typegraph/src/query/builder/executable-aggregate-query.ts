@@ -8,6 +8,7 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { createDataKeyedBag } from "../../utils/object";
+import { requireDefined } from "../../utils/presence";
 import {
   type AggregateExpr,
   type AggregateOrderSpec,
@@ -22,6 +23,7 @@ import {
 } from "../compiler/index";
 import type { DatabaseExpression } from "../expressions";
 import { parseJsonPointer } from "../json-pointer";
+import { resolveNullOrdering } from "../order";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
@@ -37,8 +39,9 @@ import {
   fillTemplateParams,
 } from "./read-instant-template";
 import {
-  createExecutableRelation,
+  createOrderedSourceRelation,
   type ExecutableRelationQuery,
+  liftSourceStatementOrder,
 } from "./relation";
 import { type QueryBuilderConfig, type QueryBuilderState } from "./types";
 import { validateQueryRange, validateSortDirection } from "./validation";
@@ -283,7 +286,6 @@ export class ExecutableAggregateQuery<
     AggregateResult<R, Aliases>
   > {
     const ast = this.toAst();
-    const { aggregateOrderBy, limit, offset, ...unorderedUnboundedAst } = ast;
     const internalContext = getQueryBuilderInternalContext(this.#config);
     const columns = Object.entries(this.#fields).map(
       ([outputName, expression]) => ({
@@ -304,39 +306,52 @@ export class ExecutableAggregateQuery<
       }),
     );
 
-    let relation = createExecutableRelation<
+    const lifted = liftSourceStatementOrder(
+      ast,
+      (ast.aggregateOrderBy ?? []).map((order) => {
+        const column = requireDefined(
+          columns.find(
+            (candidate) => candidate.outputName === order.outputName,
+          ),
+          `aggregate orderBy() output "${order.outputName}" is projected`,
+        );
+        return {
+          outputName: column.outputName,
+          valueType: column.valueType,
+          nullable: column.nullable,
+          direction: order.direction,
+          nulls: resolveNullOrdering(order),
+        };
+      }),
+    );
+    return createOrderedSourceRelation<
       AggregateRelationFields<R, Aliases>,
       AggregateResult<R, Aliases>
-    >({
-      ast: {
-        kind: "source",
-        query: unorderedUnboundedAst,
-        graphId: this.#config.graphId,
-        options: this.#compileOptions(),
+    >(
+      {
+        ast: {
+          kind: "source",
+          query: lifted.sourceAst,
+          graphId: this.#config.graphId,
+          options: this.#compileOptions(),
+        },
+        columns,
+        fields: {} as AggregateRelationFields<R, Aliases>,
+        config: this.#config,
+        provenance: {
+          graphId: this.#config.graphId,
+          executionTarget:
+            this.#config.backend === undefined ?
+              undefined
+            : backendDerivationRoot(this.#config.backend),
+          recordedAsOf: ast.recordedAsOf,
+          checked: internalContext.expectedSchemaVersion !== undefined,
+          temporalCoordinate: JSON.stringify(ast.temporalMode),
+        },
+        decodeRow: (row) => this.#mapRow(row),
       },
-      columns,
-      fields: {} as AggregateRelationFields<R, Aliases>,
-      config: this.#config,
-      provenance: {
-        graphId: this.#config.graphId,
-        executionTarget:
-          this.#config.backend === undefined ?
-            undefined
-          : backendDerivationRoot(this.#config.backend),
-        recordedAsOf: ast.recordedAsOf,
-        checked: internalContext.expectedSchemaVersion !== undefined,
-        temporalCoordinate: JSON.stringify(ast.temporalMode),
-      },
-      decodeRow: (row) => this.#mapRow(row),
-    });
-    for (const order of aggregateOrderBy ?? [])
-      relation = relation.orderBy(
-        (columns) => columns[order.outputName as keyof R],
-        order.direction,
-      );
-    if (limit !== undefined) relation = relation.limit(limit);
-    if (offset !== undefined) relation = relation.offset(offset);
-    return relation;
+      lifted,
+    );
   }
 
   /**

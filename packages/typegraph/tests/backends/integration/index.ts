@@ -133,6 +133,7 @@ export { registerTransactionBoundaryIntegrationTests } from "./transaction-bound
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
+export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limit-pushdown";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";

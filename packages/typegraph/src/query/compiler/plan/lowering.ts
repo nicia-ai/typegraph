@@ -14,6 +14,7 @@ import {
   type SqlDialect,
   type VectorStrategy,
 } from "../../dialect";
+import { isAggregatedStatement } from "../aggregated-statement";
 import {
   runFulltextPredicatePass,
   runRecursiveTraversalSelectionPass,
@@ -136,11 +137,7 @@ function appendAggregateSortLimitAndProjectNodes(
       } satisfies ResultFilterPlanNode);
 
   const aggregateExpressions = extractAggregateExpressions(ast);
-  if (
-    aggregateExpressions.length > 0 ||
-    ast.groupBy !== undefined ||
-    ast.having !== undefined
-  ) {
+  if (isAggregatedStatement(ast)) {
     const aggregateNode: AggregatePlanNode = {
       aggregates: aggregateExpressions,
       groupBy: ast.groupBy?.fields ?? [],
