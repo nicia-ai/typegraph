@@ -4,7 +4,6 @@
 
 ```ts
 
-import { SQLWrapper } from 'drizzle-orm';
 import { z } from 'zod';
 
 // @public (undocumented)
@@ -77,23 +76,6 @@ export type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 
 // @public (undocumented)
 export type EdgeIndexDirection = "out" | "in" | "none";
-
-// @public (undocumented)
-export type EdgeIndexTable = Readonly<{
-    graphId: NamedSqlWrapper;
-    id: NamedSqlWrapper;
-    kind: NamedSqlWrapper;
-    fromKind: NamedSqlWrapper;
-    fromId: NamedSqlWrapper;
-    toKind: NamedSqlWrapper;
-    toId: NamedSqlWrapper;
-    props: NamedSqlWrapper;
-    validFrom: NamedSqlWrapper;
-    validTo: NamedSqlWrapper;
-    createdAt: NamedSqlWrapper;
-    updatedAt: NamedSqlWrapper;
-    deletedAt: NamedSqlWrapper;
-}>;
 
 // @public (undocumented)
 export type EdgeIndexWhereBuilder<E extends AnyEdgeType> = Readonly<{
@@ -297,11 +279,6 @@ export type LiveColumn = "graph_id" | "kind" | "id" | "deleted_at" | "valid_from
 // @public (undocumented)
 export type LiveEdgeColumn = LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
-// @public (undocumented)
-export type NamedSqlWrapper = SQLWrapper & Readonly<{
-    name: string;
-}>;
-
 // @public
 export const NODE_SYSTEM_COLUMN_NAMES: readonly ["graph_id", "kind", "id", "deleted_at", "valid_from", "valid_to", "created_at", "updated_at", "version"];
 
@@ -360,20 +337,6 @@ export type NodeIndexKeyInput<T> = Readonly<{
     field?: never;
     system: NodeSystemColumnName;
     direction: "asc" | "desc";
-}>;
-
-// @public (undocumented)
-export type NodeIndexTable = Readonly<{
-    graphId: NamedSqlWrapper;
-    kind: NamedSqlWrapper;
-    id: NamedSqlWrapper;
-    props: NamedSqlWrapper;
-    version: NamedSqlWrapper;
-    validFrom: NamedSqlWrapper;
-    validTo: NamedSqlWrapper;
-    createdAt: NamedSqlWrapper;
-    updatedAt: NamedSqlWrapper;
-    deletedAt: NamedSqlWrapper;
 }>;
 
 // @public (undocumented)

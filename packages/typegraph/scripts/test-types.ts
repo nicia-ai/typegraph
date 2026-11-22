@@ -284,9 +284,8 @@ function specifierOfEntrypoint(entrypoint: string): string {
 async function readDeclarationEmitFixtures(
   fixtureDir: string,
 ): Promise<readonly DeclarationEmitFixture[]> {
-  const files = (await readdir(fixtureDir)).filter((file) =>
-    file.endsWith(".ts"),
-  );
+  const entries = await readdir(fixtureDir);
+  const files = entries.filter((file) => file.endsWith(".ts"));
   const coveredSpecifiers = new Map<string, string>(
     COVERED_ENTRYPOINTS.map((entrypoint) => [
       reportNameForExport(entrypoint),

@@ -326,11 +326,6 @@ export type {
   StoreSearchContext,
 } from "./store/search-facade";
 export type {
-  CoordinatePinnedView,
-  RecordedStoreViewImplementation,
-  StoreViewImplementation,
-} from "./store/store-view";
-export type {
   AdapterHistoryStoreTransactions,
   AdapterStoreReconciliation,
   AdapterStoreTransactions,
@@ -345,6 +340,11 @@ export type {
   StoreTransactions,
   ViewIdentityAccess,
 } from "./store/store";
+export type {
+  CoordinatePinnedView,
+  RecordedStoreViewImplementation,
+  StoreViewImplementation,
+} from "./store/store-view";
 export type {
   EdgeProjectionPropertyKey,
   EmptyShape,

@@ -149,6 +149,22 @@ export { generateId } from "../utils/id";
  */
 export type { UniquePredicate } from "../constraints";
 export type {
+  IncompatibleKeys,
+  LiteralKeysOf,
+  OpaqueTypeLevelValue,
+  RuntimeInvisibleTags,
+  StructuralSubtypeMismatchWording,
+  TypeLevelChild,
+  TypeLevelElement,
+} from "../ontology/types";
+export type {
+  CompositionPair,
+  CompositionRealization,
+  CompositionRelation,
+} from "../registry/composition-relation";
+export type { EdgeKindFacts } from "../registry/edge-kind-facts";
+export type { KindRegistry, RegistryClosures } from "../registry/kind-registry";
+export type {
   EdgeEntry,
   GraphDefConfig,
   NormalizedEdges,
@@ -170,19 +186,3 @@ export type {
   UniqueConstraintPredicate,
   UniqueConstraintPredicateBuilder,
 } from "./types";
-export type {
-  IncompatibleKeys,
-  LiteralKeysOf,
-  OpaqueTypeLevelValue,
-  RuntimeInvisibleTags,
-  StructuralSubtypeMismatchWording,
-  TypeLevelChild,
-  TypeLevelElement,
-} from "../ontology/types";
-export type {
-  CompositionPair,
-  CompositionRealization,
-  CompositionRelation,
-} from "../registry/composition-relation";
-export type { EdgeKindFacts } from "../registry/edge-kind-facts";
-export type { KindRegistry, RegistryClosures } from "../registry/kind-registry";

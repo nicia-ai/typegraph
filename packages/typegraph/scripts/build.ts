@@ -186,10 +186,8 @@ async function newestEntryDeclarationMtime(
       exported.types.replace(/\.d\.ts$/, ".d.cts"),
     ]) {
       try {
-        newest = Math.max(
-          newest,
-          (await stat(path.join(PACKAGE_ROOT, file))).mtimeMs,
-        );
+        const stats = await stat(path.join(PACKAGE_ROOT, file));
+        newest = Math.max(newest, stats.mtimeMs);
       } catch {
         // tsup has not (re)written every entry yet.
         return undefined;

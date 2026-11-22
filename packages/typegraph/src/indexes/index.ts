@@ -96,11 +96,6 @@ export { andWhere, notWhere, orWhere } from "./where";
  * declarations (contract 3 in `tests/public-type-reachability.test.ts`).
  */
 export type {
-  EdgeIndexTable,
-  NamedSqlWrapper,
-  NodeIndexTable,
-} from "./drizzle";
-export type {
   LiveColumn,
   LiveEdgeColumn,
   RecordedColumn,

@@ -1733,7 +1733,9 @@ export type ExpressionObjectChildren<Value, Scope extends string> = {
 }>;
 
 // @public
-export type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>];
+export type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
 export type ExpressionProjectionEntry<T = unknown> = Readonly<{

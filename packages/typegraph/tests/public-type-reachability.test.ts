@@ -27,12 +27,12 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { reportNameForExport } from "../scripts/api-report-names";
+import { extractApiReportBody } from "../scripts/api-surface-compat";
 import { DECLARATION_LOADS } from "../scripts/declaration-loads";
 import {
   AUTHORING_ENTRYPOINTS,
   COVERED_ENTRYPOINTS,
 } from "../scripts/entrypoint-stability";
-import { extractApiReportBody } from "../scripts/api-surface-compat";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const PACKAGE_NAME = "@nicia-ai/typegraph";

@@ -1253,11 +1253,11 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `SelectableEdgeMeta`.
   // Per-entrypoint declaration emit (#956). A type an entrypoint's public
   // declarations name is now exported by that entrypoint or by an entrypoint
-  // its declarations load (`scripts/declaration-loads.ts`), so 387 names no
+  // its declarations load (`scripts/declaration-loads.ts`), so 384 names no
   // entrypoint exported are now exported once, from the subpath that owns
   // their source area. Those subpaths lose them as forgotten exports:
   // `./query` 542→328, `./store` 801→707, `./core` 94→76, `./indexes`
-  // 41→31, `./graph-extension` 27→24, `./adapters/drizzle/sqlite` 282→281,
+  // 41→31, `./adapters/drizzle/indexes` 24→21, `./graph-extension` 27→24, `./adapters/drizzle/sqlite` 282→281,
   // and `./graph-merge`, `./provenance`, `./schema`, `./identity` and
   // `./profiler` lose the names they now export. Every other entrypoint keeps
   // rendering those names without exporting them: they are nameable through
@@ -1275,9 +1275,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 353,
     sha256: "6371337df2fab10e0a73cf469b4f5367b22fdf287507868ed283bcc21135df25",
   },
+  // #956: the Drizzle index-table types its builders name
+  // (`EdgeIndexTable`, `NodeIndexTable`, `NamedSqlWrapper`) are now exported
+  // here, where the signatures that name them live, rather than from
+  // `/indexes`, whose declaration graph stays free of Drizzle: 24→21.
   "./adapters/drizzle/indexes": {
-    count: 24,
-    sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
+    count: 21,
+    sha256: "7949327562f8f8bfd738f6439a424d88ccd82ac6182724dc755f0eca5bad2944",
   },
   "./adapters/drizzle/postgres": {
     count: 281,

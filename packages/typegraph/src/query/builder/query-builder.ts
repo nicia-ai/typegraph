@@ -11,7 +11,6 @@ import {
   type RuntimeEdgeKind,
   type RuntimeEdgeTypeFor,
   type RuntimeNodeKind,
-  type RuntimeNodeTypeFor,
 } from "../../core/runtime-kind";
 import {
   coordinateContext,

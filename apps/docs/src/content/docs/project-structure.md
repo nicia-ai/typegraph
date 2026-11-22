@@ -78,6 +78,16 @@ export const store = createStore(graph, backend);
 This separation keeps the schema definition (which is static) separate from
 store instantiation (which involves runtime configuration like database paths).
 
+Both modules export inferred types, and that works under `declaration: true`
+(a library, or a project with `composite` builds) without type annotations or
+extra imports: every type the root's declarations name is reachable from the
+root, so TypeScript writes it as `import("@nicia-ai/typegraph").…` or through
+another public subpath. The same holds for a module that imports any single
+TypeGraph entrypoint. The one exception is a backend value from an adapter
+factory such as `createLocalSqliteBackend`: its type is a backend-authoring
+contract, so export the store built from it, or annotate the backend as
+`GraphBackend`, rather than exporting it with its inferred type.
+
 ## Medium Projects
 
 When your graph grows to 10+ node types or you want better organization, split definitions into separate files:

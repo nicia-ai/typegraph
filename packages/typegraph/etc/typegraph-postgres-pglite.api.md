@@ -2547,7 +2547,9 @@ type ExpressionObjectChildren<Value, Scope extends string> = {
 }>;
 
 // @public
-type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>];
+type ExpressionProjectionEntries<Fields extends Readonly<Record<string, DatabaseExpression>>> = keyof Fields extends never ? readonly [] : string extends keyof Fields ? readonly ExpressionProjectionEntry[] : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[] : readonly [
+ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>
+];
 
 // @public (undocumented)
 type ExpressionProjectionEntry<T = unknown> = Readonly<{
@@ -6405,9 +6407,7 @@ type SearchableMetadata = Readonly<{
 }>;
 
 // @public
-type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [
-E
-] extends ["exact"] ? N : PolymorphicNodeType<N>;
+type SearchNodeType<N extends NodeType, E extends DefaultAliasExpansionAxis> = [E] extends ["exact"] ? N : PolymorphicNodeType<N>;
 
 // @public
 type SearchScopeOptions<N extends NodeType = NodeType> = Readonly<{
