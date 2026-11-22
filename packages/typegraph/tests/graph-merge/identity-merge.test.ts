@@ -45,6 +45,7 @@ import { enumerateAllNodes } from "../../src/graph-merge/state-diff";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import type { BranchId } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
+import { importGraph } from "../../src/interchange";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { createPgliteFixturePool } from "./pglite-fixture-pool";
@@ -926,6 +927,85 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
     ]);
   });
 
+  it("reports an assertion id two branches imported identically once when a third branch wins the pair", async () => {
+    const [store] = await createStoreWithSchema(graph, await makeBackend());
+    for (const id of ["x", "y"]) {
+      await store.nodes.Person.create(
+        { name: id },
+        { id, validFrom: "2020-01-01T00:00:00.000Z" },
+      );
+    }
+    async function importSame(
+      target: typeof store,
+      id: string,
+      validFrom: string,
+    ): Promise<void> {
+      const outcome = await importGraph(
+        target,
+        {
+          formatVersion: "2.0",
+          exportedAt: "2024-03-01T00:00:00.000Z",
+          source: { type: "external" },
+          nodes: [],
+          edges: [],
+          identity: {
+            profile: "typegraph-identity-v1",
+            mode: "state",
+            assertions: [
+              {
+                id,
+                relation: "same",
+                a: { kind: "Person", id: "x" },
+                b: { kind: "Person", id: "y" },
+                validFrom,
+              },
+            ],
+          },
+        },
+        { onConflict: "skip" },
+      );
+      expect(outcome.errors).toEqual([]);
+    }
+    const BRANCH_C = asBranchId("branch-c");
+    const [own, first, second] = await Promise.all(
+      [BRANCH_A, BRANCH_B, BRANCH_C].map(async (id) =>
+        unwrap(await branch(store, () => makeBackend(), { id })),
+      ),
+    );
+    // The earliest validFrom survives, so the row the two other branches
+    // carry under one shared id loses — once, not once per carrier.
+    await importSame(
+      requireDefined(own).store,
+      "own",
+      "2024-01-01T00:00:00.000Z",
+    );
+    await importSame(
+      requireDefined(first).store,
+      "shared",
+      "2024-02-01T00:00:00.000Z",
+    );
+    await importSame(
+      requireDefined(second).store,
+      "shared",
+      "2024-02-01T00:00:00.000Z",
+    );
+
+    const result = await merge(
+      store,
+      [requireDefined(own), requireDefined(first), requireDefined(second)],
+      {},
+    );
+    if (isErr(result)) throw result.error;
+    expect(result.data.merged.identity).toEqual({ asserted: 1, retracted: 0 });
+    expect(result.data.dropped).toEqual([
+      {
+        kind: "identity",
+        id: "shared",
+        reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+      },
+    ]);
+  });
+
   it("binds an assertion to an ontology-retyped survivor (#1)", async () => {
     const [baseStore] = await createStoreWithSchema(
       employeeGraph,
@@ -1444,6 +1524,71 @@ describe("planIdentityChanges survivor tie-break", () => {
       },
     ]);
     expect(reverse.dropped).toEqual(forward.dropped);
+  });
+
+  it("reports an id two branches staged identically once, whatever the candidate order", () => {
+    const pair = {
+      relation: "same",
+      a: { kind: "Person", id: "x" },
+      b: { kind: "Person", id: "y" },
+    } as const;
+    // The earliest validFrom wins, so the shared imported row loses on both
+    // branches that carry it.
+    const winner: IdentityTransferAssertion = {
+      ...pair,
+      id: "own",
+      validFrom: "2024-01-01T00:00:00.000Z",
+    };
+    const shared: IdentityTransferAssertion = {
+      ...pair,
+      id: "imported",
+      validFrom: "2024-02-01T00:00:00.000Z",
+    };
+    const BRANCH_C = asBranchId("branch-c");
+    const orders = [
+      [BRANCH_A, BRANCH_B, BRANCH_C],
+      [BRANCH_B, BRANCH_C, BRANCH_A],
+      [BRANCH_B, BRANCH_A, BRANCH_C],
+    ] as const;
+    const assertionByBranch = new Map<BranchId, IdentityTransferAssertion>([
+      [BRANCH_A, winner],
+      [BRANCH_B, shared],
+      [BRANCH_C, shared],
+    ]);
+
+    const outcomeByOrder = Object.fromEntries(
+      orders.map((order) => {
+        const planned = planIdentityChanges(
+          stagingWithIdentityChanges(
+            order.map((branchId) => ({
+              branchId,
+              assertion: requireDefined(assertionByBranch.get(branchId)),
+            })),
+          ),
+          new Map(),
+        );
+        return [
+          order.join(","),
+          {
+            written: planned.assertions.map((entry) => entry.id),
+            dropped: planned.dropped,
+          },
+        ];
+      }),
+    );
+    const expected = {
+      written: ["own"],
+      dropped: [
+        {
+          kind: "identity",
+          id: "imported",
+          reason: DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
+        },
+      ],
+    };
+    expect(outcomeByOrder).toEqual(
+      Object.fromEntries(orders.map((order) => [order.join(","), expected])),
+    );
   });
 });
 

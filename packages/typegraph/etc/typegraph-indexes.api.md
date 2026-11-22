@@ -163,7 +163,7 @@ export type IndexDeclarationBase = Readonly<{
 }>;
 
 // @public (undocumented)
-type IndexFieldInput<T> = (keyof T & string) | NonEmptyJsonPointerFor<T> | NonEmptyJsonPointerSegmentsFor<T> | JsonPointer;
+export type IndexFieldInput<T> = (keyof T & string) | NonEmptyJsonPointerFor<T> | NonEmptyJsonPointerSegmentsFor<T> | JsonPointer;
 
 // @public
 export type IndexOrigin = "compile-time" | "runtime";
@@ -187,7 +187,7 @@ export type IndexScope =
 | "none";
 
 // @public (undocumented)
-type IndexWhereComparableValue<T> = NonNullable<T> extends string ? string : NonNullable<T> extends number ? number : NonNullable<T> extends boolean ? boolean : NonNullable<T> extends Date ? Date | string : never;
+export type IndexWhereComparableValue<T> = NonNullable<T> extends string ? string : NonNullable<T> extends number ? number : NonNullable<T> extends boolean ? boolean : NonNullable<T> extends Date ? Date | string : never;
 
 // @public (undocumented)
 export type IndexWhereExpression = Readonly<{
@@ -274,10 +274,10 @@ type KindAnnotations = Readonly<Record<string, JsonValue>>;
 type KindEntity = "node" | "edge";
 
 // @public (undocumented)
-type LiveColumn = "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at";
+export type LiveColumn = "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at";
 
 // @public (undocumented)
-type LiveEdgeColumn = LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
+export type LiveEdgeColumn = LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
 // @public
 export const NODE_SYSTEM_COLUMN_NAMES: readonly ["graph_id", "kind", "id", "deleted_at", "valid_from", "valid_to", "created_at", "updated_at", "version"];
@@ -368,10 +368,10 @@ type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = 
 }>;
 
 // @public (undocumented)
-type NonEmptyJsonPointerFor<T> = Exclude<JsonPointerFor<T>, "">;
+export type NonEmptyJsonPointerFor<T> = Exclude<JsonPointerFor<T>, "">;
 
 // @public (undocumented)
-type NonEmptyJsonPointerSegmentsFor<T> = Exclude<JsonPointerSegmentsFor<T>, readonly []>;
+export type NonEmptyJsonPointerSegmentsFor<T> = Exclude<JsonPointerSegmentsFor<T>, readonly []>;
 
 // @public (undocumented)
 type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
@@ -408,10 +408,10 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
 type ProfileEntityType = KindEntity;
 
 // @public (undocumented)
-type RecordedColumn = "history_id" | "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
+export type RecordedColumn = "history_id" | "graph_id" | "kind" | "id" | "valid_from" | "valid_to" | "recorded_from" | "recorded_to";
 
 // @public (undocumented)
-type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
+export type RecordedEdgeColumn = RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
 // @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
@@ -429,13 +429,13 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[];
 export type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
 
 // @public (undocumented)
-type SystemIndexColumnsFor<T extends SystemIndexTable> = T extends "nodes" ? LiveColumn : T extends "edges" ? LiveEdgeColumn : T extends "recordedNodes" ? RecordedColumn : RecordedEdgeColumn;
+export type SystemIndexColumnsFor<T extends SystemIndexTable> = T extends "nodes" ? LiveColumn : T extends "edges" ? LiveEdgeColumn : T extends "recordedNodes" ? RecordedColumn : RecordedEdgeColumn;
 
 // @public (undocumented)
 export type SystemIndexDeclaration = SystemIndexDeclarationFor<"nodes"> | SystemIndexDeclarationFor<"edges"> | SystemIndexDeclarationFor<"recordedNodes"> | SystemIndexDeclarationFor<"recordedEdges">;
 
 // @public (undocumented)
-type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
+export type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
     table: T;
     suffix: string;
     binaryOrderColumns?: readonly string[];

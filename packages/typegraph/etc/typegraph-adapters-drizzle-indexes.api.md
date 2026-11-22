@@ -31,7 +31,7 @@ type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 type EdgeIndexDirection = "out" | "in" | "none";
 
 // @public (undocumented)
-type EdgeIndexTable = Readonly<{
+export type EdgeIndexTable = Readonly<{
     graphId: NamedSqlWrapper;
     id: NamedSqlWrapper;
     kind: NamedSqlWrapper;
@@ -133,7 +133,7 @@ type JsonPointer = string & {
 };
 
 // @public (undocumented)
-type NamedSqlWrapper = SQLWrapper & Readonly<{
+export type NamedSqlWrapper = SQLWrapper & Readonly<{
     name: string;
 }>;
 
@@ -155,7 +155,7 @@ type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
 }>;
 
 // @public (undocumented)
-type NodeIndexTable = Readonly<{
+export type NodeIndexTable = Readonly<{
     graphId: NamedSqlWrapper;
     kind: NamedSqlWrapper;
     id: NamedSqlWrapper;

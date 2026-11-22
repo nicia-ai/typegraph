@@ -205,6 +205,10 @@ import {
   normalizePersistedEdgeMatchProps,
   resolveEdgeMatchIdentityStorage,
 } from "../edge-match-key";
+import {
+  type OperationScoped,
+  type StatementBackend,
+} from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
   appliedResolvedMutationSet,
@@ -1017,7 +1021,7 @@ async function durableIdentityIdConflict(
 async function executeEdgeCreateInternal<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: Readonly<{
     returnRow?: boolean;
     convergeOn?: EdgeConvergenceGuard;
@@ -1079,7 +1083,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
 
   const rowWork = async (
     session: EdgeWriteSession,
-    target: WriteTarget,
+    target: OperationScoped<WriteTarget>,
     _overlaidSession: OverlaidSessionMint<"edge">,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
@@ -1503,7 +1507,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
 export async function executeEdgeCreate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<Edge> {
   const result = await executeEdgeCreateInternal(ctx, input, backend, {
     returnRow: true,
@@ -1529,7 +1533,7 @@ export async function executeEdgeCreate<G extends GraphDef>(
 export async function executeEdgeCreateNoReturn<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   await executeEdgeCreateInternal(ctx, input, backend, { returnRow: false });
 }
@@ -4568,7 +4572,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   toKind: string,
   toId: string,
   props: Record<string, unknown>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: Readonly<{
     matchOn?: readonly string[];
     ifExists?: IfExistsMode;

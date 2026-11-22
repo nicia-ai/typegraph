@@ -74,7 +74,7 @@ export type InternalTemporalAlgorithmOptions = Omit<
  * backends reject malformed or out-of-range values identically. SQLite has
  * no equivalent setting and otherwise ignores the option.
  */
-type IterativeMemoryOptions = Readonly<{
+export type IterativeMemoryOptions = Readonly<{
   /**
    * Transaction-scoped `work_mem` override, e.g. `"64MB"`. Omit to inherit
    * the server's configured setting.

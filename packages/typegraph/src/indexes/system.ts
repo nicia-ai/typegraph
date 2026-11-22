@@ -46,7 +46,7 @@ import { requireDefined } from "../utils/presence";
 export type SystemIndexTable =
   "nodes" | "edges" | "recordedNodes" | "recordedEdges";
 
-type LiveColumn =
+export type LiveColumn =
   | "graph_id"
   | "kind"
   | "id"
@@ -55,10 +55,10 @@ type LiveColumn =
   | "valid_to"
   | "created_at";
 
-type LiveEdgeColumn =
+export type LiveEdgeColumn =
   LiveColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
-type RecordedColumn =
+export type RecordedColumn =
   | "history_id"
   | "graph_id"
   | "kind"
@@ -68,10 +68,10 @@ type RecordedColumn =
   | "recorded_from"
   | "recorded_to";
 
-type RecordedEdgeColumn =
+export type RecordedEdgeColumn =
   RecordedColumn | "from_kind" | "from_id" | "to_kind" | "to_id";
 
-type SystemIndexColumnsFor<T extends SystemIndexTable> =
+export type SystemIndexColumnsFor<T extends SystemIndexTable> =
   T extends "nodes" ? LiveColumn
   : T extends "edges" ? LiveEdgeColumn
   : T extends "recordedNodes" ? RecordedColumn
@@ -86,7 +86,7 @@ export type SystemIndexPredicate<C extends string = string> = Readonly<{
   isNull: C;
 }>;
 
-type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
+export type SystemIndexDeclarationFor<T extends SystemIndexTable> = Readonly<{
   table: T;
   /** Physical index name is `${physicalTableName}_${suffix}`. */
   suffix: string;

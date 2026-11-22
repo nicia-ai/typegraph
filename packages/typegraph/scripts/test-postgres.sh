@@ -123,6 +123,7 @@ vitest_args+=(
   tests/hybrid-single-statement.test.ts
   tests/identity-frontier-bounded.test.ts
   tests/identity-maintenance-schema-race.test.ts
+  tests/projection-prepare-checked-statement.test.ts
   tests/search-filter-pushdown.test.ts
   tests/search-liveness.test.ts
   tests/similar-to-approximate.test.ts

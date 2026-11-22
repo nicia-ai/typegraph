@@ -3,8 +3,9 @@ import { defineConfig } from "tsup";
 /**
  * The published entrypoints, keyed by their `dist` path. The sole owner of the
  * dist↔src map: `scripts/drizzle-reachability-scan.ts` cross-checks
- * `package.json#exports` against it, and the declaration rollup below derives
- * its own entry list from it, so neither can name a different set of roots.
+ * `package.json#exports` against it, and the declaration rollup
+ * (`scripts/declaration-rollup.ts`) derives its own entry list from it, so
+ * neither can name a different set of roots.
  */
 const ENTRY = {
   index: "src/index.ts",
@@ -36,7 +37,7 @@ const ENTRY = {
 
 /**
  * Where `scripts/build.ts` has `tsc` write the declaration tree that the
- * rollup below consumes, relative to the package root (which is the build's
+ * declaration rollup consumes, relative to the package root (which is the build's
  * working directory). Gitignored, and rebuilt by every build.
  *
  * It must NOT live under `node_modules`, even in a cache directory:
@@ -92,20 +93,43 @@ export const DECLARATION_ENTRY = Object.fromEntries(
   ]),
 );
 
+/**
+ * The build's output directory, relative to the package root. tsup writes
+ * the JavaScript here and the declaration rollup writes the declarations
+ * here; `package.json#exports` names files under it. The build accepts no
+ * flag that changes it (`scripts/build-options.ts`).
+ */
+export const OUT_DIR = "dist";
+
+/**
+ * Modules both bundles leave as imports, on top of the package's
+ * dependencies and peers. The declaration rollup reads the same list.
+ */
+export const EXTERNAL = [
+  "better-sqlite3",
+  "@libsql/client",
+  "bun:sqlite",
+  "pg",
+  "@electric-sql/pglite",
+  "@electric-sql/pglite-pgvector",
+] as const;
+
+/**
+ * The JavaScript build. tsup writes no declarations: `scripts/build.ts` runs
+ * the declaration rollup (`scripts/declaration-rollup.ts`) itself, because the
+ * rollup writes each entry's declaration loads while it generates the bundle
+ * and tsup cannot run a plugin inside its declaration worker. The clean
+ * therefore spares declaration files: in a watch session tsup re-cleans the
+ * output directory on every rebuild, and the declaration rollup owns them.
+ */
 export default defineConfig({
   entry: ENTRY,
+  outDir: OUT_DIR,
   format: ["esm", "cjs"],
-  dts: { entry: DECLARATION_ENTRY },
+  dts: false,
   splitting: true,
   sourcemap: false,
-  clean: true,
+  clean: ["!**/*.d.{ts,cts,mts}"],
   treeshake: true,
-  external: [
-    "better-sqlite3",
-    "@libsql/client",
-    "bun:sqlite",
-    "pg",
-    "@electric-sql/pglite",
-    "@electric-sql/pglite-pgvector",
-  ],
+  external: [...EXTERNAL],
 });

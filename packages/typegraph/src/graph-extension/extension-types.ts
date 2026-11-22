@@ -173,7 +173,7 @@ export type ExtensionPropertyType =
   | ExtensionArrayProperty
   | ExtensionObjectProperty;
 
-type ExtensionDefinedOutput<P extends ExtensionPropertyType> =
+export type ExtensionDefinedOutput<P extends ExtensionPropertyType> =
   P extends ExtensionStringProperty ? string
   : P extends ExtensionNumberProperty ? number
   : P extends ExtensionBooleanProperty ? boolean
@@ -203,7 +203,7 @@ export type ExtensionObjectOutput<
   }
 >;
 
-type ExtensionPropertySchema<P extends ExtensionPropertyType> =
+export type ExtensionPropertySchema<P extends ExtensionPropertyType> =
   P extends { optional: true } ?
     z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>>
   : z.ZodType<ExtensionDefinedOutput<P>>;

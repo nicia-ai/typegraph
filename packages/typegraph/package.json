@@ -274,6 +274,8 @@
     "libsql-client-017": "npm:@libsql/client@^0.17.4",
     "pg": "^8.23.0",
     "postgres": "^3.4.9",
+    "rollup": "4.63.5",
+    "rollup-plugin-dts": "6.1.1",
     "sqlite-vec": "^0.1.9",
     "tsd": "^0.33.0",
     "tsup": "^8.5.1",

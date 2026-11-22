@@ -93,6 +93,15 @@ export function readUnqualifiedColumn(
 }
 
 /**
+ * Writes an unqualified `name` that resolves in a derived table of its FROM
+ * (`(SELECT ...) AS inner`) or in its own SELECT list, which no WITH
+ * relation of the statement declares: it records the read with no relation.
+ */
+export function readDerivedTableColumn(name: string): SqlFragment {
+  return readUnqualifiedColumn([], name);
+}
+
+/**
  * Writes an unqualified `name` whose FROM is not known where it is written
  * (the shared predicate and expression compilers). The SELECT that places it
  * binds it to its FROM with {@link bindUnresolvedColumnReads}; a standard

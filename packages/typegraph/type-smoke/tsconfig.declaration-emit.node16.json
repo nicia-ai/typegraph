@@ -4,13 +4,13 @@
     "module": "Node16",
     "target": "ES2022",
     "lib": ["ES2023"],
+    "types": ["node"],
     "strict": true,
     "declaration": true,
     "emitDeclarationOnly": true,
-    "outDir": "declaration-out/node16",
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true
-  },
-  "files": ["declaration-emit.ts"]
+    "exactOptionalPropertyTypes": true,
+    "rootDir": "declaration-emit"
+  }
 }
