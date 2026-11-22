@@ -6336,7 +6336,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         FROM (
       SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $6::vector))) AS score
       FROM "tg_vec_compile_golden_document_embedding_8872495b"
-      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $7 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = $8)
+      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $7 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $8)
       ORDER BY ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $9::vector) ASC
       LIMIT $10
     ) AS tg_ann_src
@@ -6388,7 +6388,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)))) AS score
         FROM vector_top_k(?, vector32(?), ?)
         JOIN "tg_vec_compile_golden_document_embedding_8872495b" ON "tg_vec_compile_golden_document_embedding_8872495b".rowid = id
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = ?)
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) ASC
         LIMIT ?
       ) AS tg_ann_src
@@ -6436,7 +6436,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_compile_golden_document_embedding_8872495b"
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = ?)
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
@@ -6487,9 +6487,9 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
       INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
         ON scoped_relevance_nodes.node_id =
@@ -6544,9 +6544,9 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
       INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
         ON scoped_relevance_nodes.node_id =
@@ -6597,7 +6597,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_compile_golden_document_embedding_8872495b"
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT "cte_d"."d_id" FROM "cte_d" WHERE "cte_d"."d_kind" = ?)
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
@@ -6644,9 +6644,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6696,9 +6696,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6749,9 +6749,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6801,9 +6801,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6852,9 +6852,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6902,9 +6902,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -6953,9 +6953,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =
@@ -7003,9 +7003,9 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         INNER JOIN 
     (
         SELECT DISTINCT
-          "cte_d"."d_id" AS node_id,
-          "cte_d"."d_kind" AS node_kind
-        FROM "cte_d"
+          cte_d.d_id AS node_id,
+          cte_d.d_kind AS node_kind
+        FROM cte_d
       ) AS scoped_relevance_nodes
   
           ON scoped_relevance_nodes.node_id =

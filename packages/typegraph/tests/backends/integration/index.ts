@@ -78,6 +78,7 @@ export { registerMatchResultFilteringIntegrationTests } from "./match-result-fil
 export { registerMatchResultRankingIntegrationTests } from "./match-result-ranking";
 export { registerMetadataPredicateIntegrationTests } from "./metadata-predicates";
 export { registerMigrateSchemaKindIntegrationTests } from "./migrate-schema-kinds";
+export { registerMixedCaseAliasIntegrationTests } from "./mixed-case-alias";
 export { registerMultiKindQueryIntegrationTests } from "./multi-kind-queries";
 export { registerMultiRecursiveTraversalIntegrationTests } from "./multi-recursive-traversals";
 export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-subgraph-batch";

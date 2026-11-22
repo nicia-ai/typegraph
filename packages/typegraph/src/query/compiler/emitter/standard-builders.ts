@@ -112,9 +112,9 @@ function buildScopedNodeIdsSubquery(nodeAlias: string): SqlFragment {
   return sql`
     (
         SELECT DISTINCT
-          ${readAliasColumn(cteAlias, nodeAlias, "id", "quoted")} AS node_id,
-          ${readAliasColumn(cteAlias, nodeAlias, "kind", "quoted")} AS node_kind
-        FROM ${quoteIdentifier(cteAlias)}
+          ${readAliasColumn(cteAlias, nodeAlias, "id")} AS node_id,
+          ${readAliasColumn(cteAlias, nodeAlias, "kind")} AS node_kind
+        FROM ${sql.raw(cteAlias)}
       ) AS ${sql.raw(SCOPED_RELEVANCE_NODES_ALIAS)}
   `;
 }
@@ -1098,8 +1098,8 @@ export function buildLateMaterializedTopKCte(
   for (const alias of lateMaterializedNodeAliases(ast)) {
     const cteAlias = cteAliasFor(alias);
     columns.push(
-      sql`${readAliasColumn(cteAlias, alias, "id", "quoted")} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "id"))}`,
-      sql`${readAliasColumn(cteAlias, alias, "kind", "quoted")} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "kind"))}`,
+      sql`${readAliasColumn(cteAlias, alias, "id")} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "id"))}`,
+      sql`${readAliasColumn(cteAlias, alias, "kind")} AS ${sql.raw(declareAliasColumn(topKColumns, alias, "kind"))}`,
     );
   }
   for (const [index, orderSpec] of (ast.orderBy ?? []).entries()) {
@@ -1448,7 +1448,7 @@ export function buildStandardEmbeddingsCte(
       // buildScopedNodeIdsSubquery's DISTINCT — a join DOES multiply
       // rows on duplicates.
       const candidateCte = aliasCteName(field.alias);
-      const kindCandidates = sql`SELECT ${readAliasColumn(candidateCte, field.alias, "id", "quoted")} FROM ${quoteIdentifier(candidateCte)} WHERE ${readAliasColumn(candidateCte, field.alias, "kind", "quoted")} = ${kind}`;
+      const kindCandidates = sql`SELECT ${readAliasColumn(candidateCte, field.alias, "id")} FROM ${sql.raw(candidateCte)} WHERE ${readAliasColumn(candidateCte, field.alias, "kind")} = ${kind}`;
       const annSql = vectorStrategy.buildSearch(
         {
           graphId,
