@@ -12,24 +12,52 @@
  * revision-clock advance, a capture flush, a pre-commit hook) reaches a
  * session that is aborted or no longer inside the transaction. It is a
  * carrier, not a second decision.
+ *
+ * It also carries the view of a schema-write transaction a preflight is
+ * handed: one whose `executeSchemaDdl`, a port that forwards arbitrary SQL,
+ * releases control of the transaction (`native-transaction-release.ts`)
+ * before its statement is sent, exactly as handing over the native handle does.
  */
 import { backendDerivationChain } from "./derive-backend";
 
 /**
  * Resolves when the transaction may still be committed; rejects with a
  * `TransactionRolledBackError` when the database has aborted it, or a
- * `TransactionOutcomeUnknownError` when the session is no longer inside it.
+ * `TransactionOutcomeUnknownError` when TypeGraph cannot vouch for it.
  */
 export type TransactionCommitCheck = () => Promise<void>;
 
-const TRANSACTION_COMMIT_CHECKS = new WeakMap<object, TransactionCommitCheck>();
+/** The commit check of one transaction, and its preflight view. */
+export type TransactionCommitEvidence = Readonly<{
+  check: TransactionCommitCheck;
+  /**
+   * The backend a schema preflight on this transaction is handed in place of
+   * the registered one, when control can leave through it.
+   */
+  preflightTarget?: object | undefined;
+}>;
 
-/** Registers the commit check of one transaction's backend. */
+const TRANSACTION_COMMIT_EVIDENCE = new WeakMap<
+  object,
+  TransactionCommitEvidence
+>();
+
+/** Registers the commit evidence of one transaction's backend. */
 export function registerTransactionCommitCheck(
   backend: object,
-  check: TransactionCommitCheck,
+  evidence: TransactionCommitEvidence,
 ): void {
-  TRANSACTION_COMMIT_CHECKS.set(backend, check);
+  TRANSACTION_COMMIT_EVIDENCE.set(backend, evidence);
+}
+
+function resolveTransactionCommitEvidence(
+  target: object,
+): TransactionCommitEvidence | undefined {
+  for (const link of backendDerivationChain(target)) {
+    const evidence = TRANSACTION_COMMIT_EVIDENCE.get(link);
+    if (evidence !== undefined) return evidence;
+  }
+  return undefined;
 }
 
 /**
@@ -44,9 +72,18 @@ export function registerTransactionCommitCheck(
 export function resolveTransactionCommitCheck(
   target: object,
 ): TransactionCommitCheck | undefined {
-  for (const link of backendDerivationChain(target)) {
-    const check = TRANSACTION_COMMIT_CHECKS.get(link);
-    if (check !== undefined) return check;
-  }
-  return undefined;
+  return resolveTransactionCommitEvidence(target)?.check;
+}
+
+/**
+ * The backend a schema preflight on exactly `target` is handed: the
+ * registered preflight view, or `target` itself. Exact identity, not the
+ * derivation chain, so a view registered for an ancestor never replaces a
+ * target's own overlays.
+ */
+export function resolveSchemaPreflightTarget<T extends object>(target: T): T {
+  const view = TRANSACTION_COMMIT_EVIDENCE.get(target)?.preflightTarget;
+  // Registered for exactly this backend by the code that built it, as a
+  // derivation of it: the same surface.
+  return (view as T | undefined) ?? target;
 }

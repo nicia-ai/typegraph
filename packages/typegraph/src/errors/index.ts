@@ -1941,7 +1941,9 @@ export type TransactionRolledBackErrorDetails = Readonly<{
   /**
    * Whether any engine error the transaction observed was a serialization
    * failure or a deadlock. Such a transaction is safe to re-run from the
-   * top, and `store.transaction(fn, { retry })` re-runs it.
+   * top, and `store.transaction(fn, { retry })` re-runs it. This error is
+   * only raised for a transaction whose native handle (`tx.sql`) was never
+   * read; see {@link TransactionOutcomeUnknownError} for one whose was.
    */
   conflict: boolean;
 }>;
@@ -1954,11 +1956,14 @@ export type TransactionRolledBackErrorDetails = Readonly<{
  * transaction even when the callback catches the error: every later statement
  * is refused, and the database answers the closing `COMMIT` with a rollback.
  * Before it commits, TypeGraph checks the session whenever a statement failed
- * on it or the native handle was read; an aborted transaction refuses that
- * check, and TypeGraph rejects with this error instead of reporting success.
- * Nothing the
- * transaction wrote was saved. `cause` is the first engine error the
- * transaction observed.
+ * on it; an aborted transaction refuses that check, and TypeGraph rejects with
+ * this error instead of reporting success. Nothing the transaction wrote was
+ * saved. `cause` is the first engine error the transaction observed.
+ *
+ * Raised only for a transaction whose native handle (`tx.sql`) was never
+ * read: only then can TypeGraph be sure the transaction that rolled back is
+ * the one it opened. Once the handle was read, the same failure is reported
+ * as a {@link TransactionOutcomeUnknownError}.
  */
 export class TransactionRolledBackError extends TypeGraphError {
   declare readonly details: TransactionRolledBackErrorDetails;
@@ -1987,25 +1992,45 @@ export class TransactionRolledBackError extends TypeGraphError {
  */
 export type TransactionOutcomeUnknownErrorDetails = Readonly<{
   /**
-   * What TypeGraph found on the session before its `COMMIT`.
-   * `"transaction-ended"`: the marker it set when the native handle was read
-   * was gone, so the session was no longer inside that transaction.
+   * Why TypeGraph cannot vouch for the outcome.
+   *
+   * - `"transaction-ended"`: the callback returned, but the marker TypeGraph
+   *   set when the native handle was read was gone before its `COMMIT`, so
+   *   the session was no longer inside the transaction TypeGraph opened.
+   *   TypeGraph sent no `COMMIT`.
+   * - `"native-handle-released"`: the attempt failed after the native handle
+   *   was read — the transaction was aborted, or a serialization failure or
+   *   deadlock rejected the callback or the `COMMIT`. `cause` is that
+   *   failure. Through the handle the callback could have committed
+   *   TypeGraph's transaction and begun another, and an aborted transaction
+   *   cannot be queried, so nothing proves that the transaction that failed
+   *   is the one TypeGraph opened. (Any other error the callback throws is
+   *   rejected with as it is: it is never retried.)
    */
-  reason: "transaction-ended";
+  reason: "transaction-ended" | "native-handle-released";
 }>;
 
 /**
- * Thrown when the transaction TypeGraph opened was ended by a statement
- * TypeGraph did not issue — a `COMMIT`, `ROLLBACK` or `BEGIN` sent through
- * the native `tx.sql` handle, for instance — before TypeGraph could commit it.
+ * Thrown when a transaction whose native handle (`tx.sql`, or the second
+ * argument of a `transactionWithNative` callback) was read did not commit.
  *
- * TypeGraph does not send its `COMMIT` to a session that is no longer inside
- * the transaction it opened. What the callback wrote may or may not have been
- * saved: a native `COMMIT` saved it, a native `ROLLBACK` discarded it, and a
- * statement sent after either ran outside that transaction. This error is
- * never retried automatically, because re-running the callback could repeat
- * writes that were already committed. `cause` is the first engine error the
- * transaction observed, if any.
+ * Through the native handle a callback can end the transaction TypeGraph
+ * opened (`COMMIT`, `COMMIT AND CHAIN`, `ROLLBACK`) and begin another. Once
+ * the handle was read, an attempt is reported as committed only when
+ * TypeGraph found its marker in the transaction right before its own
+ * `COMMIT` and that `COMMIT` succeeded. A missing marker, an aborted
+ * transaction, or a serialization failure or deadlock is this error; any
+ * other error the callback throws is rejected with unchanged. What
+ * the callback wrote may or may not have been saved: a native `COMMIT` saved
+ * it, a native `ROLLBACK` discarded it, and a statement sent after either ran
+ * outside that transaction.
+ *
+ * This error is never retried automatically, `retry: { attempts }`
+ * included, even when its `cause` is a serialization failure or a deadlock:
+ * re-running the callback could repeat writes that were already committed.
+ * A caller that knows its callback is safe to re-run retries it itself.
+ * `details.reason` says what TypeGraph found; `cause` is the failure when
+ * the attempt failed, or the first engine error it observed.
  */
 export class TransactionOutcomeUnknownError extends TypeGraphError {
   declare readonly details: TransactionOutcomeUnknownErrorDetails;
@@ -2015,13 +2040,15 @@ export class TransactionOutcomeUnknownError extends TypeGraphError {
     options?: { cause?: unknown },
   ) {
     super(
-      "Transaction outcome unknown: the transaction TypeGraph opened was ended by a statement TypeGraph did not issue, so TypeGraph did not commit it and cannot tell what was saved",
+      details.reason === "transaction-ended" ?
+        "Transaction outcome unknown: the transaction TypeGraph opened was ended by a statement TypeGraph did not issue, so TypeGraph did not commit it and cannot tell what was saved"
+      : "Transaction outcome unknown: the transaction failed after its native handle was read, so TypeGraph cannot tell whether the transaction that failed is the one it opened, and does not retry it",
       "TRANSACTION_OUTCOME_UNKNOWN",
       {
         details,
         category: "system",
         suggestion:
-          "Do not send COMMIT, ROLLBACK or BEGIN through tx.sql inside store.transaction(); use savepoints for a partial rollback. Check what the transaction wrote before running it again.",
+          "Do not send COMMIT, ROLLBACK or BEGIN through tx.sql inside store.transaction(); use savepoints for a partial rollback. A transaction that read tx.sql is never retried automatically: check what it wrote, or catch this error and re-run the transaction yourself when you know the callback is safe to repeat (the original failure is the cause).",
         cause: options?.cause,
       },
     );

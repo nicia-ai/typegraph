@@ -19,6 +19,7 @@ import {
 } from "../backend/derive-backend";
 import {
   resolveDriverSavepointScope,
+  resolveSavepointGuard,
   runSessionSavepoint,
   type SavepointDecision,
 } from "../backend/session-savepoint";
@@ -739,6 +740,7 @@ export async function runRecordedTransactionSavepoint<T>(
         executeControl: (statement) =>
           executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
         enterDriverScope: resolveDriverSavepointScope(rawTarget),
+        guardSavepoint: resolveSavepointGuard(rawTarget),
       },
       savepoint,
       fn,

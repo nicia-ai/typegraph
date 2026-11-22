@@ -1519,7 +1519,7 @@ export class TransactionOutcomeUnknownError extends TypeGraphError {
 
 // @public
 export type TransactionOutcomeUnknownErrorDetails = Readonly<{
-    reason: "transaction-ended";
+    reason: "transaction-ended" | "native-handle-released";
 }>;
 
 // @public

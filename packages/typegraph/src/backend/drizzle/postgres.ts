@@ -154,7 +154,9 @@ import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   deferNativeHandle,
+  guardNativeTransactionSavepoint,
   nativeHandleForCallback,
+  releaseNativeTransaction,
 } from "../native-transaction-release";
 import {
   RECORDED_ANCHOR_RETENTION_COLUMN,
@@ -171,7 +173,9 @@ import {
 } from "../row-mappers";
 import {
   registerDriverSavepointScope,
+  registerSavepointGuard,
   runSessionSavepoint,
+  type SavepointGuard,
 } from "../session-savepoint";
 import { registerTransactionCommitCheck } from "../transaction-commit-check";
 import {
@@ -2184,6 +2188,13 @@ function buildPostgresEngineProfileInternal(
       transactionScoped ? queueOwner : undefined;
 
     /**
+     * A transaction's backend, which may carry the schema-write DDL port a
+     * preflight is handed.
+     */
+    type CommitCheckedBackend = TransactionBackend &
+      Partial<Pick<SchemaWriteTransactionBackend, "executeSchemaDdl">>;
+
+    /**
      * Opens one transaction this backend will commit, and runs `body` in it.
      * `body` receives the transaction and `registerCommitCheck`, which
      * hands the transaction's commit check to the Store code that runs on
@@ -2201,7 +2212,7 @@ function buildPostgresEngineProfileInternal(
       config: PgTransactionConfig | undefined,
       body: (
         tx: AnyPgTransaction,
-        registerCommitCheck: (txBackend: object) => void,
+        registerCommitCheck: (txBackend: CommitCheckedBackend) => void,
       ) => Promise<T>,
     ): Promise<T> {
       if (capabilities.execution.commitOutcome !== "session-marker") {
@@ -2218,7 +2229,23 @@ function buildPostgresEngineProfileInternal(
         (error) => isSerializationFailure(error, ctx.self()),
         (tx, marker) =>
           body(tx, (txBackend) => {
-            registerTransactionCommitCheck(txBackend, marker.assertCommittable);
+            const executeSchemaDdl = txBackend.executeSchemaDdl;
+            registerTransactionCommitCheck(txBackend, {
+              check: marker.assertCommittable,
+              // A schema preflight's `executeSchemaDdl` forwards any SQL
+              // text, transaction control included: it releases control of
+              // the transaction before its statement is sent.
+              ...(executeSchemaDdl === undefined ?
+                {}
+              : {
+                  preflightTarget: deriveBackend(txBackend, {
+                    executeSchemaDdl(ddl: string): Promise<void> {
+                      releaseNativeTransaction(tx);
+                      return executeSchemaDdl(ddl);
+                    },
+                  }),
+                }),
+            });
           }),
       );
     }
@@ -4366,6 +4393,10 @@ function createTransactionBackend(
   );
   const executeCompiled = session.compiled.executeCompiled;
   const { enterDriverScope } = session;
+  // TypeGraph's own savepoints on a transaction this backend opened restore
+  // the transaction's commit evidence when they roll back past it.
+  const guardSavepoint: SavepointGuard = (savepointStatement) =>
+    guardNativeTransactionSavepoint(options.db, savepointStatement);
   // Preserve the established Drizzle-routed execution surface for ordinary
   // transaction work. Only a closed atomic program needs the pinned client's
   // compiled-text seam; changing every statement to that seam would also
@@ -4384,6 +4415,7 @@ function createTransactionBackend(
         executeCompiled,
         runExclusive,
         enterDriverScope,
+        guardSavepoint,
       })
     );
   const sessionAtomicSqlProgramExecutor =
@@ -4455,6 +4487,7 @@ function createTransactionBackend(
   if (enterDriverScope !== undefined) {
     registerDriverSavepointScope(backend, enterDriverScope);
   }
+  registerSavepointGuard(backend, guardSavepoint);
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);

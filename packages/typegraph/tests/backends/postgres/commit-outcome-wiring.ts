@@ -45,10 +45,17 @@ import {
   TransactionOutcomeUnknownError,
   TransactionRolledBackError,
 } from "../../../src";
-import { deriveBackend } from "../../../src/backend/derive-backend";
+import { resolveRegisteredAtomicSqlBatchExecutor } from "../../../src/backend/capabilities/atomic-sql-program";
+import {
+  backendDerivationChain,
+  deriveBackend,
+} from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import { type NodeRow } from "../../../src/backend/types";
+import {
+  type NodeRow,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
@@ -66,6 +73,8 @@ const PLANT_PREFIX = "set local typegraph.transaction_marker";
 const READ_PREFIX = "select current_setting('typegraph.transaction_marker'";
 const PROBE_PREFIX = "select 1 as healthy";
 const MISSING_RELATION_SQL = "SELECT * FROM commit_outcome_missing_table";
+/** A marker value: generated per attempt, from a fixed alphabet. */
+const MARKER_VALUE_SHAPE = /^[\da-f]{32}$/;
 const CALLER_MARKER_READ =
   "SELECT current_setting('typegraph.transaction_marker', true) AS seen_by_caller";
 
@@ -131,6 +140,31 @@ function backendWithRead(
   });
 }
 
+/** The first statement of the batch {@link runFailingAtomicBatch} runs. */
+const BATCH_FIRST_STATEMENT = "select 'inside the typegraph savepoint'";
+
+/**
+ * Runs, inside TypeGraph's own savepoint on the transaction session `target`
+ * (its registered atomic batch), {@link BATCH_FIRST_STATEMENT} and then a
+ * statement that fails, so TypeGraph rolls the savepoint back.
+ */
+async function runFailingAtomicBatch(
+  target: TransactionBackend,
+): Promise<void> {
+  for (const link of backendDerivationChain(target)) {
+    const batch = resolveRegisteredAtomicSqlBatchExecutor(
+      link as TransactionBackend,
+    );
+    if (batch === undefined) continue;
+    await batch([
+      { sql: BATCH_FIRST_STATEMENT, params: [] },
+      { sql: MISSING_RELATION_SQL, params: [] },
+    ]);
+    return;
+  }
+  throw new Error("The transaction session has no atomic batch.");
+}
+
 type SentStatement = Readonly<{ statement: string; at: number }>;
 
 /**
@@ -148,22 +182,48 @@ type StatementLog = Readonly<{
    */
   overlaps: () => number;
   recordOverlap: () => void;
+  /**
+   * Whether an overlapping statement is refused, as a client that runs one
+   * statement at a time must.
+   */
+  strict: () => boolean;
+  setStrict: (strict: boolean) => void;
+  /**
+   * Runs `hook` once, synchronously, as the first statement starting with
+   * `prefix` is handed to the driver.
+   */
+  onStatement: (prefix: string, hook: () => void) => void;
   reset: () => void;
 }>;
 
 function createStatementLog(): StatementLog {
   const statements: SentStatement[] = [];
   let overlaps = 0;
+  let strict = false;
+  let pendingHook: Readonly<{ prefix: string; hook: () => void }> | undefined;
   return {
+    onStatement: (prefix, hook) => {
+      pendingHook = { prefix, hook };
+    },
     overlaps: () => overlaps,
+    strict: () => strict,
+    setStrict: (value) => {
+      strict = value;
+    },
     recordOverlap: () => {
       overlaps += 1;
     },
     record: (statement) => {
-      statements.push({
-        statement: statement.trim().replaceAll(/\s+/g, " ").toLowerCase(),
-        at: performance.now(),
-      });
+      const normalized = statement.trim().replaceAll(/\s+/g, " ").toLowerCase();
+      statements.push({ statement: normalized, at: performance.now() });
+      if (
+        pendingHook !== undefined &&
+        normalized.startsWith(pendingHook.prefix)
+      ) {
+        const { hook } = pendingHook;
+        pendingHook = undefined;
+        hook();
+      }
     },
     sent: () => [...statements],
     statements: () => statements.map(({ statement }) => statement),
@@ -172,6 +232,8 @@ function createStatementLog(): StatementLog {
     reset: () => {
       statements.length = 0;
       overlaps = 0;
+      strict = false;
+      pendingHook = undefined;
     },
   };
 }
@@ -219,6 +281,10 @@ export type DriverFixture = Readonly<{
   >;
 }>;
 
+/** What a strict test client answers a statement sent while another runs. */
+const STRICT_CLIENT_REFUSAL =
+  "strict test client: a statement is already executing";
+
 /**
  * PGlite sends `BEGIN` and `COMMIT` / `ROLLBACK` itself, around the callback
  * of its `transaction`, and hands the callback a transaction object; both are
@@ -232,6 +298,7 @@ function recordPgliteStatements(client: PGlite, log: StatementLog): void {
   ): Promise<T> =>
     openTransaction(async (transaction) => {
       log.record("BEGIN");
+      let executing = 0;
       const recording = new Proxy(transaction, {
         get(target, property) {
           const value: unknown = Reflect.get(target, property, target);
@@ -242,7 +309,23 @@ function recordPgliteStatements(client: PGlite, log: StatementLog): void {
           }
           return (...args: unknown[]): unknown => {
             log.record(textOf(args[0]));
-            return Reflect.apply(value, target, args);
+            if (executing > 0) {
+              log.recordOverlap();
+              if (log.strict()) {
+                return Promise.reject(new Error(STRICT_CLIENT_REFUSAL));
+              }
+            }
+            executing += 1;
+            const pending = Reflect.apply(
+              value,
+              target,
+              args,
+            ) as Promise<unknown>;
+            const settle = (): void => {
+              executing -= 1;
+            };
+            pending.then(settle, settle);
+            return pending;
           };
         },
       });
@@ -251,6 +334,9 @@ function recordPgliteStatements(client: PGlite, log: StatementLog): void {
         if (!transaction.closed) log.record("COMMIT");
         return result;
       } catch (error) {
+        // PGlite sends its ROLLBACK itself, once the callback settles: a
+        // statement still executing then would overlap it.
+        if (executing > 0) log.recordOverlap();
         if (!transaction.closed) log.record("ROLLBACK");
         throw error;
       }
@@ -286,7 +372,18 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
         let executing = 0;
         Reflect.set(client, "query", (...args: unknown[]): unknown => {
           log.record(textOf(args[0]));
-          if (executing > 0) log.recordOverlap();
+          if (executing > 0) {
+            log.recordOverlap();
+            if (log.strict()) {
+              const refusal = new Error(STRICT_CLIENT_REFUSAL);
+              const callback = args.find(
+                (argument) => typeof argument === "function",
+              ) as ((error: Error) => unknown) | undefined;
+              if (callback === undefined) return Promise.reject(refusal);
+              queueMicrotask(() => callback(refusal));
+              return undefined;
+            }
+          }
           executing += 1;
           const settle = (): void => {
             executing -= 1;
@@ -415,7 +512,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
         return rows[0]?.["seen_by_caller"];
       });
 
-      expect(seen).toBe("open");
+      expect(seen).toMatch(MARKER_VALUE_SHAPE);
       expect(statementLog.overlaps()).toBe(0);
       const statements = statementLog.statements();
       expect(keywordsOf(statements)).toEqual([
@@ -451,7 +548,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
         return rows[0]?.["seen_by_caller"];
       });
 
-      expect(seen).toBe("open");
+      expect(seen).toMatch(MARKER_VALUE_SHAPE);
       expect(statementLog.overlaps()).toBe(0);
       expect(statementLog.count(PLANT_PREFIX)).toBe(1);
     });
@@ -606,6 +703,138 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       expect(await noteBody(store, id)).toBe("nested write");
     });
 
+    it("waits for the plant before the driver rolls back a callback that threw, and rejects with the callback's own error", async () => {
+      await requireDefined(storePromise);
+      const slowReadStore = createAdapterStore(
+        wiringGraph,
+        backendWithRead(requireDefined(opened).backend, SLOW_READ_SQL),
+      );
+      const failure = new Error("the callback's own failure");
+      statementLog.reset();
+      statementLog.setStrict(true);
+
+      const outcome = await slowReadStore
+        .transaction(async (tx) => {
+          void tx.nodes.WiringNote.getById("in-flight" as never).catch(
+            () => "left running",
+          );
+          // The slow read is on the wire, so the plant waits behind it, and
+          // the callback throws before either has finished.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(nativeHandleOf(tx)).toBeDefined();
+          throw failure;
+        })
+        .catch((error: unknown) => error);
+      statementLog.setStrict(false);
+
+      // Not a conflict, so no retry loop would re-run it: the callback's own
+      // error, intact, after the ROLLBACK the strict client accepted.
+      expect(outcome).toBe(failure);
+      expect(statementLog.overlaps()).toBe(0);
+      const statements = statementLog.statements();
+      const plant = statements.findIndex((statement) =>
+        statement.startsWith(PLANT_PREFIX),
+      );
+      expect(plant).toBeGreaterThanOrEqual(0);
+      expect(statements.indexOf("rollback")).toBeGreaterThan(plant);
+    });
+
+    it("plants the marker again after TypeGraph rolls back a savepoint of its own that the plant landed in", async () => {
+      const store = await requireDefined(storePromise);
+      const { backend } = requireDefined(opened);
+      const id = `${fixture.name}-savepoint-rearm`;
+      const batchStore = createAdapterStore(
+        wiringGraph,
+        deriveBackend(backend, {
+          transactionWithNative: (run, options) =>
+            backend.transactionWithNative(
+              (target, native) =>
+                run(
+                  deriveBackend(target, {
+                    getNode: async (): Promise<NodeRow | undefined> => {
+                      await runFailingAtomicBatch(target);
+                      return undefined;
+                    },
+                  }),
+                  native,
+                ),
+              options,
+            ),
+        }),
+      );
+      statementLog.reset();
+
+      const outcome = await batchStore
+        .transaction(async (tx) => {
+          await tx.nodes.WiringNote.create({ body: "kept" }, { id });
+          // Read as TypeGraph's SAVEPOINT is already on the session and its
+          // first statement is handed to the driver: the plant the release
+          // sends lands inside the savepoint, whose rollback undoes it.
+          statementLog.onStatement(BATCH_FIRST_STATEMENT, () => {
+            nativeHandleOf(tx);
+          });
+          return tx.nodes.WiringNote.getById("x" as never).then(
+            () => "the batch did not fail",
+            () => "TypeGraph rolled its savepoint back",
+          );
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBe("TypeGraph rolled its savepoint back");
+      const statements = statementLog.statements();
+      const savepointRolledBack = statements.indexOf(
+        "rollback to savepoint typegraph_atomic_program",
+      );
+      expect(
+        statements.findIndex((statement) => statement.startsWith(PLANT_PREFIX)),
+      ).toBeLessThan(savepointRolledBack);
+      expect(statementLog.count(PLANT_PREFIX)).toBe(2);
+      expect(await noteBody(store, id)).toBe("kept");
+    });
+
+    it("never plants the marker again in a transaction the callback opened, when TypeGraph rolls back a savepoint taken there", async () => {
+      await requireDefined(storePromise);
+      const { backend } = requireDefined(opened);
+      const batchStore = createAdapterStore(
+        wiringGraph,
+        deriveBackend(backend, {
+          transactionWithNative: (run, options) =>
+            backend.transactionWithNative(
+              (target, native) =>
+                run(
+                  deriveBackend(target, {
+                    getNode: async (): Promise<NodeRow | undefined> => {
+                      await runFailingAtomicBatch(target);
+                      return undefined;
+                    },
+                  }),
+                  native,
+                ),
+              options,
+            ),
+        }),
+      );
+      statementLog.reset();
+
+      const outcome = await batchStore
+        .transaction(async (tx) => {
+          const native = nativeHandleOf(tx);
+          await native.execute(drizzleSql.raw("COMMIT"));
+          // postgres-js refuses a BEGIN outside its own transaction API.
+          await native.execute(drizzleSql.raw("BEGIN")).catch(() => "refused");
+          // TypeGraph's own savepoint, taken in the transaction the callback
+          // opened, rolls back: re-planting there would vouch for it.
+          await tx.nodes.WiringNote.getById("x" as never).catch(
+            () => "TypeGraph's savepoint scope failed",
+          );
+          return "callback returned";
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).toBeInstanceOf(TransactionOutcomeUnknownError);
+      expect(statementLog.count(PLANT_PREFIX)).toBe(1);
+    });
+
     for (const options of [
       { isolationLevel: "repeatable_read", accessMode: "read_only" },
       { isolationLevel: "serializable" },
@@ -659,9 +888,10 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
           return "committed";
         })
         .catch((error: unknown) =>
-          error instanceof TransactionRolledBackError ?
+          error instanceof TransactionOutcomeUnknownError ?
             {
-              rolledBack: Reflect.get(
+              unknown: error.details.reason,
+              cause: Reflect.get(
                 requireDefined(error.cause as object),
                 "code",
               ) as unknown,
@@ -671,11 +901,11 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
 
       // The session is healthy and the marker is found either way. postgres-js
       // still rolls back a transaction scope in which a statement failed, and
-      // rethrows that failure in place of committing: reported as the
-      // rollback it is, with that failure as the cause.
+      // rethrows that failure in place of committing. The handle was read, so
+      // that is reported as an unknown outcome, with the failure as its cause.
       expect(outcome).toEqual(
         fixture.driverTracksScopeFailures ?
-          { rolledBack: "42P01" }
+          { unknown: "native-handle-released", cause: "42P01" }
         : "committed",
       );
       const recovered = await store.nodes.WiringNote.getById(

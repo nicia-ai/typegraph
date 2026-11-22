@@ -3,13 +3,19 @@
  * hands".
  *
  * A transaction TypeGraph opens is ended or replaced behind its back only by
- * statements sent through the adapter-native handle (`tx.sql`, the second
- * argument of a `transactionWithNative` callback): TypeGraph issues no
- * `COMMIT`, `ROLLBACK` or `BEGIN` of its own inside the transaction. The
- * backend that opened the transaction therefore needs to know the moment the
- * handle escapes, and no earlier: a transaction whose handle never escaped
- * pays nothing for evidence it cannot need (see
- * `drizzle/execution/postgres-commit-outcome.ts`).
+ * statements TypeGraph does not issue: those sent through the adapter-native
+ * handle (`tx.sql`, the second argument of a `transactionWithNative`
+ * callback) and any other port that forwards a caller's SQL text verbatim
+ * (a schema preflight's `executeSchemaDdl`). TypeGraph issues no `COMMIT`,
+ * `ROLLBACK` or `BEGIN` of its own inside the transaction. The backend that
+ * opened the transaction therefore needs to know the moment control escapes,
+ * and no earlier: a transaction whose handle never escaped pays nothing for
+ * evidence it cannot need (see `drizzle/execution/postgres-commit-outcome.ts`).
+ *
+ * Once control has escaped, the attempt is never retried automatically: an
+ * aborted PostgreSQL transaction cannot be queried, so nothing TypeGraph can
+ * read proves that the transaction which failed is the one it opened rather
+ * than one the caller began after committing it.
  *
  * Every path that hands the native handle of a TypeGraph-opened transaction
  * to code TypeGraph does not own returns it through
@@ -18,24 +24,77 @@
  * anything through it. A handle nothing registered (a SQLite transaction, an
  * adopted caller-owned transaction, a savepoint on an enclosing transaction)
  * is returned unchanged.
+ *
+ * The registration is a non-enumerable property under a process-wide symbol
+ * on the native transaction object itself, the mechanism the Store's runtime
+ * ports use: a Store loaded from one copy of this package and an adapter
+ * loaded from another must agree on it, exactly as they already agree on
+ * the deferral token ({@link INTERNAL_DEFERRED_NATIVE_HANDLE}).
  */
 
+import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import {
   INTERNAL_DEFERRED_NATIVE_HANDLE,
   type InternalTransactionOptions,
 } from "./types";
 
-/** Runs, synchronously, when the native handle it is registered for is released. */
-export type NativeTransactionRelease = () => void;
+/**
+ * What the backend that opened a transaction does when control of it
+ * escapes. A cross-instance contract: every member is called by whichever
+ * copy of this package holds the handle, so it may only grow.
+ */
+export type NativeTransactionReleasePort = Readonly<{
+  /** Runs, synchronously, when the native handle is released. */
+  release: () => void;
+  /**
+   * Called with the `SAVEPOINT` statement of a savepoint of TypeGraph's own
+   * as TypeGraph is about to send it on the transaction. Returns what to run
+   * right after TypeGraph rolls back to that savepoint: evidence the release
+   * placed inside the savepoint is undone by the rollback, and is restored
+   * there.
+   */
+  guardSavepoint: (savepointStatement: string) => () => void;
+}>;
 
-const RELEASES = new WeakMap<object, NativeTransactionRelease>();
+const NATIVE_TRANSACTION_RELEASE: unique symbol = typeGraphGlobalSymbol(
+  "native-transaction-release-v1",
+);
 
-/** Registers what releasing `nativeTransaction` must do first. */
+function isObjectLike(value: unknown): value is object {
+  return (
+    (typeof value === "object" && value !== null) || typeof value === "function"
+  );
+}
+
+function releasePortOf(
+  nativeTransaction: unknown,
+): NativeTransactionReleasePort | undefined {
+  if (!isObjectLike(nativeTransaction)) return undefined;
+  const port: unknown = Reflect.get(
+    nativeTransaction,
+    NATIVE_TRANSACTION_RELEASE,
+  );
+  return isObjectLike(port) ?
+      (port as NativeTransactionReleasePort)
+    : undefined;
+}
+
+/**
+ * Registers what releasing `nativeTransaction` must do first. Returns `false`
+ * when the object cannot carry the registration (it is frozen or already
+ * registered); the caller must then treat control as released from the
+ * start, since nothing would tell it when the handle escapes.
+ */
 export function registerNativeTransactionRelease(
   nativeTransaction: object,
-  release: NativeTransactionRelease,
-): void {
-  RELEASES.set(nativeTransaction, release);
+  port: NativeTransactionReleasePort,
+): boolean {
+  return Reflect.defineProperty(nativeTransaction, NATIVE_TRANSACTION_RELEASE, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: port,
+  });
 }
 
 /**
@@ -43,13 +102,19 @@ export function registerNativeTransactionRelease(
  * the release its opening backend registered.
  */
 export function releaseNativeTransaction<T>(nativeTransaction: T): T {
-  if (
-    (typeof nativeTransaction === "object" && nativeTransaction !== null) ||
-    typeof nativeTransaction === "function"
-  ) {
-    RELEASES.get(nativeTransaction)?.();
-  }
+  releasePortOf(nativeTransaction)?.release();
   return nativeTransaction;
+}
+
+/**
+ * What to run right after TypeGraph rolls back a savepoint it is opening now
+ * on `nativeTransaction`; `undefined` when nothing registered for it.
+ */
+export function guardNativeTransactionSavepoint(
+  nativeTransaction: unknown,
+  savepointStatement: string,
+): (() => void) | undefined {
+  return releasePortOf(nativeTransaction)?.guardSavepoint(savepointStatement);
 }
 
 /**

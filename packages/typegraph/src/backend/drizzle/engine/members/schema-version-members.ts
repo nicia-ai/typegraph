@@ -25,7 +25,10 @@
  * that import it at module scope), so this import adds no new reach into a
  * real Drizzle package that was not already there.
  */
-import { resolveTransactionCommitCheck } from "../../../transaction-commit-check";
+import {
+  resolveSchemaPreflightTarget,
+  resolveTransactionCommitCheck,
+} from "../../../transaction-commit-check";
 import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
@@ -98,12 +101,18 @@ export type SchemaVersionMembers = Readonly<{
  * on PostgreSQL has left the session aborted, and the write would otherwise
  * surface as a raw `25P02` instead of the `TransactionRolledBackError`
  * naming the failure. A backend that registers no check (SQLite) skips it.
+ *
+ * The preflight's `executeSchemaDdl` forwards whatever SQL text it is
+ * given, transaction control included, so it releases control of the
+ * transaction exactly as handing over the native handle does: the first call
+ * arms the transaction's marker before its statement is sent, and from then
+ * on the schema write commits only with the marker read back.
  */
 async function runPreflight(
   preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
   target: SchemaWriteTransactionBackend,
 ): Promise<void> {
-  await preflight(target);
+  await preflight(resolveSchemaPreflightTarget(target));
   await resolveTransactionCommitCheck(target)?.();
 }
 

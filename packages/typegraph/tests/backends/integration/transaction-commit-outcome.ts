@@ -6,20 +6,24 @@
  * transaction even when the callback catches the error, and the server answers
  * the closing `COMMIT` with a rollback that most drivers report as success. A
  * callback that catches such a failure and returns normally must therefore see
- * its transaction reject with a `TransactionRolledBackError` whose cause is the
- * first engine error — never resolve with nothing saved. A callback that ends
- * the transaction itself through its native handle must see a
- * `TransactionOutcomeUnknownError`, never a retry. Both follow from the
- * backend's declared `commitOutcome` evidence (`"session-marker"`). SQLite
- * (`"statement-scoped"`) keeps the transaction usable after a failed
- * statement, so the same callbacks commit there, exactly as before.
+ * its transaction reject — never resolve with nothing saved.
+ *
+ * Which error it sees depends on whether the native handle (`tx.sql`) was
+ * read. Never read: the transaction cannot have been ended or replaced, so it
+ * rejects with a `TransactionRolledBackError` whose cause is the first engine
+ * error, and re-runs under `retry` when any engine error it observed was a
+ * conflict. Read: the callback could have committed TypeGraph's transaction
+ * and begun another, and an aborted transaction cannot be queried, so the
+ * attempt commits only with its marker read back and is otherwise a
+ * `TransactionOutcomeUnknownError` that never re-runs, whatever its cause.
+ * Both follow from the backend's declared `commitOutcome` evidence
+ * (`"session-marker"`). SQLite (`"statement-scoped"`) keeps the transaction
+ * usable after a failed statement, so the same callbacks commit there,
+ * exactly as before.
  *
  * Each case provokes the failure through a different statement path — a write
  * with no application-side pre-check, a read, the native SQL handle, a
- * schema preflight — or ends the transaction through the native handle, and
- * pins the retry contract: a rolled-back transaction re-runs when any engine
- * error it observed was a conflict, and a transaction whose outcome is unknown
- * never re-runs.
+ * schema preflight — or ends the transaction through the native handle.
  */
 import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
@@ -35,7 +39,9 @@ import {
   TransactionOutcomeUnknownError,
   TransactionRolledBackError,
 } from "../../../src";
+import { resolveRegisteredAtomicSqlBatchExecutor } from "../../../src/backend/capabilities/atomic-sql-program";
 import {
+  backendDerivationChain,
   deriveBackend,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
@@ -44,9 +50,11 @@ import {
   type BackendCapabilities,
   type GraphBackend,
   type NodeRow,
+  type TransactionBackend,
 } from "../../../src/backend/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import { type IntegrationTestContext } from "./test-context";
 
 const OutcomeNote = defineNode("OutcomeNote", {
@@ -179,12 +187,13 @@ function backendWithReadRunning(
 }
 
 /**
- * {@link backendWithReadRunning} for an adapter backend, whose Store
- * transactions also hand the callback the native `tx.sql` handle.
+ * An adapter backend whose Store transactions run `read(target, id)` as
+ * every `getNode` and find nothing: a managed read, through the
+ * transaction's statement queue, that never reads the native handle.
  */
-function adapterBackendWithReadRunning(
+function adapterBackendWithReads(
   backend: AdapterBackend<unknown>,
-  statement: string,
+  read: (target: TransactionBackend, id: string) => Promise<unknown>,
 ): AdapterBackend<unknown> {
   return deriveBackend(backend, {
     transactionWithNative: (run, options) =>
@@ -192,8 +201,12 @@ function adapterBackendWithReadRunning(
         (target, native) =>
           run(
             deriveBackend(target, {
-              getNode: async (): Promise<NodeRow | undefined> => {
-                await target.execute(asCompiledRowsSql(sql.raw(statement)));
+              getNode: async (
+                _graphId: string,
+                _kind: string,
+                id: string,
+              ): Promise<NodeRow | undefined> => {
+                await read(target, id);
                 return;
               },
             }),
@@ -202,6 +215,40 @@ function adapterBackendWithReadRunning(
         options,
       ),
   });
+}
+
+/**
+ * {@link backendWithReadRunning} for an adapter backend, whose Store
+ * transactions also hand the callback the native `tx.sql` handle.
+ */
+function adapterBackendWithReadRunning(
+  backend: AdapterBackend<unknown>,
+  statement: string,
+): AdapterBackend<unknown> {
+  return adapterBackendWithReads(backend, (target) =>
+    target.execute(asCompiledRowsSql(sql.raw(statement))),
+  );
+}
+
+/**
+ * Runs `statement` inside TypeGraph's own savepoint on the transaction
+ * session `target` (its registered atomic batch), and returns the failure
+ * after TypeGraph rolled the savepoint back past it. A session with no atomic
+ * batch runs the statement directly.
+ */
+async function failInsideTypeGraphSavepoint(
+  target: TransactionBackend,
+  statement: string,
+): Promise<unknown> {
+  for (const link of backendDerivationChain(target)) {
+    const batch = resolveRegisteredAtomicSqlBatchExecutor(
+      link as TransactionBackend,
+    );
+    if (batch !== undefined) {
+      return failureOf(batch([{ sql: statement, params: [] }]));
+    }
+  }
+  return failureOf(target.execute(asCompiledRowsSql(sql.raw(statement))));
 }
 
 /**
@@ -215,6 +262,8 @@ type Outcome =
       kind: "rejected";
       errorName: string | undefined;
       engineCode: string | undefined;
+      /** `details.reason` of an unknown outcome. */
+      reason?: unknown;
     }>;
 
 async function outcomeOf(promise: Promise<unknown>): Promise<Outcome> {
@@ -225,6 +274,9 @@ async function outcomeOf(promise: Promise<unknown>): Promise<Outcome> {
       kind: "rejected",
       errorName: error instanceof Error ? error.name : undefined,
       engineCode: engineCodeOf(error),
+      ...(error instanceof TransactionOutcomeUnknownError ?
+        { reason: error.details.reason }
+      : {}),
     };
   }
 }
@@ -237,11 +289,15 @@ function rolledBack(engineCode: string): Outcome {
   };
 }
 
-function outcomeUnknown(engineCode?: string): Outcome {
+function outcomeUnknown(
+  reason: TransactionOutcomeUnknownError["details"]["reason"],
+  engineCode?: string,
+): Outcome {
   return {
     kind: "rejected",
     errorName: TransactionOutcomeUnknownError.name,
     engineCode,
+    reason,
   };
 }
 
@@ -267,6 +323,30 @@ async function noteBody(
 ): Promise<string | undefined> {
   const note = await store.nodes.OutcomeNote.getById(id as never);
   return note?.body;
+}
+
+/** The Store transaction context shape the read helpers below use. */
+type OutcomeReadContext = Readonly<{
+  nodes: Readonly<{
+    OutcomeNote: Readonly<{ getById: (id: never) => Promise<unknown> }>;
+  }>;
+}>;
+
+/**
+ * A failure TypeGraph's own savepoint recovers, then a queued read the engine
+ * refuses with a conflict, which the callback catches.
+ */
+async function recoverThenConflict(tx: OutcomeReadContext): Promise<void> {
+  await tx.nodes.OutcomeNote.getById("recovered" as never);
+  await tx.nodes.OutcomeNote.getById("conflict" as never).catch(() => "caught");
+}
+
+/** A client-side parameter error, then a caught conflict. */
+async function failClientSideThenConflict(
+  tx: OutcomeReadContext,
+): Promise<void> {
+  await tx.nodes.OutcomeNote.getById("client-side" as never);
+  await tx.nodes.OutcomeNote.getById("conflict" as never).catch(() => "caught");
 }
 
 export function registerTransactionCommitOutcomeIntegrationTests(
@@ -358,7 +438,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
-    it("rejects after a caught failing statement on the native handle on PostgreSQL", async () => {
+    it("reports an unknown outcome after a caught failing statement on the native handle on PostgreSQL", async () => {
       const store = await context.createStore(outcomeGraph);
       const marked = usesSessionMarker(store.backend);
 
@@ -375,9 +455,12 @@ export function registerTransactionCommitOutcomeIntegrationTests(
         }),
       );
 
+      // The handle was read, so the aborted transaction cannot be shown to be
+      // the one TypeGraph opened: nothing was saved, but the outcome TypeGraph
+      // reports is unknown, with the failure as its cause.
       expect(outcome).toEqual(
         marked ?
-          rolledBack("42P01")
+          outcomeUnknown("native-handle-released", "42P01")
         : { kind: "committed", value: "callback returned" },
       );
       expect(await noteBody(store, "outcome-before-native")).toBe(
@@ -420,18 +503,24 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
-    it("still retries a serialization failure, caught or not, under optimistic retry", async () => {
+    it("retries a serialization failure, caught or not, when the native handle was never read", async () => {
       const store = await context.createStore(outcomeGraph);
       // SQLite has no statement that raises a serialization failure inside a
       // transaction, so there the statement is one that succeeds and the
       // first attempt commits.
       const marked = usesSessionMarker(store.backend);
-      const conflictStatement = marked ? POSTGRES_CONFLICT_SQL : "SELECT 1";
+      const conflictingReadStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReadRunning(
+          context.getBackend(),
+          marked ? POSTGRES_CONFLICT_SQL : "SELECT 1",
+        ),
+      );
 
       for (const handling of ["propagated", "caught"] as const) {
         let attempts = 0;
         const outcome = await outcomeOf(
-          store.transaction(
+          conflictingReadStore.transaction(
             async (tx) => {
               attempts += 1;
               await tx.nodes.OutcomeNote.create(
@@ -439,12 +528,9 @@ export function registerTransactionCommitOutcomeIntegrationTests(
                 { id: `outcome-retry-${handling}-${attempts}` },
               );
               if (attempts > 1) return attempts;
-              const statement = runNative(
-                nativeHandleOf(tx),
-                conflictStatement,
-              );
-              await (handling === "propagated" ? statement : (
-                statement.catch(() => "caught")
+              const read = tx.nodes.OutcomeNote.getById("conflict" as never);
+              await (handling === "propagated" ? read : (
+                read.catch(() => "caught")
               ));
               return attempts;
             },
@@ -464,9 +550,9 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       // With no attempt left, a caught conflict is reported as a conflict
       // whose cause is the rollback, and under it the engine error.
       let exhausted: unknown;
-      await store
+      await conflictingReadStore
         .transaction(async (tx) => {
-          await runNative(nativeHandleOf(tx), conflictStatement).catch(
+          await tx.nodes.OutcomeNote.getById("conflict" as never).catch(
             () => "caught",
           );
         })
@@ -495,10 +581,23 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       const store = await context.createStore(outcomeGraph);
       const marked = usesSessionMarker(store.backend);
       const conflictStatement = marked ? POSTGRES_CONFLICT_SQL : "SELECT 1";
+      const readStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReads(context.getBackend(), (target, id) =>
+          target.execute(
+            asCompiledRowsSql(
+              // PostgreSQL parses a statement before it checks for an aborted
+              // transaction, so the second read fails with its own syntax
+              // error, not 25P02.
+              sql.raw(id === "conflict" ? conflictStatement : "SELEC 1"),
+            ),
+          ),
+        ),
+      );
 
       let attempts = 0;
       const outcome = await outcomeOf(
-        store.transaction(
+        readStore.transaction(
           async (tx) => {
             attempts += 1;
             await tx.nodes.OutcomeNote.create(
@@ -506,11 +605,12 @@ export function registerTransactionCommitOutcomeIntegrationTests(
               { id: `outcome-first-failure-${attempts}` },
             );
             if (attempts > 1) return attempts;
-            const native = nativeHandleOf(tx);
-            await runNative(native, conflictStatement).catch(() => "caught");
-            // PostgreSQL parses a statement before it checks for an aborted
-            // transaction, so this fails with its own syntax error, not 25P02.
-            await runNative(native, "SELEC 1").catch(() => "caught");
+            await tx.nodes.OutcomeNote.getById("conflict" as never).catch(
+              () => "caught",
+            );
+            await tx.nodes.OutcomeNote.getById("syntax" as never).catch(
+              () => "caught",
+            );
             return attempts;
           },
           { retry: { attempts: 2 } },
@@ -523,7 +623,88 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
-    it("retries when a queued read's conflict follows a failure a savepoint recovered", async () => {
+    it("retries when a queued read's conflict follows a failure TypeGraph's own savepoint recovered, and keeps that failure the cause", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const conflictStatement = marked ? POSTGRES_CONFLICT_SQL : "SELECT 1";
+      const recoveredCodes: (string | undefined)[] = [];
+      const readStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReads(context.getBackend(), async (target, id) => {
+          if (id === "recovered") {
+            const failure = await failInsideTypeGraphSavepoint(
+              target,
+              MISSING_RELATION_SQL,
+            );
+            recoveredCodes.push(engineCodeOf(failure));
+            return;
+          }
+          // A managed read, queued behind everything the callback sent,
+          // that the engine refuses with a serialization failure.
+          await target.execute(asCompiledRowsSql(sql.raw(conflictStatement)));
+        }),
+      );
+      let attempts = 0;
+      const outcome = await outcomeOf(
+        readStore.transaction(
+          async (tx) => {
+            attempts += 1;
+            await tx.nodes.OutcomeNote.create(
+              { body: `attempt ${attempts}` },
+              { id: `outcome-queued-conflict-${attempts}` },
+            );
+            if (attempts === 1) await recoverThenConflict(tx);
+            return attempts;
+          },
+          { retry: { attempts: 2 } },
+        ),
+      );
+      expect(outcome).toEqual({ kind: "committed", value: marked ? 2 : 1 });
+      expect(await noteBody(store, "outcome-queued-conflict-1")).toBe(
+        marked ? undefined : "attempt 1",
+      );
+
+      // With no attempt left: the conflict after the recovered failure is what
+      // classified the rollback as worth re-running, and the recovered 42P01,
+      // the first engine error, stays its cause.
+      const exhausted = await readStore
+        .transaction(async (tx) => {
+          await recoverThenConflict(tx);
+        })
+        .then(
+          () => "committed",
+          (error: unknown) => error,
+        );
+      const rollback = exhausted instanceof Error ? exhausted.cause : undefined;
+      expect({
+        recovered: recoveredCodes[0],
+        name: exhausted instanceof Error ? exhausted.name : undefined,
+        rollback:
+          rollback instanceof TransactionRolledBackError ?
+            { conflict: rollback.details.conflict }
+          : undefined,
+        retryable: isSerializationFailure(rollback),
+        engineCode: engineCodeOf(exhausted),
+      }).toEqual(
+        marked ?
+          {
+            recovered: "42P01",
+            name: "TransactionConflictError",
+            rollback: { conflict: true },
+            retryable: true,
+            engineCode: "42P01",
+          }
+        : {
+            recovered: undefined,
+            name: undefined,
+            rollback: undefined,
+            retryable: false,
+            engineCode: undefined,
+          },
+      );
+    });
+
+    it("never retries a queued read's conflict after the handle was read, and keeps the recovered failure the cause", async () => {
       const store = await context.createStore(outcomeGraph);
       const marked = usesSessionMarker(store.backend);
       const conflictingReadStore = createAdapterStore(
@@ -535,37 +716,43 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
 
       let attempts = 0;
+      let rejection: unknown;
       const outcome = await outcomeOf(
-        conflictingReadStore.transaction(
-          async (tx) => {
-            attempts += 1;
-            await tx.nodes.OutcomeNote.create(
-              { body: `attempt ${attempts}` },
-              { id: `outcome-queued-conflict-${attempts}` },
-            );
-            if (attempts > 1) return attempts;
-            await failInsideNativeSavepoint(
-              nativeHandleOf(tx),
-              marked,
-              MISSING_RELATION_SQL,
-            );
-            // A managed read, queued behind everything the callback sent,
-            // that the engine refuses with a serialization failure.
-            await tx.nodes.OutcomeNote.getById("anything" as never).catch(
-              () => "caught",
-            );
-            return attempts;
-          },
-          { retry: { attempts: 2 } },
-        ),
+        conflictingReadStore
+          .transaction(
+            async (tx) => {
+              attempts += 1;
+              await tx.nodes.OutcomeNote.create(
+                { body: `attempt ${attempts}` },
+                { id: `outcome-released-queued-conflict-${attempts}` },
+              );
+              await failInsideNativeSavepoint(
+                nativeHandleOf(tx),
+                marked,
+                MISSING_RELATION_SQL,
+              );
+              await tx.nodes.OutcomeNote.getById("conflict" as never).catch(
+                () => "caught",
+              );
+              return attempts;
+            },
+            { retry: { attempts: 2 } },
+          )
+          .catch((error: unknown) => {
+            rejection = error;
+            throw error;
+          }),
       );
 
-      // The recovered 42P01 came first and stays the cause; the conflict
-      // after it is what makes the rolled-back attempt worth re-running.
-      expect(outcome).toEqual({ kind: "committed", value: marked ? 2 : 1 });
-      expect(await noteBody(store, "outcome-queued-conflict-1")).toBe(
-        marked ? undefined : "attempt 1",
+      expect(attempts).toBe(1);
+      expect(outcome).toEqual(
+        marked ?
+          outcomeUnknown("native-handle-released", "42P01")
+        : { kind: "committed", value: 1 },
       );
+      // The conflict is in the attempt's evidence, yet the outcome is never
+      // classified as one: the handle was read.
+      expect(isSerializationFailure(rejection)).toBe(false);
     });
 
     it("retries a conflict that follows a caught client-side parameter error, and never makes that error the cause", async () => {
@@ -574,42 +761,47 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       const conflictStatement = marked ? POSTGRES_CONFLICT_SQL : "SELECT 1";
       const circular: Record<string, unknown> = {};
       circular["self"] = circular;
-
-      async function failClientSideThenConflict(native: unknown) {
-        // The driver cannot serialize the parameter as JSON, so the
-        // statement never runs and the transaction stays usable.
-        const clientSide = await failureOf(
-          runNativeQuery(
-            native,
-            marked ?
-              drizzleSql`SELECT ${circular}::jsonb AS value`
-            : drizzleSql`SELECT ${circular} AS value`,
-          ),
-        );
-        expect(engineCodeOf(clientSide)).toBeUndefined();
-        await runNative(native, conflictStatement).catch(() => "caught");
-      }
-
+      const clientSideCodes: (string | undefined)[] = [];
+      const readStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReads(context.getBackend(), async (target, id) => {
+          if (id === "client-side") {
+            // The driver cannot serialize the parameter, so the statement
+            // never runs and the transaction stays usable.
+            const clientSide = await failureOf(
+              target.execute(
+                asCompiledRowsSql(
+                  marked ?
+                    sql`SELECT ${circular}::jsonb AS value`
+                  : sql`SELECT ${circular} AS value`,
+                ),
+              ),
+            );
+            clientSideCodes.push(engineCodeOf(clientSide));
+            return;
+          }
+          await target.execute(asCompiledRowsSql(sql.raw(conflictStatement)));
+        }),
+      );
       let attempts = 0;
       const outcome = await outcomeOf(
-        store.transaction(
+        readStore.transaction(
           async (tx) => {
             attempts += 1;
-            if (attempts === 1) {
-              await failClientSideThenConflict(nativeHandleOf(tx));
-            }
+            if (attempts === 1) await failClientSideThenConflict(tx);
             return attempts;
           },
           { retry: { attempts: 2 } },
         ),
       );
       expect(outcome).toEqual({ kind: "committed", value: marked ? 2 : 1 });
+      expect(clientSideCodes[0]).toBeUndefined();
 
       // With no attempt left, the cause beneath the rollback is the
       // conflict, the first error that reached the engine.
       const exhausted = await outcomeOf(
-        store.transaction(async (tx) => {
-          await failClientSideThenConflict(nativeHandleOf(tx));
+        readStore.transaction(async (tx) => {
+          await failClientSideThenConflict(tx);
         }),
       );
       expect(exhausted).toEqual(
@@ -621,6 +813,172 @@ export function registerTransactionCommitOutcomeIntegrationTests(
           }
         : { kind: "committed", value: undefined },
       );
+    });
+
+    it("never retries a conflict after the handle was read, with no native transaction control, and reports the conflict as the cause", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const conflictingReadStore = createAdapterStore(
+        outcomeGraph,
+        adapterBackendWithReadRunning(
+          context.getBackend(),
+          marked ? POSTGRES_CONFLICT_SQL : "SELECT 1",
+        ),
+      );
+
+      for (const handling of ["propagated", "caught"] as const) {
+        let attempts = 0;
+        let conflict: unknown;
+        let rejection: unknown;
+        const outcome = await outcomeOf(
+          conflictingReadStore
+            .transaction(
+              async (tx) => {
+                attempts += 1;
+                await tx.nodes.OutcomeNote.create(
+                  { body: `${handling} attempt ${attempts}` },
+                  { id: `outcome-read-handle-${handling}-${attempts}` },
+                );
+                // Read, never used.
+                void nativeHandleOf(tx);
+                const read = tx.nodes.OutcomeNote.getById(
+                  "conflict" as never,
+                ).catch((error: unknown) => {
+                  conflict = error;
+                  if (handling === "propagated") throw error;
+                  return "caught";
+                });
+                await read;
+                return attempts;
+              },
+              { retry: { attempts: 2 } },
+            )
+            .catch((error: unknown) => {
+              rejection = error;
+              throw error;
+            }),
+        );
+
+        expect(attempts).toBe(1);
+        expect(outcome).toEqual(
+          marked ?
+            outcomeUnknown("native-handle-released", "40001")
+          : { kind: "committed", value: 1 },
+        );
+        // The conflict the callback met is the cause: the very object it
+        // threw, or, caught, the engine error it carried.
+        expect({
+          causeIsTheConflict:
+            rejection instanceof TransactionOutcomeUnknownError &&
+            (handling === "propagated" ?
+              rejection.cause === conflict
+            : engineCodeOf(rejection.cause) === engineCodeOf(conflict)),
+          retryable: isSerializationFailure(rejection),
+        }).toEqual({ causeIsTheConflict: marked, retryable: false });
+        expect(await noteBody(store, `outcome-read-handle-${handling}-1`)).toBe(
+          marked ? undefined : `${handling} attempt 1`,
+        );
+      }
+    });
+
+    it("never replays an attempt that committed through COMMIT AND CHAIN before a caught conflict", async (testContext) => {
+      const store = await context.createStore(outcomeGraph);
+      // SQLite has no COMMIT AND CHAIN and no serialization failure to catch.
+      if (!usesSessionMarker(store.backend)) testContext.skip();
+
+      let attempts = 0;
+      const outcome = await outcomeOf(
+        store.transaction(
+          async (tx) => {
+            attempts += 1;
+            await tx.nodes.OutcomeNote.create(
+              { body: `attempt ${attempts}` },
+              { id: `outcome-chain-${attempts}` },
+            );
+            const native = nativeHandleOf(tx);
+            // Commits the attempt's write and opens a new transaction on the
+            // session, which the conflict then aborts.
+            await runNative(native, "COMMIT AND CHAIN");
+            await runNative(native, POSTGRES_CONFLICT_SQL).catch(
+              () => "caught",
+            );
+            return attempts;
+          },
+          { retry: { attempts: 2 } },
+        ),
+      );
+
+      expect(attempts).toBe(1);
+      expect(outcome).toEqual(
+        outcomeUnknown("native-handle-released", "40001"),
+      );
+      expect(await noteBody(store, "outcome-chain-1")).toBe("attempt 1");
+      expect(await noteBody(store, "outcome-chain-2")).toBeUndefined();
+    });
+
+    it("never replays an attempt whose native COMMIT preceded an uncaught conflict", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const conflictStatement = marked ? POSTGRES_CONFLICT_SQL : "SELECT 1";
+
+      let attempts = 0;
+      const outcome = await outcomeOf(
+        store.transaction(
+          async (tx) => {
+            attempts += 1;
+            await tx.nodes.OutcomeNote.create(
+              { body: `attempt ${attempts}` },
+              { id: `outcome-commit-then-conflict-${attempts}` },
+            );
+            const native = nativeHandleOf(tx);
+            await runNative(native, "COMMIT");
+            // Outside any transaction now: the conflict propagates.
+            await runNative(native, conflictStatement);
+            return attempts;
+          },
+          { retry: { attempts: 2 } },
+        ),
+      );
+
+      expect(attempts).toBe(1);
+      // SQLite refuses the closing COMMIT itself with its driver's error.
+      expect(marked ? outcome : outcome.kind).toEqual(
+        marked ? outcomeUnknown("native-handle-released", "40001") : "rejected",
+      );
+      expect(await noteBody(store, "outcome-commit-then-conflict-1")).toBe(
+        "attempt 1",
+      );
+      expect(
+        await noteBody(store, "outcome-commit-then-conflict-2"),
+      ).toBeUndefined();
+    });
+
+    it("never commits a replacement transaction that inherited a session-level marker setting", async (testContext) => {
+      const store = await context.createStore(outcomeGraph);
+      // The setting is PostgreSQL's; SQLite has no session settings.
+      if (!usesSessionMarker(store.backend)) testContext.skip();
+
+      const outcome = await outcomeOf(
+        store.transaction(async (tx) => {
+          const native = nativeHandleOf(tx);
+          // A session-level value, committed so it outlives this transaction,
+          // and inherited by the transaction the callback opens next.
+          await runNative(
+            native,
+            "SELECT set_config('typegraph.transaction_marker', 'open', false)",
+          );
+          await runNative(native, "COMMIT");
+          // postgres-js refuses a BEGIN outside its own transaction API.
+          await runNative(native, "BEGIN").catch(() => "refused");
+          await tx.nodes.OutcomeNote.create(
+            { body: "written in the replacement" },
+            { id: "outcome-session-marker" },
+          );
+          return "callback returned";
+        }),
+      );
+
+      expect(outcome).toEqual(outcomeUnknown("transaction-ended"));
     });
 
     it("never retries after the callback committed through its native handle", async () => {
@@ -661,7 +1019,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
       // SQLite refuses the closing COMMIT itself with its driver's error.
       expect(marked ? outcome : outcome.kind).toEqual(
-        marked ? outcomeUnknown("40001") : "rejected",
+        marked ? outcomeUnknown("transaction-ended", "40001") : "rejected",
       );
     });
 
@@ -687,7 +1045,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
         undefined,
       );
       expect(marked ? outcome : outcome.kind).toEqual(
-        marked ? outcomeUnknown() : "rejected",
+        marked ? outcomeUnknown("transaction-ended") : "rejected",
       );
     });
 
@@ -714,7 +1072,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       // The session left the transaction, so a statement after the ROLLBACK
       // would have run outside it: TypeGraph cannot vouch for the outcome.
       expect(marked ? outcome : outcome.kind).toEqual(
-        marked ? outcomeUnknown("42P01") : "rejected",
+        marked ? outcomeUnknown("transaction-ended", "42P01") : "rejected",
       );
     });
 
@@ -742,7 +1100,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       // happens next is the driver's (better-sqlite3 commits the new
       // transaction; libsql refuses its closed transaction object).
       expect(marked ? outcome : "either").toEqual(
-        marked ? outcomeUnknown() : "either",
+        marked ? outcomeUnknown("transaction-ended") : "either",
       );
     });
 
@@ -771,7 +1129,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       expect(await noteBody(store, "outcome-same-tick-before")).toBeUndefined();
       // See "never commits a transaction the callback opened" for SQLite.
       expect(marked ? outcome : "either").toEqual(
-        marked ? outcomeUnknown() : "either",
+        marked ? outcomeUnknown("transaction-ended") : "either",
       );
     });
 
@@ -794,7 +1152,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
-    it("rejects after a caught failure on PostgreSQL when the handle is read only afterwards", async () => {
+    it("reports an unknown outcome after a caught failure on PostgreSQL when the handle is read only afterwards", async () => {
       const store = await context.createStore(outcomeGraph);
       const marked = usesSessionMarker(store.backend);
       const failingReadStore = createAdapterStore(
@@ -820,8 +1178,12 @@ export function registerTransactionCommitOutcomeIntegrationTests(
         }),
       );
 
+      // Read after the failure aborted the transaction, the handle still
+      // released it: the outcome is unknown, never a retryable rollback.
       expect(outcome).toEqual(
-        marked ? rolledBack("42P01") : { kind: "committed", value: "read" },
+        marked ?
+          outcomeUnknown("native-handle-released", "42P01")
+        : { kind: "committed", value: "read" },
       );
       expect(await noteBody(store, "outcome-handle-after-failure")).toBe(
         marked ? undefined : "written before the read",
@@ -841,7 +1203,7 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
 
       expect(marked ? outcome : outcome.kind).toEqual(
-        marked ? outcomeUnknown() : "rejected",
+        marked ? outcomeUnknown("transaction-ended") : "rejected",
       );
     });
 
@@ -913,6 +1275,51 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
       const activeAfter = await backend.getActiveSchema(outcomeGraph.id);
       expect(activeAfter?.version).toBe(marked ? active.version : nextVersion);
+    });
+
+    it("never commits a schema write after its preflight ended the transaction through executeSchemaDdl", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const { backend } = store;
+      const active = await backend.getActiveSchema(outcomeGraph.id);
+      const commit = backend.commitSchemaVersionWithPreflight;
+      if (active === undefined || commit === undefined) {
+        throw new Error("The bundled backend has no preflighted commit.");
+      }
+      const nextVersion = active.version + 1;
+
+      const outcome = await outcomeOf(
+        commit(
+          {
+            graphId: outcomeGraph.id,
+            expected: { kind: "active", version: active.version },
+            version: nextVersion,
+            schemaHash: active.schema_hash,
+            schemaDoc: JSON.parse(active.schema_doc) as never,
+          },
+          async (target) => {
+            const executeSchemaDdl = target.executeSchemaDdl;
+            if (executeSchemaDdl === undefined) {
+              throw new Error("The bundled preflight target runs DDL.");
+            }
+            // The port forwards any SQL text: it ends the transaction that
+            // holds the schema fence, and opens another.
+            await executeSchemaDdl("ROLLBACK");
+            // postgres-js refuses a BEGIN outside its own transaction API.
+            await executeSchemaDdl("BEGIN").catch(() => "refused");
+          },
+        ).then((row) => row.version),
+      );
+
+      // "statement-scoped" evidence cannot tell the transaction the preflight
+      // opened from TypeGraph's own, the documented limit on SQLite.
+      expect(marked ? outcome : "either").toEqual(
+        marked ? outcomeUnknown("transaction-ended") : "either",
+      );
+      const activeAfter = await backend.getActiveSchema(outcomeGraph.id);
+      expect(marked ? activeAfter?.version : "either").toBe(
+        marked ? active.version : "either",
+      );
     });
 
     it("commits a clean read-only transaction, and rejects one after a caught failing read on PostgreSQL", async () => {
