@@ -17,7 +17,12 @@ export type ExpressionAliasScope = ReadonlyMap<string, string>;
 export function namespaceExpressionSubquery(
   ast: QueryAst,
   prefix: string,
-): Readonly<{ ast: QueryAst; aliases: ExpressionAliasScope }> {
+): Readonly<{
+  ast: QueryAst;
+  aliases: ExpressionAliasScope;
+  /** The caller's name of each renamed alias, for refusals. */
+  callerAliases: ReadonlyMap<string, string>;
+}> {
   const rewrittenAliases = new Map<string, string>([
     [ast.start.alias, `${prefix}a0`],
   ]);
@@ -52,7 +57,16 @@ export function namespaceExpressionSubquery(
       ]),
     );
   }
-  return { aliases: physicalAliases, ast: rewrite(ast) as QueryAst };
+  return {
+    aliases: physicalAliases,
+    ast: rewrite(ast) as QueryAst,
+    callerAliases: new Map(
+      [...rewrittenAliases].map(([callerAlias, renamed]) => [
+        renamed,
+        callerAlias,
+      ]),
+    ),
+  };
 }
 
 /** Visits enclosing fields referenced anywhere in a nested query, without lifting its local fields. */

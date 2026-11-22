@@ -543,6 +543,13 @@ export type PredicateCompilerContext = Readonly<{
   identityRegisteredKinds?: readonly string[];
   compileFieldExpression?: DatabaseExpressionCompilerContext["compileFieldExpression"];
   /**
+   * The name the caller wrote for an alias of the statement being compiled.
+   * A correlated subquery compiles with its aliases renamed; a refusal raised
+   * while compiling it names the caller's alias through this. Absent means
+   * the aliases were not renamed.
+   */
+  callerAlias?: (alias: string) => string;
+  /**
    * Whether the active backend can compute a bounded transitive closure in
    * one round trip. Optional per Contract E: a required member here would
    * churn every predicate-context literal across the compiler's tests for

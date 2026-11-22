@@ -530,7 +530,7 @@ export function registerMultiRecursiveTraversalIntegrationTests(
           )
           .select((row) => row.target.name)
           .execute(),
-      ).rejects.toThrow(/cross-alias reference "middle".*completed where/);
+      ).rejects.toThrow('The predicate on alias "target" reads alias "middle"');
       await expect(
         prefix
           .whereNode("target", (_target, expressions) =>
@@ -538,7 +538,7 @@ export function registerMultiRecursiveTraversalIntegrationTests(
           )
           .select((row) => row.target.name)
           .execute(),
-      ).rejects.toThrow(/cross-alias reference "root".*completed where/);
+      ).rejects.toThrow('The predicate on alias "target" reads alias "root"');
     });
 
     it("refuses recursive output aliases that collide with materialized columns", async () => {

@@ -2,6 +2,8 @@ export { registerAdoptedEvolutionIntegrationTests } from "./adopted-evolution";
 export { registerAdoptedEvolutionConcurrencyTests } from "./adopted-evolution-concurrency";
 export { registerAggregateIntegrationTests } from "./aggregates";
 export { registerAlgorithmIntegrationTests } from "./algorithms";
+export { registerAliasPredicateDifferentialIntegrationTests } from "./alias-predicate-differential";
+export { registerAliasPredicateScopeIntegrationTests } from "./alias-predicate-scope";
 export { registerBackendProvenanceIntegrationTests } from "./backend-provenance";
 export { registerBatchWriteVerdictIntegrationTests } from "./batch-write-verdicts";
 export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
