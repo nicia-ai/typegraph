@@ -83,14 +83,25 @@ export function visitExpressionFields(
   });
 }
 
-/** Visits every field a predicate reads. */
-function visitPredicateFields(
+/**
+ * Visits every field a predicate reads, on every operand: both sides of a
+ * comparison (the right may be a field), every field of a tuple, every
+ * member of AND/OR, and every operand of a database expression. EXISTS and
+ * IN subqueries are compiled as independent statements and read nothing of
+ * the enclosing query besides the IN field.
+ */
+export function visitPredicateFields(
   expression: PredicateExpression,
   visit: (field: FieldRef) => void,
 ): void {
   switch (expression.__type) {
     case "comparison": {
       visit(expression.left);
+      if (
+        !Array.isArray(expression.right) &&
+        expression.right.__type === "field_ref"
+      )
+        visit(expression.right);
       return;
     }
     case "tuple_comparison": {

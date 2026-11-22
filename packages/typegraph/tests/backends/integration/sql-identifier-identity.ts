@@ -873,6 +873,41 @@ export function registerSqlIdentifierIdentityIntegrationTests(
         );
       });
 
+      it("refuses HAVING `e_from.id != e.fromId` when no other clause reads the edge's fromId, instead of comparing `e_from_id` with itself", async () => {
+        // Column pruning used to visit only the left operand of a
+        // comparison, so `e.fromId` was not carried, the statement declared
+        // one `e_from_id`, and HAVING compared the target's id with itself:
+        // no rows on every engine for an Alice → Bob edge that matches.
+        const query = store
+          .query()
+          .from("Person", "p")
+          .traverse("knows", "e")
+          .to("Person", "e_from")
+          .groupByNode("e_from")
+          .groupBy("e_from", "name")
+          .having({
+            __type: "comparison",
+            op: "neq",
+            left: fieldRef("e_from", ["id"], { valueType: "string" }),
+            right: fieldRef("e", ["from_id"], { valueType: "string" }),
+          })
+          .aggregate({ name: field("e_from", "name"), edges: count("e") });
+        await expectRefusedEverywhere(
+          counter,
+          () => query,
+          refusal(
+            SQL_IDENTIFIER_COLLISION_CODE,
+            collisionMessage(
+              "e_from_id",
+              'column from_id of alias "e"',
+              "e_from_id",
+              'column id of alias "e_from"',
+              "the columns of cte_e_from",
+            ),
+          ),
+        );
+      });
+
       it("returns the maximum of `e_from`'s age beside an edge `e` filtered on fromId, since no statement reads either `e_from_id`", async () => {
         await store.nodes.Person.update(asNodeId<typeof Person>(seeded.bobId), {
           age: 41,

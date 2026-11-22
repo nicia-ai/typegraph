@@ -215,6 +215,48 @@ describe("column pruning pass", () => {
     expect(state.requiredColumnsByAlias).toBeDefined();
   });
 
+  it("carries a column read only on the right of a HAVING comparison", () => {
+    // HAVING c.id != e_worksAt.fromId, grouped by c: no other clause reads
+    // the edge's from_id, so pruning keeps it only by visiting the right
+    // operand. Dropping it left `HAVING c_id != e_worksAt_from_id` reading a
+    // column no CTE carries.
+    const ast = makeMinimalAst({
+      traversals: [makeTraversal()],
+      projection: {
+        fields: [
+          {
+            outputName: "total",
+            source: {
+              __type: "aggregate",
+              function: "count",
+              field: makeFieldRef("e_worksAt", ["id"]),
+            },
+          },
+        ],
+      },
+      groupBy: { fields: [makeFieldRef("c", ["id"])] },
+      having: {
+        __type: "comparison",
+        op: "neq",
+        left: makeFieldRef("c", ["id"], "string"),
+        right: makeFieldRef("e_worksAt", ["from_id"], "string"),
+      },
+    });
+    const state = runStandardQueryPassPipeline(
+      ast,
+      "test_graph",
+      makePipelineContext(),
+    );
+    expect([...(state.requiredColumnsByAlias?.get("e_worksAt") ?? [])]).toEqual(
+      expect.arrayContaining(["from_id"]),
+    );
+    const compiled = toSqlString(
+      compileQuery(ast, "test_graph", { dialect: "sqlite" }),
+    );
+    expect(compiled).toContain("e.from_id AS e_worksAt_from_id");
+    expect(compiled).toContain("HAVING c_id != e_worksAt_from_id");
+  });
+
   it("enables column pruning when projection contains aggregates", () => {
     const ast = makeMinimalAst({
       projection: {
