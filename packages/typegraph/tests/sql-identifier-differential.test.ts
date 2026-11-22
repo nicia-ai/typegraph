@@ -12,17 +12,31 @@
  * The guard is disabled by replacing `refuseConflictingSqlNames`, the one
  * function every standard-path entry point calls to apply the verdict, with a
  * pass-through for the unguarded runs.
+ *
+ * Shapes cover selections, projections, HAVING with a field on either side of
+ * a comparison, every legacy aggregate, an ordered aggregate and an aggregate
+ * beside an edge filtered on its source id. Output keys never differ only by
+ * letter case here: `aggregate()` and `project()` refuse such keys where
+ * they are declared, a deliberate restriction outside this guard.
  */
 import fc from "fast-check";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  avg,
+  count,
+  countDistinct,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
+  field,
+  havingGt,
+  max,
+  min,
   type Store,
+  sum,
 } from "../src";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
@@ -32,7 +46,9 @@ import {
   SQL_IDENTIFIER_TOO_LONG_CODE,
   ValidationError,
 } from "../src/errors";
+import type { PredicateExpression } from "../src/query/ast";
 import type * as SqlNameRegistry from "../src/query/compiler/sql-name-registry";
+import { fieldRef } from "../src/query/predicates";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
@@ -51,7 +67,7 @@ vi.mock("../src/query/compiler/sql-name-registry", async (importOriginal) => {
 });
 
 const Person = defineNode("Person", {
-  schema: z.object({ name: z.string() }),
+  schema: z.object({ name: z.string(), age: z.number().optional() }),
 });
 const knows = defineEdge("knows", { schema: z.object({}) });
 const graph = defineGraph({
@@ -99,6 +115,13 @@ const SHAPES = [
   "target name",
   "projected name",
   "edge and target",
+  "having field on the right",
+  "having field on the left",
+  "having start id",
+  "having legacy aggregate",
+  "legacy aggregates",
+  "ordered aggregate",
+  "max beside edge filtered on fromId",
 ] as const;
 type Shape = (typeof SHAPES)[number];
 
@@ -116,11 +139,60 @@ function idOf(value: unknown): unknown {
     : value;
 }
 
+/** A comparison of two fields, as HAVING compiles it. */
+function fieldComparison(
+  left: ReturnType<typeof fieldRef>,
+  right: ReturnType<typeof fieldRef>,
+): PredicateExpression {
+  return { __type: "comparison", op: "neq", left, right };
+}
+
+function nameOf(alias: string) {
+  return fieldRef(alias, ["props", "name"], { valueType: "string" });
+}
+
+function idOfAlias(alias: string) {
+  return fieldRef(alias, ["id"], { valueType: "string" });
+}
+
+/**
+ * Aggregate values as both engines agree on them: PostgreSQL returns some
+ * numeric aggregates as decimal text.
+ */
+function normalizeRows(rows: readonly unknown[]): readonly unknown[] {
+  return rows.map((row) =>
+    typeof row === "object" && row !== null ?
+      Object.fromEntries(
+        Object.entries(row).map(([key, value]) => [
+          key,
+          typeof value === "string" && /^-?\d+(?:\.\d+)?$/u.test(value) ?
+            Number(value)
+          : value,
+        ]),
+      )
+    : row,
+  );
+}
+
 function runQuery(
+  engine: Engine,
+  aliases: readonly [string, string, string],
+  shape: Shape,
+): Promise<readonly unknown[]> {
+  return runQueryRows(engine, aliases, shape).then((rows) =>
+    normalizeRows(rows),
+  );
+}
+
+function runQueryRows(
   engine: Engine,
   [start, edge, target]: readonly [string, string, string],
   shape: Shape,
 ): Promise<readonly unknown[]> {
+  // Runtime aliases: each is typed as a distinct placeholder literal.
+  const typedTarget = target as "differential_target";
+  const typedStart = start as "differential_start";
+  const typedEdge = edge as "differential_edge";
   const query = engine.store
     .query()
     .fromDynamic("Person", start as "differential_start")
@@ -176,6 +248,87 @@ function runQuery(
         )
         .execute();
     }
+    case "having field on the right": {
+      return query
+        .groupByNode(typedTarget)
+        .groupBy(typedTarget, "name")
+        .having(fieldComparison(nameOf(target), idOfAlias(target)))
+        .aggregate({
+          name: field(typedTarget, "name"),
+          edges: count(typedEdge),
+        })
+        .execute();
+    }
+    case "having field on the left": {
+      return query
+        .groupByNode(typedTarget)
+        .groupBy(typedTarget, "name")
+        .having(fieldComparison(idOfAlias(target), nameOf(target)))
+        .aggregate({
+          name: field(typedTarget, "name"),
+          edges: count(typedEdge),
+        })
+        .execute();
+    }
+    case "having start id": {
+      return query
+        .groupByNode(typedStart)
+        .groupByNode(typedTarget)
+        .groupBy(typedTarget, "name")
+        .having(fieldComparison(idOfAlias(start), idOfAlias(target)))
+        .aggregate({
+          name: field(typedTarget, "name"),
+          edges: count(typedEdge),
+        })
+        .execute();
+    }
+    case "having legacy aggregate": {
+      return query
+        .groupBy(typedStart, "name")
+        .having(havingGt(count(typedTarget), 0))
+        .aggregate({
+          name: field(typedStart, "name"),
+          friends: count(typedTarget),
+        })
+        .execute();
+    }
+    case "legacy aggregates": {
+      return query
+        .groupBy(typedStart, "name")
+        .aggregate({
+          name: field(typedStart, "name"),
+          friends: count(typedTarget),
+          edges: countDistinct(typedEdge),
+          oldest: max(typedTarget, "age"),
+          youngest: min(typedTarget, "age"),
+          total: sum(typedTarget, "age"),
+          mean: avg(typedTarget, "age"),
+        })
+        .execute();
+    }
+    case "ordered aggregate": {
+      return query
+        .groupBy(typedStart, "name")
+        .aggregate({
+          name: field(typedStart, "name"),
+          oldest: max(typedTarget, "age"),
+        })
+        .orderBy("oldest", "desc")
+        .limit(1)
+        .execute();
+    }
+    case "max beside edge filtered on fromId": {
+      return engine.store
+        .query()
+        .fromDynamic("Person", start as "differential_start")
+        .traverseDynamic("knows", edge as "differential_edge")
+        .whereEdge(typedEdge, (knowsEdge) =>
+          knowsEdge.fromId.eq(engine.aliceId),
+        )
+        .toDynamic("Person", typedTarget)
+        .aggregate({ age: max(typedTarget, "age") })
+        .execute();
+    }
   }
 }
 
@@ -203,6 +356,33 @@ function expectedRows(engine: Engine, shape: Shape): readonly unknown[] {
     }
     case "edge and target": {
       return [{ edge: engine.knowsId, name: "Bob" }];
+    }
+    case "having field on the right":
+    case "having field on the left":
+    case "having start id": {
+      return [{ name: "Bob", edges: 1 }];
+    }
+    case "having legacy aggregate": {
+      return [{ name: "Alice", friends: 1 }];
+    }
+    case "legacy aggregates": {
+      return [
+        {
+          name: "Alice",
+          friends: 1,
+          edges: 1,
+          oldest: 41,
+          youngest: 41,
+          total: 41,
+          mean: 41,
+        },
+      ];
+    }
+    case "ordered aggregate": {
+      return [{ name: "Alice", oldest: 41 }];
+    }
+    case "max beside edge filtered on fromId": {
+      return [{ age: 41 }];
     }
   }
 }
@@ -246,7 +426,7 @@ async function seedEngine(
 ): Promise<Engine> {
   const [store] = await createStoreWithSchema(graph, backend);
   const alice = await store.nodes.Person.create({ name: "Alice" });
-  const bob = await store.nodes.Person.create({ name: "Bob" });
+  const bob = await store.nodes.Person.create({ name: "Bob", age: 41 });
   const edge = await store.edges.knows.create(alice, bob, {});
   return {
     name,
@@ -288,6 +468,14 @@ describe("SQL-name guard against the unguarded compiler on SQLite and PGlite", (
         ([start, edge, target]) =>
           start !== edge && start !== target && edge !== target,
       );
+    // Tallied over every run, and printed so a run reports its counts.
+    const tally = {
+      runs: 0,
+      refused: 0,
+      wrongUnguarded: 0,
+      overRefused: 0,
+      wrongGuarded: 0,
+    };
     await fc.assert(
       fc.asyncProperty(
         aliasTriple,
@@ -307,6 +495,23 @@ describe("SQL-name guard against the unguarded compiler on SQLite and PGlite", (
           );
           guard.enabled = true;
 
+          const unguardedRight = engines.every((engine, index) =>
+            isExactlyRight(requireDefined(unguarded[index]), engine, shape),
+          );
+          tally.runs += 1;
+          if (guarded[0]?.kind === "refused") tally.refused += 1;
+          if (!unguardedRight) tally.wrongUnguarded += 1;
+          if (unguardedRight && guarded.some((o) => o.kind === "refused"))
+            tally.overRefused += 1;
+          if (
+            guarded.some(
+              (outcome, index) =>
+                outcome.kind !== "refused" &&
+                !isExactlyRight(outcome, requireDefined(engines[index]), shape),
+            )
+          )
+            tally.wrongGuarded += 1;
+
           // Typed refusal or exactly the right row, with one verdict.
           for (const [index, engine] of engines.entries()) {
             const outcome = requireDefined(guarded[index]);
@@ -322,21 +527,26 @@ describe("SQL-name guard against the unguarded compiler on SQLite and PGlite", (
 
           // A refusal is justified only by an engine the unguarded statement
           // fails or answers wrongly on.
-          const unguardedRightEverywhere = engines.every((engine, index) =>
-            isExactlyRight(requireDefined(unguarded[index]), engine, shape),
-          );
           expect({
             aliases,
             shape,
             refusedThoughRightUnguarded:
-              unguardedRightEverywhere && guarded[0]?.kind === "refused",
+              unguardedRight && guarded[0]?.kind === "refused",
           }).toEqual({ aliases, shape, refusedThoughRightUnguarded: false });
         },
       ),
       {
-        numRuns: 120,
+        numRuns: 400,
         seed: 951,
         examples: [
+          // The second review: HAVING reads `e_from.id` on the right beside an
+          // edge `e`; a max of `e_from`'s age reads neither `e_from_id`.
+          [["p", "e", "e_from"], "having field on the right"],
+          [["p", "e", "e_from"], "having field on the left"],
+          [["p", "e", "e_from"], "max beside edge filtered on fromId"],
+          [["p", "e", "e_from"], "legacy aggregates"],
+          [["p", "e", "e_from"], "ordered aggregate"],
+          [["p", "e", "e_from"], "having start id"],
           // An edge `e` beside a target `e_from`: neither `e_from_id` is read.
           [["p", "e", "e_from"], "projected name"],
           [["p", "e", "e_from"], "target name"],
@@ -347,5 +557,13 @@ describe("SQL-name guard against the unguarded compiler on SQLite and PGlite", (
         ],
       },
     );
+    console.info(`sql-identifier differential: ${JSON.stringify(tally)}`);
+    expect({
+      overRefused: tally.overRefused,
+      wrongGuarded: tally.wrongGuarded,
+    }).toEqual({
+      overRefused: 0,
+      wrongGuarded: 0,
+    });
   });
 });
