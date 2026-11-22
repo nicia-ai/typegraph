@@ -71,6 +71,7 @@ import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
 import { createGate, type Gate } from "../../concurrency-utils";
 import {
+  type DefectScope,
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
@@ -123,6 +124,11 @@ const POSTGRES_DRIVERS: readonly IntegrationLaneDriver[] = [
   "node-postgres",
   "postgres-js",
 ];
+
+/** The scope of a known defect every driver shows today. */
+const ON_EVERY_DRIVER: DefectScope = { driver: ALL_DRIVERS };
+/** The scope of a known defect every PostgreSQL driver shows today. */
+const ON_POSTGRES_DRIVERS: DefectScope = { driver: POSTGRES_DRIVERS };
 
 /**
  * Asserts a case's one observation on this lane: the correct value, or the
@@ -649,7 +655,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 2b",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 transaction: "rejected",
                 late: "fulfilled",
@@ -895,7 +901,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 3a",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 apply: "rejected",
                 child: "fulfilled",
@@ -1070,7 +1076,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 3d",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 unit: "rejected",
                 sibling: "fulfilled",
@@ -1126,7 +1132,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 4a",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 unit: "rejected",
                 receiptTotal: 1,
@@ -1179,7 +1185,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 4a",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: { plainWrite: "fulfilled", items: [] },
             },
           ],
@@ -1244,7 +1250,7 @@ export function registerTransactionSessionHazardTests(
               [
                 {
                   label: "hazard 4b",
-                  on: { driver: POSTGRES_DRIVERS },
+                  on: ON_POSTGRES_DRIVERS,
                   today: {
                     creates: ["fulfilled", "rejected"],
                     items: ["taken"],
@@ -1283,7 +1289,7 @@ export function registerTransactionSessionHazardTests(
               [
                 {
                   label: "hazard 4c",
-                  on: { driver: POSTGRES_DRIVERS },
+                  on: ON_POSTGRES_DRIVERS,
                   today: {
                     outcomes: ["rejected", "fulfilled"],
                     items: ["taken"],
@@ -1351,7 +1357,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 5",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 adopted: { status: "fulfilled", receiptTotal: 1 },
                 live: 0,
@@ -1500,7 +1506,7 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 6b",
-              on: { driver: ALL_DRIVERS },
+              on: ON_EVERY_DRIVER,
               today: {
                 attempt: "rejected",
                 items: [],
