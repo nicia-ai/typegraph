@@ -290,6 +290,17 @@ export class UnionableQuery<G extends GraphDef, R> {
   }
 
   /**
+   * @internal Refuses, before any statement is sent, a set operation whose
+   * operands have colliding generated SQL names: it compiles the one statement
+   * `executeOn()` sends. `store.batch()` runs it for every item before its
+   * first statement.
+   */
+  checkSqlNamesBeforeExecution?(): void {
+    if (composableQueryHasParameterReferences(this.toAst())) return;
+    this.compile();
+  }
+
+  /**
    * The cached placeholder template for this set operation, or `undefined`
    * when no fast path applies. Built once per instance; every operand's read
    * instant is the shared placeholder, filled fresh per execution by

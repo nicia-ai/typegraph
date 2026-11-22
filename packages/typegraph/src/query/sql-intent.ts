@@ -52,6 +52,7 @@ export function asCompiledTemporaryStatementSql(
  */
 type SqlIntentRegistry = Readonly<{
   recursivePlanCounts?: WeakMap<SqlFragment, number>;
+  columnReadNodes?: WeakMap<SqlFragment, ColumnReadNode>;
   annIndexScanQueries: WeakMap<SqlFragment, readonly string[]>;
   forceCustomPlanQueries: WeakSet<SqlFragment>;
 }>;
@@ -131,11 +132,93 @@ export function markRecursivePlan(query: SqlFragment): void {
   recursivePlanCounts.set(query, recursivePlanCount(query) + 1);
 }
 
+/**
+ * One by-name column reference a compiled statement makes, recorded by the
+ * function that writes it into the SQL (`compiler/column-reads.ts`).
+ */
+export type SqlColumnRead = Readonly<{
+  /** The column name, or `undefined` for every column (`SELECT *`). */
+  name: string | undefined;
+  /**
+   * The relations SQL resolves the name in: the one relation a qualified
+   * reference names, or every relation of the FROM an unqualified reference
+   * is written under. `undefined` until the SELECT that writes an unqualified
+   * reference binds it to its FROM.
+   */
+  relations: readonly string[] | undefined;
+  /** Whether SQL writes the name with its relation. */
+  qualified: boolean;
+  /**
+   * The expression scope of the enclosing statement a correlated reference
+   * reads from; `undefined` for a read of the statement that writes it.
+   */
+  scope: symbol | undefined;
+}>;
+
+type ColumnReadNode = Readonly<{
+  reads: readonly SqlColumnRead[];
+  children: readonly ColumnReadNode[];
+}>;
+
+// Column reads ride on the fragment that spells them and on every fragment
+// composed from it, as a tree shared with the sources: composing costs one
+// lookup per source, not a copy of the reads.
+const columnReadNodes =
+  sqlIntentRegistry.columnReadNodes ??
+  new WeakMap<SqlFragment, ColumnReadNode>();
+if (sqlIntentRegistry.columnReadNodes === undefined)
+  Object.defineProperty(sqlIntentRegistry, "columnReadNodes", {
+    value: columnReadNodes,
+  });
+
+/**
+ * @internal Records the column reads a freshly built fragment spells,
+ * replacing any it inherited from its sources.
+ */
+export function setSqlColumnReads(
+  fragment: SqlFragment,
+  reads: readonly SqlColumnRead[],
+): void {
+  if (reads.length === 0) {
+    columnReadNodes.delete(fragment);
+    return;
+  }
+  columnReadNodes.set(fragment, { reads: [...reads], children: [] });
+}
+
+/** @internal Every column read a fragment's SQL spells. */
+export function sqlColumnReads(
+  fragment: SqlFragment,
+): readonly SqlColumnRead[] {
+  const root = columnReadNodes.get(fragment);
+  if (root === undefined) return [];
+  const reads: SqlColumnRead[] = [];
+  const visited = new Set<ColumnReadNode>();
+  const pending: ColumnReadNode[] = [root];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (visited.has(node)) continue;
+    visited.add(node);
+    for (const read of node.reads) reads.push(read);
+    for (const child of node.children) pending.push(child);
+  }
+  return reads;
+}
+
 /** @internal Copies execution semantics and compiler metadata through composition. */
 export function copySqlIntents(
   target: SqlFragment,
   sources: readonly SqlFragment[],
 ): void {
+  const readNodes: ColumnReadNode[] = [];
+  for (const source of sources) {
+    const node = columnReadNodes.get(source);
+    if (node !== undefined) readNodes.push(node);
+  }
+  const [onlyNode] = readNodes;
+  if (readNodes.length === 1 && onlyNode !== undefined)
+    columnReadNodes.set(target, onlyNode);
+  else if (readNodes.length > 1)
+    columnReadNodes.set(target, { reads: [], children: readNodes });
   const recursivePlans = sources.reduce(
     (count, source) => count + recursivePlanCount(source),
     0,

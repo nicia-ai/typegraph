@@ -45,7 +45,10 @@ import {
   type ExpressionComparedSide,
   subqueryProjectedValueLeaves,
 } from "../compared-operands";
-import { compileQuery, type CompileQueryOptions } from "../compiler/index";
+import {
+  compileNameCheckedQuery,
+  type CompileQueryOptions,
+} from "../compiler/index";
 import { resolveParameterValueType } from "../compiler/predicates";
 import { type SqlDialect } from "../dialect/types";
 import {
@@ -691,10 +694,11 @@ export class PreparedQuery<R> {
     }
 
     const concreteAst = substituteParameters(ast, bindings);
-    const compiled = compileQuery(
+    const compiled = compileNameCheckedQuery(
       concreteAst,
       this.#graphId,
       this.#compileOptions,
+      "decoded",
     );
     const rawRows =
       await this.#backend.execute<Record<string, unknown>>(compiled);

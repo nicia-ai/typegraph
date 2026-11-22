@@ -1,11 +1,21 @@
 import { CompilerInvariantError } from "../../../errors";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { bindUnresolvedColumnReads } from "../column-reads";
 import { type LogicalPlan } from "../plan";
 import { inspectStandardProjectPlan } from "./plan-inspector";
 
+/**
+ * A FROM clause and the WITH relations it names. An unqualified column
+ * reference in the SELECT that owns the clause resolves in those relations.
+ */
+export type StandardFromClause = Readonly<{
+  sql: SqlFragment;
+  relations: readonly string[];
+}>;
+
 export type StandardQueryEmitterInput = Readonly<{
   ctes: readonly SqlFragment[];
-  fromClause: SqlFragment;
+  fromClause: StandardFromClause;
   where?: SqlFragment;
   groupBy?: SqlFragment;
   having?: SqlFragment;
@@ -70,22 +80,25 @@ export function emitStandardQuerySql(
     parts.push(sql`WITH ${sql.join([...input.ctes], sql`, `)}`);
   }
 
-  parts.push(sql`SELECT ${input.projection}`, input.fromClause);
-
-  if (input.where !== undefined) parts.push(input.where);
-
-  if (input.groupBy !== undefined) {
-    parts.push(input.groupBy);
-  }
-  if (input.having !== undefined) {
-    parts.push(input.having);
-  }
-  if (input.orderBy !== undefined) {
-    parts.push(input.orderBy);
-  }
-  if (input.limitOffset !== undefined) {
-    parts.push(input.limitOffset);
-  }
+  const select: SqlFragment[] = [
+    sql`SELECT ${input.projection}`,
+    input.fromClause.sql,
+  ];
+  for (const clause of [
+    input.where,
+    input.groupBy,
+    input.having,
+    input.orderBy,
+    input.limitOffset,
+  ])
+    if (clause !== undefined) select.push(clause);
+  // Unqualified references in this SELECT resolve in the relations of its FROM.
+  parts.push(
+    bindUnresolvedColumnReads(
+      sql.join(select, sql` `),
+      input.fromClause.relations,
+    ),
+  );
 
   return sql.join(parts, sql` `);
 }

@@ -3,7 +3,10 @@ import {
   projectBackendWithout,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
-import { type GraphBackend } from "../../../src/backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { type CompiledRowsSql } from "../../../src/query/sql-intent";
 
 export type StatementCounter = Readonly<{
@@ -49,6 +52,53 @@ export function createStatementCounter(
 
   return {
     backend: countingBackend,
+    count: () => statementCount,
+    reset: () => {
+      statementCount = 0;
+    },
+  };
+}
+
+/**
+ * A derived backend that counts every statement sent inside a transaction it
+ * opens, through the transaction's `execute` or `executeRaw` — the target a
+ * `store.batch()` runs its items on — and none sent outside one.
+ */
+export function createTransactionStatementCounter(
+  backend: GraphBackend,
+): StatementCounter {
+  const projected = projectGraphBackend(backend);
+  let statementCount = 0;
+
+  function counting(transaction: TransactionBackend): TransactionBackend {
+    const executeRaw = transaction.executeRaw;
+    return deriveBackend(transaction, {
+      execute: <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+        statementCount += 1;
+        return transaction.execute<T>(query);
+      },
+      ...(executeRaw === undefined ?
+        {}
+      : {
+          executeRaw: <T>(
+            sqlText: string,
+            params: readonly unknown[],
+          ): Promise<readonly T[]> => {
+            statementCount += 1;
+            return executeRaw<T>(sqlText, params);
+          },
+        }),
+    });
+  }
+
+  return {
+    backend: deriveBackend(projected, {
+      transaction: (fn, options) =>
+        projected.transaction(
+          (transaction) => fn(counting(transaction)),
+          options,
+        ),
+    }),
     count: () => statementCount,
     reset: () => {
       statementCount = 0;

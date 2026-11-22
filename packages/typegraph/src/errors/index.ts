@@ -230,6 +230,32 @@ export const IMMUTABLE_VALIDITY_LOWER_BOUND_CODE =
 export const EDGE_IDENTITY_MISMATCH_CODE = "EDGE_IDENTITY_MISMATCH";
 
 /**
+ * The stable {@link ValidationIssue.code} carried when two different values a
+ * query compiles to SQL would share one generated SQL name. The comparison is
+ * the strictest one a supported engine applies: PostgreSQL clips an identifier
+ * to its first 63 bytes, and both PostgreSQL (for unquoted names) and SQLite
+ * compare relation and column names without regard to ASCII letter case. Such
+ * a query fails, or returns another value's data, on at least one engine, so
+ * it is refused on every engine before any SQL is sent.
+ *
+ * Each issue's `path` names the SQL scope (the WITH list, the columns of one
+ * CTE, or the result columns) and its message names both generated names.
+ * Use aliases that differ in more than letter case and early in the name, or
+ * rename the selected value so the two no longer meet.
+ */
+export const SQL_IDENTIFIER_COLLISION_CODE = "SQL_IDENTIFIER_COLLISION";
+
+/**
+ * The stable {@link ValidationIssue.code} carried when a result column the
+ * library reads back by name (a selected field, a node or edge column, or an
+ * `aggregate()` key) would be longer than PostgreSQL's 63-byte identifier
+ * limit. PostgreSQL clips the name, so the value would come back under a
+ * different key; the query is refused on every engine instead. Shorten the
+ * alias or the key.
+ */
+export const SQL_IDENTIFIER_TOO_LONG_CODE = "SQL_IDENTIFIER_TOO_LONG";
+
+/**
  * The stable {@link ValidationIssue.code} every "this id is already taken"
  * create refusal carries, whichever way the create found out: its own existence
  * probe, or the engine refusing the INSERT. `ValidationError`'s own code is the
