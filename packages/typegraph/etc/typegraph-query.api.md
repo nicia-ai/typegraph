@@ -1419,7 +1419,7 @@ export class ExecutableAggregateQuery<G extends GraphDef, Aliases extends Aggreg
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: R);
     asRelation(): ExecutableRelationQuery<AggregateRelationFields<R, Aliases>, AggregateResult<R, Aliases>>;
     // @internal
-    checkSqlNamesBeforeExecution(): void;
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     // @internal
     compileOneStatementBatchItem(): {
@@ -1472,7 +1472,7 @@ export class ExecutableProjectionQuery<Fields extends DatabaseProjection, Contex
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, fields: Fields, context: () => Context, mapper?: (row: ProjectionResult<Fields>) => Result);
     asRelation(): ExecutableRelationQuery<Fields, Result>;
     // @internal
-    checkSqlNamesBeforeExecution(): void;
+    checkSqlNamesBeforeExecution?(): void;
     // (undocumented)
     compile(): CompiledRowsSql;
     // (undocumented)
@@ -1533,7 +1533,7 @@ export class ExecutableProjectionQuery<Fields extends DatabaseProjection, Contex
 export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     // @internal
-    checkSqlNamesBeforeExecution(): void;
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     compileNodeCandidateIds(readInstant?: string): CompiledSelectSql;
     // @internal
@@ -1599,7 +1599,7 @@ export class ExecutableRelationQuery<Fields extends RelationProjection, Result =
     // (undocumented)
     aggregate<const NextFields extends RelationProjection>(build: (columns: RelationColumnContext<Fields>) => NextFields): ExecutableRelationQuery<NextFields>;
     // @internal
-    checkSqlNamesBeforeExecution(): void;
+    checkSqlNamesBeforeExecution?(): void;
     // (undocumented)
     compile(): CompiledRowsSql;
     // (undocumented)
@@ -4851,7 +4851,7 @@ type UndefinedWhenOptional<Optional extends boolean> = Optional extends true ? u
 export class UnionableQuery<G extends GraphDef, R> {
     constructor(config: QueryBuilderConfig, state: UnionableQueryState);
     // @internal
-    checkSqlNamesBeforeExecution(): void;
+    checkSqlNamesBeforeExecution?(): void;
     compile(): CompiledSelectSql;
     // @internal
     compileOneStatementBatchItem?(): Readonly<{

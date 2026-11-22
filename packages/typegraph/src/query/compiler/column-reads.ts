@@ -20,7 +20,6 @@ import {
 } from "../sql-intent";
 import { aliasColumnName } from "./alias-names";
 
-
 /**
  * How a qualified reference is spelled:
  *

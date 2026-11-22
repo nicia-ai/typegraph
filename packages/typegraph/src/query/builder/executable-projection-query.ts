@@ -380,7 +380,7 @@ export class ExecutableProjectionQuery<
    * statement has colliding generated SQL names. `store.batch()` runs it for
    * every item before its first statement.
    */
-  checkSqlNamesBeforeExecution(): void {
+  checkSqlNamesBeforeExecution?(): void {
     const ast = this.toAst();
     if (hasParameterReferences(ast)) return;
     this.#compileRowsStatement(ast);

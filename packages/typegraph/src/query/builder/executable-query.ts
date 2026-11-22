@@ -759,7 +759,7 @@ export class ExecutableQuery<
    * extracted, or the full one. `store.batch()` runs it for every item before
    * its first statement.
    */
-  checkSqlNamesBeforeExecution(): void {
+  checkSqlNamesBeforeExecution?(): void {
     if (this.#hasParameterReferences()) return;
     const ast = this.toAst();
     if (

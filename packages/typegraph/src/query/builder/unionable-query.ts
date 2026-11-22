@@ -295,7 +295,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * `executeOn()` sends. `store.batch()` runs it for every item before its
    * first statement.
    */
-  checkSqlNamesBeforeExecution(): void {
+  checkSqlNamesBeforeExecution?(): void {
     if (composableQueryHasParameterReferences(this.toAst())) return;
     this.compile();
   }

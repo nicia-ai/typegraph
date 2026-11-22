@@ -958,7 +958,7 @@ export class ExecutableRelationQuery<
    * execution applies. `store.batch()` runs it for every item before its
    * first statement.
    */
-  checkSqlNamesBeforeExecution(): void {
+  checkSqlNamesBeforeExecution?(): void {
     assertRelationSourceSqlNames(this.#materialize(), "decoded");
   }
 

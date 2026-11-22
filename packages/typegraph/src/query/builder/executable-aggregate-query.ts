@@ -339,8 +339,8 @@ export class ExecutableAggregateQuery<
    * statement has colliding generated SQL names. `store.batch()` runs it for
    * every item before its first statement.
    */
-  checkSqlNamesBeforeExecution(): void {
-    this.asRelation().checkSqlNamesBeforeExecution();
+  checkSqlNamesBeforeExecution?(): void {
+    this.asRelation().checkSqlNamesBeforeExecution?.();
   }
 
   /** Runs on a target with the same database and transaction provenance. */
