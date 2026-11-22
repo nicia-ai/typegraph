@@ -9,7 +9,9 @@ import type { IntegrationTestContext } from "./test-context";
  * keeps a quoted one as written, so every reference must be spelled like the
  * declaration. These cases run the builders that read an alias CTE from a
  * second relation: the relevance subquery of fulltext, vector and hybrid
- * search, and the top-K page of a late-materialized `orderBy()` + `limit()`.
+ * search, the candidate list of an approximate (`{ approximate: true }`)
+ * vector index scan, alone and inside hybrid search, and the top-K page of a
+ * late-materialized `orderBy()` + `limit()`.
  */
 const AXES = {
   climate: [1, 0, 0, 0],
@@ -72,46 +74,52 @@ export function registerMixedCaseAliasIntegrationTests(
       ]);
     });
 
-    it("run a vector query rooted at the alias", async (ctx) => {
-      const store = context.getStore();
-      requireCapabilities(store, ctx, ["vector"]);
-      await seedArticles(store);
+    for (const approximate of [false, true]) {
+      const retrieval = approximate ? "approximate" : "exact";
 
-      const rows = await store
-        .query()
-        .from("Article", "Doc")
-        .whereNode("Doc", (document) =>
-          document.embedding.similarTo(QUERY_VECTOR, 2),
-        )
-        .select((row) => ({ title: row.Doc.title }))
-        .execute();
-      expect(rows).toEqual([
-        { title: "Climate change drivers" },
-        { title: "Climate cuisine guide" },
-      ]);
-    });
+      it(`run an ${retrieval} vector query rooted at the alias`, async (ctx) => {
+        const store = context.getStore();
+        requireCapabilities(store, ctx, ["vector"]);
+        await seedArticles(store);
 
-    it("run a hybrid query rooted at the alias", async (ctx) => {
-      const store = context.getStore();
-      requireCapabilities(store, ctx, ["fulltext", "vector"]);
-      await seedArticles(store);
+        const rows = await store
+          .query()
+          .from("Article", "Doc")
+          .whereNode("Doc", (document) =>
+            document.embedding.similarTo(QUERY_VECTOR, 2, { approximate }),
+          )
+          .select((row) => ({ title: row.Doc.title }))
+          .execute();
+        expect(rows).toEqual([
+          { title: "Climate change drivers" },
+          { title: "Climate cuisine guide" },
+        ]);
+      });
 
-      const rows = await store
-        .query()
-        .from("Article", "Doc")
-        .whereNode("Doc", (document) =>
-          document.$fulltext
-            .matches("climate", 10)
-            .and(document.embedding.similarTo(QUERY_VECTOR, 10)),
-        )
-        .select((row) => ({ title: row.Doc.title }))
-        .execute();
-      expect(sortedTitles(rows)).toEqual([
-        "Climate change drivers",
-        "Climate cuisine guide",
-        "Renewable energy outlook",
-      ]);
-    });
+      it(`run a hybrid query with ${retrieval} vector candidates rooted at the alias`, async (ctx) => {
+        const store = context.getStore();
+        requireCapabilities(store, ctx, ["fulltext", "vector"]);
+        await seedArticles(store);
+
+        const rows = await store
+          .query()
+          .from("Article", "Doc")
+          .whereNode("Doc", (document) =>
+            document.$fulltext
+              .matches("climate", 10)
+              .and(
+                document.embedding.similarTo(QUERY_VECTOR, 10, { approximate }),
+              ),
+          )
+          .select((row) => ({ title: row.Doc.title }))
+          .execute();
+        expect(sortedTitles(rows)).toEqual([
+          "Climate change drivers",
+          "Climate cuisine guide",
+          "Renewable energy outlook",
+        ]);
+      });
+    }
 
     it("page a late-materialized traversal through mixed-case aliases", async () => {
       const store = await context.createStore(integrationTestGraph, {
