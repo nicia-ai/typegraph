@@ -25,10 +25,7 @@
  * that import it at module scope), so this import adds no new reach into a
  * real Drizzle package that was not already there.
  */
-import {
-  resolveSchemaPreflightTarget,
-  resolveTransactionCommitCheck,
-} from "../../../transaction-commit-check";
+import { resolveRawSqlReleasingView } from "../../../raw-sql-release-view";
 import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
@@ -90,32 +87,30 @@ export type SchemaVersionMembers = Readonly<{
 }>;
 
 /**
- * Builds the schema-commit member group. Moved out of the two dialect files
- * unchanged: same fenced commit, same populated-kind guard, same
- * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
- * preflight form sequences its flip exactly as a commit does.
- */
-/**
- * Runs a caller's preflight, then — before the schema write that follows it —
- * the transaction's commit check: a preflight that caught a failed statement
- * on PostgreSQL has left the session aborted, and the write would otherwise
- * surface as a raw `25P02` instead of the `TransactionRolledBackError`
- * naming the failure. A backend that registers no check (SQLite) skips it.
- *
- * The preflight's `executeSchemaDdl` forwards whatever SQL text it is
- * given, transaction control included, so it releases control of the
- * transaction exactly as handing over the native handle does: the first call
- * arms the transaction's marker before its statement is sent, and from then
- * on the schema write commits only with the marker read back.
+ * Runs a caller's preflight on the schema-write transaction. Its
+ * `executeSchemaDdl` forwards whatever SQL text it is given, transaction
+ * control included, so the preflight is handed the transaction's
+ * control-releasing view: the first call releases control of the transaction
+ * exactly as handing over the native handle does, and from then on the schema
+ * write commits only with the marker read back and is never retried
+ * automatically. A preflight that caught a failed statement on PostgreSQL has
+ * left the session aborted: the schema write that follows is refused with
+ * `25P02`, which the transaction's owner reports as the
+ * `TransactionRolledBackError` it is.
  */
 async function runPreflight(
   preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
   target: SchemaWriteTransactionBackend,
 ): Promise<void> {
-  await preflight(resolveSchemaPreflightTarget(target));
-  await resolveTransactionCommitCheck(target)?.();
+  await preflight(resolveRawSqlReleasingView(target));
 }
 
+/**
+ * Builds the schema-commit member group. Moved out of the two dialect files
+ * unchanged: same fenced commit, same populated-kind guard, same
+ * preflight-then-commit sequencing, same fenced `setActiveVersion`, whose
+ * preflight form sequences its flip exactly as a commit does.
+ */
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
 ): SchemaVersionMembers {

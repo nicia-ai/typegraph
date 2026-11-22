@@ -9,15 +9,16 @@
  * its transaction reject — never resolve with nothing saved.
  *
  * Which error it sees depends on whether the native handle (`tx.sql`) was
- * read. Never read: the transaction cannot have been ended or replaced, so it
- * rejects with a `TransactionRolledBackError` whose cause is the first engine
- * error, and re-runs under `retry` when any engine error it observed was a
+ * read. Never read: the transaction cannot have been ended or replaced, so the
+ * database's reply to its `COMMIT` (or postgres-js refusing to commit) is the
+ * outcome, and it rejects with a `TransactionRolledBackError` whose cause is
+ * the first engine error, and re-runs under `retry` when any engine error it observed was a
  * conflict. Read: the callback could have committed TypeGraph's transaction
  * and begun another, and an aborted transaction cannot be queried, so the
  * attempt commits only with its marker read back and is otherwise a
  * `TransactionOutcomeUnknownError` that never re-runs, whatever its cause.
  * Both follow from the backend's declared `commitOutcome` evidence
- * (`"session-marker"`). SQLite (`"statement-scoped"`) keeps the transaction
+ * (`"commit-reply"`). SQLite (`"statement-scoped"`) keeps the transaction
  * usable after a failed statement, so the same callbacks commit there,
  * exactly as before.
  *
@@ -308,7 +309,7 @@ function outcomeUnknown(
 function usesSessionMarker(
   backend: Readonly<{ capabilities: BackendCapabilities }>,
 ): boolean {
-  return backend.capabilities.execution.commitOutcome === "session-marker";
+  return backend.capabilities.execution.commitOutcome === "commit-reply";
 }
 
 async function noteBody(
@@ -1322,6 +1323,45 @@ export function registerTransactionCommitOutcomeIntegrationTests(
       );
     });
 
+    it("never commits a public schemaWriteTransaction whose callback ended the transaction through executeSchemaDdl", async () => {
+      const store = await context.createStore(outcomeGraph);
+      const marked = usesSessionMarker(store.backend);
+      const schemaWriteTransaction = store.backend.schemaWriteTransaction;
+      if (schemaWriteTransaction === undefined) {
+        throw new Error("The bundled backend has no schemaWriteTransaction.");
+      }
+      const chainedTable = "transaction_outcome_chained";
+
+      const outcome = await outcomeOf(
+        schemaWriteTransaction(outcomeGraph.id, async (tx) => {
+          // The port forwards any SQL text: on PostgreSQL this ends the
+          // transaction that holds the schema fence and chains a new one,
+          // which the DDL below then writes into.
+          const chained = await tx.executeSchemaDdl("ROLLBACK AND CHAIN").then(
+            () => true,
+            () => false,
+          );
+          if (chained) {
+            await tx.executeSchemaDdl(
+              `CREATE TABLE ${chainedTable} (id integer)`,
+            );
+          }
+          return chained;
+        }),
+      );
+
+      // SQLite has no ROLLBACK AND CHAIN; the callback returns false there.
+      expect(outcome).toEqual(
+        marked ?
+          outcomeUnknown("transaction-ended")
+        : { kind: "committed", value: false },
+      );
+      const created = await schemaWriteTransaction(outcomeGraph.id, (tx) =>
+        tx.tableExists(chainedTable),
+      );
+      expect(created).toBe(false);
+    });
+
     it("commits a clean read-only transaction, and rejects one after a caught failing read on PostgreSQL", async () => {
       const store = await context.createStore(outcomeGraph);
       await store.nodes.OutcomeNote.create(
@@ -1401,8 +1441,9 @@ export function registerTransactionCommitOutcomeIntegrationTests(
           })),
       );
 
-      // A capture flush on the aborted session would itself fail with a
-      // 25P02; the check runs first and reports the duplicate instead.
+      // The capture flush after the callback meets the aborted session and is
+      // refused with 25P02; that refusal is reported as the rollback, with the
+      // duplicate as its cause, never as a raw driver error.
       expect(outcome).toEqual(
         marked ?
           rolledBack("23505")

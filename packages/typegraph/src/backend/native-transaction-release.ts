@@ -6,7 +6,8 @@
  * statements TypeGraph does not issue: those sent through the adapter-native
  * handle (`tx.sql`, the second argument of a `transactionWithNative`
  * callback) and any other port that forwards a caller's SQL text verbatim
- * (a schema preflight's `executeSchemaDdl`). TypeGraph issues no `COMMIT`,
+ * (a schema write's `executeSchemaDdl`, handed to a preflight or to the
+ * callback of the public `schemaWriteTransaction`). TypeGraph issues no `COMMIT`,
  * `ROLLBACK` or `BEGIN` of its own inside the transaction. The backend that
  * opened the transaction therefore needs to know the moment control escapes,
  * and no earlier: a transaction whose handle never escaped pays nothing for
@@ -35,6 +36,7 @@
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import {
   INTERNAL_DEFERRED_NATIVE_HANDLE,
+  type InternalSchemaWriteTransactionOptions,
   type InternalTransactionOptions,
 } from "./types";
 
@@ -138,4 +140,19 @@ export function nativeHandleForCallback<T>(
   return options?.nativeHandle === INTERNAL_DEFERRED_NATIVE_HANDLE ?
       nativeTransaction
     : releaseNativeTransaction(nativeTransaction);
+}
+
+/**
+ * `schemaWriteTransaction` options for a TypeGraph-owned callback that sends
+ * only DDL TypeGraph generated: its `executeSchemaDdl` releases nothing.
+ */
+export function ownSchemaDdl(): InternalSchemaWriteTransactionOptions {
+  return { nativeHandle: INTERNAL_DEFERRED_NATIVE_HANDLE };
+}
+
+/** Whether a `schemaWriteTransaction` caller sends only TypeGraph's own DDL. */
+export function sendsOwnSchemaDdl(
+  options: InternalSchemaWriteTransactionOptions | undefined,
+): boolean {
+  return options?.nativeHandle === INTERNAL_DEFERRED_NATIVE_HANDLE;
 }

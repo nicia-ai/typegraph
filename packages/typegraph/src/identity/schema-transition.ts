@@ -8,6 +8,7 @@ import {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
+import { ownSchemaDdl } from "../backend/native-transaction-release";
 import {
   type GraphBackend,
   type IdentityTableNames,
@@ -333,14 +334,18 @@ async function provisionDerivedRelations(
     ]);
   }
   await withIdentityDdlRaceRetry(async () =>
-    fence(graphId, async (target) => {
-      await lockIdentityDdl(target);
-      await executeIdentityDdl(
-        (ddl) => target.executeSchemaDdl(ddl),
-        identityTableDdl(tableNames),
-      );
-      await ports.recompute(target);
-    }),
+    fence(
+      graphId,
+      async (target) => {
+        await lockIdentityDdl(target);
+        await executeIdentityDdl(
+          (ddl) => target.executeSchemaDdl(ddl),
+          identityTableDdl(tableNames),
+        );
+        await ports.recompute(target);
+      },
+      ownSchemaDdl(),
+    ),
   );
 }
 

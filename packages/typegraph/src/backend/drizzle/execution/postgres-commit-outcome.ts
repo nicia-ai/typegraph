@@ -1,95 +1,90 @@
 /**
- * The one owner of "may the PostgreSQL transaction TypeGraph opened be
- * committed, and may it be retried?" for every transaction a bundled
- * PostgreSQL backend opens and commits itself
- * (`capabilities.execution.commitOutcome: "session-marker"`).
+ * The one owner of "did the PostgreSQL transaction TypeGraph opened commit,
+ * and may it be retried?" for every transaction a bundled PostgreSQL backend
+ * opens and commits itself (`capabilities.execution.commitOutcome:
+ * "commit-reply"`).
  *
- * A statement that fails inside a PostgreSQL transaction aborts the whole
- * transaction, whether or not the code that issued it catches the error;
- * the server then answers the closing `COMMIT` with `ROLLBACK`, which
- * node-postgres, neon-serverless and PGlite report as a success. A caller
- * holding the native `tx.sql` handle can also end the transaction itself
- * (`COMMIT`, `COMMIT AND CHAIN`, `ROLLBACK`) and even open another (`BEGIN`),
- * after which a `COMMIT` TypeGraph sends would close a transaction it never
- * opened, and a failure would belong to a transaction TypeGraph never opened.
+ * **The `COMMIT`'s own reply decides.** A statement that fails inside a
+ * PostgreSQL transaction aborts the whole transaction, whether or not the
+ * code that issued it caught the error, and whether or not the client ever
+ * saw the failure: a node-postgres `query_timeout` rejects on the client
+ * while the server is still running the statement, which can then fail there
+ * with nobody listening. The server answers the closing `COMMIT` of an
+ * aborted transaction with the command tag `ROLLBACK` instead of `COMMIT`,
+ * which node-postgres, neon-serverless and PGlite resolve as a success.
+ * TypeGraph reads the tag of the `COMMIT` that ends the transaction it
+ * opened, and adds no statement to do so:
  *
- * A transaction in which nothing failed and whose native handle never left
- * TypeGraph costs nothing: no statement is added to it. Evidence is gathered
- * only when one of the two things that can go wrong becomes possible.
+ * - node-postgres and neon-serverless: Drizzle sends `commit` through the
+ *   transaction's pinned client, which this module observes for the whole
+ *   attempt. The first statement handed to that client once the attempt's
+ *   own work is done is that `commit`; its result carries the tag
+ *   (`command`).
+ * - PGlite: `PGlite.transaction()` sends `COMMIT` through the instance's
+ *   `execProtocolStream`, observed from the moment the attempt's work is done
+ *   until that `COMMIT` has replied. The instance runs nothing else while the
+ *   transaction holds it; the `COMMIT`'s `CommandComplete` message carries
+ *   the tag.
+ * - postgres-js: the `COMMIT` that `sql.begin()` sends goes through a query
+ *   function private to `begin`, so its tag is not reachable. The driver
+ *   itself tracks every statement of the transaction and, when one failed,
+ *   rolls back and rejects with that failure instead of sending `COMMIT`.
+ *   That refusal is the evidence on postgres-js ({@link attemptFailure}).
  *
- * **The native handle is released.** Native transaction control can only
- * arrive through a port that forwards the caller's SQL (`releaseNativeTransaction`:
- * the `tx.sql` getter, a public `transactionWithNative` callback, a schema
- * preflight's `executeSchemaDdl`). From that moment the attempt's outcome is
- * exactly one of two:
+ * Tag `COMMIT`: committed. Tag `ROLLBACK`: {@link TransactionRolledBackError}
+ * (`detectedBy: "commit-reply"`), whose `cause` is the first engine error the
+ * attempt observed; there may be none, when the failure never reached the
+ * client (`causeObserved: false`). A reply that should be readable and was
+ * not is an unknown outcome, never a commit. Errors the engine raises at
+ * `COMMIT` itself (a deferred constraint, a serialization failure at commit)
+ * reject the `COMMIT` and propagate as they are.
  *
- * - **committed**: right before the `COMMIT`, the marker planted at the
- *   release is read back on the same session with this attempt's value, and
- *   the `COMMIT` then succeeds;
- * - **unknown** ({@link TransactionOutcomeUnknownError}): the marker is
- *   missing, the read is refused, or the attempt failed with a conflict (a
- *   serialization failure or deadlock, from the callback or the `COMMIT`).
- *   Any other rejection is the callback's own error and propagates unchanged;
- *   no retry loop re-runs it. Never retried: an aborted transaction cannot be queried,
- *   so nothing proves that the transaction that failed is the one TypeGraph
- *   opened rather than one the caller began after committing it through the
- *   handle, and re-running the callback could repeat committed writes. The
- *   failure is the error's `cause`.
+ * Work TypeGraph does on the transaction after the callback returned (a
+ * revision-clock advance, a capture flush, a pre-commit hook) can meet an
+ * aborted session nobody reported. Its statement is refused with `25P02`,
+ * and {@link attemptFailure} reports that refusal as the same rolled-back
+ * outcome (`detectedBy: "refused-statement"`): no raw `25P02` escapes.
+ *
+ * Statement failures are observed for two things only: the `cause` of a
+ * rolled-back transaction, and whether it is a conflict (a serialization
+ * failure or deadlock), which `retry: { attempts }` re-runs.
+ *
+ * **Transaction control through a raw-SQL port is unsupported.** A caller
+ * holding a port that forwards its SQL text (`tx.sql`, a
+ * `transactionWithNative` callback's handle, a schema write's
+ * `executeSchemaDdl`) can end or replace the transaction, which cannot be
+ * fully detected. As a defence for those known routes, the moment such a
+ * port is handed out (`releaseNativeTransaction`) the attempt plants a
+ * marker, reads it back right before the `COMMIT`, and is never retried
+ * automatically: a failed attempt then reports
+ * {@link TransactionOutcomeUnknownError}, since nothing proves the
+ * transaction that failed is the one TypeGraph opened. A caller that
+ * deliberately carries the marker into a transaction of its own defeats it;
+ * that is outside the supported contract.
  *
  * The marker is a transaction-local setting
  * (`SET LOCAL typegraph.transaction_marker = '<value>'`) whose value TypeGraph
- * generates for the attempt from a fixed alphabet, so no session-level value
- * and no other attempt can satisfy the read. It is ordered on the pinned
- * driver client ahead of every statement handed to it afterwards, so the
- * session receives it before anything the caller sends through the handle,
+ * generates for the attempt from a fixed alphabet. It is ordered on the
+ * pinned driver client ahead of every statement handed to it afterwards, so
+ * the session receives it before anything the caller sends through the port,
  * in the same tick included: postgres-js takes it at once; on node-postgres,
  * neon-serverless and PGlite it waits for the statements already executing
  * and holds the later ones behind it, so it never overlaps another statement
- * on the client. The read goes through the connection's statement queue so
- * it never overlaps a statement still running. A transaction-local setting
- * lives exactly as long as the transaction that set it, and survives a
- * caller's `ROLLBACK TO SAVEPOINT`, since a caller can only take a savepoint
- * after the release planted the marker. A savepoint of TypeGraph's own that
- * was open when the marker was planted would undo it on rollback, so the
+ * on the client. The read goes through the connection's statement queue so it
+ * never overlaps a statement still running. A savepoint of TypeGraph's own
+ * that was open when the marker was planted would undo it on rollback, so the
  * marker is planted again right after TypeGraph rolls back to such a
- * savepoint (see {@link NativeTransactionReleasePort.guardSavepoint}).
- *
- * **A statement failed, and the handle was never released.** Every statement
- * on the transaction passes through the pinned driver client, which is
- * observed for the attempt: Drizzle's session (and so the native handle, its
- * relational queries included) and TypeGraph's compiled fast path both read
- * it when they send a statement. When an engine error (one carrying a
- * SQLSTATE) was observed, a plain health probe decides: refused with `25P02`,
- * the transaction is aborted and is reported as
- * {@link TransactionRolledBackError} — the only outcome that claims "rolled
- * back, safe to retry", since with the handle never released the transaction
- * cannot have been ended or replaced; answered, a savepoint TypeGraph rolled
- * back has recovered it. A rolled-back transaction is a conflict, re-run under
- * `retry: { attempts }`, when any engine error observed in the attempt was a
- * serialization failure or deadlock. Errors the engine surfaces only at
- * `COMMIT` (a deferred constraint, a serialization failure at commit, a
- * terminated connection) reject the `COMMIT` itself.
- *
- * The marker is planted with `SET LOCAL`, not `SELECT set_config(...)`: a
- * `SET` takes no snapshot, so a `REPEATABLE READ` or `SERIALIZABLE`
- * transaction still takes its snapshot at the callback's first statement
- * even when the handle is released before it. `SET` binds no parameters, so
- * the value is inlined, and its shape is asserted before it is.
- *
- * One driver needs the observation for more than that. postgres-js tracks
- * the first failed statement of a transaction scope and, when the scope's
- * callback resolves, rolls back and rethrows that failure in place of
- * committing — even when a raw `ROLLBACK TO SAVEPOINT` recovered the session
- * and the marker read succeeded. A rejection that is the very error a
- * statement of the transaction failed with before TypeGraph handed the
- * transaction back to its driver is that substitution: reported as the
- * {@link TransactionRolledBackError} it is when the handle was never
- * released, and as an unknown outcome otherwise.
+ * savepoint (see {@link NativeTransactionReleasePort.guardSavepoint}). It is
+ * planted with `SET LOCAL`, not `SELECT set_config(...)`: a `SET` takes no
+ * snapshot, so a `REPEATABLE READ` or `SERIALIZABLE` transaction still takes
+ * its snapshot at the callback's first statement. `SET` binds no parameters,
+ * so the value is inlined, and its shape is asserted before it is.
  */
 import {
   CompilerInvariantError,
   TransactionOutcomeUnknownError,
   TransactionRolledBackError,
+  type TransactionRolledBackErrorDetails,
 } from "../../../errors";
 import { sql } from "../../../query/sql-fragment";
 import {
@@ -102,29 +97,17 @@ import {
   registerNativeTransactionRelease,
 } from "../../native-transaction-release";
 import {
+  type AnyPgDatabase,
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
+  getPgliteClient,
   getPinnedPostgresTransactionClient,
   getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
+  isPostgresJsClient,
   replacePinnedPostgresTransactionClient,
 } from "./postgres-execution";
 import { createSerialExecutionAdapter } from "./statement-queue";
-
-/** The commit evidence of one TypeGraph-opened transaction. */
-export type PostgresTransactionMarker = Readonly<{
-  /**
-   * Resolves when the transaction TypeGraph opened is still open and healthy
-   * on its session. Once the native handle was released, rejects with
-   * {@link TransactionOutcomeUnknownError} unless this attempt's marker is
-   * read back; before that, rejects with {@link TransactionRolledBackError}
-   * when the transaction is aborted. Waits for every statement queued on the
-   * connection first, then sends nothing unless the handle was released or
-   * an engine error was observed since the last check that found the
-   * transaction healthy.
-   */
-  assertCommittable: () => Promise<void>;
-}>;
 
 /**
  * The transaction-local setting that carries the marker. Namespaced so it
@@ -160,12 +143,6 @@ const READ_MARKER_STATEMENT = sql.raw(
 );
 
 /**
- * The health probe of a transaction whose native handle never left
- * TypeGraph: refused with `25P02` exactly when the transaction is aborted.
- */
-const PROBE_STATEMENT = sql.raw("SELECT 1 AS healthy");
-
-/**
  * Driver-client members that send a statement and return its pending result:
  * node-postgres and PGlite `query`, PGlite `exec` and `sql`, postgres-js
  * `unsafe`. A postgres-js client is also callable as a tagged template.
@@ -185,36 +162,94 @@ const STATEMENT_MEMBERS: ReadonlySet<PropertyKey> = new Set([
  */
 const SCOPED_CLIENT_MEMBER = "savepoint";
 
+/** The normalized text of the statement that ends a committed transaction. */
+const COMMIT_STATEMENT = "commit";
+
+/** The command tag PostgreSQL answers a `COMMIT` with when it committed. */
+const COMMITTED_TAG = "COMMIT";
+
+/** The command tag PostgreSQL answers a `COMMIT` of an aborted transaction with. */
+const ROLLED_BACK_TAG = "ROLLBACK";
+
+/**
+ * Where the reply to the `COMMIT` that ends an attempt can be read:
+ *
+ * - `"client-result"`: from the result the pinned client returns for
+ *   Drizzle's `commit` (node-postgres, neon-serverless);
+ * - `"pglite-protocol"`: from the PGlite instance's protocol stream;
+ * - `"driver-refusal"`: nowhere; the driver refuses to commit a transaction
+ *   in which a statement failed (postgres-js);
+ * - `"unobserved"`: the transaction's client could not be observed at all.
+ *   The marker is then planted before the callback runs and always read, so
+ *   an aborted session refuses the read.
+ */
+type CommitReplySource =
+  | "client-result"
+  | "pglite-protocol"
+  | "driver-refusal"
+  | "unobserved";
+
+/** The reply to the first statement sent once an attempt's work was done. */
+type CommitReply = Readonly<{
+  /** That statement's normalized text; `undefined` when unreadable. */
+  statement: string | undefined;
+  /** Its command tag; `undefined` when it carried none or failed. */
+  tag: string | undefined;
+}>;
+
+/** The watch on the statement that ends an attempt. */
+interface CommitReplyWatch {
+  /** Set once the attempt's own work is done and it is handed to its driver. */
+  armed: boolean;
+  /** Set once the first statement after arming was handed to the driver. */
+  claimed: boolean;
+  /** That statement's reply, once it settled. */
+  reply: CommitReply | undefined;
+}
+
 /** What one transaction attempt observed on its session. */
 interface AttemptEvidence {
   /** Statements sent through the observed client; `undefined` when unobserved. */
   statements: number | undefined;
-  /** Failures that reached the engine, counted. */
-  engineErrors: number;
-  /** The first failure that reached the engine. */
+  /**
+   * The first failure that reached the engine, other than a refusal of a
+   * statement sent to an already aborted transaction (`25P02`), which is the
+   * abort's consequence rather than its cause.
+   */
   firstEngineError: unknown;
   /** Whether any failure that reached the engine was a conflict. */
   conflict: boolean;
   /** Every failure a statement settled with, by identity. */
   readonly failures: WeakSet<object>;
-  /** Whether the transaction was found committable and handed back to its driver to commit. */
+  /** Whether the attempt's work was done and it was handed back to its driver to commit. */
   handedToDriver: boolean;
   /**
-   * Whether control of the transaction left TypeGraph: from then on the
-   * attempt either commits with its marker read back, or its outcome is
-   * unknown and it is never retried.
+   * Whether a port that forwards the caller's SQL was handed out: from then
+   * on the attempt either commits with its marker read back, or its outcome
+   * is unknown and it is never retried.
    */
   released: boolean;
+  readonly commitReply: CommitReplyWatch;
 }
 
 type StatementObserver = Readonly<{
   sent: () => void;
   failed: (error: unknown) => void;
+  /** A statement was handed to the driver client and returned `result`. */
+  handed: (statement: unknown, result: unknown) => void;
 }>;
+
+/** The command tag a node-postgres-style result carries. */
+function commandTagOf(result: unknown): string | undefined {
+  if (typeof result !== "object" || result === null) return undefined;
+  const command: unknown = Reflect.get(result, "command");
+  return typeof command === "string" ? command : undefined;
+}
 
 function createStatementObserver(
   evidence: AttemptEvidence,
   isConflict: (error: unknown) => boolean,
+  readsClientResult: () => boolean,
 ): StatementObserver {
   return {
     sent() {
@@ -225,11 +260,33 @@ function createStatementObserver(
         evidence.failures.add(error);
       }
       if (!carriesEngineSqlState(error)) return;
-      evidence.engineErrors += 1;
-      if (evidence.firstEngineError === undefined) {
+      if (
+        evidence.firstEngineError === undefined &&
+        !isPostgresFailedTransactionError(error)
+      ) {
         evidence.firstEngineError = error;
       }
       if (!evidence.conflict && isConflict(error)) evidence.conflict = true;
+    },
+    handed(statement, result) {
+      const watch = evidence.commitReply;
+      if (!watch.armed || watch.claimed || !readsClientResult()) return;
+      watch.claimed = true;
+      const text = normalizedStatementText(statement);
+      if (!(result instanceof Promise)) {
+        watch.reply = { statement: text, tag: undefined };
+        return;
+      }
+      // Attached as the statement is handed over, so this reaction runs
+      // before the driver's own continuation sees the result.
+      result.then(
+        (value: unknown) => {
+          watch.reply = { statement: text, tag: commandTagOf(value) };
+        },
+        () => {
+          watch.reply = { statement: text, tag: undefined };
+        },
+      );
     },
   };
 }
@@ -384,6 +441,7 @@ function observeClient(
     const blocker = gate.blocker;
     if (blocker === undefined) {
       const result = statement();
+      observer.handed(text, result);
       trackInFlight(gate, result);
       return observeOutcome(result, observer, () => {
         recordHandOff(gate.ledger, text);
@@ -393,7 +451,9 @@ function observeClient(
     // it is actually handed to the driver, after the plant.
     const handOff = (): unknown => {
       recordHandOff(gate.ledger, text);
-      return statement();
+      const result = statement();
+      observer.handed(text, result);
+      return result;
     };
     const held = blocker.then(handOff, handOff);
     trackInFlight(gate, held);
@@ -448,16 +508,122 @@ function observeClient(
   });
 }
 
-function rolledBack(evidence: AttemptEvidence): TransactionRolledBackError {
+/** The PostgreSQL frontend message type byte of a simple query (`'Q'`). */
+const SIMPLE_QUERY_MESSAGE = 0x51;
+
+/** The SQL text of a simple-query protocol message; `undefined` for any other. */
+function simpleQueryText(message: unknown): string | undefined {
+  if (!(message instanceof Uint8Array) || message[0] !== SIMPLE_QUERY_MESSAGE) {
+    return undefined;
+  }
+  // Type byte, 4-byte length, then the NUL-terminated query text.
+  return new TextDecoder().decode(message.subarray(5, - 1));
+}
+
+/** The tag of the last `CommandComplete` among PGlite's parsed replies. */
+function commandCompleteTag(replies: unknown): string | undefined {
+  if (!Array.isArray(replies)) return undefined;
+  let tag: string | undefined;
+  for (const reply of replies as readonly unknown[]) {
+    if (typeof reply !== "object" || reply === null) continue;
+    if (Reflect.get(reply, "name") !== "commandComplete") continue;
+    const text: unknown = Reflect.get(reply, "text");
+    if (typeof text === "string") tag = text;
+  }
+  return tag;
+}
+
+const PGLITE_PROTOCOL_MEMBER = "execProtocolStream";
+
+/**
+ * Reads the reply to the first protocol message the PGlite `instance` is
+ * handed from now on — the `COMMIT` its `transaction()` sends once the
+ * callback resolved — into `watch`. The instance's own member is shadowed
+ * until that message has replied, then put back exactly as it was. Returns
+ * the function that puts it back if no message came.
+ */
+function watchPgliteCommitReply(
+  instance: object,
+  watch: CommitReplyWatch,
+): () => void {
+  const inherited: unknown = Reflect.get(instance, PGLITE_PROTOCOL_MEMBER);
+  if (typeof inherited !== "function") return ignoreSettlement;
+  const previous = Reflect.getOwnPropertyDescriptor(
+    instance,
+    PGLITE_PROTOCOL_MEMBER,
+  );
+  function restore(): void {
+    if (
+      Reflect.getOwnPropertyDescriptor(instance, PGLITE_PROTOCOL_MEMBER)
+        ?.value !== observed
+    ) {
+      return;
+    }
+    if (previous === undefined) {
+      Reflect.deleteProperty(instance, PGLITE_PROTOCOL_MEMBER);
+    } else {
+      Reflect.defineProperty(instance, PGLITE_PROTOCOL_MEMBER, previous);
+    }
+  }
+  async function observed(this: unknown, ...args: unknown[]): Promise<unknown> {
+    if (watch.claimed) return Reflect.apply(inherited as never, this, args);
+    watch.claimed = true;
+    const statement = normalizedStatementText(simpleQueryText(args[0]));
+    try {
+      const replies: unknown = await Reflect.apply(
+        inherited as never,
+        this,
+        args,
+      );
+      watch.reply = { statement, tag: commandCompleteTag(replies) };
+      return replies;
+    } catch (error) {
+      watch.reply = { statement, tag: undefined };
+      throw error;
+    } finally {
+      restore();
+    }
+  }
+  Reflect.defineProperty(instance, PGLITE_PROTOCOL_MEMBER, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: observed,
+  });
+  return restore;
+}
+
+/** Where the reply to `observed`'s `COMMIT` can be read. */
+function commitReplySourceOf(
+  observed: ObservedClient | undefined,
+  pglite: object | undefined,
+): CommitReplySource {
+  if (observed === undefined) return "unobserved";
+  if (pglite !== undefined) return "pglite-protocol";
+  if (isPostgresJsClient(observed.raw)) return "driver-refusal";
+  return "client-result";
+}
+
+type RolledBackDetection = TransactionRolledBackErrorDetails["detectedBy"];
+
+function rolledBack(
+  evidence: AttemptEvidence,
+  detectedBy: RolledBackDetection,
+): TransactionRolledBackError {
   return new TransactionRolledBackError(
-    { conflict: evidence.conflict },
+    {
+      // An attempt that handed out a raw-SQL port is never retried.
+      conflict: evidence.conflict && !evidence.released,
+      detectedBy,
+      causeObserved: evidence.firstEngineError !== undefined,
+    },
     { cause: evidence.firstEngineError },
   );
 }
 
 /**
- * The outcome of an attempt that failed after the native handle was
- * released: unknown, and never retried. `cause` is the failure.
+ * The outcome of an attempt that failed after a raw-SQL port was handed out:
+ * unknown, and never retried. `cause` is the failure.
  */
 function releasedAttemptFailed(cause: unknown): TransactionOutcomeUnknownError {
   return new TransactionOutcomeUnknownError(
@@ -530,7 +696,14 @@ type ObservedClient = Readonly<{
 }>;
 
 type TransactionEvidenceSession = Readonly<{
-  marker: PostgresTransactionMarker;
+  /**
+   * Resolves when nothing a raw-SQL port could have done stands in the way
+   * of the `COMMIT`. Sends nothing unless a port was handed out (or the
+   * client is unobserved): then reads this attempt's marker back on the same
+   * session, and rejects with {@link TransactionOutcomeUnknownError} unless
+   * it is there. Waits for every statement queued on the connection first.
+   */
+  assertCommittable: () => Promise<void>;
   /** What the opening backend registers for the transaction's native handle. */
   releasePort: NativeTransactionReleasePort;
   /**
@@ -544,7 +717,7 @@ type TransactionEvidenceSession = Readonly<{
 }>;
 
 /**
- * The commit evidence of one transaction. `observed` is its observed pinned
+ * The marker evidence of one transaction. `observed` is its observed pinned
  * client; without one no failure can be seen and the plant cannot be ordered
  * ahead of the caller's statements, so the marker is planted at once,
  * through the queue, and always read.
@@ -566,9 +739,6 @@ async function createTransactionEvidence(
   // The statement count at the last read that found the marker; a check
   // with nothing sent since has nothing new to learn from the session.
   let verifiedAtStatement: number | undefined;
-  // The engine errors already accounted for by a probe that found the
-  // transaction healthy.
-  let probedAtEngineErrors = 0;
 
   if (observed === undefined) {
     markerValue = newMarkerValue();
@@ -647,9 +817,9 @@ async function createTransactionEvidence(
       );
     } catch (error) {
       // An unobserved transaction is planted before the callback runs; until
-      // its handle is released, nothing can have ended or replaced it.
+      // a raw-SQL port is handed out, nothing can have ended or replaced it.
       if (!evidence.released && isPostgresFailedTransactionError(error)) {
-        throw rolledBack(evidence);
+        throw rolledBack(evidence, "refused-statement");
       }
       throw releasedAttemptFailed(evidence.firstEngineError ?? error);
     }
@@ -660,19 +830,6 @@ async function createTransactionEvidence(
       );
     }
     verifiedAtStatement = evidence.statements;
-  }
-
-  async function probe(): Promise<void> {
-    const accountedFor = evidence.engineErrors;
-    try {
-      await session.execute(PROBE_STATEMENT);
-    } catch (error) {
-      if (isPostgresFailedTransactionError(error)) {
-        throw rolledBack(evidence);
-      }
-      throw error;
-    }
-    probedAtEngineErrors = accountedFor;
   }
 
   return {
@@ -691,106 +848,151 @@ async function createTransactionEvidence(
     close() {
       closed = true;
     },
-    marker: {
-      async assertCommittable(): Promise<void> {
-        // Every statement queued on the connection settles first, so its
-        // failure, if any, has been observed before anything is decided.
-        await session.runExclusive(() => Promise.resolve());
-        if (evidence.released || markerValue !== undefined) {
-          return readMarker();
-        }
-        if (evidence.engineErrors === probedAtEngineErrors) return;
-        return probe();
-      },
+    async assertCommittable(): Promise<void> {
+      // Every statement queued on the connection settles first, so its
+      // failure, if any, has been observed before anything is decided.
+      await session.runExclusive(() => Promise.resolve());
+      if (evidence.released || markerValue !== undefined) {
+        return readMarker();
+      }
     },
   };
 }
 
 /**
  * What a failed attempt reports, and so whether the retry loop above it may
- * re-run it: the one decision for both ways an attempt fails, the callback
- * rejecting and the commit evidence refusing.
+ * re-run it: the one decision for every way an attempt fails before its
+ * `COMMIT` replied — the callback or TypeGraph's own pre-commit work
+ * rejecting, the marker refusing, the driver refusing to commit.
  *
- * Once the native handle was released, no failure may reach a retry loop as
- * retryable: a failure the backend's conflict classifier accepts (a
- * serialization failure or deadlock, however wrapped, the `COMMIT`'s own
- * included) is an unknown outcome with that failure as its `cause`; so is
- * the driver's substitution of a failure the transaction's statements met.
- * The evidence's own refusals already are unknown outcomes. Any other
- * rejection is the callback's own error, which no retry loop re-runs, and
- * propagates unchanged.
+ * Without a raw-SQL port handed out:
  *
- * Before the release, a driver that rolled back and rethrew a failure the
- * transaction's own statements met (postgres-js), rather than committing, is
- * reported as the rollback it is; anything else propagates unchanged.
+ * - a statement refused because the transaction was already aborted
+ *   (`25P02`), wherever it surfaced, is the rolled-back transaction it
+ *   reveals (`detectedBy: "refused-statement"`);
+ * - the driver rolling back and rethrowing a failure the transaction's own
+ *   statements met, rather than committing (postgres-js), is the rolled-back
+ *   transaction it reports (`detectedBy: "driver"`);
+ * - anything else propagates unchanged.
+ *
+ * After a port was handed out, no failure may reach a retry loop as
+ * retryable: a refusal of an aborted transaction, the driver's substitution,
+ * or a failure the backend's conflict classifier accepts is an unknown
+ * outcome with that failure as its `cause`. Any other rejection is the
+ * callback's own error, which no retry loop re-runs, and propagates
+ * unchanged.
  */
 function attemptFailure(
   evidence: AttemptEvidence,
   error: unknown,
   isConflict: (error: unknown) => boolean,
 ): unknown {
+  if (
+    error instanceof TransactionRolledBackError ||
+    isTransactionOutcomeUnknown(error)
+  ) {
+    return error;
+  }
   const substitutedByDriver =
     evidence.handedToDriver &&
     typeof error === "object" &&
     error !== null &&
     evidence.failures.has(error);
+  const refusedAsAborted = isPostgresFailedTransactionError(error);
   if (evidence.released) {
-    if (isTransactionOutcomeUnknown(error)) return error;
+    if (refusedAsAborted) {
+      return releasedAttemptFailed(evidence.firstEngineError ?? error);
+    }
     return substitutedByDriver || isConflict(error) ?
         releasedAttemptFailed(error)
       : error;
   }
-  return substitutedByDriver ? rolledBack(evidence) : error;
+  if (substitutedByDriver) return rolledBack(evidence, "driver");
+  if (refusedAsAborted) return rolledBack(evidence, "refused-statement");
+  return error;
 }
 
 /**
- * Runs one transaction TypeGraph opens and will commit, with its commit
- * decided by the evidence above.
+ * The outcome of an attempt whose `COMMIT` resolved, from that `COMMIT`'s
+ * reply. Returns when it committed; throws otherwise.
+ */
+function assertCommitReplied(
+  evidence: AttemptEvidence,
+  source: CommitReplySource,
+): void {
+  if (source !== "client-result" && source !== "pglite-protocol") return;
+  const reply = evidence.commitReply.reply;
+  if (reply?.statement === COMMIT_STATEMENT) {
+    if (reply.tag === COMMITTED_TAG) return;
+    if (reply.tag === ROLLED_BACK_TAG) {
+      throw rolledBack(evidence, "commit-reply");
+    }
+  }
+  throw new TransactionOutcomeUnknownError(
+    { reason: "commit-reply-unread" },
+    { cause: evidence.firstEngineError },
+  );
+}
+
+/**
+ * Runs one transaction TypeGraph opens on `driver` and will commit, with its
+ * outcome decided by the reply to its `COMMIT` (see the module comment).
  *
  * `open` opens the transaction and runs the body it is given inside it —
  * `(body) => db.transaction(body, config)`. The body installs the observer
  * and registers the marker's plant as the transaction's native-handle
  * release, both before anything else binds to the transaction, then runs
- * `body`, then checks the evidence; only a body that resolves and passes the
- * check reaches the driver's `COMMIT`. A `body` that rejects waits for
- * whatever the attempt still has running and then lets the driver roll back.
- * Every failure is reported through {@link attemptFailure}.
+ * `body`, then reads the marker if a raw-SQL port was handed out; only a body
+ * that resolves and passes that check reaches the driver's `COMMIT`, whose
+ * reply is then read. A `body` that rejects waits for whatever the attempt
+ * still has running and then lets the driver roll back. Every failure before
+ * the reply is reported through {@link attemptFailure}.
  *
  * `isConflict` is the backend's own serialization-failure classifier.
  */
 export async function runMarkedPostgresTransaction<T>(
+  driver: AnyPgDatabase,
   open: (body: (transaction: AnyPgTransaction) => Promise<T>) => Promise<T>,
   isConflict: (error: unknown) => boolean,
-  body: (
-    transaction: AnyPgTransaction,
-    marker: PostgresTransactionMarker,
-  ) => Promise<T>,
+  body: (transaction: AnyPgTransaction) => Promise<T>,
 ): Promise<T> {
   const evidence: AttemptEvidence = {
     statements: undefined,
-    engineErrors: 0,
     firstEngineError: undefined,
     conflict: false,
     failures: new WeakSet(),
     handedToDriver: false,
     released: false,
+    commitReply: { armed: false, claimed: false, reply: undefined },
   };
-  const observer = createStatementObserver(evidence, isConflict);
+  const pglite = getPgliteClient(driver);
+  let source: CommitReplySource = "unobserved";
+  const observer = createStatementObserver(
+    evidence,
+    isConflict,
+    () => source === "client-result",
+  );
+  let restoreClient: (() => void) | undefined;
+  let stopPgliteWatch: (() => void) | undefined;
+  let result: T;
   try {
-    return await open(async (transaction) => {
+    result = await open(async (transaction) => {
       const gate: SendGate = {
         inFlight: new Set(),
         blocker: undefined,
         ledger: { handed: 0, pendingSavepoints: new Set() },
       };
       let observed: ObservedClient | undefined;
-      const restoreClient = replacePinnedPostgresTransactionClient(
+      // Installed for the whole attempt, `COMMIT` included: the reply to the
+      // driver's `commit` is read through it.
+      restoreClient = replacePinnedPostgresTransactionClient(
         transaction,
         (client) => {
           observed = { raw: client, observer, gate };
           return observeClient(client, observer, gate);
         },
       );
+      source = commitReplySourceOf(observed, pglite);
       let attempt: TransactionEvidenceSession | undefined;
       try {
         attempt = await createTransactionEvidence(
@@ -804,19 +1006,37 @@ export async function runMarkedPostgresTransaction<T>(
           // Nothing would say when the handle escapes: treat it as escaped.
           attempt.releasePort.release();
         }
-        const result = await body(transaction, attempt.marker);
-        await attempt.marker.assertCommittable();
+        const value = await body(transaction);
+        await attempt.assertCommittable();
         evidence.handedToDriver = true;
-        return result;
+        // The next statement the driver sends is the `COMMIT`.
+        evidence.commitReply.armed = true;
+        if (source === "pglite-protocol" && pglite !== undefined) {
+          stopPgliteWatch = watchPgliteCommitReply(
+            pglite,
+            evidence.commitReply,
+          );
+        }
+        return value;
       } catch (error) {
         await attempt?.settle();
         throw error;
       } finally {
         attempt?.close();
-        restoreClient?.();
+        // Only a reply read from the client's results needs the observer
+        // through the driver's `COMMIT`.
+        if (source !== "client-result") {
+          restoreClient?.();
+          restoreClient = undefined;
+        }
       }
     });
   } catch (error) {
     throw attemptFailure(evidence, error, isConflict);
+  } finally {
+    stopPgliteWatch?.();
+    restoreClient?.();
   }
+  assertCommitReplied(evidence, source);
+  return result;
 }

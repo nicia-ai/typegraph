@@ -14,7 +14,13 @@
  *   read sends exactly what it sent before the evidence existed;
  * - reading the handle plants the marker ahead of anything the caller then
  *   sends through it, in the same tick, and costs one plant and one read;
- * - a failure with the handle never read costs one probe and no marker;
+ * - a failure with the handle never read costs nothing: the reply to the
+ *   `COMMIT` decides, and the driver's own refusal on postgres-js;
+ * - an abort the client never saw (a statement a node-postgres
+ *   `query_timeout` abandoned and the server then failed, one a
+ *   `statement_timeout` cancelled) is reported as the rollback it is, a
+ *   history store included, and a deferred constraint failing at `COMMIT`
+ *   rejects with its own error;
  * - the decision waits for a statement the callback left running;
  * - a nested transaction plants nothing and shares the enclosing
  *   connection's statement queue, and a handle read inside it is covered by
@@ -71,7 +77,6 @@ const wiringGraph = defineGraph({
 
 const PLANT_PREFIX = "set local typegraph.transaction_marker";
 const READ_PREFIX = "select current_setting('typegraph.transaction_marker'";
-const PROBE_PREFIX = "select 1 as healthy";
 const MISSING_RELATION_SQL = "SELECT * FROM commit_outcome_missing_table";
 /** A marker value: generated per attempt, from a fixed alphabet. */
 const MARKER_VALUE_SHAPE = /^[\da-f]{32}$/;
@@ -115,26 +120,65 @@ const SLOW_READ_SQL = "select pg_sleep(0.3)";
 const SLOW_FAILING_READ_SQL = "select (pg_sleep(0.3)::text || 'x')::int";
 
 /**
+ * Holds the connection for 0.4 s, then fails on the server with a division by
+ * zero (22012): long enough for a 150 ms node-postgres `query_timeout` to
+ * abandon it on the client first.
+ */
+const ABANDONED_FAILING_READ_SQL =
+  "select 1 / (count(*)::int - 1) from pg_sleep(0.4)";
+const CLIENT_QUERY_TIMEOUT_MILLISECONDS = 150;
+/** Longer than {@link ABANDONED_FAILING_READ_SQL} runs on the server. */
+const SERVER_FAILURE_WAIT_MILLISECONDS = 700;
+
+const DEFERRED_PARENT_TABLE = "commit_outcome_deferred_parent";
+const DEFERRED_CHILD_TABLE = "commit_outcome_deferred_child";
+/** Accepted when sent; its foreign key is checked only at COMMIT (23503). */
+const DEFERRED_VIOLATION_SQL = `insert into ${DEFERRED_CHILD_TABLE} values (42)`;
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** The SQLSTATE of the first engine error in `error`'s cause chain. */
+function engineCodeOf(error: unknown): string | undefined {
+  let link: unknown = error;
+  for (let depth = 0; depth < 10 && link !== undefined; depth += 1) {
+    if (typeof link !== "object" || link === null) return undefined;
+    const code: unknown = Reflect.get(link, "code");
+    if (typeof code === "string" && /^[\dA-Z]{5}$/.test(code)) return code;
+    link = Reflect.get(link, "cause");
+  }
+  return undefined;
+}
+
+/**
  * The same backend, with every transaction's `getNode` a managed read that
- * runs `statement` through the transaction's statement queue.
+ * runs `statement` (or each of `statement`, in order) through the
+ * transaction's statement queue.
  */
 function backendWithRead(
   backend: ReturnType<typeof createPostgresBackend>,
-  statement: string,
+  statement: string | readonly string[],
 ): ReturnType<typeof createPostgresBackend> {
+  const statements = typeof statement === "string" ? [statement] : statement;
+  function reading(target: TransactionBackend): TransactionBackend {
+    return deriveBackend(target, {
+      getNode: async (): Promise<NodeRow | undefined> => {
+        for (const each of statements) {
+          await target.execute(asCompiledRowsSql(sql.raw(each)));
+        }
+        return undefined;
+      },
+    });
+  }
+  // A history store opens its transactions through `transaction`, an
+  // adapter Store through `transactionWithNative`.
   return deriveBackend(backend, {
+    transaction: (run, options) =>
+      backend.transaction((target) => run(reading(target)), options),
     transactionWithNative: (run, options) =>
       backend.transactionWithNative(
-        (target, native) =>
-          run(
-            deriveBackend(target, {
-              getNode: async (): Promise<NodeRow | undefined> => {
-                await target.execute(asCompiledRowsSql(sql.raw(statement)));
-                return undefined;
-              },
-            }),
-            native,
-          ),
+        (target, native) => run(reading(target), native),
         options,
       ),
   });
@@ -264,8 +308,27 @@ function textOf(query: unknown): string {
   return typeof text === "string" ? text : String(query);
 }
 
+type OpenedDriver = Readonly<{
+  backend: ReturnType<typeof createPostgresBackend>;
+  /** Runs one statement outside any transaction. */
+  admin: (statement: string) => Promise<void>;
+  close: () => Promise<void>;
+}>;
+
 export type DriverFixture = Readonly<{
   name: string;
+  /**
+   * Whether the reply to the `COMMIT` that ends a transaction is read
+   * (node-postgres, PGlite); postgres-js refuses to commit instead.
+   */
+  commitReplyReadable: boolean;
+  /** Whether the engine cancels a statement at its `statement_timeout`. */
+  enforcesStatementTimeout: boolean;
+  /**
+   * Opens the driver with a client-side query timeout: the driver rejects a
+   * statement on the client while the server may still be running it.
+   */
+  openWithQueryTimeout?: (milliseconds: number) => Promise<OpenedDriver>;
   /** Whether the driver rolls back a scope whose statement failed. */
   driverTracksScopeFailures: boolean;
   /**
@@ -273,12 +336,7 @@ export type DriverFixture = Readonly<{
    * transaction is open (a pool); PGlite has one session.
    */
   independentConnections: boolean;
-  open: (log: StatementLog) => Promise<
-    Readonly<{
-      backend: ReturnType<typeof createPostgresBackend>;
-      close: () => Promise<void>;
-    }>
-  >;
+  open: (log: StatementLog) => Promise<OpenedDriver>;
 }>;
 
 /** What a strict test client answers a statement sent while another runs. */
@@ -345,6 +403,9 @@ function recordPgliteStatements(client: PGlite, log: StatementLog): void {
 
 export const pgliteFixture: DriverFixture = {
   name: "PGlite",
+  commitReplyReadable: true,
+  // Single-threaded WASM: nothing interrupts a running statement.
+  enforcesStatementTimeout: false,
   driverTracksScopeFailures: false,
   independentConnections: false,
   async open(log) {
@@ -353,6 +414,9 @@ export const pgliteFixture: DriverFixture = {
     recordPgliteStatements(client, log);
     return {
       backend: createPostgresBackend(drizzlePglite(client)),
+      admin: async (statement) => {
+        await client.exec(statement);
+      },
       close: () => client.close(),
     };
   },
@@ -361,6 +425,21 @@ export const pgliteFixture: DriverFixture = {
 export function nodePostgresFixture(databaseUrl: string): DriverFixture {
   return {
     name: "node-postgres",
+    commitReplyReadable: true,
+    enforcesStatementTimeout: true,
+    openWithQueryTimeout(milliseconds) {
+      const pool = new Pool({
+        connectionString: databaseUrl,
+        query_timeout: milliseconds,
+      });
+      return Promise.resolve({
+        backend: createPostgresBackend(drizzleNodePg(pool)),
+        admin: async (statement) => {
+          await pool.query(statement);
+        },
+        close: () => pool.end(),
+      });
+    },
     driverTracksScopeFailures: false,
     independentConnections: true,
     async open(log) {
@@ -413,6 +492,9 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
       );
       return {
         backend: createPostgresBackend(drizzleNodePg(pool)),
+        admin: async (statement) => {
+          await pool.query(statement);
+        },
         close: () => pool.end(),
       };
     },
@@ -422,6 +504,8 @@ export function nodePostgresFixture(databaseUrl: string): DriverFixture {
 export function postgresJsFixture(databaseUrl: string): DriverFixture {
   return {
     name: "postgres-js",
+    commitReplyReadable: false,
+    enforcesStatementTimeout: true,
     driverTracksScopeFailures: true,
     independentConnections: true,
     async open(log) {
@@ -439,6 +523,9 @@ export function postgresJsFixture(databaseUrl: string): DriverFixture {
       );
       return {
         backend: createPostgresBackend(drizzlePostgresJs(client)),
+        admin: async (statement) => {
+          await client.unsafe(statement);
+        },
         close: () => client.end(),
       };
     },
@@ -458,7 +545,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
     const statementLog = createStatementLog();
     // Opened in `beforeAll`, not at registration: the two server drivers
     // share this file's database and must not run its migration concurrently.
-    let opened: Awaited<ReturnType<DriverFixture["open"]>> | undefined;
+    let opened: OpenedDriver | undefined;
     let storePromise: ReturnType<typeof openStore> | undefined;
 
     function openStore(backend: ReturnType<typeof createPostgresBackend>) {
@@ -471,6 +558,12 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       opened = await fixture.open(statementLog);
       storePromise = openStore(opened.backend);
       await storePromise;
+      await opened.admin(
+        `CREATE TABLE IF NOT EXISTS ${DEFERRED_PARENT_TABLE} (id integer PRIMARY KEY)`,
+      );
+      await opened.admin(
+        `CREATE TABLE IF NOT EXISTS ${DEFERRED_CHILD_TABLE} (parent_id integer REFERENCES ${DEFERRED_PARENT_TABLE} (id) DEFERRABLE INITIALLY DEFERRED)`,
+      );
     });
 
     afterAll(async () => {
@@ -570,14 +663,13 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       expect([
         statementLog.count(PLANT_PREFIX),
         statementLog.count(READ_PREFIX),
-        statementLog.count(PROBE_PREFIX),
-      ]).toEqual([1, 1, 0]);
+      ]).toEqual([1, 1]);
       expect(await noteBody(store, `${fixture.name}-handle-read`)).toBe(
         "handle read",
       );
     });
 
-    it("probes once, and plants nothing, after a failure with the handle never read", async () => {
+    it("adds no statement after a failure with the handle never read, and says how the rollback was detected", async () => {
       await requireDefined(storePromise);
       const failingReadStore = createAdapterStore(
         wiringGraph,
@@ -595,11 +687,18 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(TransactionRolledBackError);
-      expect([
-        statementLog.count(PLANT_PREFIX),
-        statementLog.count(READ_PREFIX),
-        statementLog.count(PROBE_PREFIX),
-      ]).toEqual([0, 0, 1]);
+      expect((outcome as TransactionRolledBackError).details).toEqual({
+        conflict: false,
+        detectedBy: fixture.commitReplyReadable ? "commit-reply" : "driver",
+        causeObserved: true,
+      });
+      // BEGIN, the failing read, then COMMIT (answered ROLLBACK), or the
+      // ROLLBACK postgres-js sends in its place: nothing added.
+      expect(keywordsOf(statementLog.statements())).toEqual([
+        "begin",
+        "select",
+        fixture.commitReplyReadable ? "commit" : "rollback",
+      ]);
     });
 
     it("decides only after a failing read the callback left running has finished", async () => {
@@ -627,8 +726,131 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
       // decides the outcome.
       expect(sentDuringSlowRead(statementLog.sent())).toEqual([]);
       expect(outcome).toBeInstanceOf(TransactionRolledBackError);
-      expect(statementLog.count(PROBE_PREFIX)).toBe(1);
     });
+
+    it.runIf(fixture.enforcesStatementTimeout)(
+      "rejects as rolled back a transaction whose caught statement a statement_timeout cancelled",
+      async () => {
+        const store = await requireDefined(storePromise);
+        const cancelledReadStore = createAdapterStore(
+          wiringGraph,
+          backendWithRead(requireDefined(opened).backend, [
+            "SET LOCAL statement_timeout = 50",
+            "select pg_sleep(1)",
+          ]),
+        );
+        const id = `${fixture.name}-statement-timeout`;
+        let cancelled: string | undefined;
+
+        const outcome = await cancelledReadStore
+          .transaction(async (tx) => {
+            await tx.nodes.WiringNote.create(
+              { body: "before the timeout" },
+              { id },
+            );
+            cancelled = await tx.nodes.WiringNote.getById(
+              "cancelled" as never,
+            ).then(
+              () => "the read was not cancelled",
+              (error: unknown) => engineCodeOf(error),
+            );
+            return "callback returned";
+          })
+          .catch((error: unknown) => error);
+
+        expect(cancelled).toBe("57014");
+        expect(outcome).toBeInstanceOf(TransactionRolledBackError);
+        expect((outcome as TransactionRolledBackError).details).toEqual({
+          conflict: false,
+          detectedBy: fixture.commitReplyReadable ? "commit-reply" : "driver",
+          causeObserved: true,
+        });
+        expect(engineCodeOf(outcome)).toBe("57014");
+        expect(await noteBody(store, id)).toBeUndefined();
+      },
+    );
+
+    it("rejects with the constraint's own error a transaction whose deferred constraint fails at COMMIT", async () => {
+      const store = await requireDefined(storePromise);
+      const violatingStore = createAdapterStore(
+        wiringGraph,
+        backendWithRead(requireDefined(opened).backend, DEFERRED_VIOLATION_SQL),
+      );
+      const id = `${fixture.name}-deferred`;
+
+      const outcome = await violatingStore
+        .transaction(async (tx) => {
+          await tx.nodes.WiringNote.create({ body: "before COMMIT" }, { id });
+          // Accepted now: the foreign key is checked at COMMIT.
+          await tx.nodes.WiringNote.getById("violation" as never);
+          return "callback returned";
+        })
+        .catch((error: unknown) => error);
+
+      expect(outcome).not.toBe("callback returned");
+      expect(outcome).not.toBeInstanceOf(TransactionRolledBackError);
+      expect(engineCodeOf(outcome)).toBe("23503");
+      expect(await noteBody(store, id)).toBeUndefined();
+    });
+
+    for (const history of [false, true]) {
+      it.runIf(fixture.openWithQueryTimeout !== undefined)(
+        `rejects as rolled back, with no cause, a transaction a statement abandoned by query_timeout aborted on the server${history ? " (history store)" : ""}`,
+        async () => {
+          const openWithQueryTimeout = requireDefined(
+            fixture.openWithQueryTimeout,
+          );
+          const store = await requireDefined(storePromise);
+          const timed = await openWithQueryTimeout(
+            CLIENT_QUERY_TIMEOUT_MILLISECONDS,
+          );
+          try {
+            const abandoningStore = createAdapterStore(
+              wiringGraph,
+              backendWithRead(timed.backend, ABANDONED_FAILING_READ_SQL),
+              history ? { history: true } : {},
+            );
+            const id = `${fixture.name}-abandoned-${history ? "history" : "plain"}`;
+            let abandoned: unknown;
+
+            const outcome = await abandoningStore
+              .transaction(async (tx) => {
+                await tx.nodes.WiringNote.create(
+                  { body: "before the abandoned read" },
+                  { id },
+                );
+                abandoned = await tx.nodes.WiringNote.getById(
+                  "abandoned" as never,
+                ).then(
+                  () => "the read did not time out",
+                  (error: unknown) => error,
+                );
+                await delay(SERVER_FAILURE_WAIT_MILLISECONDS);
+                return "callback returned";
+              })
+              .catch((error: unknown) => error);
+
+            // Rejected on the client, with no SQLSTATE: nothing told the
+            // client that the statement then failed on the server.
+            expect(abandoned).toBeInstanceOf(Error);
+            expect(engineCodeOf(abandoned)).toBeUndefined();
+            expect(outcome).toBeInstanceOf(TransactionRolledBackError);
+            expect((outcome as TransactionRolledBackError).details).toEqual({
+              conflict: false,
+              // The history store's capture flush, before COMMIT, meets the
+              // aborted session; a plain store reaches COMMIT, which replies
+              // ROLLBACK.
+              detectedBy: history ? "refused-statement" : "commit-reply",
+              causeObserved: false,
+            });
+            expect((outcome as Error).cause).toBeUndefined();
+            expect(await noteBody(store, id)).toBeUndefined();
+          } finally {
+            await timed.close();
+          }
+        },
+      );
+    }
 
     it("plants no marker in a nested transaction, which shares the enclosing connection's statement queue", async () => {
       await requireDefined(storePromise);
@@ -844,6 +1066,7 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
         async () => {
           const store = await requireDefined(storePromise);
           const id = `${fixture.name}-${options.isolationLevel}-after-plant`;
+          statementLog.reset();
 
           const seen = await store.transaction(async (tx) => {
             // Released before anything else: the plant is the transaction's
@@ -860,6 +1083,12 @@ export function registerCommitOutcomeWiringTests(fixture: DriverFixture): void {
           }, options);
 
           expect(seen).toBe("committed elsewhere");
+          // The plant ran (and was read back before COMMIT): without it this
+          // case would pass whatever the plant does to the snapshot.
+          expect([
+            statementLog.count(PLANT_PREFIX),
+            statementLog.count(READ_PREFIX),
+          ]).toEqual([1, 1]);
         },
       );
     }

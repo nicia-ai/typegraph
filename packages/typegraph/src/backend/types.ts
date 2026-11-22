@@ -401,24 +401,23 @@ export type BackendCapabilities = Readonly<{
      */
     unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     /**
-     * What tells this backend that a transaction it opened, whose callback
-     * returned normally, is still the open, healthy transaction it began —
-     * the evidence behind its decision to `COMMIT`. One of:
+     * What tells this backend whether a transaction it opened, whose
+     * callback returned normally, committed. One of:
      *
-     * - `"session-marker"`: the backend observes every statement on the
-     *   transaction's session. The moment the native handle (`tx.sql`)
-     *   leaves its hands it sets a marker that lives exactly as long as that
-     *   transaction, and right before `COMMIT` reads it back on the same
-     *   session. Present: the transaction commits. Refused because the
-     *   transaction is aborted (on PostgreSQL, a caught statement failure
-     *   aborts the whole transaction): it rejects with
-     *   `TransactionRolledBackError`. Absent: something the backend did not
-     *   issue ended or replaced the transaction, and it rejects with
-     *   `TransactionOutcomeUnknownError`, which is never retried. With no
-     *   marker set, a transaction in which a statement failed is probed
-     *   before `COMMIT` (aborted: `TransactionRolledBackError`), and one in
-     *   which nothing failed adds no statement at all. The bundled
-     *   PostgreSQL backends declare this.
+     * - `"commit-reply"`: the database's reply to the closing `COMMIT`
+     *   decides. PostgreSQL answers the `COMMIT` of a transaction a failed
+     *   statement aborted with `ROLLBACK`, whatever caused the abort and
+     *   whether or not the client saw the failure; the backend reads that
+     *   reply (node-postgres, neon-serverless, PGlite) or relies on the
+     *   driver refusing to commit after a failed statement (postgres-js),
+     *   and rejects with `TransactionRolledBackError`. A clean transaction
+     *   adds no statement. Once a raw-SQL port (`tx.sql`, a schema write's
+     *   `executeSchemaDdl`) was handed out, the backend also sets a marker
+     *   that lives exactly as long as the transaction and reads it back
+     *   before `COMMIT`, and never retries the attempt automatically: a
+     *   missing marker or a failure is `TransactionOutcomeUnknownError`.
+     *   Transaction control sent through a raw-SQL port is unsupported. The
+     *   bundled PostgreSQL backends declare this.
      * - `"statement-scoped"`: a failed statement undoes only itself and
      *   leaves the transaction usable, and an engine that ends a
      *   transaction on its own refuses the closing `COMMIT`, so the
@@ -430,7 +429,7 @@ export type BackendCapabilities = Readonly<{
      * re-checking the session after a failure it caught itself while
      * compensating a constraint claim.
      */
-    commitOutcome?: "session-marker" | "statement-scoped";
+    commitOutcome?: "commit-reply" | "statement-scoped";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -2306,6 +2305,22 @@ export type InternalTransactionOptions = TransactionOptions &
     nativeHandle?: typeof INTERNAL_DEFERRED_NATIVE_HANDLE;
   }>;
 
+/**
+ * @internal Options of `schemaWriteTransaction` available only to
+ * TypeGraph-owned execution.
+ */
+export type InternalSchemaWriteTransactionOptions = Readonly<{
+  /**
+   * The callback sends only DDL TypeGraph generated through
+   * `executeSchemaDdl`, so it is handed the transaction backend itself.
+   * Without this option the callback's `executeSchemaDdl` releases control
+   * of the transaction (`releaseNativeTransaction`) before its first
+   * statement, since it forwards whatever SQL text it is given. Only
+   * {@link INTERNAL_DEFERRED_NATIVE_HANDLE} has that effect.
+   */
+  nativeHandle?: symbol;
+}>;
+
 // ============================================================
 // Backend Interface
 // ============================================================
@@ -3059,6 +3074,13 @@ export type GraphBackend = Readonly<{
           ) => Promise<void>;
         }>,
     ) => Promise<T>,
+    /**
+     * @internal TypeGraph-owned execution only: a callback that sends only
+     * DDL TypeGraph generated passes `{ nativeHandle: <internal token> }`,
+     * and its `executeSchemaDdl` then releases nothing. Without it, the
+     * callback's `executeSchemaDdl` releases control of the transaction.
+     */
+    options?: Readonly<{ nativeHandle?: symbol }>,
   ) => Promise<T>;
 
   // === Embedding Operations (optional - depends on vector capabilities) ===
@@ -5166,7 +5188,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
     unitOfWork: "interactive",
-    commitOutcome: "session-marker",
+    commitOutcome: "commit-reply",
   }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   orderedAggregates: true,

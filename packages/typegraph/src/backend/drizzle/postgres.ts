@@ -157,7 +157,12 @@ import {
   guardNativeTransactionSavepoint,
   nativeHandleForCallback,
   releaseNativeTransaction,
+  sendsOwnSchemaDdl,
 } from "../native-transaction-release";
+import {
+  registerRawSqlReleasingView,
+  resolveRawSqlReleasingView,
+} from "../raw-sql-release-view";
 import {
   RECORDED_ANCHOR_RETENTION_COLUMN,
   recordedAnchorAdoptionTimeoutBudget,
@@ -177,7 +182,6 @@ import {
   runSessionSavepoint,
   type SavepointGuard,
 } from "../session-savepoint";
-import { registerTransactionCommitCheck } from "../transaction-commit-check";
 import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
@@ -201,6 +205,7 @@ import {
   type IndexState,
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
+  type InternalSchemaWriteTransactionOptions,
   type InternalTransactionOptions,
   type LineageMembers,
   type LockSchemaVersionForWriteParams,
@@ -2188,65 +2193,27 @@ function buildPostgresEngineProfileInternal(
       transactionScoped ? queueOwner : undefined;
 
     /**
-     * A transaction's backend, which may carry the schema-write DDL port a
-     * preflight is handed.
-     */
-    type CommitCheckedBackend = TransactionBackend &
-      Partial<Pick<SchemaWriteTransactionBackend, "executeSchemaDdl">>;
-
-    /**
      * Opens one transaction this backend will commit, and runs `body` in it.
-     * `body` receives the transaction and `registerCommitCheck`, which
-     * hands the transaction's commit check to the Store code that runs on
-     * `txBackend`.
      *
-     * Under `commitOutcome: "session-marker"` the transaction's commit is
-     * decided by the evidence `./execution/postgres-commit-outcome` gathers:
-     * a marker planted when its native handle is released, a probe when a
-     * statement failed, nothing otherwise.
-     * A transaction-scoped backend declares no such evidence: its
+     * Under `commitOutcome: "commit-reply"` the transaction's outcome is
+     * decided by `./execution/postgres-commit-outcome`: the reply to its
+     * `COMMIT`, plus a marker once a raw-SQL port was handed out. A
+     * transaction-scoped backend declares no such evidence: its
      * `db.transaction` opens a savepoint on the enclosing transaction, whose
-     * commit is decided by whoever opened that transaction.
+     * outcome is decided by whoever opened that transaction.
      */
     function openCommittingTransaction<T>(
       config: PgTransactionConfig | undefined,
-      body: (
-        tx: AnyPgTransaction,
-        registerCommitCheck: (txBackend: CommitCheckedBackend) => void,
-      ) => Promise<T>,
+      body: (tx: AnyPgTransaction) => Promise<T>,
     ): Promise<T> {
-      if (capabilities.execution.commitOutcome !== "session-marker") {
-        return db.transaction(
-          (tx) =>
-            body(tx, () => {
-              // No evidence to register: see above.
-            }),
-          config,
-        );
+      if (capabilities.execution.commitOutcome !== "commit-reply") {
+        return db.transaction((tx) => body(tx), config);
       }
       return runMarkedPostgresTransaction(
+        db,
         (markedBody) => db.transaction(markedBody, config),
         (error) => isSerializationFailure(error, ctx.self()),
-        (tx, marker) =>
-          body(tx, (txBackend) => {
-            const executeSchemaDdl = txBackend.executeSchemaDdl;
-            registerTransactionCommitCheck(txBackend, {
-              check: marker.assertCommittable,
-              // A schema preflight's `executeSchemaDdl` forwards any SQL
-              // text, transaction control included: it releases control of
-              // the transaction before its statement is sent.
-              ...(executeSchemaDdl === undefined ?
-                {}
-              : {
-                  preflightTarget: deriveBackend(txBackend, {
-                    executeSchemaDdl(ddl: string): Promise<void> {
-                      releaseNativeTransaction(tx);
-                      return executeSchemaDdl(ddl);
-                    },
-                  }),
-                }),
-            });
-          }),
+        (tx) => body(tx),
       );
     }
 
@@ -2508,7 +2475,7 @@ function buildPostgresEngineProfileInternal(
       const attempt = (): Promise<T> =>
         openCommittingTransaction(
           transactionConfig,
-          async (tx, registerCommitCheck) => {
+          async (tx) => {
             await acquireSchemaWriteFence(tx, graphId, fence, {
               kind: "read-with-lock",
             });
@@ -2537,7 +2504,20 @@ function buildPostgresEngineProfileInternal(
                 recordedTime: provisioning.recordedTime,
                 isFirstParty,
               });
-            registerCommitCheck(txBackend);
+            // `executeSchemaDdl` forwards any SQL text, transaction control
+            // included: the view handed to code TypeGraph does not own (a
+            // preflight, a public `schemaWriteTransaction` callback)
+            // releases control of the transaction before its statement is
+            // sent.
+            registerRawSqlReleasingView(
+              txBackend,
+              deriveBackend(txBackend, {
+                executeSchemaDdl(ddl: string): Promise<void> {
+                  releaseNativeTransaction(tx);
+                  return txBackend.executeSchemaDdl(ddl);
+                },
+              }),
+            );
             try {
               return await fn(txBackend);
             } finally {
@@ -2673,14 +2653,13 @@ function buildPostgresEngineProfileInternal(
 
           return openCommittingTransaction(
             txConfig,
-            async (tx, registerCommitCheck) => {
+            async (tx) => {
               const { backend: txBackend, drainAndClose } =
                 bindTransactionBackend(
                   tx,
                   isFirstParty,
                   nestedTransactionConnection,
                 );
-              registerCommitCheck(txBackend);
               try {
                 return await fn(
                   markSchemaFencedInsertEligibleUnderFence(
@@ -2981,8 +2960,15 @@ function buildPostgresEngineProfileInternal(
         async schemaWriteTransaction<T>(
           graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+          options?: InternalSchemaWriteTransactionOptions,
         ): Promise<T> {
-          return runSchemaWriteTransaction(graphId, (target) => fn(target));
+          // The callback's `executeSchemaDdl` forwards whatever SQL it is
+          // given: it releases control of the transaction, unless the caller
+          // is TypeGraph sending only DDL it generated.
+          const ownDdl = sendsOwnSchemaDdl(options);
+          return runSchemaWriteTransaction(graphId, (target) =>
+            fn(ownDdl ? target : resolveRawSqlReleasingView(target)),
+          );
         },
       },
 

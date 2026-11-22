@@ -1519,7 +1519,7 @@ export class TransactionOutcomeUnknownError extends TypeGraphError {
 
 // @public
 export type TransactionOutcomeUnknownErrorDetails = Readonly<{
-    reason: "transaction-ended" | "native-handle-released";
+    reason: "transaction-ended" | "native-handle-released" | "commit-reply-unread";
 }>;
 
 // @public
@@ -1534,6 +1534,8 @@ export class TransactionRolledBackError extends TypeGraphError {
 // @public
 export type TransactionRolledBackErrorDetails = Readonly<{
     conflict: boolean;
+    detectedBy: "commit-reply" | "refused-statement" | "driver";
+    causeObserved: boolean;
 }>;
 
 // @public

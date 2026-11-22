@@ -264,7 +264,7 @@ type BackendCapabilities = Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
-        commitOutcome?: "session-marker" | "statement-scoped";
+        commitOutcome?: "commit-reply" | "statement-scoped";
     }>;
     windowFunctions: boolean;
     orderedAggregates?: boolean;
@@ -4075,7 +4075,10 @@ type GraphBackend = Readonly<{
         tableExists: (this: void, tableName: string) => Promise<boolean>;
         executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
         deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
-    }>) => Promise<T>) => Promise<T>;
+    }>) => Promise<T>,
+    options?: Readonly<{
+        nativeHandle?: symbol;
+    }>) => Promise<T>;
     upsertEmbedding?: (this: void, params: UpsertEmbeddingParams) => Promise<void>;
     upsertEmbeddingBatch?: (this: void, params: UpsertEmbeddingBatchParams) => Promise<void>;
     deleteEmbedding?: (this: void, params: DeleteEmbeddingParams) => Promise<void>;
