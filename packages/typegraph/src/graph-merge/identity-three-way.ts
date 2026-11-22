@@ -136,6 +136,58 @@ function isIdenticalIdentityRow(
 export const DUPLICATE_IDENTITY_ASSERTION_DROP_REASON =
   "identity:duplicate-assertion";
 
+/**
+ * The injective key of one identity assertion ROW: its id plus its complete
+ * truth (validity window). Two rows share it exactly when
+ * {@link isIdenticalIdentityRow} holds for them, so a set of these keys answers
+ * "is an identical row already reported" in constant time. An unbounded row
+ * encodes a shorter tuple, so it never collides with a bounded one.
+ */
+function identityRowKey(assertion: IdentityTransferAssertion): string {
+  const { id, validFrom, validTo } = assertion;
+  return encodeTupleKey(
+    validTo === undefined ? [id, validFrom] : [id, validFrom, validTo],
+  );
+}
+
+/**
+ * THE "does this losing row need its own `dropped` entry" decision both
+ * survivor reducers read: not when it is the very row that won (two branches
+ * staging the IDENTICAL row collapse silently), and not when an identical row
+ * is already reported — two branches carrying one imported row that a third
+ * candidate beats lose it once, whichever order the candidates arrive in.
+ * `reported` holds the {@link identityRowKey} of every row the dedupe group has
+ * already reported: a set, not a list, because endpoint reconciliation can map
+ * thousands of distinct assertions onto one pair, and scanning every reported
+ * row per new loser made planning quadratic in the group size.
+ */
+export function isUnreportedIdentityLoser(
+  loser: IdentityTransferAssertion,
+  winner: IdentityTransferAssertion,
+  reported: ReadonlySet<string>,
+): boolean {
+  return (
+    !isIdenticalIdentityRow(loser, winner) &&
+    !reported.has(identityRowKey(loser))
+  );
+}
+
+/**
+ * Asks {@link isUnreportedIdentityLoser} and, when the loser needs its own
+ * `dropped` entry, marks it reported for its dedupe group. Both reducers go
+ * through here, so neither can mark a row under a key the predicate does not
+ * read.
+ */
+function claimIdentityLoserReport(
+  loser: IdentityTransferAssertion,
+  winner: IdentityTransferAssertion,
+  reported: Set<string>,
+): boolean {
+  if (!isUnreportedIdentityLoser(loser, winner, reported)) return false;
+  reported.add(identityRowKey(loser));
+  return true;
+}
+
 function droppedIdentityAssertion(
   assertion: IdentityTransferAssertion,
   reason: string,
@@ -260,20 +312,22 @@ function assertedOutcome(
 ): IdentityPairOutcome {
   const [first, ...rest] = candidates;
   let survivor = requireDefined(first);
-  const superseded: DroppedItem[] = [];
+  const losers: IdentityTransferAssertion[] = [];
+  const reported = new Set<string>();
   for (const candidate of rest) {
     const picked = pickIdentitySurvivor(candidate, survivor, committedIds);
     survivor = picked.winner;
-    if (isIdenticalIdentityRow(picked.loser.assertion, picked.winner.assertion))
-      continue;
-    superseded.push(
-      droppedIdentityAssertion(
-        picked.loser.assertion,
-        DUPLICATE_IDENTITY_ASSERTION_DROP_REASON,
-      ),
-    );
+    const loser = picked.loser.assertion;
+    if (claimIdentityLoserReport(loser, survivor.assertion, reported))
+      losers.push(loser);
   }
-  return { kind: "asserted", survivor: survivor.assertion, superseded };
+  return {
+    kind: "asserted",
+    survivor: survivor.assertion,
+    superseded: losers.map((loser) =>
+      droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
+    ),
+  };
 }
 
 /**
@@ -315,6 +369,7 @@ export function dedupeIdentityAssertionsRaw(
   dropped: readonly DroppedItem[];
 }> {
   const survivorBySemantic = new Map<string, IdentityTransferAssertion>();
+  const reportedBySemantic = new Map<string, Set<string>>();
   const dropped: DroppedItem[] = [];
   for (const assertion of assertions) {
     const key = identityDedupeKey(assertion);
@@ -331,7 +386,9 @@ export function dedupeIdentityAssertionsRaw(
     const survivor = picked.winner.assertion;
     const loser = picked.loser.assertion;
     survivorBySemantic.set(key, survivor);
-    if (isIdenticalIdentityRow(loser, survivor)) continue;
+    const reported = reportedBySemantic.get(key) ?? new Set<string>();
+    reportedBySemantic.set(key, reported);
+    if (!claimIdentityLoserReport(loser, survivor, reported)) continue;
     dropped.push(
       droppedIdentityAssertion(loser, DUPLICATE_IDENTITY_ASSERTION_DROP_REASON),
     );

@@ -564,9 +564,9 @@ export function buildPostgresSystemIndexBuilders(
 // Minimal table shapes (shared between dialect schemas)
 // ============================================================
 
-type NamedSqlWrapper = SQLWrapper & Readonly<{ name: string }>;
+export type NamedSqlWrapper = SQLWrapper & Readonly<{ name: string }>;
 
-type NodeIndexTable = Readonly<{
+export type NodeIndexTable = Readonly<{
   graphId: NamedSqlWrapper;
   kind: NamedSqlWrapper;
   id: NamedSqlWrapper;
@@ -579,7 +579,7 @@ type NodeIndexTable = Readonly<{
   deletedAt: NamedSqlWrapper;
 }>;
 
-type EdgeIndexTable = Readonly<{
+export type EdgeIndexTable = Readonly<{
   graphId: NamedSqlWrapper;
   id: NamedSqlWrapper;
   kind: NamedSqlWrapper;

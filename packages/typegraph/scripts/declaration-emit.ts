@@ -2,7 +2,8 @@
  * The declaration-pipeline facts `scripts/build.ts` runs on.
  *
  * The package's declarations are emitted ONCE by `tsc` into the directory
- * `tsup.config.ts` names, and tsup's declaration rollup then bundles the
+ * `tsup.config.ts` names, and the declaration rollup
+ * (`scripts/declaration-rollup.ts`) then bundles the
  * per-entrypoint `.d.ts` out of that emit instead of re-deriving declarations
  * from source inside the rollup graph. Rolling from source made
  * rollup-plugin-dts build a live TypeScript program and call `program.emit()`
@@ -16,7 +17,7 @@
  * emit the rollup used to drive.
  *
  * The emit directory and the entry mapping belong to `tsup.config.ts`, which
- * the rollup reads directly; this module resolves them against the package root
+ * the declaration rollup reads directly; this module resolves them against the package root
  * and adds the facts only the pipeline needs.
  */
 import path from "node:path";
@@ -41,7 +42,7 @@ export const DECLARATION_EMIT_DIR = path.resolve(
 /**
  * Every declaration file the rollup takes as an entry, resolved for
  * file-system use. A watch session waits for exactly these before starting
- * tsup, so the files it waits on are the files the rollup will open.
+ * the declaration rollup, so the files it waits on are the files the rollup will open.
  */
 export const DECLARATION_ENTRY_FILES: readonly string[] = Object.values(
   DECLARATION_ENTRY,
@@ -61,22 +62,3 @@ export const DECLARATION_TSCONFIG = path.join(
  * must not fall below this one.
  */
 export const DECLARATION_HEAP_MB = 8192;
-
-/**
- * tsup's declaration CLI flags (`--dts`, `--dts-only`, `--dts-resolve`,
- * `--experimental-dts`) REPLACE the config's `dts` option, which would discard
- * the emitted declaration roots and silently re-root the rollup at `src` — the
- * ~10 GiB path this pipeline exists to avoid, which then dies on the heap
- * ceiling. Refuse them by name instead of forwarding them.
- */
-export function assertNoDeclarationOverride(args: readonly string[]): void {
-  const DECLARATION_FLAG_PREFIXES = ["--dts", "--experimental-dts"] as const;
-  const override = args.find((argument) =>
-    DECLARATION_FLAG_PREFIXES.some((prefix) => argument.startsWith(prefix)),
-  );
-  if (override !== undefined) {
-    throw new Error(
-      `${override} cannot be passed to the build: it replaces the declaration roots this pipeline emits, re-rooting the declaration rollup at "src". Edit tsup.config.ts's declaration entry instead.`,
-    );
-  }
-}

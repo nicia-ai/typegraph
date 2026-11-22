@@ -14,7 +14,7 @@ export type ExpressionProjectionEntry<T = unknown> = Readonly<{
   expression: DatabaseExpression<T>;
 }>;
 
-type ExpressionValue<Expression> =
+export type ProjectedExpressionValue<Expression> =
   Expression extends DatabaseExpression<infer Value> ? Value : never;
 /** Preserves a one-field projection as a tuple so `$scalar()` can reject wider records. */
 export type ExpressionProjectionEntries<
@@ -23,7 +23,9 @@ export type ExpressionProjectionEntries<
   keyof Fields extends never ? readonly []
   : string extends keyof Fields ? readonly ExpressionProjectionEntry[]
   : IsUnion<keyof Fields> extends true ? readonly ExpressionProjectionEntry[]
-  : readonly [ExpressionProjectionEntry<ExpressionValue<Fields[keyof Fields]>>];
+  : readonly [
+      ExpressionProjectionEntry<ProjectedExpressionValue<Fields[keyof Fields]>>,
+    ];
 
 export type ExpressionSubqueryRelation<
   Projection extends readonly ExpressionProjectionEntry[],
@@ -34,11 +36,11 @@ export type ExpressionSubqueryRelation<
   toAst: () => QueryAst;
 }>;
 
-type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<
+export type ProjectedExpressionSubqueryRelation = ExpressionSubqueryRelation<
   readonly ExpressionProjectionEntry[]
 >;
 
-type ScalarExpressionSubqueryRelation<T> = ExpressionSubqueryRelation<
+export type ScalarExpressionSubqueryRelation<T> = ExpressionSubqueryRelation<
   readonly [ExpressionProjectionEntry<T>]
 >;
 

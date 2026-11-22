@@ -302,7 +302,7 @@ export function edgeCardinalityAxis(
 }
 
 /** The relation a claim row lives in. */
-type ClaimRelation = "uniques" | "edgeClaims";
+export type ClaimRelation = "uniques" | "edgeClaims";
 
 /** A claim row named in full — the row a statement is about to lock. */
 export type ClaimTarget = Readonly<{

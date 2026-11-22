@@ -90,7 +90,7 @@ export type RestoredRecordedInstant = string & {
  * exported on its own — callers narrow {@link RecordedInstantParts} by
  * `kind` rather than naming either variant directly.
  */
-type TypeGraphRecordedInstantParts = Readonly<{
+export type TypeGraphRecordedInstantParts = Readonly<{
   kind: "typegraph";
   /** Absent only on legacy r1 anchors, which cannot authorize a recorded read. */
   origin?: string;
@@ -103,7 +103,7 @@ type TypeGraphRecordedInstantParts = Readonly<{
  * The parsed halves of an engine-native (`e1:`) recorded instant. Not
  * exported on its own — see {@link TypeGraphRecordedInstantParts}.
  */
-type EngineRecordedInstantParts = Readonly<{
+export type EngineRecordedInstantParts = Readonly<{
   kind: "engine";
   revision: string;
   recordedAt: string;

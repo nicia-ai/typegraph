@@ -199,7 +199,7 @@ export type ObjectPredicate = Readonly<{
 /**
  * Logical AND predicate.
  */
-type AndPredicate = Readonly<{
+export type AndPredicate = Readonly<{
   __type: "and";
   predicates: readonly PredicateExpression[];
 }>;
@@ -207,7 +207,7 @@ type AndPredicate = Readonly<{
 /**
  * Logical OR predicate.
  */
-type OrPredicate = Readonly<{
+export type OrPredicate = Readonly<{
   __type: "or";
   predicates: readonly PredicateExpression[];
 }>;
@@ -215,13 +215,13 @@ type OrPredicate = Readonly<{
 /**
  * Logical NOT predicate.
  */
-type NotPredicate = Readonly<{
+export type NotPredicate = Readonly<{
   __type: "not";
   predicate: PredicateExpression;
 }>;
 
 /** A typed Boolean database expression used as a SQL predicate. */
-type DatabaseExpressionPredicate = Readonly<{
+export type DatabaseExpressionPredicate = Readonly<{
   __type: "database_expression_predicate";
   expression: DatabaseExpression<boolean | undefined>;
 }>;
@@ -399,7 +399,7 @@ export type PredicateExpression =
 /**
  * The starting point of a query (the FROM clause).
  */
-type QueryStart = Readonly<{
+export type QueryStart = Readonly<{
   alias: string;
   kinds: readonly string[]; // Expanded per `expansion` (subclasses/narrower)
   /**
@@ -537,7 +537,7 @@ export function mergeEdgeKinds(traversal: Traversal): readonly string[] {
 /**
  * Supported aggregate functions.
  */
-type AggregateFunction =
+export type AggregateFunction =
   "count" | "countDistinct" | "sum" | "avg" | "min" | "max";
 
 /**
@@ -614,7 +614,7 @@ export type SelectiveField = Readonly<{
 /**
  * Null ordering preference.
  */
-type NullOrdering = "first" | "last";
+export type NullOrdering = "first" | "last";
 
 /**
  * Sort direction.
@@ -669,7 +669,7 @@ export type NodePredicate = Readonly<{
 /**
  * Temporal query options.
  */
-type TemporalOptions = Readonly<{
+export type TemporalOptions = Readonly<{
   mode: TemporalMode;
   asOf?: string;
 }>;

@@ -100,6 +100,10 @@ import {
   runInsertIfAbsent,
   runInsertNoReturn,
 } from "../insert-dispatch";
+import {
+  type OperationScoped,
+  type StatementBackend,
+} from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import {
@@ -211,6 +215,12 @@ export type WriteTarget = Readonly<
  * validation or change nested writes' fence and revision-clock behavior.
  */
 export function unfencedTarget(
+  target: OperationScoped<WriteTarget>,
+): StatementBackend;
+export function unfencedTarget(
+  target: WriteTarget,
+): GraphBackend | TransactionBackend;
+export function unfencedTarget(
   target: WriteTarget,
 ): GraphBackend | TransactionBackend {
   return target as GraphBackend | TransactionBackend;
@@ -221,6 +231,12 @@ export function unfencedTarget(
  * executor against the current transaction receiver. Keeping this as one seam
  * prevents each fallback consumer from minting its own widening escape.
  */
+export function nestedManagedWriteTarget(
+  target: OperationScoped<WriteTarget>,
+): StatementBackend;
+export function nestedManagedWriteTarget(
+  target: WriteTarget,
+): GraphBackend | TransactionBackend;
 export function nestedManagedWriteTarget(
   target: WriteTarget,
 ): GraphBackend | TransactionBackend {

@@ -109,7 +109,7 @@ export type IndexWhereLiteral = Readonly<{
   valueType: ValueType;
 }>;
 
-type IndexWhereComparableValue<T> =
+export type IndexWhereComparableValue<T> =
   NonNullable<T> extends string ? string
   : NonNullable<T> extends number ? number
   : NonNullable<T> extends boolean ? boolean
@@ -177,9 +177,9 @@ export type IndexWhereInput<Builder> =
 // Index Definitions
 // ============================================================
 
-type NonEmptyJsonPointerFor<T> = Exclude<JsonPointerFor<T>, "">;
+export type NonEmptyJsonPointerFor<T> = Exclude<JsonPointerFor<T>, "">;
 
-type NonEmptyJsonPointerSegmentsFor<T> = Exclude<
+export type NonEmptyJsonPointerSegmentsFor<T> = Exclude<
   JsonPointerSegmentsFor<T>,
   readonly []
 >;

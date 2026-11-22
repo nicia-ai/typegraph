@@ -281,3 +281,120 @@ export type {
   VectorIndexType,
   VectorMetric,
 } from "./backend/types";
+
+/**
+ * Types the public declarations name without being everyday API: exported so
+ * a consumer's declaration emit can spell an inferred type through a public
+ * specifier. Entrypoints whose declarations name them load this entrypoint's
+ * declarations (contract 3 in `tests/public-type-reachability.test.ts`).
+ */
+export type { RecordedTimeOwnership } from "./backend/capabilities/recorded-time-ownership";
+export type { BackendValidityEndMutation } from "./backend/types";
+export type { EdgeAcyclicityViolation } from "./store/acyclicity";
+export type { InternalGraphAlgorithms } from "./store/algorithms";
+export type {
+  InternalBaseTraversalOptions,
+  InternalDegreeOptions,
+  InternalLabelPropagationOptions,
+  InternalNeighborsOptions,
+  InternalPageRankOptions,
+  InternalPersonalizedPageRankOptions,
+  InternalReachableOptions,
+  InternalShortestPathOptions,
+  InternalTemporalAlgorithmOptions,
+  InternalWeaklyConnectedComponentsOptions,
+  InternalWeightedShortestPathOptions,
+  IterativeMemoryOptions,
+} from "./store/algorithms/types";
+export type { ClaimRelation } from "./store/claims/axis";
+export type {
+  ConstrainedCardinality,
+  ConstrainedTargetCardinality,
+} from "./store/claims/edge-claims";
+export type {
+  HistoryStoreBackendMember,
+  UnclassifiedHistoryStoreBackendMember,
+  UnsafeHistoryStoreBackendMember,
+} from "./store/history-store-backend";
+export type { NeighborReadOptionsBoundary } from "./store/neighbors";
+export type {
+  ExactExpansion,
+  ResolveNode,
+  ResolveNodeType,
+  SearchNodeType,
+  StatedExpansion,
+  StoreSearchContext,
+} from "./store/search-facade";
+export type {
+  AdapterHistoryStoreTransactions,
+  AdapterStoreReconciliation,
+  AdapterStoreTransactions,
+  AddedStoreReadKey,
+  AddedStoreReads,
+  AddedStoreReadsBoundary,
+  CheckedReadScopeBoundary,
+  ReconciledOption,
+  ResolvedStoreCore,
+  StoreCore,
+  StoreIdentityAccess,
+  StoreTransactions,
+  ViewIdentityAccess,
+} from "./store/store";
+export type {
+  CoordinatePinnedView,
+  RecordedStoreViewImplementation,
+  StoreViewImplementation,
+} from "./store/store-view";
+export type {
+  EdgeProjectionPropertyKey,
+  EmptyShape,
+  HasMeta,
+  NodeProjectionPropertyKey,
+  ProjectedEdgeResult,
+  ProjectedNodeResult,
+  ProjectionSelection,
+  SelectedEdgeProps,
+  SelectedNodeProps,
+  SubgraphEdgeProjectionField,
+  SubgraphEdgeProjectionMap,
+  SubgraphEdgeResultForKind,
+  SubgraphNodeProjectionField,
+  SubgraphNodeProjectionMap,
+  SubgraphNodeResultForKind,
+  SubgraphProject,
+  SubgraphProjectFor,
+} from "./store/subgraph";
+export type {
+  AdapterTransactionSqlAccess,
+  AssignableNodeTypes,
+  EdgeAllowedPairs,
+  EdgeBulkCreateItem,
+  EdgeBulkGetOrCreateItem,
+  EdgeBulkInsertItem,
+  EdgeBulkUpsertItem,
+  EdgeCreateArguments,
+  EdgeCreateArgumentsTuple,
+  EdgeCreateOptions,
+  EdgeEndpointPairTypes,
+  EdgeFindByEndpointsArguments,
+  EdgeFromNodeTypes,
+  EdgeFromTypes,
+  EdgeGetOrCreateByEndpointsArguments,
+  EdgeMeta,
+  EdgeToNodeTypes,
+  EdgeToTypes,
+  ExtractAllowedPairs,
+  ExtractTargets,
+  GraphWithoutOntology,
+  HeterogeneousNodeForKind,
+  KindNodeTypes,
+  MapRowToMeta,
+  NodeMeta,
+  NodeReferenceGroup,
+  OperationOutcomeFacts,
+  TemporalMetaFieldMap,
+  TransactionCollections,
+  UnbrandParam,
+  UnbrandRecord,
+  WidenBrandedIds,
+} from "./store/types";

@@ -34,6 +34,7 @@ import {
   type VectorMetricType,
   type VectorSimilarityPredicate,
 } from "./ast";
+import { type EqualityOperand, type MembershipOperand } from "./builder/types";
 import {
   inSubqueryComparisonValueType,
   isDateComparison,
@@ -174,9 +175,6 @@ type FieldBuilder<T> =
   : [T] extends [Record<string, unknown>] ? ObjectFieldBuilder<T>
   : BaseFieldBuilder<T>;
 
-type EqualityOperand<T> = T | FieldRef<T> | ParameterRef;
-type MembershipOperand<T> = readonly T[] | ParameterRef;
-
 type NullFieldBuilder = Readonly<{
   isNull: () => Predicate;
   isNotNull: () => Predicate;
@@ -204,7 +202,7 @@ type BaseFieldBuilder<T = unknown> = Readonly<{
  *   on the query builder) is the final result count returned to the
  *   caller after any fusion.
  */
-type MatchesOptions = Readonly<{
+export type MatchesOptions = Readonly<{
   /**
    * Parse mode for the query string. Default: "websearch".
    *
@@ -452,7 +450,7 @@ type EmbeddingFieldBuilder = NullFieldBuilder &
 /**
  * Creates a field reference.
  */
-type FieldRefOptions = Readonly<{
+export type FieldRefOptions = Readonly<{
   jsonPointer?: JsonPointer | undefined;
   valueType?: ValueType | undefined;
   elementType?: ValueType | undefined;
