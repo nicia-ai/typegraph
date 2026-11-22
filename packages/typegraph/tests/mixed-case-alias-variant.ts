@@ -42,7 +42,7 @@ function collectAliases(value: unknown, aliases: Set<string>): void {
 }
 
 /** The mixed-case spelling of one alias. */
-export function mixedCaseAlias(alias: string): string {
+function mixedCaseAlias(alias: string): string {
   const capitalized = `${alias.charAt(0).toUpperCase()}${alias.slice(1)}`;
   return alias.length === 1 ? `${capitalized}x` : capitalized;
 }
