@@ -32,8 +32,14 @@ import { computeUniqueKey } from "../../../src/constraints";
 import { buildKindRegistry } from "../../../src/registry";
 import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
-import { expectObservation } from "../../helpers/known-defect";
+import {
+  type DefectScope,
+  expectObservation,
+} from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
+
+/** #948 reproduces on every lane: a scope naming no facet covers them all. */
+const ON_EVERY_LANE: DefectScope = {};
 
 /** The issue tracking the defect every case in this file pins. */
 const KNOWN_DEFECT = "known defect #948";
@@ -141,7 +147,7 @@ function expectRefusal<TValue>(
     lane: { dialect: store.backend.dialect },
     observed,
     correct,
-    defects: [{ label: "#948", on: {}, today }],
+    defects: [{ label: "#948", on: ON_EVERY_LANE, today }],
   });
 }
 
