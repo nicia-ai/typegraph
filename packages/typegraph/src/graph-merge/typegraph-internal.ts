@@ -31,7 +31,6 @@ export type {
   LineageDelta,
   NodeRow,
   SchemaVersionRow,
-  TransactionBackend,
   TransactionOptions,
 } from "../backend/types";
 export { isLiveNodeRow } from "../backend/types";

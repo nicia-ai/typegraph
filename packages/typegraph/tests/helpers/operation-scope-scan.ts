@@ -31,7 +31,7 @@ const STORE_ROOT = path.join(SOURCE_ROOT, "store");
 export const MINT_MODULE = "src/store/operation-scope.ts";
 
 /** The transitional whole-transaction shim, counted by its own ratchet. */
-export const LEGACY_SHIM_NAME = "legacyTransactionOperation";
+const LEGACY_SHIM_NAME = "legacyTransactionOperation";
 
 /** The module-private unique symbol that keys the brand property. */
 const BRAND_KEY_NAME = "OPERATION_SCOPED";
