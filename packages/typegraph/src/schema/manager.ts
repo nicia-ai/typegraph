@@ -55,6 +55,9 @@ import {
   legacyTransactionOperation,
   type OperationBackend,
   type OperationScoped,
+  type StoreCommitSchemaVersionWithPreflight,
+  storeCommitSchemaVersionWithPreflight,
+  storeSetActiveVersionWithPreflight,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
 import { freezeDeep } from "../utils/object";
@@ -941,8 +944,10 @@ function requireCommitWithPreflight(
   backend: GraphBackend,
   graph: GraphDef,
   capabilityError: AtomicPreflightCapabilityError,
-): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
-  const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+): StoreCommitSchemaVersionWithPreflight {
+  const commitWithPreflight = storeCommitSchemaVersionWithPreflight(
+    backend.commitSchemaVersionWithPreflight,
+  );
   if (commitWithPreflight === undefined) {
     throw atomicPreflightUnsupportedError(graph.id, capabilityError);
   }
@@ -1208,7 +1213,9 @@ async function initializeSchemaImpl<G extends GraphDef>(
     if (edgeMatchIdentityPreflight === undefined) {
       return backend.commitSchemaVersion(commit);
     }
-    const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+    const commitWithPreflight = storeCommitSchemaVersionWithPreflight(
+      backend.commitSchemaVersionWithPreflight,
+    );
     return commitWithPreflight === undefined ?
         commitInitialEdgeIdentityOnEmptyKinds(
           backend,
@@ -2043,7 +2050,9 @@ export async function rollbackSchema(
     await backend.setActiveVersion(params);
     return;
   }
-  const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
+  const setActiveWithPreflight = storeSetActiveVersionWithPreflight(
+    backend.setActiveVersionWithPreflight,
+  );
   if (setActiveWithPreflight === undefined) throw preflight.unsupportedError;
   await setActiveWithPreflight(
     params,

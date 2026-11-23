@@ -43,6 +43,7 @@ import {
   legacyTransactionOperation,
   type OperationScoped,
   type StatementBackend,
+  storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "./operation-scope";
 import { closeRecordedHardDeletedKind } from "./recorded-capture";
@@ -479,7 +480,9 @@ async function materializeOne(
   ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
   const recordKindRemoval = requireDefined(ctx.backend.recordKindRemoval);
-  const schemaWriteTransaction = ctx.backend.schemaWriteTransaction;
+  const schemaWriteTransaction = storeSchemaWriteTransaction(
+    ctx.backend.schemaWriteTransaction,
+  );
   if (schemaWriteTransaction === undefined) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend that can hold the " +
@@ -904,7 +907,9 @@ async function reclaimRemovedVectorFieldTables(
 
   const results: ReclaimedVectorFieldEntry[] = [];
   let skippedAfterLockedRecheck = false;
-  const schemaWriteTransaction = backend.schemaWriteTransaction;
+  const schemaWriteTransaction = storeSchemaWriteTransaction(
+    backend.schemaWriteTransaction,
+  );
   if (orphans.length > 0 && schemaWriteTransaction === undefined) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend that can hold the " +

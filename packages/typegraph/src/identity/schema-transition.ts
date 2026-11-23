@@ -25,6 +25,7 @@ import {
   type OperationBackend,
   type OperationScoped,
   type StatementBackend,
+  storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
 import {
@@ -331,7 +332,7 @@ async function provisionDerivedRelations(
     await ports.ensureIdentityTables(tableNames, { provisionMissing: true });
     return;
   }
-  const fence = backend.schemaWriteTransaction;
+  const fence = storeSchemaWriteTransaction(backend.schemaWriteTransaction);
   const identityTableDdl = backend.identityTableDdl;
   if (fence === undefined || identityTableDdl === undefined) {
     throw identityDerivedUpgradeUnsupportedError(graphId, [

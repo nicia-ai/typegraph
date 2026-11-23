@@ -254,22 +254,27 @@ const DETERMINISM_RESTRICTIONS = [
 
 const OPERATION_BRAND_MESSAGE =
   "Do not assert a value to OperationScoped / OperationBackend / " +
-  "StatementBackend / LegacyOperationTarget / StoreTransactionBackend (by " +
-  "name, alias, namespace, import type or typeof a mint), and do not narrow " +
-  "to one with a type predicate. A raw transaction backend reaches a " +
-  "statement-issuing Store function only through a mint in " +
-  "src/store/operation-scope.ts (enterOperation at a public Store member, " +
-  "scopeWriteFrameTarget in the write executor, the transitional " +
-  "legacyTransactionOperation); an assertion anywhere else forges the brand, " +
-  "or the engine type a StoreTransactionBackend records, and hides a call " +
-  "path the type exists to expose. Call a mint instead. " +
+  "StatementBackend / LegacyOperationTarget / StoreTransactionBackend, or " +
+  "to a Store-facing schema opener (StoreSchemaWriteTransaction, " +
+  "StoreSchemaPreflightMember, StoreCommitSchemaVersionWithPreflight, " +
+  "StoreSetActiveVersionWithPreflight, StoreAdoptSchemaWriteTransaction, " +
+  "StoreAdoptedSchemaWriteTransaction) (by name, alias, namespace, import " +
+  "type or typeof a mint), and do not narrow to one with a type predicate. A " +
+  "raw transaction backend reaches a statement-issuing Store function only " +
+  "through a mint in src/store/operation-scope.ts (enterOperation at a " +
+  "public Store member, scopeWriteFrameTarget in the write executor, the " +
+  "transitional legacyTransactionOperation), and a specialised (schema-" +
+  "write or preflight) transaction only through the boundary mint for the " +
+  "engine member that opens it; an assertion anywhere else forges the " +
+  "brand, or the engine type a StoreTransactionBackend records, and hides a " +
+  "call path the type exists to expose. Call a mint instead. " +
   "tests/operation-scope-ratchet.test.ts pins every forge site, found by " +
   "type, to the mints.";
 
 const OPERATION_BRAND_TYPE_NAMES =
-  "/^(OperationScoped|OperationBackend|StatementBackend|LegacyOperationTarget|StoreTransactionBackend)$/";
+  "/^(OperationScoped|OperationBackend|StatementBackend|LegacyOperationTarget|StoreTransactionBackend|StoreSchemaWriteTransaction|StoreSchemaPreflightMember|StoreCommitSchemaVersionWithPreflight|StoreSetActiveVersionWithPreflight|StoreAdoptSchemaWriteTransaction|StoreAdoptedSchemaWriteTransaction)$/";
 const OPERATION_MINT_NAMES =
-  "/^(enterOperation|scopeWriteFrameTarget|legacyTransactionOperation)$/";
+  "/^(enterOperation|scopeWriteFrameTarget|legacyTransactionOperation|storeSchemaWriteTransaction|storeCommitSchemaVersionWithPreflight|storeSetActiveVersionWithPreflight|storeAdoptSchemaWriteTransaction)$/";
 const OPERATION_BRAND_CONTEXT =
   ":matches(TSAsExpression, TSTypeAssertion, TSTypePredicate)";
 
@@ -284,8 +289,7 @@ const OPERATION_BRAND_CONTEXT =
  * forge by the brand's property rather than its name, so it also sees what
  * no selector can (a local alias, `Parameters<typeof consumer>[2]`,
  * `as never` into a branded parameter, a generic instantiated to the brand).
- * The two mints in `src/store/operation-scope.ts` carry an inline disable
- * each. Exported so that test fires THESE selectors.
+ * Each mint in `src/store/operation-scope.ts` carries an inline disable. Exported so that test fires THESE selectors.
  */
 export const OPERATION_BRAND_RESTRICTIONS = [
   {

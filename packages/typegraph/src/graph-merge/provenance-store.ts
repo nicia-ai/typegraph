@@ -139,6 +139,7 @@ import { z } from "zod";
 import type { SchemaWriteTransactionBackend } from "../backend/types";
 import {
   legacyTransactionOperation,
+  storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
 import { encodeTupleKey } from "../utils/tuple-key";
@@ -371,7 +372,7 @@ async function claimSidecarOwnership(
   graph: ReturnType<typeof buildOwnedProvenanceGraph>,
   targetGraphId: string,
 ): Promise<SidecarDisposition> {
-  const fence = backend.schemaWriteTransaction;
+  const fence = storeSchemaWriteTransaction(backend.schemaWriteTransaction);
   if (fence === undefined) {
     throw provenanceClaimUnfenced(graph.id, targetGraphId);
   }

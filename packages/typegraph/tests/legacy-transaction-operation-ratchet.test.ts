@@ -10,12 +10,16 @@
  * exactly how every statement in a transaction ran before handles existed,
  * now visible and counted.
  *
- * Every reference to the shim is found by symbol (a renamed import or a
- * stored reference is found as surely as a call), must be a direct call, and
- * is pinned to the inventory below by file and enclosing function. Each entry
- * names the family whose conversion removes it; `FAMILY_BASELINE` is the
- * table those conversions count down. Adding a call fails; a conversion that
- * removes calls lowers its entries and its family here in the same change.
+ * Every reference to the shim is found by symbol, and every call by the
+ * signature the checker resolves (`legacyShimSites`), so a renamed import, a
+ * namespace member, a string-literal element access, a re-export, a
+ * destructured alias and a call through a stored value are all found. Only a
+ * direct call by name (renamed or not) is allowed, and each is pinned to the
+ * inventory below by file and enclosing function. Adding a call fails.
+ * Each entry names the family whose conversion removes it;
+ * `FAMILY_BASELINE` is the table those conversions count down. A conversion
+ * that removes calls lowers its entries and its family here in the same
+ * change.
  */
 import path from "node:path";
 
@@ -23,6 +27,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   createScanProgram,
+  errorDiagnostics,
   legacyShimSites,
   PACKAGE_ROOT,
   type ScanProgram,
@@ -44,7 +49,7 @@ type Family =
 const FAMILY_BASELINE = {
   "node writes": 4,
   "edge writes": 1,
-  "query terminals and tx.backend": 10,
+  "query terminals and tx.backend": 11,
   "identity and search facades": 40,
   "capture and flush": 10,
   "schema and evolution": 12,
@@ -105,6 +110,11 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     count: 1,
     family: "query terminals and tx.backend",
   },
+  // Raised from none: the implementation behind the public signature now
+  // receives the Store-facing transaction, so the value it hands the
+  // relation's public `executeOn` is the counted handle, not the raw type.
+  "src/query/builder/executable-aggregate-query.ts#ExecutableAggregateQuery.executeOn":
+    { count: 1, family: "query terminals and tx.backend" },
   "src/store/collections/edge-collection.ts#batchFindFrom": {
     count: 1,
     family: "query terminals and tx.backend",
@@ -408,6 +418,14 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
 /** A module inside `src/store`, so it resolves the shim like a store module. */
 const SHIM_FIXTURE = "src/store/legacy-shim-reference.fixture.ts";
 
+/** A second store module, re-exporting the shim, which the fixture imports. */
+const SHIM_REEXPORT_FIXTURE = "src/store/legacy-shim-reexport.fixture.ts";
+
+const SHIM_REEXPORT_SOURCE = `
+export { legacyTransactionOperation as reexported } from "./operation-scope";
+export * from "./operation-scope";
+`;
+
 const SHIM_FIXTURE_SOURCE = `
 import type { TransactionBackend } from "../backend/types";
 import {
@@ -415,13 +433,23 @@ import {
   legacyTransactionOperation as renamed,
 } from "./operation-scope";
 import * as scope from "./operation-scope";
+import { reexported } from "./legacy-shim-reexport.fixture";
 
 declare const raw: TransactionBackend;
+declare const key: "legacyTransactionOperation";
+declare function spread(value: object): void;
 
 export function direct() { return legacyTransactionOperation(raw); }
 export function throughRename() { return renamed(raw); }
 export function throughNamespace() { return scope.legacyTransactionOperation(raw); }
+export function throughElementAccess() { return scope["legacyTransactionOperation"](raw); }
+export function throughComputedKey() { return scope[key](raw); }
+export function throughNamespaceValue() { spread(scope); }
 export function stored() { const shim = legacyTransactionOperation; return shim(raw); }
+export function destructured() { const { legacyTransactionOperation: shim } = scope; return shim(raw); }
+export function throughCall() { return legacyTransactionOperation.call(undefined, raw); }
+export function throughReexport() { return reexported(raw); }
+export { legacyTransactionOperation as forwarded };
 `;
 
 function countBy<T>(
@@ -440,7 +468,10 @@ describe("legacyTransactionOperation ratchet", () => {
   let scan: ScanProgram;
 
   beforeAll(() => {
-    scan = createScanProgram({ [SHIM_FIXTURE]: SHIM_FIXTURE_SOURCE });
+    scan = createScanProgram({
+      [SHIM_FIXTURE]: SHIM_FIXTURE_SOURCE,
+      [SHIM_REEXPORT_FIXTURE]: SHIM_REEXPORT_SOURCE,
+    });
   }, 180_000);
 
   it(
@@ -448,7 +479,7 @@ describe("legacyTransactionOperation ratchet", () => {
     { timeout: 180_000 },
     () => {
       const sites = legacyShimSites(scan, scan.sourceFiles);
-      expect(sites.filter((site) => !site.call)).toEqual([]);
+      expect(sites.filter((site) => site.form !== "call")).toEqual([]);
       expect(countBy(sites, (site) => `${site.file}#${site.function}`)).toEqual(
         Object.fromEntries(
           Object.entries(SHIM_INVENTORY).map(([label, entry]) => [
@@ -470,17 +501,104 @@ describe("legacyTransactionOperation ratchet", () => {
     expect(totals).toEqual(FAMILY_BASELINE);
   });
 
-  it("finds a reference by symbol: through a rename, a namespace, or a stored value", () => {
+  it("finds every way of naming the shim, and allows only a direct call", () => {
+    expect(errorDiagnostics(scan, SHIM_FIXTURE)).toEqual([]);
     const sites = legacyShimSites(scan, [
       path.join(PACKAGE_ROOT, SHIM_FIXTURE),
+      path.join(PACKAGE_ROOT, SHIM_REEXPORT_FIXTURE),
     ]);
     expect(
-      sites.map((site) => ({ function: site.function, call: site.call })),
+      sites.map((site) => ({
+        file: path.basename(site.file),
+        function: site.function,
+        form: site.form,
+      })),
     ).toEqual([
-      { function: "direct", call: true },
-      { function: "throughRename", call: true },
-      { function: "throughNamespace", call: false },
-      { function: "stored", call: false },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "direct",
+        form: "call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughRename",
+        form: "call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughNamespace",
+        form: "namespace",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughElementAccess",
+        form: "element-access",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughComputedKey",
+        form: "indirect-call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughComputedKey",
+        form: "namespace-value",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughNamespaceValue",
+        form: "namespace-value",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "stored",
+        form: "value",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "stored",
+        form: "indirect-call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "destructured",
+        form: "alias",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "destructured",
+        form: "namespace-value",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "destructured",
+        form: "indirect-call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughCall",
+        form: "value",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "throughReexport",
+        form: "call",
+      },
+      {
+        file: "legacy-shim-reference.fixture.ts",
+        function: "<module>",
+        form: "re-export",
+      },
+      {
+        file: "legacy-shim-reexport.fixture.ts",
+        function: "<module>",
+        form: "re-export",
+      },
+      {
+        file: "legacy-shim-reexport.fixture.ts",
+        function: "<module>",
+        form: "re-export",
+      },
     ]);
   });
 });

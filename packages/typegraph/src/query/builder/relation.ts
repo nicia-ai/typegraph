@@ -7,6 +7,7 @@ import {
 import {
   legacyTransactionOperation,
   type StatementBackend,
+  type StoreTransactionBackend,
 } from "../../store/operation-scope";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { isPortableCountDistinctValueType } from "../aggregate-value-types";
@@ -966,8 +967,11 @@ export class ExecutableRelationQuery<
     assertRelationSourceSqlNames(this.#materialize(), "decoded");
   }
 
-  async executeOn(
+  executeOn(
     backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly Result[]>;
+  async executeOn(
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
     if (this.#definition.provenance.checked)
       throw new ConfigurationError(

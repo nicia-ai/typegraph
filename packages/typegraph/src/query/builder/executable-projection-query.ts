@@ -4,6 +4,7 @@ import { ConfigurationError } from "../../errors";
 import {
   legacyTransactionOperation,
   type StatementBackend,
+  type StoreTransactionBackend,
 } from "../../store/operation-scope";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
@@ -185,8 +186,11 @@ export class ExecutableProjectionQuery<
     return this.executeOn(this.#requireBackend());
   }
   /** Runs on an explicitly supplied target, including store.batch() transactions. */
-  async executeOn(
+  executeOn(
     backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly Result[]>;
+  async executeOn(
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
     const rows = await this.#fetchRows(
       legacyTransactionOperation(backend),

@@ -16,6 +16,7 @@ import {
 import {
   legacyTransactionOperation,
   type StatementBackend,
+  type StoreTransactionBackend,
 } from "../../store/operation-scope";
 import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
@@ -808,8 +809,9 @@ export class ExecutableQuery<
    * after its statement has executed, and the caller re-runs the full fetch.
    * The fallback clears the fast path for this instance.
    */
+  executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly R[]>;
   async executeOn(
-    backend: GraphBackend | TransactionBackend,
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly R[]> {
     const target = legacyTransactionOperation(backend);
     const ast = this.toAst();

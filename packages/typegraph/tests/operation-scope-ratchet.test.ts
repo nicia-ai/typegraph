@@ -2,7 +2,7 @@
  * THE RATCHET for operation-scoped statement targets
  * (`src/store/operation-scope.ts`).
  *
- * Three invariants:
+ * Four invariants:
  *
  * 1. **The brand is produced only by the mints.** The brand key is a
  *    module-private, declared-only unique symbol, so a route that would have
@@ -29,10 +29,21 @@
  *    (no statement member) and statements go through an operation handle.
  *    `rawTransactionSites` finds every place Store code still declares,
  *    produces or asserts the engine `TransactionBackend` (or asserts into the
- *    engine type a `StoreTransactionBackend` records). The only ones allowed
- *    are the declarations a public API report spells, listed with their
- *    reason in `RAW_TRANSACTION_DECLARATIONS`; each one's value reaches
- *    statement work only through the shim.
+ *    engine type a `StoreTransactionBackend` records). A name Store code can
+ *    use with the raw type is never allowed. The only sites allowed are the
+ *    declarations a public API report spells, listed with their reason in
+ *    `RAW_TRANSACTION_DECLARATIONS`: bodiless signatures (a public overload,
+ *    a port member's function type), which no code can use and whose
+ *    implementations the type checker holds to the narrowed type; and two
+ *    properties, whose every read this scan checks instead.
+ *
+ * 4. **A specialised Store transaction exists only where the engine opens
+ *    it.** A `StoreTransactionBackend` specialised to the schema-write
+ *    transaction or the preflight target (and a handle to one) carries a
+ *    required, module-private engine record, so no annotation can claim it:
+ *    the type checker refuses an ordinary transaction or handle there.
+ *    `forgeSites(…, "engine record")` must find it produced only at the
+ *    boundary mints, one per engine member that opens such a transaction.
  *
  * The forge-route table below is the systematic enumeration: every route,
  * the layer that refuses it (type system, lint, scan), or the reason it is an
@@ -47,7 +58,10 @@ import { ESLint } from "eslint";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { OPERATION_BRAND_RESTRICTIONS } from "../eslint.config.mjs";
+import type {
+  BOUNDARY_MINT_MEMBERS} from "./helpers/operation-scope-scan";
 import {
+  boundaryMintCalls,
   brandKeyDeclaration,
   countByFamily,
   createScanProgram,
@@ -100,6 +114,34 @@ const MINT_SITES = [
   },
   { file: MINT_MODULE, function: "enterOperation", route: "assertion" },
   { file: MINT_MODULE, function: "scopeWriteFrameTarget", route: "assertion" },
+] as const;
+
+/**
+ * The sites `src` may produce a specialised `StoreTransactionBackend` at:
+ * one assertion per boundary mint, each at the engine member that opens the
+ * specialised transaction.
+ */
+const BOUNDARY_MINT_SITES = [
+  {
+    file: MINT_MODULE,
+    function: "storeSchemaWriteTransaction",
+    route: "assertion",
+  },
+  {
+    file: MINT_MODULE,
+    function: "storeCommitSchemaVersionWithPreflight",
+    route: "assertion",
+  },
+  {
+    file: MINT_MODULE,
+    function: "storeSetActiveVersionWithPreflight",
+    route: "assertion",
+  },
+  {
+    file: MINT_MODULE,
+    function: "storeAdoptSchemaWriteTransaction",
+    route: "assertion",
+  },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -398,6 +440,14 @@ export function forgeOverload(backend: TransactionBackend): GraphBackend | Trans
     ),
   },
   {
+    route: "an opener asserted to hand the brand to its callback",
+    code: `type BrandOpener = (fn: (tx: OperationBackend) => Promise<Edge>) => Promise<Edge>;
+export function forgeOpener(root: GraphBackend) {
+  return (root.transaction as unknown as BrandOpener)((tx) => executeEdgeCreate(ctx, input, tx));
+}`,
+    refusal: refusal([], [], ["assertion"]),
+  },
+  {
     route: "a function type asserted to return the brand",
     code: `export function forgeFunctionType() {
   const forge = ((backend: TransactionBackend) => backend) as unknown as (backend: TransactionBackend) => StatementBackend;
@@ -543,6 +593,27 @@ export function forgePrivateDemand(): unknown { const opaque: unknown = new Priv
   run() { return this.create(enterOperation(raw)); }
 }
 export function forgeTsPrivateDemand(): unknown { const opaque: unknown = new TsPrivateDemand(); return opaque; }`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route: "a brand consumer used as a WeakMap key",
+    code: `const DEMANDS = new WeakMap<object, number>();
+export function forgeWeakKey() {
+  const holder = { create: (backend: StatementBackend) => executeEdgeCreate(ctx, input, backend) };
+  DEMANDS.set(holder, 1);
+  return DEMANDS.get(holder);
+}`,
+    refusal: refusal([], [], []),
+    gap: "Not a forge: a WeakMap or WeakSet never hands a key back (no iteration, no key read), so a value used only as a key cannot be read out and re-asserted; its demand is unreachable through the collection. Store instances are keyed this way.",
+  },
+  {
+    route: "a brand consumer used as a Map key",
+    code: `const ITERABLE = new Map<object, number>();
+export function forgeIterableKey() {
+  const holder = { create: (backend: StatementBackend) => executeEdgeCreate(ctx, input, backend) };
+  ITERABLE.set(holder, 1);
+  return [...ITERABLE.keys()];
+}`,
     refusal: refusal([], [], ["consumer-flow"]),
   },
   {
@@ -694,68 +765,102 @@ const RAW_TARGET_FIXTURE_COUNTED = [
  * `executeOn`, which shims).
  */
 const RAW_TRANSACTION_DECLARATIONS: Readonly<
-  Record<string, Readonly<{ sites: number; reason: string }>>
+  Record<
+    string,
+    Readonly<{
+      sites: number;
+      route: Extract<RawTransactionRoute, "signature" | "property">;
+      reason: string;
+    }>
+  >
 > = {
   "src/store/runtime-port.ts#StoreRuntime": {
     sites: 14,
+    route: "signature",
     reason:
-      "The Store runtime port's member signatures appear in the store, graph-merge, identity and other reports. Their implementations in store.ts annotate the narrowed type, so the raw type exists only in the port's declaration.",
-  },
-  "src/store/types.ts#TransactionRuntime": {
-    sites: 1,
-    reason:
-      "`TransactionRuntime.backend` appears in the store reports. Its one reader, `transactionBackend()`, returns `StoreTransactionBackend`.",
-  },
-  "src/identity/service-types.ts#IdentityServiceContext": {
-    sites: 1,
-    reason:
-      "`IdentityServiceContext.backend` appears in the reports through the runtime port's `identityContext`. Every statement-issuing read of it goes through the shim.",
+      "The Store runtime port's member signatures appear in the store, graph-merge, identity and other reports. They are function types with no body; their implementations in store.ts annotate the narrowed type, which the type checker holds them to.",
   },
   "src/query/builder/types.ts#BatchableQuery": {
     sites: 1,
+    route: "signature",
     reason:
-      "The public `BatchableQuery.executeOn` signature. Its implementations annotate the narrowed type.",
+      "The public `BatchableQuery.executeOn` signature, a function type with no body. Its implementations are the overloads below.",
   },
   "src/query/builder/executable-query.ts#ExecutableQuery.executeOn": {
     sites: 1,
-    reason: "The public `executeOn` signature; the body shims once.",
+    route: "signature",
+    reason:
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
   },
   "src/query/builder/executable-projection-query.ts#ExecutableProjectionQuery.executeOn":
     {
       sites: 1,
-      reason: "The public `executeOn` signature; the body shims once.",
+      route: "signature",
+      reason:
+        "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
     },
   "src/query/builder/relation.ts#ExecutableRelationQuery.executeOn": {
     sites: 1,
-    reason: "The public `executeOn` signature; the body shims once.",
+    route: "signature",
+    reason:
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
   },
   "src/query/builder/unionable-query.ts#UnionableQuery.executeOn": {
     sites: 1,
-    reason: "The public `executeOn` signature; the body shims once.",
+    route: "signature",
+    reason:
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
   },
   "src/query/builder/executable-aggregate-query.ts#ExecutableAggregateQuery.executeOn":
     {
       sites: 1,
+      route: "signature",
       reason:
-        "The public `executeOn` signature; it passes the value unchanged to `ExecutableRelationQuery.executeOn`.",
+        "The public overload of `executeOn`. The implementation receives the Store-facing transaction and hands the relation's `executeOn` the shimmed handle.",
     },
+  "src/store/types.ts#TransactionRuntime": {
+    sites: 1,
+    route: "property",
+    reason:
+      "`TransactionRuntime.backend` appears in the store reports. A property has one type for every reader and no overload, so the type checker cannot narrow it for Store code; each read is checked by this scan instead. Its one reader, `transactionBackend()`, returns `StoreTransactionBackend`.",
+  },
+  "src/identity/service-types.ts#IdentityServiceContext": {
+    sites: 1,
+    route: "property",
+    reason:
+      "`IdentityServiceContext.backend` appears in the reports through the runtime port's `identityContext`. A property has one type for every reader and no overload, so the type checker cannot narrow it for Store code; each read is checked by this scan instead, and every statement-issuing read goes through the shim.",
+  },
 };
 
 /** A path inside `src/store`, so the fixture resolves imports like a store module. */
 const RAW_TRANSACTION_FIXTURE = "src/store/raw-transaction-routes.fixture.ts";
 
+/** A second store module that re-exports the engine type under another name. */
+const RAW_TRANSACTION_REEXPORT_FIXTURE =
+  "src/store/raw-transaction-reexport.fixture.ts";
+
+const RAW_TRANSACTION_REEXPORT_SOURCE = `
+export type { TransactionBackend as Session } from "../backend/types";
+`;
+
 const RAW_TRANSACTION_PREAMBLE = `
 import type {
   GraphBackend,
+  SchemaCommitPreflightBackend,
   SchemaWriteTransactionBackend,
   TransactionBackend,
 } from "../backend/types";
+import type * as types from "../backend/types";
 import {
   legacyTransactionOperation,
+  storeSchemaWriteTransaction,
+  type StoreSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "./operation-scope";
+import type { Session } from "./raw-transaction-reexport.fixture";
 
 declare const root: GraphBackend;
+type Engine = TransactionBackend;
 declare const narrowed: StoreTransactionBackend;
 declare function engineTransaction(): ReturnType<() => TransactionBackend>;
 function keyOnly(key: object): void {
@@ -848,6 +953,94 @@ const RAW_TRANSACTION_CASES: readonly RawTransactionCase[] = [
     typeErrors: [],
     scan: ["assertion"],
   },
+  {
+    route:
+      "an ordinary transaction callback annotated as the schema-write transaction",
+    code: `export function claimedSchemaWrite() { return root.transaction(async (tx: StoreTransactionBackend<SchemaWriteTransactionBackend>) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    typeErrors: [2345],
+    scan: [],
+  },
+  {
+    route: "an ordinary transaction callback annotated as the preflight target",
+    code: `export function claimedPreflight() { return root.transaction(async (tx: StoreTransactionBackend<SchemaCommitPreflightBackend>) => legacyTransactionOperation(tx).executeSchemaDdl?.("SELECT 1")); }`,
+    typeErrors: [2345],
+    scan: [],
+  },
+  {
+    route: "the schema-write transaction through its boundary mint",
+    code: `export function mintedSchemaWrite() { return storeSchemaWriteTransaction(root.schemaWriteTransaction)?.("graph", async (tx) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    typeErrors: [],
+    scan: [],
+    allowed:
+      "The engine member that opens the schema-write transaction is the one place its specialised type is granted.",
+  },
+  {
+    route: "an ordinary opener asserted to the schema-write opener",
+    code: `export function forgedOpener() { return (root.transaction as unknown as StoreSchemaWriteTransaction)("graph", async (tx) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: "an assertion to the engine type through a local alias",
+    code: `export async function assertedAlias() { await (narrowed as Engine).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: "an assertion to the engine type through a namespace",
+    code: `export async function assertedNamespace() { await (narrowed as types.TransactionBackend).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: 'an assertion to the engine type through an inline import("…") type',
+    code: `export async function assertedImportType() { await (narrowed as import("../backend/types").TransactionBackend).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: "an assertion to the engine type through a renamed re-export",
+    code: `export async function assertedReexport() { await (narrowed as Session).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route:
+      "an assertion to the engine type through an indexed access into the opener",
+    code: `export async function assertedIndexed() { await (narrowed as Parameters<Parameters<GraphBackend["transaction"]>[0]>[0]).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route:
+      "a public overload keeping the engine type over a narrowed implementation",
+    code: `export function overloaded(tx: TransactionBackend): string;
+export function overloaded(tx: StoreTransactionBackend): string { return tx.dialect; }`,
+    typeErrors: [],
+    scan: ["signature"],
+    allowed:
+      "A bodiless signature: no code can use its parameter, and the implementation's parameter is held to the Store-facing type by the type checker.",
+  },
+  {
+    route: "a statement on an overloaded implementation's narrowed parameter",
+    code: `export async function overloadedStatement(tx: GraphBackend | TransactionBackend): Promise<void>;
+export async function overloadedStatement(tx: GraphBackend | StoreTransactionBackend): Promise<void> { await tx.getNode("graph", "Kind", "id"); }`,
+    typeErrors: [2339],
+    scan: ["signature"],
+  },
+  {
+    route: "a public signature whose implementation keeps the engine type",
+    code: `export async function rawImplementation(tx: TransactionBackend): Promise<void>;
+export async function rawImplementation(tx: TransactionBackend): Promise<void> { await tx.getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["declaration", "signature"],
+  },
+  {
+    route: "a read of a property declared with the engine type",
+    code: `export async function propertyRead(holder: Readonly<{ backend: TransactionBackend }>) { await holder.backend.getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["property", "value"],
+  },
 ];
 
 const RAW_TRANSACTION_SOURCE = [
@@ -866,6 +1059,50 @@ function rawCaseIndexOfLine(line: number): number {
   }
   return -1;
 }
+
+// ---------------------------------------------------------------------------
+// The boundary mints' arguments
+// ---------------------------------------------------------------------------
+
+/**
+ * Each boundary mint's calls in `src`, by mint. Every one passes a read of
+ * the mint's own engine member.
+ */
+const BOUNDARY_MINT_CALLS = {
+  storeSchemaWriteTransaction: 4,
+  storeCommitSchemaVersionWithPreflight: 2,
+  storeSetActiveVersionWithPreflight: 1,
+  storeAdoptSchemaWriteTransaction: 1,
+} as const satisfies Record<keyof typeof BOUNDARY_MINT_MEMBERS, number>;
+
+/** A path inside `src/store`, so the fixture resolves imports like a store module. */
+const BOUNDARY_ARGUMENT_FIXTURE =
+  "src/store/boundary-mint-arguments.fixture.ts";
+
+const BOUNDARY_ARGUMENT_SOURCE = `
+import type {
+  CommitSchemaVersionParams,
+  GraphBackend,
+  SchemaCommitPreflightBackend,
+  SchemaVersionRow,
+} from "../backend/types";
+import * as scope from "./operation-scope";
+import { storeCommitSchemaVersionWithPreflight } from "./operation-scope";
+
+declare const backend: GraphBackend;
+
+export function memberRead() { return storeCommitSchemaVersionWithPreflight(backend.commitSchemaVersionWithPreflight); }
+export function optionalMemberRead(maybe: GraphBackend | undefined) { return storeCommitSchemaVersionWithPreflight(maybe?.commitSchemaVersionWithPreflight); }
+export function throughNamespace() { return scope.storeCommitSchemaVersionWithPreflight(backend.commitSchemaVersionWithPreflight); }
+export function adapter() {
+  return storeCommitSchemaVersionWithPreflight(
+    (params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>): Promise<SchemaVersionRow> =>
+      backend.transaction(async (tx) => { await preflight(tx); return backend.commitSchemaVersion(params); }),
+  );
+}
+export function stored() { const commit = backend.commitSchemaVersionWithPreflight; return storeCommitSchemaVersionWithPreflight(commit); }
+export function literalProperty(commit: GraphBackend["commitSchemaVersionWithPreflight"]) { return storeCommitSchemaVersionWithPreflight({ commitSchemaVersionWithPreflight: commit }.commitSchemaVersionWithPreflight); }
+`;
 
 // ---------------------------------------------------------------------------
 // Lint
@@ -921,6 +1158,8 @@ describe("operation-scope ratchet", () => {
       [FORGE_FIXTURE]: FORGE_SOURCE,
       [RAW_TARGET_FIXTURE]: RAW_TARGET_SOURCE,
       [RAW_TRANSACTION_FIXTURE]: RAW_TRANSACTION_SOURCE,
+      [RAW_TRANSACTION_REEXPORT_FIXTURE]: RAW_TRANSACTION_REEXPORT_SOURCE,
+      [BOUNDARY_ARGUMENT_FIXTURE]: BOUNDARY_ARGUMENT_SOURCE,
     });
   }, 180_000);
 
@@ -1037,6 +1276,54 @@ describe("operation-scope ratchet", () => {
   });
 
   it(
+    "src produces a specialised Store transaction only at the boundary mints",
+    { timeout: 180_000 },
+    () => {
+      expect(
+        forgeSites(scan, scan.sourceFiles, "engine record").map((site) => ({
+          file: site.file,
+          function: site.function,
+          route: site.route,
+        })),
+      ).toEqual(BOUNDARY_MINT_SITES);
+    },
+  );
+
+  it(
+    "every boundary mint in src is handed a read of its own engine member",
+    { timeout: 180_000 },
+    () => {
+      const calls = boundaryMintCalls(scan, scan.sourceFiles);
+      expect(
+        calls
+          .filter((call) => call.argument !== "member-read")
+          .map((call) => `${call.file}:${call.line} ${call.mint}`),
+      ).toEqual([]);
+      const counts: Record<string, number> = {};
+      for (const call of calls)
+        counts[call.mint] = (counts[call.mint] ?? 0) + 1;
+      expect(counts).toEqual(BOUNDARY_MINT_CALLS);
+    },
+  );
+
+  it("refuses a boundary mint handed anything but its engine member", () => {
+    // Every case compiles: the adapter is exactly the function no type refuses.
+    expect(errorDiagnostics(scan, BOUNDARY_ARGUMENT_FIXTURE)).toEqual([]);
+    expect(
+      boundaryMintCalls(scan, [
+        path.join(PACKAGE_ROOT, BOUNDARY_ARGUMENT_FIXTURE),
+      ]).map((call) => ({ function: call.function, argument: call.argument })),
+    ).toEqual([
+      { function: "memberRead", argument: "member-read" },
+      { function: "optionalMemberRead", argument: "member-read" },
+      { function: "throughNamespace", argument: "member-read" },
+      { function: "adapter", argument: "other" },
+      { function: "stored", argument: "other" },
+      { function: "literalProperty", argument: "other" },
+    ]);
+  });
+
+  it(
     "raw statement targets per store family only decrease, and the edge-create entry points are off the raw surface",
     { timeout: 180_000 },
     () => {
@@ -1074,22 +1361,26 @@ describe("operation-scope ratchet", () => {
     { timeout: 180_000 },
     () => {
       const sites = rawTransactionSites(scan, storeFacingModules(scan));
+      // A name Store code can use, a value or an assertion is never allowed:
+      // only a bodiless signature or a property the reports spell.
       expect(
         sites
-          .filter((site) => site.route !== "declaration")
+          .filter(
+            (site) => site.route !== "signature" && site.route !== "property",
+          )
           .map(
             (site) => `${site.file}:${site.line} ${site.route} ${site.text}`,
           ),
       ).toEqual([]);
       const counts: Record<string, number> = {};
       for (const site of sites) {
-        const label = `${site.file}#${site.function}`;
+        const label = `${site.file}#${site.function} ${site.route}`;
         counts[label] = (counts[label] ?? 0) + 1;
       }
       expect(counts).toEqual(
         Object.fromEntries(
           Object.entries(RAW_TRANSACTION_DECLARATIONS).map(([label, entry]) => [
-            label,
+            `${label} ${entry.route}`,
             entry.sites,
           ]),
         ),
@@ -1133,7 +1424,11 @@ describe("operation-scope ratchet", () => {
     );
 
     for (const rawCase of RAW_TRANSACTION_CASES) {
-      const refused = rawCase.typeErrors.length > 0 || rawCase.scan.length > 0;
+      const refused =
+        rawCase.typeErrors.length > 0 ||
+        rawCase.scan.some(
+          (route) => route !== "signature" && route !== "property",
+        );
       expect({ route: rawCase.route, refused }).toEqual({
         route: rawCase.route,
         refused: rawCase.allowed === undefined,

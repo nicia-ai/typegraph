@@ -366,6 +366,7 @@ import {
   type OperationBackend,
   type OperationScoped,
   type StatementBackend,
+  storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "./operation-scope";
 import {
@@ -6150,7 +6151,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
-    const adopt = this.#adapterBackend?.adoptSchemaWriteTransaction;
+    const adopt = storeAdoptSchemaWriteTransaction(
+      this.#adapterBackend?.adoptSchemaWriteTransaction,
+    );
     if (adopt === undefined)
       throw new UnsupportedBackendCapabilityError(
         "store.withEvolvedTransaction()",
