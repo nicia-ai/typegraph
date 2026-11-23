@@ -1306,6 +1306,14 @@ try {
 
 Thrown when an edge references a node that doesn't exist.
 
+An endpoint that is missing or soft-deleted is reported before any cardinality
+answer: when the same write would also exceed a `cardinality` or
+`targetCardinality` bound, it raises `EndpointNotFoundError`, not
+`CardinalityError` (or `CompositionError` for an occupied part). This holds
+on every backend, at the root and inside `store.transaction()`, and on every
+edge write path: `create`, `getOrCreateByEndpoints`, the bulk forms, and
+import, which reports the row as `From node not found` / `To node not found`.
+
 ```typescript
 try {
   await store.edges.worksAt.create(

@@ -32,9 +32,10 @@
  * The dispatch log is an ordinary assertion on every lane. Outcomes that
  * leave a refused create's rows behind, or that make the winning error
  * depend on which dimension a port declined, are known defects: the case
- * states the correct outcome and, with the design note's label (`D2`, `D3`,
+ * states the correct outcome and, with the design note's label (`D2`,
  * `D6`), the exact outcome main produces today on the lanes it affects
- * (`tests/helpers/known-defect.ts`).
+ * (`tests/helpers/known-defect.ts`). A dead endpoint outranks a taken axis
+ * whichever dimension the port declines (#946).
  */
 import { describe, expect, it } from "vitest";
 
@@ -134,17 +135,6 @@ const D2_CLAIM_RESIDUE: CreateDefect = {
     error: ENDPOINT,
     added: { edges: [], claims: ['one:mxSource ["MxItem","c"] -> new'] },
   },
-};
-
-/**
- * D3: with a dead endpoint and a taken axis, declining `cardinalityClaim`
- * makes the claim refuse first, while declining `endpointPredicate` reports
- * the endpoint: the precedence follows the port's support, on every lane.
- */
-const D3_PORT_DECIDES_PRECEDENCE: CreateDefect = {
-  label: "D3",
-  on: {},
-  today: { error: cardinality("source", "s-ab") },
 };
 
 /**
@@ -309,7 +299,6 @@ const DECLINE_CASES: readonly DeclineCase[] = [
     run: createSource(ITEM.a, ITEM.dead),
     correct: { error: ENDPOINT },
     dispatches: () => [create(1, "declined cardinalityClaim")],
-    defects: [D3_PORT_DECIDES_PRECEDENCE],
   },
   {
     name: "one axis, endpointPredicate declined, free axis",

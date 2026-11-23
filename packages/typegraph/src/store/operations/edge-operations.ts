@@ -175,6 +175,7 @@ import {
   edgeCardinalityClaimTarget,
   type EdgeCardinalityDeclarations,
   type EdgeClaimSubject,
+  isClaimRefusal,
   sortedByClaimTarget,
 } from "../claims/edge-claims";
 import {
@@ -447,13 +448,29 @@ function buildInsertEdgeParams(
   return insertParams;
 }
 
+/**
+ * What an edge create's preparation owes on its endpoint rows:
+ *
+ * - `"read"` — read them now, before any other database decision. The
+ *   default.
+ * - `"inWrite"` — a later statement of this create carries the
+ *   live-endpoint predicate (the fused INSERT, the durable converge
+ *   command, a native batch program), so nothing is read now; a cardinality
+ *   refusal reached before that statement reads them first
+ *   ({@link refuseCardinalityAfterEndpoints}).
+ * - `"provenByFrame"` — the enclosing write frame writes or has already
+ *   proven the endpoint rows (a composition edge beside the part it
+ *   creates), so there is nothing to read and no refusal to outrank.
+ */
+export type EdgeEndpointCheck = "read" | "inWrite" | "provenByFrame";
+
 export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
   id: string,
   backend: WriteTarget,
   options?: Readonly<{
-    validateEndpoints?: boolean;
+    endpoints?: EdgeEndpointCheck;
     validateCardinality?: boolean;
     /**
      * Whether this call owes the two lock-only decisions a row makes about
@@ -503,8 +520,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   );
   if (endpointError) throw endpointError;
 
-  if (options?.validateEndpoints ?? true) {
-    await assertLiveEdgeEndpoints(
+  const assertEndpointsLive = (): Promise<void> =>
+    assertLiveEdgeEndpoints(
       ctx,
       kind,
       fromKind,
@@ -513,7 +530,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       input.toId,
       backend,
     );
-  }
+  const endpointCheck = options?.endpoints ?? "read";
+  if (endpointCheck === "read") await assertEndpointsLive();
 
   // Validate props with full context
   const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
@@ -560,18 +578,22 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     backend,
   };
   if (options?.validateCardinality ?? true) {
-    await checkEdgeCardinalityConstraints(
-      constraintContext,
-      edgeInsertClaims(ctx.registry, declarations, {
-        graphId: ctx.graphId,
-        id,
-        kind,
-        fromKind,
-        fromId: input.fromId,
-        toKind,
-        toId: input.toId,
-        ...(validTo === undefined ? {} : { validTo }),
-      }),
+    await refuseCardinalityAfterEndpoints(
+      () =>
+        checkEdgeCardinalityConstraints(
+          constraintContext,
+          edgeInsertClaims(ctx.registry, declarations, {
+            graphId: ctx.graphId,
+            id,
+            kind,
+            fromKind,
+            fromId: input.fromId,
+            toKind,
+            toId: input.toId,
+            ...(validTo === undefined ? {} : { validTo }),
+          }),
+        ),
+      endpointCheck === "inWrite" ? assertEndpointsLive : undefined,
     );
   }
 
@@ -634,6 +656,41 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   }
 
   return { declarations, insertParams };
+}
+
+/**
+ * THE refusal order between an edge create's endpoints and its cardinality
+ * (issue #946): a non-live endpoint is reported before any cardinality
+ * answer. A cardinality refusal is about a relation the write may not join
+ * when one of its endpoints is not live, so it is never the answer then.
+ *
+ * Every create path reaches its cardinality verdict through
+ * {@link validateAndPrepareEdgeCreate} or through a claim statement, and
+ * both consult this. A path that read the endpoints first (`"read"`) passes
+ * no `assertEndpointsLive`: the order already holds; nor does one whose
+ * frame proves them (`"provenByFrame"`). A path that skipped them because a
+ * later statement carries the endpoint predicate (`"inWrite"`) passes the
+ * endpoint check, and it runs only once `probe` has refused, so the reads a
+ * successful create never needed are spent on the refusal path alone. Two
+ * such paths exist: a durable-identity create probes cardinality before its
+ * converge command, which holds the endpoint predicate; and a port without
+ * the fused claim insert (both SQLite drivers) has the session issue the
+ * claim statement before the endpoint-guarded INSERT, where the fused
+ * PostgreSQL statement evaluates both at once and reports a failed endpoint
+ * predicate as no row.
+ */
+async function refuseCardinalityAfterEndpoints<T>(
+  probe: () => Promise<T>,
+  assertEndpointsLive: (() => Promise<void>) | undefined,
+): Promise<T> {
+  try {
+    return await probe();
+  } catch (error) {
+    if (assertEndpointsLive !== undefined && isClaimRefusal(error)) {
+      await assertEndpointsLive();
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1123,7 +1180,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           id,
           target,
           {
-            validateEndpoints: true,
+            endpoints: "read",
             validateCardinality,
             // Already probed by the always-run first call below, under the
             // same lock this diagnostic reruns after; a second probe here
@@ -1140,7 +1197,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         return prepared;
       }
       return validateAndPrepareEdgeCreate(ctx, input, id, target, {
-        validateEndpoints: true,
+        endpoints: "read",
         validateCardinality,
         validateRelations: false,
       });
@@ -1184,7 +1241,8 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         convergeOn === undefined
       : !usesGuardedCardinalityClaim && !delaysCardinalityProbe;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-      validateEndpoints: convergeOn === undefined && !canFuseEndpointCheck,
+      endpoints:
+        convergeOn === undefined && !canFuseEndpointCheck ? "read" : "inWrite",
       validateCardinality: probesCardinalityBeforeWrite,
       // Always run here, unlike cardinality: this is the one call every
       // create path reaches before any insert branch (fused, durable, or
@@ -1238,7 +1296,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           return foundEdgeResult(matchedRow);
         }
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-          validateEndpoints: !canFuseEndpointCheck,
+          endpoints: canFuseEndpointCheck ? "inWrite" : "read",
           validateCardinality: true,
           validateRelations: false,
         });
@@ -1368,7 +1426,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
             // endpoints pass, the typed conflict is already authoritative.
             await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
             await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-              validateEndpoints: true,
+              endpoints: "read",
               validateCardinality: false,
               // This call exists only to raise the typed endpoint error
               // before the already-decided identity conflict is thrown; no
@@ -1405,7 +1463,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         // Re-establish endpoint liveness on the portable path. When the next
         // row write can fuse that predicate, it remains in the INSERT instead.
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-          validateEndpoints: !canFuseEndpointCheck,
+          endpoints: canFuseEndpointCheck ? "inWrite" : "read",
           validateCardinality: true,
           validateRelations: false,
         });
@@ -1439,8 +1497,24 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           : {}),
         },
       };
-      const fusedResult = await withAlreadyExistsTranslation("edge", () =>
-        session.createEdgeWithPlan(fusedCommand),
+      // A port without the fused claim insert claims before its
+      // endpoint-guarded INSERT has run, so a claim refusal from it has not
+      // seen the endpoints; the order owner checks them first.
+      const fusedResult = await refuseCardinalityAfterEndpoints(
+        () =>
+          withAlreadyExistsTranslation("edge", () =>
+            session.createEdgeWithPlan(fusedCommand),
+          ),
+        () =>
+          assertLiveEdgeEndpoints(
+            ctx,
+            kind,
+            input.fromKind,
+            input.fromId,
+            input.toKind,
+            input.toId,
+            target,
+          ),
       );
       if (fusedResult.outcome === "created") {
         if (fuseSchemaFenceInFirstWrite) {
@@ -1679,7 +1753,7 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
       input.id ?? generateId(),
       backend,
       {
-        validateEndpoints: false,
+        endpoints: "inWrite",
         validateCardinality: false,
         // Never reached for an acyclic kind: `resolveAtomicEdgeBatchExecutor`
         // declines eligibility whenever any input's kind is acyclic, so this
