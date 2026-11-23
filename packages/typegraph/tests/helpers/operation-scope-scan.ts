@@ -1470,7 +1470,7 @@ export function rawTransactionSites(
  * other form is refused, because it is a way to reach the shim that a reader
  * of the call sites would not see.
  */
-export type LegacyShimForm =
+type LegacyShimForm =
   /** `legacyTransactionOperation(tx)`, or the same through a renamed import. */
   | "call"
   /** `scope.legacyTransactionOperation`, a namespace member, called or not. */
@@ -1670,7 +1670,7 @@ export const BOUNDARY_MINT_MEMBERS = {
   storeAdoptSchemaWriteTransaction: "adoptSchemaWriteTransaction",
 } as const;
 
-export type BoundaryMint = keyof typeof BOUNDARY_MINT_MEMBERS;
+type BoundaryMint = keyof typeof BOUNDARY_MINT_MEMBERS;
 
 export type BoundaryMintCall = Readonly<{
   file: string;

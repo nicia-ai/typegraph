@@ -213,7 +213,7 @@ export type StoreSchemaWriteTransaction = <T>(
  * it opens, as Store code calls it: the same function, whose preflight
  * receives the Store form of the preflight target.
  */
-export type StoreSchemaPreflightMember<Params, Result> = (
+type StoreSchemaPreflightMember<Params, Result> = (
   params: Params,
   preflight: (
     transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
@@ -307,7 +307,7 @@ export function storeSetActiveVersionWithPreflight(
  * A schema-write transaction the engine adopted, as Store code receives it:
  * the Store form of the adopted transaction, and the schema it found active.
  */
-export type StoreAdoptedSchemaWriteTransaction = Readonly<{
+type StoreAdoptedSchemaWriteTransaction = Readonly<{
   backend: StoreTransactionBackend<AdoptedSchemaWriteTransaction["backend"]>;
   activeSchema: AdoptedSchemaWriteTransaction["activeSchema"];
 }>;
