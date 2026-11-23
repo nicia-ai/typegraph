@@ -14,9 +14,14 @@ import {
   type RelationAst,
   type RelationColumn,
   type RelationOrder,
+  relationOrderColumnName,
+  relationSourceOrderColumnName,
   type TopPerPartitionRelation,
 } from "../compiler/relations";
-import { type SqlNameUsage } from "../compiler/sql-name-registry";
+import {
+  refuseReservedOutputKeys,
+  type SqlNameUsage,
+} from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
 import {
   createFieldExpression,
@@ -526,7 +531,7 @@ export class ExecutableRelationQuery<
       })),
       ...this.#state.orderBy.map((order, index) => ({
         column: {
-          outputName: `__tg_relation_order_${index}`,
+          outputName: relationOrderColumnName(index),
           valueType: order.expression.valueType,
           nullable: order.expression.nullable,
         },
@@ -618,6 +623,8 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "A relation projection requires at least one expression.",
       );
+    // Hidden ordering columns are named in the reserved namespace beside these keys.
+    refuseReservedOutputKeys(entries.map(([outputName]) => outputName));
     for (const [, expression] of entries)
       assertExpressionScope(expression, this.#scopeIdentity);
     // Grouping belongs to the new projection; all other modifiers describe its input rows.
@@ -1172,7 +1179,7 @@ export class ExecutableRelationQuery<
       },
       outputNames: this.#definition.columns.map((column) => column.outputName),
       orderBy: this.#state.orderBy.map((order, index) => ({
-        column: `__tg_relation_order_${index}`,
+        column: relationOrderColumnName(index),
         direction: order.direction,
         nulls: order.nulls,
       })),
@@ -1353,7 +1360,7 @@ export function createProjectionRelation<
           orderOutputNames[index] === undefined ?
             [
               {
-                outputName: `__tg_relation_source_order_${index}`,
+                outputName: relationSourceOrderColumnName(index),
                 source: order.field,
               },
             ]
@@ -1393,7 +1400,7 @@ export function createProjectionRelation<
     orderBy: ordering.map((order, index) => ({
       expression: createFieldExpression(
         outputField(
-          orderOutputNames[index] ?? `__tg_relation_source_order_${index}`,
+          orderOutputNames[index] ?? relationSourceOrderColumnName(index),
           order.field.valueType ?? "unknown",
         ),
         scopeIdentity,

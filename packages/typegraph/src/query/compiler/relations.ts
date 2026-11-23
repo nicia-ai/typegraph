@@ -15,7 +15,10 @@ import { compileNameCheckedQuery, type CompileQueryOptions } from "./index";
 import { compileLimitOffsetClauses } from "./limit-offset";
 import { validateRelationAggregation } from "./relation-aggregate-validation";
 import { setOperationKeyword } from "./set-operations";
-import { type SqlNameUsage } from "./sql-name-registry";
+import {
+  refuseReservedOutputKeys,
+  type SqlNameUsage,
+} from "./sql-name-registry";
 import { withPinnedReadInstant } from "./temporal";
 
 export type RelationColumn = Readonly<{
@@ -102,6 +105,100 @@ function relationSources(relation: RelationAst): readonly RelationSource[] {
 
 const SOURCE_ALIAS = "typegraph_relation_source";
 
+/** The hidden column `topPerPartition()` numbers each partition's rows in. */
+const PARTITION_RANK_COLUMN = "__tg_partition_rank";
+
+const RELATION_ORDER_COLUMN_PREFIX = "__tg_relation_order_";
+
+const RELATION_SOURCE_ORDER_COLUMN_PREFIX = "__tg_relation_source_order_";
+
+/**
+ * The hidden column that carries a relation's `index`th ordering term to the
+ * statement around it: the relation builder appends one per ordering term
+ * after a derived relation's visible columns.
+ */
+export function relationOrderColumnName(index: number): string {
+  return `${RELATION_ORDER_COLUMN_PREFIX}${index}`;
+}
+
+/**
+ * The hidden column a relation built from a projection adds to its source
+ * query for the projection's `index`th ordering term when no projected
+ * column carries that term already.
+ */
+export function relationSourceOrderColumnName(index: number): string {
+  return `${RELATION_SOURCE_ORDER_COLUMN_PREFIX}${index}`;
+}
+
+function isRelationSourceOrderColumnName(name: string): boolean {
+  if (!name.startsWith(RELATION_SOURCE_ORDER_COLUMN_PREFIX)) return false;
+  const index = Number(name.slice(RELATION_SOURCE_ORDER_COLUMN_PREFIX.length));
+  return (
+    Number.isSafeInteger(index) && relationSourceOrderColumnName(index) === name
+  );
+}
+
+/**
+ * Every column name a relation tree declares other than the hidden ordering
+ * columns the relation builder adds: the output keys of each source query,
+ * each derived relation's input and output columns, and the columns of each
+ * ranked and set relation, nested relations included. A hidden column is
+ * recognized only in the slot the builder puts it in: a derived relation's
+ * trailing column for its `index`th ordering term, named
+ * `relationOrderColumnName(index)`, or a source query's output key spelled
+ * `relationSourceOrderColumnName(index)` (no visible column of any relation
+ * may be spelled either way).
+ */
+function declaredRelationColumnNames(relation: RelationAst): readonly string[] {
+  switch (relation.kind) {
+    case "source": {
+      return relation.query.projection.fields
+        .map((field) => field.outputName)
+        .filter((name) => !isRelationSourceOrderColumnName(name));
+    }
+    case "derived": {
+      const hiddenStart = relation.projection.length - relation.orderBy.length;
+      return [
+        ...relation.sourceColumns.map((column) => column.outputName),
+        ...relation.projection.flatMap(({ column }, index) =>
+          (
+            index >= hiddenStart &&
+            column.outputName === relationOrderColumnName(index - hiddenStart)
+          ) ?
+            []
+          : [column.outputName],
+        ),
+        ...declaredRelationColumnNames(relation.source),
+      ];
+    }
+    case "topPerPartition": {
+      return [
+        ...relation.columns.map((column) => column.outputName),
+        ...declaredRelationColumnNames(relation.source),
+      ];
+    }
+    case "set": {
+      return [
+        ...relation.columns.map((column) => column.outputName),
+        ...declaredRelationColumnNames(relation.left),
+        ...declaredRelationColumnNames(relation.right),
+      ];
+    }
+  }
+}
+
+/**
+ * Refuses a relation, before any SQL is sent, that declares a column in the
+ * reserved `__tg` namespace anywhere in its tree. The builders refuse such a
+ * key where it is declared; this covers a relation definition built another
+ * way and handed to the public `ExecutableRelationQuery` constructor. The
+ * aliases of each source query are refused where it is compiled
+ * (`compileQueryWithSqlNames`).
+ */
+function refuseReservedRelationColumnNames(relation: RelationAst): void {
+  refuseReservedOutputKeys(declaredRelationColumnNames(relation));
+}
+
 function expressionContext(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   allowAggregates: boolean,
@@ -168,7 +265,7 @@ function compileDerived(
     relation.projection.map(({ expression }) => expression),
     relation.groupBy,
   );
-  const source = compileRelation(relation.source, dialect, "wrapped");
+  const source = compileRelationPart(relation.source, dialect, "wrapped");
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
@@ -199,7 +296,7 @@ function compileTopPerPartition(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
 ): CompiledSelectSql {
-  const source = compileRelation(relation.source, dialect, "wrapped");
+  const source = compileRelationPart(relation.source, dialect, "wrapped");
   const partition = sql.join(
     relation.partitionBy.map((expression) =>
       compileExpression(expression, dialect, false, orderedAggregates),
@@ -207,12 +304,9 @@ function compileTopPerPartition(
     sql`, `,
   );
   const ordering = compileOrder(relation.orderBy, dialect, orderedAggregates);
-  const occupiedNames = new Set(
-    // SQLite resolves even quoted identifiers without case sensitivity.
-    relation.columns.map((column) => column.outputName.toLowerCase()),
-  );
-  let rankName = "__tg_partition_rank";
-  while (occupiedNames.has(rankName)) rankName += "_";
+  // No column of the relation falls in the reserved `__tg` namespace
+  // (`refuseReservedRelationColumnNames`), so this hidden column meets none.
+  const rankName = PARTITION_RANK_COLUMN;
   const selectedColumns = sql.join(
     relation.columns.map(
       (column) =>
@@ -253,6 +347,7 @@ export function assertRelationSourceSqlNames(
   relation: RelationAst,
   usage: SqlNameUsage,
 ): void {
+  refuseReservedRelationColumnNames(relation);
   if (relation.kind === "source") {
     compileRelationSource(relation, usage);
     return;
@@ -279,8 +374,8 @@ function compileRelationInner(
       return compileTopPerPartition(relation, dialect, orderedAggregates);
     }
     case "set": {
-      const left = compileRelation(relation.left, dialect, "wrapped");
-      const right = compileRelation(relation.right, dialect, "wrapped");
+      const left = compileRelationPart(relation.left, dialect, "wrapped");
+      const right = compileRelationPart(relation.right, dialect, "wrapped");
       const columns = sql.join(
         relation.columns.map(
           (column) =>
@@ -307,11 +402,26 @@ function compileRelationInner(
  * Compiles a relation. `usage` is how the caller reads the statement's result
  * columns (see `SqlNameUsage`); a query the relation reads from is checked
  * under it when it is the whole relation.
+ *
+ * Every compile from outside this module enters here and is refused when the
+ * relation declares a column in the reserved namespace
+ * (`refuseReservedRelationColumnNames`); the nested relations of one
+ * statement compile through `compileRelationPart`, already checked.
  */
 export function compileRelation(
   relation: RelationAst,
   dialect: DatabaseExpressionCompilerContext["dialect"],
   usage: SqlNameUsage = "decoded",
+): CompiledSelectSql {
+  refuseReservedRelationColumnNames(relation);
+  return compileRelationPart(relation, dialect, usage);
+}
+
+/** Compiles a relation, or a relation nested in one, without the reserved-name check. */
+function compileRelationPart(
+  relation: RelationAst,
+  dialect: DatabaseExpressionCompilerContext["dialect"],
+  usage: SqlNameUsage,
 ): CompiledSelectSql {
   const orderedAggregates = relationSources(relation).every(
     (source) => source.options.orderedAggregates === true,

@@ -40,7 +40,8 @@ For new queries that need SQL composition, use `project()` and the typed `expr` 
 operations. Use `select()` when you specifically need the compatibility JavaScript mapper.
 `project()` keys become SQL result names, so two keys that differ only by letter case (`name`
 and `Name`) are refused when `project()` is called (see
-[Errors](/errors#sql_identifier_collision-and-sql_identifier_too_long)).
+[Errors](/errors#sql_identifier_collision-and-sql_identifier_too_long)), and a key that starts
+with the reserved `__tg` prefix in any letter case is refused with a `ConfigurationError`.
 
 ## Selection Patterns
 

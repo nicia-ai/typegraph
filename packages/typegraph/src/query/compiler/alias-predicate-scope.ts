@@ -63,7 +63,7 @@ export function assertAliasPredicatesReadOnlyTheirTarget(ast: QueryAst): void {
  * `inSubquery()` and expression `$exists()` / `$scalar()`), wherever in the
  * statement it appears. Subqueries nested in those are not visited.
  */
-function visitNestedSubqueries(
+export function visitNestedSubqueries(
   ast: QueryAst,
   visit: (subquery: QueryAst) => void,
 ): void {

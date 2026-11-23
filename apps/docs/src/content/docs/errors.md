@@ -278,7 +278,9 @@ sent.
   and the node's `id` (both are `e_from_id`), whether in the selection or in a
   `having()` comparison on either side; selecting a property `edge_id` of alias `p`
   together with the id of alias `p_edge`; `aggregate()` or `project()` keys that
-  differ only by letter case, such as `total` and `Total`.
+  differ only by letter case, such as `total` and `Total`; an alias that starts with the
+  reserved `__tg` prefix in any letter case (`__tg_sq_1_a0`, `__TG_x`), which could meet
+  a name the library generates (issue `path` `alias`).
 - `SQL_IDENTIFIER_TOO_LONG`: a result column read back by name would exceed 63
   bytes. Examples: reading `id` under a 61-character alias (`<alias>_id` is 64
   bytes), or an `aggregate()` key longer than 63 bytes; bytes are counted, so 32

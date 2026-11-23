@@ -9,6 +9,11 @@ import {
   type PredicateExpression,
   type SortDirection,
 } from "../ast";
+import {
+  isReservedSqlName,
+  refuseReservedOutputKeys,
+  reservedAliasRefusal,
+} from "../compiler/sql-name-registry";
 import type { PaginateOptions, QueryBuilderState } from "./types";
 
 /**
@@ -78,12 +83,20 @@ const SQL_RESERVED_KEYWORDS = new Set([
 ]);
 
 /**
- * Validates that an alias is a safe SQL identifier.
+ * Validates that an alias is a safe SQL identifier outside the names the
+ * library reserves: `cte_` (the prefix of every alias CTE) and `__tg` (see
+ * {@link isReservedSqlName}), in any letter case.
+ *
+ * The reserved namespace is checked first, so an alias in it is refused with
+ * the same code (`SQL_IDENTIFIER_COLLISION`) whether or not it is otherwise
+ * a valid identifier, as it is where a query AST is compiled.
  *
  * @param alias - The alias to validate
  * @throws ValidationError if the alias is not a valid SQL identifier
  */
 export function validateSqlIdentifier(alias: string): void {
+  if (isReservedSqlName(alias)) throw reservedAliasRefusal(alias);
+
   if (!SQL_IDENTIFIER_PATTERN.test(alias)) {
     throw new ValidationError(
       `Invalid alias "${alias}": must start with a letter or underscore, ` +
@@ -366,6 +379,9 @@ export function validateQueryState(state: QueryBuilderState): void {
   }
   addAlias(state.startAlias);
   nodes.add(state.startAlias);
+  // A state handed to a public constructor skips the project() and
+  // aggregate() checks; hidden columns are named beside these keys.
+  refuseReservedOutputKeys(state.projection.map((field) => field.outputName));
   for (const traversal of state.traversals) {
     if (!nodes.has(traversal.joinFromAlias))
       throw new ValidationError(
