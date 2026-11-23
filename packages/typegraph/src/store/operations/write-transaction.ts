@@ -712,7 +712,7 @@ export async function runFrameWritesAsUnit<T>(
  * reads its mode and {@link runInWriteEntryTransaction} opens from it, so the
  * boundary a write is judged at and the boundary it runs at are one value.
  */
-export type WriteTransactionBoundary =
+type WriteTransactionBoundary =
   | Readonly<{ mode: "opened"; root: GraphBackend }>
   | Readonly<{ mode: "existing" }>
   | Readonly<{ mode: "none" }>;
@@ -723,7 +723,7 @@ const EXISTING_TRANSACTION_BOUNDARY: WriteTransactionBoundary = {
 const NO_TRANSACTION_BOUNDARY: WriteTransactionBoundary = { mode: "none" };
 
 /** The one owner of the {@link WriteTransactionBoundary} decision. */
-export function resolveWriteTransactionBoundary(
+function resolveWriteTransactionBoundary(
   backend: StatementBackend,
 ): WriteTransactionBoundary {
   if (!("transaction" in backend)) return EXISTING_TRANSACTION_BOUNDARY;
