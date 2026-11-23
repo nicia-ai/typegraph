@@ -520,8 +520,9 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   );
   if (endpointError) throw endpointError;
 
-  const assertEndpointsLive = (): Promise<void> =>
-    assertLiveEdgeEndpoints(
+  const endpointCheck = options?.endpoints ?? "read";
+  if (endpointCheck === "read") {
+    await assertLiveEdgeEndpoints(
       ctx,
       kind,
       fromKind,
@@ -530,8 +531,7 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       input.toId,
       backend,
     );
-  const endpointCheck = options?.endpoints ?? "read";
-  if (endpointCheck === "read") await assertEndpointsLive();
+  }
 
   // Validate props with full context
   const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
@@ -579,6 +579,9 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   };
   if (options?.validateCardinality ?? true) {
     await refuseCardinalityAfterEndpoints(
+      ctx,
+      endpointCheck === "inWrite" ? [input] : [],
+      backend,
       () =>
         checkEdgeCardinalityConstraints(
           constraintContext,
@@ -593,7 +596,6 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
             ...(validTo === undefined ? {} : { validTo }),
           }),
         ),
-      endpointCheck === "inWrite" ? assertEndpointsLive : undefined,
     );
   }
 
@@ -659,35 +661,53 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
 }
 
 /**
- * THE refusal order between an edge create's endpoints and its cardinality
+ * THE refusal order between an edge write's endpoints and its cardinality
  * (issue #946): a non-live endpoint is reported before any cardinality
  * answer. A cardinality refusal is about a relation the write may not join
  * when one of its endpoints is not live, so it is never the answer then.
  *
- * Every create path reaches its cardinality verdict through
- * {@link validateAndPrepareEdgeCreate} or through a claim statement, and
- * both consult this. A path that read the endpoints first (`"read"`) passes
- * no `assertEndpointsLive`: the order already holds; nor does one whose
- * frame proves them (`"provenByFrame"`). A path that skipped them because a
- * later statement carries the endpoint predicate (`"inWrite"`) passes the
- * endpoint check, and it runs only once `probe` has refused, so the reads a
- * successful create never needed are spent on the refusal path alone. Two
- * such paths exist: a durable-identity create probes cardinality before its
- * converge command, which holds the endpoint predicate; and a port without
- * the fused claim insert (both SQLite drivers) has the session issue the
- * claim statement before the endpoint-guarded INSERT, where the fused
- * PostgreSQL statement evaluates both at once and reports a failed endpoint
- * predicate as no row.
+ * `probe` is the decision that may refuse with a claim refusal
+ * (`isClaimRefusal`); `endpoints` are the edges it decides for whose
+ * endpoints nothing has read yet. A path that read them first (`"read"`, a
+ * resurrection) or whose frame proves them (`"provenByFrame"`) passes none:
+ * the order already holds. Every other path passes them, and they are read
+ * only once `probe` has refused, so a successful write spends no read here:
+ *
+ * - a durable-identity create probes cardinality before its converge
+ *   command, which holds the endpoint predicate
+ *   ({@link validateAndPrepareEdgeCreate} with `"inWrite"`);
+ * - a port without the fused claim insert (both SQLite drivers, and any
+ *   multi-claim plan) has the session issue the claim statements before the
+ *   endpoint-guarded INSERT, where the fused PostgreSQL statement evaluates
+ *   both at once and reports a failed endpoint predicate as no row;
+ * - a native batch's preparation refuses a row repeating an axis an earlier
+ *   row claimed before the program that reads the endpoints runs
+ *   ({@link prepareAtomicEdgeBatchCreates}); it passes every row, and the
+ *   first dead endpoint in input order wins;
+ * - a window reopen re-probes the active-only axes it re-enters
+ *   ({@link prepareEdgeUpdate}) and reads no endpoints otherwise.
+ *
+ * The read takes NO row lock ({@link diagnoseEdgeEndpointsLive}): its answer
+ * only chooses which error to throw, and a lock here would be one the
+ * success path does not take at this point. A refused claim statement keeps
+ * the incumbent's claim row locked to the end of the transaction, and a hard
+ * delete of the endpoint holds the endpoint `FOR UPDATE` and then purges
+ * that claim row; a locked endpoint read after the claim would wait on the
+ * delete while the delete waits on the claim, and PostgreSQL would abort one
+ * of them as a deadlock. An endpoint whose delete has not committed reads as
+ * live, so the claim refusal stands.
  */
-async function refuseCardinalityAfterEndpoints<T>(
+async function refuseCardinalityAfterEndpoints<G extends GraphDef, T>(
+  ctx: EdgeOperationContext<G>,
+  endpoints: readonly EdgeEndpointInput[],
+  backend: WriteTarget,
   probe: () => Promise<T>,
-  assertEndpointsLive: (() => Promise<void>) | undefined,
 ): Promise<T> {
   try {
     return await probe();
   } catch (error) {
-    if (assertEndpointsLive !== undefined && isClaimRefusal(error)) {
-      await assertEndpointsLive();
+    if (endpoints.length > 0 && isClaimRefusal(error)) {
+      await diagnoseEdgeEndpointsLive(ctx, endpoints, backend);
     }
     throw error;
   }
@@ -1501,19 +1521,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       // endpoint-guarded INSERT has run, so a claim refusal from it has not
       // seen the endpoints; the order owner checks them first.
       const fusedResult = await refuseCardinalityAfterEndpoints(
+        ctx,
+        [input],
+        target,
         () =>
           withAlreadyExistsTranslation("edge", () =>
             session.createEdgeWithPlan(fusedCommand),
-          ),
-        () =>
-          assertLiveEdgeEndpoints(
-            ctx,
-            kind,
-            input.fromKind,
-            input.fromId,
-            input.toKind,
-            input.toId,
-            target,
           ),
       );
       if (fusedResult.outcome === "created") {
@@ -1746,6 +1759,11 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
   const preparedCreates: EdgeCreatePrepared[] = [];
   const claims: ClaimEdgeCardinalityParams[] = [];
   const claimedTargets = new Map<string, string>();
+  // Rows repeating an axis an earlier row claimed, first one first. Refused
+  // only after every row is prepared, and through the order owner: the
+  // native program, which reads the endpoints, never runs for this batch, so
+  // a dead endpoint anywhere in it must still outrank the repeat.
+  const repeatRefusals: ReturnType<typeof claimRefusalFor>[] = [];
   for (const input of inputs) {
     const prepared = await validateAndPrepareEdgeCreate(
       ctx,
@@ -1768,11 +1786,18 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
       const targetKey = targetIdentity(edgeCardinalityClaimTarget(claim));
       const incumbentEdgeId = claimedTargets.get(targetKey);
       if (incumbentEdgeId !== undefined) {
-        throw claimRefusalFor(claim, incumbentEdgeId);
+        repeatRefusals.push(claimRefusalFor(claim, incumbentEdgeId));
+        continue;
       }
       claimedTargets.set(targetKey, claim.edgeId);
       claims.push(claim);
     }
+  }
+  const [repeatRefusal] = repeatRefusals;
+  if (repeatRefusal !== undefined) {
+    await refuseCardinalityAfterEndpoints(ctx, inputs, backend, () =>
+      Promise.reject(repeatRefusal),
+    );
   }
   return { claims: sortedByClaimTarget(claims), preparedCreates };
 }
@@ -1890,7 +1915,14 @@ function assertEndpointRowsLive(
   }
 }
 
-async function assertAtomicEdgeBatchEndpoints<G extends GraphDef>(
+/**
+ * Throws the typed endpoint refusal for the first input, in input order and
+ * source before target, whose endpoint is not live. Reads WITHOUT a row lock:
+ * every caller uses the answer only to choose an error after its write was
+ * refused, so it must not take a lock the write did not take (see
+ * {@link refuseCardinalityAfterEndpoints}).
+ */
+async function diagnoseEdgeEndpointsLive<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly EdgeEndpointInput[],
   backend: WriteTarget,
@@ -1918,7 +1950,7 @@ async function diagnoseAtomicEdgeBatchEndpointRefusal<G extends GraphDef>(
   backend: WriteTarget,
   cause: unknown,
 ): Promise<never> {
-  await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+  await diagnoseEdgeEndpointsLive(ctx, inputs, backend);
   throw new DatabaseOperationError(
     "Atomic edge batch refused endpoint liveness, but no current missing " +
       "endpoint could be diagnosed. Endpoint state may have changed after " +
@@ -2040,7 +2072,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   const insertedCount = typeof result === "number" ? result : result.length;
   if (insertedCount === 0) {
     await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+    await diagnoseEdgeEndpointsLive(ctx, inputs, backend);
   }
   if (insertedCount !== inputs.length) {
     throw new DatabaseOperationError(
@@ -2897,13 +2929,33 @@ async function prepareEdgeUpdate<G extends GraphDef>(
         reentryOrdinaryClaims
       : [...reentryOrdinaryClaims, compositionEntry],
     );
-    await checkEdgeCardinalityConstraints(
-      {
-        graphId: ctx.graphId,
-        registry: ctx.registry,
-        backend: target,
-      },
-      reentryClaims,
+    // A resurrection read the endpoints above, before this probe. A pure
+    // window reopen reads none, so a refusal of its re-entry consults the
+    // order owner exactly as a create's does.
+    const probedClaims = reentryClaims;
+    await refuseCardinalityAfterEndpoints(
+      ctx,
+      options?.clearDeleted === true ?
+        []
+      : [
+          {
+            kind: input.identity.kind,
+            fromKind: existing.from_kind,
+            fromId: existing.from_id,
+            toKind: existing.to_kind,
+            toId: existing.to_id,
+          },
+        ],
+      target,
+      () =>
+        checkEdgeCardinalityConstraints(
+          {
+            graphId: ctx.graphId,
+            registry: ctx.registry,
+            backend: target,
+          },
+          probedClaims,
+        ),
     );
   }
   // An acyclic relation re-admits this row when the update moves it from

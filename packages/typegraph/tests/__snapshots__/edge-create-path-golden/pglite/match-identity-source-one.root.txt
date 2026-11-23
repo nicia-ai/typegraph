@@ -109,7 +109,7 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-c"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
@@ -141,7 +141,7 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-b"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
@@ -156,7 +156,7 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-dead"]
 sql ROLLBACK
 hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
@@ -203,7 +203,7 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-b"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
@@ -248,7 +248,7 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4) ORDER BY "id" COLLATE "C" FOR KEY SHARE
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
     ["<graph1>","Item","item-a","item-dead"]
 sql ROLLBACK
 hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]

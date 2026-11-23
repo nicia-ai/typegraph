@@ -1311,8 +1311,11 @@ answer: when the same write would also exceed a `cardinality` or
 `targetCardinality` bound, it raises `EndpointNotFoundError`, not
 `CardinalityError` (or `CompositionError` for an occupied part). This holds
 on every backend, at the root and inside `store.transaction()`, and on every
-edge write path: `create`, `getOrCreateByEndpoints`, the bulk forms, and
-import, which reports the row as `From node not found` / `To node not found`.
+edge write path: `create`, `getOrCreateByEndpoints`, the bulk forms (also
+when two rows of one batch repeat an axis and one of them names a non-live
+endpoint), import, which reports the row as `From node not found` /
+`To node not found`, and a write that reopens an ended edge's validity window
+(`clearValidTo`) back into a `oneActive` axis another edge holds.
 
 ```typescript
 try {

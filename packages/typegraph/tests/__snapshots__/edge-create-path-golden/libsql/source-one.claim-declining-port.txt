@@ -102,7 +102,7 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
     ["<graph1>","Item","item-a","item-c"]
 libsql rollback
 hook error create edge CardinalityError[CARDINALITY_ERROR]
@@ -133,7 +133,7 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
     ["<graph1>","Item","item-a","item-b"]
 libsql rollback
 hook error create edge CardinalityError[CARDINALITY_ERROR]
@@ -147,7 +147,7 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
     ["<graph1>","Item","item-a","item-dead"]
 libsql rollback
 hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
@@ -243,7 +243,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?) ORDER BY "id"
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
     ["<graph1>","Item","item-a","item-dead"]
 libsql rollback
 hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
