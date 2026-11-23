@@ -4671,7 +4671,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     return runInWriteEntryTransaction(
       entry,
       (frame) => findCandidates(writeEntryBackend(frame)),
-      { accessMode: "read_only" },
+      { transaction: { accessMode: "read_only" } },
     );
   }
 

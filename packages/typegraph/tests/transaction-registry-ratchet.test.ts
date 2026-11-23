@@ -280,7 +280,7 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
 const TRANSACTION_BINDING_KEYED_BASELINE = 9;
 
 /** `"transaction" in x` probes in the Store layers. May only decrease. */
-const TRANSACTION_MEMBER_PROBE_BASELINE = 6;
+const TRANSACTION_MEMBER_PROBE_BASELINE = 5;
 
 const PRIMITIVE_FLAGS =
   ts.TypeFlags.StringLike |

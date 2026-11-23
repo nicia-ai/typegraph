@@ -705,49 +705,77 @@ export async function runFrameWritesAsUnit<T>(
 }
 
 /**
- * THE decision of which boundary a write on `backend` runs at: a transaction
+ * THE decision of which boundary a write on a backend runs at: a transaction
  * handle is already inside one (`"existing"`), a root with interactive
- * transactions opens one (`"opened"`), and any other root has none
- * (`"none"`). {@link runInWriteEntryTransaction} opens exactly when this
- * reads `"opened"`.
+ * transactions opens one (`"opened"`, carrying the root that opens it), and
+ * any other root has none (`"none"`). {@link resolveWriteTransactionMode}
+ * reads its mode and {@link runInWriteEntryTransaction} opens from it, so the
+ * boundary a write is judged at and the boundary it runs at are one value.
  */
+export type WriteTransactionBoundary =
+  | Readonly<{ mode: "opened"; root: GraphBackend }>
+  | Readonly<{ mode: "existing" }>
+  | Readonly<{ mode: "none" }>;
+
+const EXISTING_TRANSACTION_BOUNDARY: WriteTransactionBoundary = {
+  mode: "existing",
+};
+const NO_TRANSACTION_BOUNDARY: WriteTransactionBoundary = { mode: "none" };
+
+/** The one owner of the {@link WriteTransactionBoundary} decision. */
+export function resolveWriteTransactionBoundary(
+  backend: StatementBackend,
+): WriteTransactionBoundary {
+  if (!("transaction" in backend)) return EXISTING_TRANSACTION_BOUNDARY;
+  return backend.capabilities.execution.interactiveTransactions ?
+      { mode: "opened", root: backend }
+    : NO_TRANSACTION_BOUNDARY;
+}
+
+/** The mode of {@link resolveWriteTransactionBoundary}'s decision. */
 export function resolveWriteTransactionMode(
   backend: StatementBackend,
 ): WriteTransactionMode {
-  if (!("transaction" in backend)) return "existing";
-  return backend.capabilities.execution.interactiveTransactions ?
-      "opened"
-    : "none";
+  return resolveWriteTransactionBoundary(backend).mode;
 }
 
-/** Transaction options for a transaction {@link runInWriteEntryTransaction} opens. */
-type WriteEntryTransactionOptions = Parameters<GraphBackend["transaction"]>[1];
+/** How {@link runInWriteEntryTransaction} runs. */
+type WriteEntryTransactionOptions = Readonly<{
+  /** Options for the transaction it opens, when it opens one. */
+  transaction?: Parameters<GraphBackend["transaction"]>[1];
+  /**
+   * The boundary the caller already resolved for the entry's backend, so the
+   * write runs at the boundary it was judged at; resolved here when absent.
+   */
+  boundary?: WriteTransactionBoundary;
+}>;
 
 /**
  * Runs `fn` in the transaction `entry` is in, opening one when `entry` is a
  * root that can: the place a write opens its own transaction, and so the
  * place its session is opened. `fn` receives the entry its work runs under —
  * the first operation of the new session, `entry` itself when it already
- * belongs to a session, or the root when there is no transaction to open.
- * The boundary is {@link resolveWriteTransactionMode}'s, asked the same way.
+ * belongs to a session, or the root when there is no transaction to open. It
+ * opens exactly when the {@link WriteTransactionBoundary} reads `"opened"`.
+ *
+ * `async`, so every failure — a boundary probe, or a backend whose
+ * `transaction()` throws while setting up — rejects the returned promise
+ * rather than escaping synchronously.
  */
-export function runInWriteEntryTransaction<T>(
+export async function runInWriteEntryTransaction<T>(
   entry: WriteEntry,
   fn: (frame: WriteEntry) => Promise<T>,
-  transactionOptions?: WriteEntryTransactionOptions,
+  options?: WriteEntryTransactionOptions,
 ): Promise<T> {
-  const backend = writeEntryBackend(entry);
-  if (
-    "transaction" in backend &&
-    backend.capabilities.execution.interactiveTransactions
-  ) {
-    return backend.transaction(
-      (transaction: StoreTransactionBackend) =>
-        fn(enterOperation(openTransactionSession(transaction))),
-      transactionOptions,
-    );
-  }
-  return fn(entry);
+  const boundary =
+    options?.boundary ??
+    resolveWriteTransactionBoundary(writeEntryBackend(entry));
+  if (boundary.mode !== "opened") return fn(entry);
+  return boundary.root.transaction(
+    (transaction: StoreTransactionBackend) =>
+      fn(enterOperation(openTransactionSession(transaction))),
+    options?.transaction,
+  );
 }
 
 /**
@@ -959,7 +987,7 @@ export function runInWriteTransaction<T>(
   options?: WriteTransactionOptions<T>,
 ): Promise<T> {
   const backend = writeEntryBackend(entry);
-  const transactionMode = resolveWriteTransactionMode(backend);
+  const boundary = resolveWriteTransactionBoundary(backend);
   const fenceReason = options?.fencesConstraintProbe;
   // Rejected rather than thrown: this function is promise-returning, and a
   // synchronous throw from it would surface differently at a caller that
@@ -976,8 +1004,7 @@ export function runInWriteTransaction<T>(
     () =>
       requiresOptimisticRetryUnit(backend) ||
       ownsSnapshotFencedUnit(backend, fenceReason),
-    () =>
-      runInWriteTransactionAttempt(ctx, entry, fn, options, transactionMode),
+    () => runInWriteTransactionAttempt(ctx, entry, fn, options, boundary),
   );
 }
 
@@ -1153,8 +1180,9 @@ function runInWriteTransactionAttempt<T>(
   entry: WriteEntry,
   fn: WriteFrame<T>,
   options: WriteTransactionOptions<T> | undefined,
-  transactionMode: WriteTransactionMode,
+  boundary: WriteTransactionBoundary,
 ): Promise<T> {
+  const transactionMode = boundary.mode;
   const ownsWriteLock = transactionMode === "opened";
   const fenceReason = options?.fencesConstraintProbe;
   const needsGraphWriteLock = writeNeedsGraphWriteFence(ctx, fenceReason);
@@ -1298,6 +1326,7 @@ function runInWriteTransactionAttempt<T>(
       }
       return result;
     },
+    { boundary },
   );
 }
 
