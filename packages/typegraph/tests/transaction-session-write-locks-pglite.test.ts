@@ -26,7 +26,14 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createStore, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStore,
+  createStore,
+  defineGraph,
+  defineNode,
+} from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import type { TransactionBackend } from "../src/backend/types";
 import {
   createRecordedPostgresStore,
   type LoggedStatement,
@@ -133,5 +140,55 @@ describe("a transaction's held graph write locks", () => {
     ]);
 
     expect(graphLockAcquisitions(statements)).toHaveLength(2);
+  });
+});
+
+/**
+ * THE ONE DELIBERATE DIFFERENCE: two adoptions of one native transaction are
+ * two bindings, even when a custom adapter returns the same object for both.
+ *
+ * Held locks used to live in a `WeakMap` keyed by the transaction object, so
+ * two transaction contexts built over one object shared them: a write of the
+ * second context started while a write of the first was acquiring the lock
+ * awaited that acquisition and took no lock itself. Object identity is not
+ * evidence that the two are one native transaction (an adapter may hand out
+ * one object for more than one), and skipping an acquisition on the strength
+ * of another binding's is only right when they are. Each context now holds
+ * its own session, as two Stores on one native transaction always have, and
+ * each takes the lock: on one native transaction the second acquisition is
+ * re-entrant and costs one statement.
+ *
+ * On the parent commit (held locks keyed by the object) this case sees one
+ * acquisition, not two.
+ */
+describe("two adoptions of one native transaction through one object", () => {
+  it("take the graph write lock once per transaction context", async () => {
+    const recorded = await createRecordedPostgresStore(graph);
+    const adopted = new WeakMap<object, TransactionBackend>();
+    const backend = deriveBackend(recorded.backend, {
+      adoptTransaction: (nativeTransaction) => {
+        const existing = adopted.get(nativeTransaction);
+        if (existing !== undefined) return existing;
+        const created = recorded.backend.adoptTransaction(nativeTransaction);
+        adopted.set(nativeTransaction, created);
+        return created;
+      },
+    });
+    const store = createAdapterStore(graph, backend, {
+      revisionTracking: true,
+    });
+    recorded.reset();
+
+    await recorded.backend.transactionWithNative(async (_tx, native) => {
+      const first = store.withTransaction(native);
+      const second = store.withTransaction(native);
+      await Promise.all([
+        first.nodes.Task.create({ name: "a" }),
+        second.nodes.Task.create({ name: "b" }),
+      ]);
+    });
+
+    expect(graphLockAcquisitions(recorded.statements)).toHaveLength(2);
+    expect(await store.nodes.Task.count()).toBe(2);
   });
 });

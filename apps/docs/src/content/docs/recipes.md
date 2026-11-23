@@ -755,6 +755,14 @@ once at startup with `createAdapterStoreWithSchema(graph, backend)` so
 fulltext-backed writes find their durable materialization marker; an uninitialized store
 throws `StoreNotInitializedError` instead of migrating mid-transaction.
 
+Each `withTransaction(sqlTx)` call returns its own transaction context, and
+TypeGraph keeps its per-transaction write state per context: a write of one
+context never skips the per-graph write lock because a write of another
+context took it, even when a custom adapter's `adoptTransaction` returns the
+same object for both calls. Two contexts over one native transaction therefore
+each take the lock; inside that one transaction the second acquisition does
+not wait, and costs one statement.
+
 On SQLite, open caller-owned transactions that may perform constrained writes
 with `BEGIN IMMEDIATE`. TypeGraph probes the writer slot before any
 decision-driving constraint read; if a `DEFERRED` snapshot was invalidated by a
