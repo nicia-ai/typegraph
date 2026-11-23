@@ -362,7 +362,10 @@ import {
 } from "./neighbors";
 import { readNodeByReference } from "./node-reference-read";
 import {
+  enterOperation,
   legacyTransactionOperation,
+  openTransactionSession,
+  type Operation,
   type OperationBackend,
   type OperationScoped,
   type StatementBackend,
@@ -420,6 +423,7 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   diagnoseFusedSchemaFenceNoRow,
+  legacyWriteEntry,
   refuseReadOnlyTransactionWrite,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
@@ -1748,7 +1752,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#createNodeOperationContext(),
           work.kind,
           work.id,
-          legacyTransactionOperation(target),
+          legacyWriteEntry(legacyTransactionOperation(target)),
           { policy },
         ),
       applyResolvedNodeUniqueness: async (
@@ -2574,6 +2578,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
         this.#registry,
         this.#backend,
+        this.#backend,
         this.#batchPointRead,
         this.#nodeOperations,
       );
@@ -2604,6 +2609,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#graph,
         this.graphId,
         this.#registry,
+        this.#backend,
         this.#backend,
         this.#batchPointRead,
         this.#endpointSetRead,
@@ -3066,19 +3072,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       rowToNode: (row) => rowToNode(row),
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
-      executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend, options) =>
-        executeNodeCreateBatch(ctx, inputs, backend, options),
-      executeCreateNoReturnBatch: (inputs, backend) =>
-        executeNodeCreateNoReturnBatch(ctx, inputs, backend),
-      executeUpdate: (input, backend, options) =>
-        executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
+      executeCreate: (input, entry) => executeNodeCreate(ctx, input, entry),
+      executeCreateBatch: (inputs, entry, options) =>
+        executeNodeCreateBatch(ctx, inputs, entry, options),
+      executeCreateNoReturnBatch: (inputs, entry) =>
+        executeNodeCreateNoReturnBatch(ctx, inputs, entry),
+      executeUpdate: (input, entry, options) =>
+        executeNodeUpdate(ctx, { ...input, id: input.id }, entry, options),
       executeNodeSetUpdate: (
         kind,
         patch,
         candidateIds,
         candidateIdColumn,
-        backend,
+        entry,
         options,
       ) =>
         executeNodeSetUpdate(
@@ -3087,17 +3093,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           patch,
           candidateIds,
           candidateIdColumn,
-          backend,
+          entry,
           options,
         ),
-      executeUpsertUpdateBatch: (entries, backend) =>
-        executeNodeUpsertUpdateBatch(ctx, entries, backend),
-      executeResolvedMutationSet: (creates, updates, backend) =>
-        executeNodeResolvedMutationSet(ctx, creates, updates, backend),
+      executeUpsertUpdateBatch: (entries, entry) =>
+        executeNodeUpsertUpdateBatch(ctx, entries, entry),
+      executeResolvedMutationSet: (creates, updates, entry) =>
+        executeNodeResolvedMutationSet(ctx, creates, updates, entry),
       prepareReplacement: (kind, props) =>
         prepareNodeReplacement(ctx, kind, props),
-      executeReplacementBatch: (kind, items, backend) =>
-        executeNodeReplacementBatch(ctx, kind, items, backend),
+      executeReplacementBatch: (kind, items, entry) =>
+        executeNodeReplacementBatch(ctx, kind, items, entry),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
@@ -3106,31 +3112,31 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // `nodes.<Kind>.reparent(...)` is THE surface that moves a part, so it
       // is the one that states `onIncumbent: "replace"`; every get-or-create
       // path reaches the same write plan with `"refuse"`.
-      executeReparent: (kind, id, options, backend) =>
-        executeNodeReparent(ctx, kind, id, options, backend, {
+      executeReparent: (kind, id, options, entry) =>
+        executeNodeReparent(ctx, kind, id, options, entry, {
           onIncumbent: "replace",
         }),
-      executeReparentBatch: (kind, items, backend) =>
-        executeNodeReparentBatch(ctx, kind, items, backend, {
+      executeReparentBatch: (kind, items, entry) =>
+        executeNodeReparentBatch(ctx, kind, items, entry, {
           onIncumbent: "replace",
         }),
-      executeDelete: (kind, id, backend, expect) =>
-        executeNodeDelete(ctx, kind, id, backend, { expect }),
-      executeDeleteBatch: (kind, ids, backend) =>
-        executeNodeDeleteBatch(ctx, kind, ids, backend),
-      executeHardDelete: (kind, id, backend) =>
-        executeNodeHardDelete(ctx, kind, id, backend),
-      executeHardDeleteBatch: (kind, ids, backend) =>
-        executeNodeHardDeleteBatch(ctx, kind, ids, backend),
-      executeDeletePlan: (kind, id, backend) =>
-        executeNodeDeletePlan(ctx, kind, id, backend),
+      executeDelete: (kind, id, entry, expect) =>
+        executeNodeDelete(ctx, kind, id, entry, { expect }),
+      executeDeleteBatch: (kind, ids, entry) =>
+        executeNodeDeleteBatch(ctx, kind, ids, entry),
+      executeHardDelete: (kind, id, entry) =>
+        executeNodeHardDelete(ctx, kind, id, entry),
+      executeHardDeleteBatch: (kind, ids, entry) =>
+        executeNodeHardDeleteBatch(ctx, kind, ids, entry),
+      executeDeletePlan: (kind, id, entry) =>
+        executeNodeDeletePlan(ctx, kind, id, entry),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByConstraint: (
         kind,
         constraintName,
         props,
-        backend,
+        entry,
         options,
       ) =>
         executeNodeGetOrCreateByConstraint(
@@ -3138,14 +3144,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           kind,
           constraintName,
           props,
-          backend,
+          entry,
           options,
         ),
       executeBulkGetOrCreateByConstraint: (
         kind,
         constraintName,
         items,
-        backend,
+        entry,
         options,
       ) =>
         executeNodeBulkGetOrCreateByConstraint(
@@ -3153,7 +3159,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           kind,
           constraintName,
           items,
-          backend,
+          entry,
           options,
         ),
       executeFindByConstraint: (kind, constraintName, props, backend) =>
@@ -3191,29 +3197,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       rowToEdge: (row) => rowToEdge(row),
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
-      executeCreate: (input, backend) => executeEdgeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend, options) =>
-        executeEdgeCreateBatch(ctx, inputs, backend, options),
-      executeCreateNoReturnBatch: (inputs, backend) =>
-        executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
-      executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
-      executeUpsertUpdateBatch: (entries, backend) =>
-        executeEdgeUpsertUpdateBatch(ctx, entries, backend),
-      executeResolvedMutationSet: (creates, updates, backend) =>
-        executeEdgeResolvedMutationSet(ctx, creates, updates, backend),
+      executeCreate: (input, entry) => executeEdgeCreate(ctx, input, entry),
+      executeCreateBatch: (inputs, entry, options) =>
+        executeEdgeCreateBatch(ctx, inputs, entry, options),
+      executeCreateNoReturnBatch: (inputs, entry) =>
+        executeEdgeCreateNoReturnBatch(ctx, inputs, entry),
+      executeUpdate: (input, entry) => executeEdgeUpdate(ctx, input, entry),
+      executeUpsertUpdateBatch: (entries, entry) =>
+        executeEdgeUpsertUpdateBatch(ctx, entries, entry),
+      executeResolvedMutationSet: (creates, updates, entry) =>
+        executeEdgeResolvedMutationSet(ctx, creates, updates, entry),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
           edgeUpsertDirtyCheck(ctx, kind, id, existingProps, inputProps),
       }),
-      executeDelete: (kind, id, backend) =>
-        executeEdgeDelete(ctx, kind, id, backend),
-      executeDeleteBatch: (kind, ids, backend) =>
-        executeEdgeDeleteBatch(ctx, kind, ids, backend),
-      executeHardDelete: (kind, id, backend) =>
-        executeEdgeHardDelete(ctx, kind, id, backend),
-      executeHardDeleteBatch: (kind, ids, backend) =>
-        executeEdgeHardDeleteBatch(ctx, kind, ids, backend),
+      executeDelete: (kind, id, entry) =>
+        executeEdgeDelete(ctx, kind, id, entry),
+      executeDeleteBatch: (kind, ids, entry) =>
+        executeEdgeDeleteBatch(ctx, kind, ids, entry),
+      executeHardDelete: (kind, id, entry) =>
+        executeEdgeHardDelete(ctx, kind, id, entry),
+      executeHardDeleteBatch: (kind, ids, entry) =>
+        executeEdgeHardDeleteBatch(ctx, kind, ids, entry),
       temporalRowMatcher: (options) => this.#temporalRowMatcher(options),
       createQuery: () => this.query(),
       executeGetOrCreateByEndpoints: (
@@ -3223,7 +3229,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         toKind,
         toId,
         props,
-        backend,
+        entry,
         options,
       ) =>
         executeEdgeGetOrCreateByEndpoints(
@@ -3234,17 +3240,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           toKind,
           toId,
           props,
-          backend,
+          entry,
           options,
         ),
-      executeBulkGetOrCreateByEndpoints: (kind, items, backend, options) =>
-        executeEdgeBulkGetOrCreateByEndpoints(
-          ctx,
-          kind,
-          items,
-          backend,
-          options,
-        ),
+      executeBulkGetOrCreateByEndpoints: (kind, items, entry, options) =>
+        executeEdgeBulkGetOrCreateByEndpoints(ctx, kind, items, entry, options),
       executeFindByEndpoints: (
         kind,
         fromKind,
@@ -5302,10 +5302,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #writeNodeUpsertBatch<
     const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
   >(
-    txBackend: OperationBackend,
+    operation: Operation,
     entries: Entries,
     receiptRecorder: TransactionReceiptRecorder | undefined,
   ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    const txBackend = operation.backend;
     // The transaction's write gate first, as every collection write passes it.
     receiptRecorder?.assertWritable("tx.writeNodeUpsertBatch()");
     if (entries.length === 0)
@@ -5503,6 +5504,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (receiptRecorder !== undefined) {
       registerSavepointState(txBackend, receiptRecorder.checkpoint);
     }
+    // Every kind of transaction (store-owned, adopted, recorded, evolved)
+    // reaches its context through this one builder, right where it opened or
+    // joined the native transaction: the session every public write this
+    // context offers enters its operation from, `tx.measure` scopes and hooks
+    // re-entering through a captured `tx` included.
+    const session = openTransactionSession(txBackend);
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
@@ -5545,7 +5552,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               nodeOperationContext,
               work.kind,
               work.id,
-              txBackend,
+              enterOperation(session),
               { policy },
             ),
           reviveNode: (work) =>
@@ -5553,7 +5560,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               nodeOperationContext,
               work.kind,
               work.id,
-              txBackend,
+              enterOperation(session),
             ),
           acquireWriteFences: async (refusal) => {
             if (readOnly) {
@@ -5563,14 +5570,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 refusal.suggestion,
               );
             }
-            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+            await acquireManagedWriteFences(
+              nodeOperationContext,
+              enterOperation(session),
+            );
           },
           acquireReadFences: async () => {
             if (readOnly) {
               await lockRecordedGraphWrite(txBackend, this.graphId);
               return;
             }
-            await acquireManagedWriteFences(nodeOperationContext, txBackend);
+            await acquireManagedWriteFences(
+              nodeOperationContext,
+              enterOperation(session),
+            );
           },
           assertWritable: (operation) => {
             for (const recorder of receiptRecorders) {
@@ -5583,6 +5596,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.graphId,
           this.#registry,
           txBackend,
+          session,
           this.#batchPointRead,
           nodeOperations,
         ),
@@ -5591,13 +5605,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.graphId,
           this.#registry,
           txBackend,
+          session,
           this.#batchPointRead,
           this.#endpointSetRead,
           edgeOperations,
         ),
         ...(this.#graph.identity === undefined ?
           {}
-        : { identity: createIdentityFacade(this.#identityContext(txBackend)) }),
+        : {
+            identity: createIdentityFacade(
+              this.#identityContext(txBackend),
+              session,
+            ),
+          }),
       };
     };
 
@@ -5622,7 +5642,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
       >(
         entries: Entries,
-      ) => this.#writeNodeUpsertBatch(txBackend, entries, receiptRecorder),
+      ) =>
+        this.#writeNodeUpsertBatch(
+          enterOperation(session),
+          entries,
+          receiptRecorder,
+        ),
       ...this.#createTransactionReadSurface(txBackend, attempt),
       assertUnchangedSince: (
         anchor: EngineRevision,
@@ -9147,7 +9172,7 @@ function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
 ): Promise<void> {
   return runInWriteTransaction(
     writeContext,
-    legacyTransactionOperation(identityContext.backend),
+    legacyWriteEntry(legacyTransactionOperation(identityContext.backend)),
     async (target) =>
       rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
     { didWrite: () => false },

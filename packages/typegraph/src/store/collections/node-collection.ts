@@ -10,10 +10,8 @@ import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import {
-  type GraphBackend,
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
-  runOptionallyInTransaction,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
@@ -40,15 +38,20 @@ import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
 import {
-  legacyTransactionOperation,
+  enterOperation,
   type StatementBackend,
-  type StoreTransactionBackend,
+  type WriteEntry,
+  writeEntryBackend,
+  type WriteScope,
 } from "../operation-scope";
 import {
   readNodeDeleteOptions,
   refuseNodeDeleteArguments,
 } from "../operations/node-delete-expectation";
-import { runOwnedMutationSetTransaction } from "../operations/write-transaction";
+import {
+  runInWriteEntryTransaction,
+  runOwnedMutationSetTransaction,
+} from "../operations/write-transaction";
 import {
   type ResolvedMutationSetAttempt,
   runResolvedMutationSetConverging,
@@ -243,7 +246,14 @@ export type NodeCreateBatchOptions = Readonly<{
 export type NodeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
+  /** What the collection's reads go through. */
   backend: StatementBackend;
+  /**
+   * Where its writes enter: the root backend, or the session of the
+   * transaction `backend` belongs to. Each write member enters its own
+   * operation from it.
+   */
+  writes: WriteScope;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
@@ -251,22 +261,19 @@ export type NodeCollectionConfig = Readonly<{
   /** See NodeOperations.maybeRefreshStatisticsAfterBulk. */
   maybeRefreshStatisticsAfterBulk?:
     ((rowCount: number) => Promise<void>) | undefined;
-  executeCreate: (
-    input: CreateNodeInput,
-    backend: StatementBackend,
-  ) => Promise<Node>;
+  executeCreate: (input: CreateNodeInput, entry: WriteEntry) => Promise<Node>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<void>;
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: StatementBackend,
+    entry: WriteEntry,
     options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
-    backend: StatementBackend,
+    entry: WriteEntry,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   executeNodeSetUpdate: (
@@ -274,17 +281,17 @@ export type NodeCollectionConfig = Readonly<{
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
-    backend: StatementBackend,
+    entry: WriteEntry,
     request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<readonly Node[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateNodeInput[],
     updates: readonly NodeUpsertUpdateBatchEntry[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -300,7 +307,7 @@ export type NodeCollectionConfig = Readonly<{
       id: string;
       props: Record<string, unknown>;
     }>[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
@@ -308,38 +315,38 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     id: string,
     options: NodeReparentOptions,
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<NodeReparentResult>;
   executeReparentBatch: (
     kind: string,
     items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
-    backend: StatementBackend,
+    entry: WriteEntry,
     expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<void>;
   executeDeletePlan: (
     kind: string,
     id: string,
-    backend: StatementBackend,
+    entry: WriteEntry,
   ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -347,7 +354,7 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    backend: StatementBackend,
+    entry: WriteEntry,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByConstraint: (
@@ -356,7 +363,7 @@ export type NodeCollectionConfig = Readonly<{
     items: readonly NodeBulkGetOrCreateByConstraintItem<
       Record<string, unknown>
     >[],
-    backend: StatementBackend,
+    entry: WriteEntry,
     options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
@@ -464,6 +471,7 @@ export function createNodeCollection<
     graphId,
     kind,
     backend,
+    writes,
     batchPointRead,
     defaultTemporalMode,
     rowToNode,
@@ -506,7 +514,7 @@ export function createNodeCollection<
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
-        backend,
+        enterOperation(writes),
       );
       return narrowNode<N>(result);
     },
@@ -551,7 +559,7 @@ export function createNodeCollection<
     ): Promise<Node<N>> {
       const result = await executeNodeUpdate(
         buildUpdateInput(kind, id, props, options),
-        backend,
+        enterOperation(writes),
       );
       return narrowNode<N>(result);
     },
@@ -578,7 +586,7 @@ export function createNodeCollection<
         params.patch,
         candidateIds,
         candidateIdColumn,
-        backend,
+        enterOperation(writes),
         { operation: "compareAndSet", expected: params.expected },
       );
       return result.affectedCount === 1;
@@ -745,7 +753,7 @@ export function createNodeCollection<
         params.patch,
         compiledCandidates,
         candidateIdColumn,
-        backend,
+        enterOperation(writes),
         { operation: "updateWhere" },
       );
       await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
@@ -759,9 +767,12 @@ export function createNodeCollection<
       id: NodeId<N>,
       options: NodeReparentOptions<Via>,
     ): Promise<NodeReparentResult<Via>> {
-      return executeNodeReparent(kind, id, options, backend) as Promise<
-        NodeReparentResult<Via>
-      >;
+      return executeNodeReparent(
+        kind,
+        id,
+        options,
+        enterOperation(writes),
+      ) as Promise<NodeReparentResult<Via>>;
     },
 
     async bulkReparent<
@@ -773,14 +784,16 @@ export function createNodeCollection<
         options: NodeReparentOptions<Via>;
       }>[],
     ): Promise<readonly NodeReparentResult<Via>[]> {
-      return executeNodeReparentBatch(kind, items, backend) as Promise<
-        readonly NodeReparentResult<Via>[]
-      >;
+      return executeNodeReparentBatch(
+        kind,
+        items,
+        enterOperation(writes),
+      ) as Promise<readonly NodeReparentResult<Via>[]>;
     },
 
     async delete(id: NodeId<N>, options?: NodeDeleteOptions): Promise<void> {
       const expect = readNodeDeleteOptions(options, { kind, id });
-      await executeNodeDelete(kind, id, backend, expect);
+      await executeNodeDelete(kind, id, enterOperation(writes), expect);
     },
 
     async hardDelete(
@@ -788,11 +801,11 @@ export function createNodeCollection<
       ...extraArguments: readonly unknown[]
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind, id }, "hardDelete");
-      await executeNodeHardDelete(kind, id, backend);
+      await executeNodeHardDelete(kind, id, enterOperation(writes));
     },
 
     async planDelete(id: NodeId<N>): Promise<NodeDeletePlan | undefined> {
-      return executeNodeDeletePlan(kind, id, backend);
+      return executeNodeDeletePlan(kind, id, enterOperation(writes));
     },
 
     async find(
@@ -940,16 +953,17 @@ export function createNodeCollection<
         | Readonly<{ verdict: "skip"; row: NodeRow }>
         | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
 
+      const entry = enterOperation(writes);
       const decision: UpsertVerdict =
         existing !== undefined && coalesces(existing) ?
-          await runOptionallyInTransaction(
-            backend,
-            async (
-              opened: GraphBackend | StoreTransactionBackend,
-            ): Promise<UpsertVerdict> => {
-              const confirmed = await legacyTransactionOperation(
-                opened,
-              ).getNode(graphId, kind, id);
+          await runInWriteEntryTransaction(
+            entry,
+            async (frame): Promise<UpsertVerdict> => {
+              const confirmed = await writeEntryBackend(frame).getNode(
+                graphId,
+                kind,
+                id,
+              );
               return confirmed !== undefined && coalesces(confirmed) ?
                   { verdict: "skip", row: confirmed }
                 : { verdict: "write", row: confirmed };
@@ -964,7 +978,7 @@ export function createNodeCollection<
       if (decision.row !== undefined) {
         const result = await executeNodeUpdate(
           buildUpsertUpdateInput(kind, id, data, options),
-          backend,
+          entry,
           { clearDeleted: decision.row.deleted_at !== undefined },
         );
         return narrowNode<N>(result);
@@ -972,7 +986,7 @@ export function createNodeCollection<
 
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, { ...options, id }),
-        backend,
+        entry,
       );
       return narrowNode<N>(result);
     },
@@ -982,7 +996,10 @@ export function createNodeCollection<
         NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
-      const results = await executeNodeCreateBatch(batchInputs, backend);
+      const results = await executeNodeCreateBatch(
+        batchInputs,
+        enterOperation(writes),
+      );
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowNodes<N>(results);
     },
@@ -1014,11 +1031,8 @@ export function createNodeCollection<
         id: item.id,
         props: prepareReplacement(kind, item.props),
       }));
-      const attempt = await executeNodeReplacementBatch(
-        kind,
-        prepared,
-        backend,
-      );
+      const entry = enterOperation(writes);
+      const attempt = await executeNodeReplacementBatch(kind, prepared, entry);
       if (attempt.outcome === "applied") {
         await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
         return narrowNodes<N>(attempt.value);
@@ -1027,9 +1041,9 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOwnedMutationSetTransaction(backend, async (target) => {
+          runOwnedMutationSetTransaction(entry, async (frame) => {
             const rows = await getNodeRowsByIds(
-              target,
+              writeEntryBackend(frame),
               batchPointRead,
               graphId,
               kind,
@@ -1053,7 +1067,7 @@ export function createNodeCollection<
                 creates.map((item) =>
                   buildCreateInput(kind, item.props, { id: item.id }),
                 ),
-                target,
+                frame,
                 { propsPreValidated: true, pairedUpdates: updateEntries },
               );
               for (const row of created)
@@ -1062,7 +1076,7 @@ export function createNodeCollection<
             if (updateEntries.length > 0) {
               const updated = await executeNodeUpsertUpdateBatch(
                 updateEntries,
-                target,
+                frame,
               );
               for (const row of updated)
                 results.set(row.id, narrowNode<N>(row));
@@ -1099,8 +1113,9 @@ export function createNodeCollection<
       }
 
       const upsertAll = async (
-        target: StatementBackend,
+        frame: WriteEntry,
       ): Promise<{ results: Node<N>[]; mutations: number }> => {
+        const target = writeEntryBackend(frame);
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored
         // props, not just deleted_at.
@@ -1307,11 +1322,11 @@ export function createNodeCollection<
         const mutationAttempt = await executeNodeResolvedMutationSet(
           createInputs,
           updateEntries,
-          target,
+          frame,
         );
         if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
-            const created = await executeNodeCreateBatch(createInputs, target, {
+            const created = await executeNodeCreateBatch(createInputs, frame, {
               pairedUpdates: updateEntries,
             });
             for (const [index, entry] of toCreate.entries()) {
@@ -1324,7 +1339,7 @@ export function createNodeCollection<
           if (toUpdate.length > 0) {
             const updated = await executeNodeUpsertUpdateBatch(
               updateEntries,
-              target,
+              frame,
             );
             for (const [updateIndex, entry] of toUpdate.entries()) {
               const result = requireDefined(updated[updateIndex]);
@@ -1359,8 +1374,8 @@ export function createNodeCollection<
         "node",
         backend,
         () =>
-          runOwnedMutationSetTransaction(backend, (target) =>
-            upsertAll(target),
+          runOwnedMutationSetTransaction(enterOperation(writes), (frame) =>
+            upsertAll(frame),
           ),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
@@ -1381,7 +1396,7 @@ export function createNodeCollection<
     ): Promise<void> {
       const batchInputs = mapBulkNodeInputs(kind, items);
 
-      await executeNodeCreateNoReturnBatch(batchInputs, backend);
+      await executeNodeCreateNoReturnBatch(batchInputs, enterOperation(writes));
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
 
@@ -1391,7 +1406,7 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkDelete");
       if (ids.length === 0) return;
-      await executeNodeDeleteBatch(kind, ids, backend);
+      await executeNodeDeleteBatch(kind, ids, enterOperation(writes));
     },
 
     async bulkHardDelete(
@@ -1400,7 +1415,7 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkHardDelete");
       if (ids.length === 0) return;
-      await executeNodeHardDeleteBatch(kind, ids, backend);
+      await executeNodeHardDeleteBatch(kind, ids, enterOperation(writes));
     },
 
     async findByConstraint(
@@ -1476,7 +1491,7 @@ export function createNodeCollection<
         kind,
         constraintName,
         props,
-        backend,
+        enterOperation(writes),
         options,
       );
       return result as NodeGetOrCreateByConstraintResult<N>;
@@ -1502,7 +1517,7 @@ export function createNodeCollection<
         kind,
         constraintName,
         mappedItems,
-        backend,
+        enterOperation(writes),
         options,
       );
       return results as NodeGetOrCreateByConstraintResult<N>[];

@@ -103,6 +103,7 @@ import type {
   OperationScoped,
   StatementBackend,
   StoreTransactionBackend,
+  WriteEntry,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
@@ -227,20 +228,13 @@ export function unfencedTarget(
 }
 
 /**
- * Widens a row-work target only when a whole managed write must re-enter the
- * executor against the current transaction receiver. Keeping this as one seam
+ * What row work hands a whole managed write it re-enters the executor with:
+ * the entry its own frame runs under, so the nested write joins the frame's
+ * transaction session rather than opening its own. Keeping this as one seam
  * prevents each fallback consumer from minting its own widening escape.
  */
-export function nestedManagedWriteTarget(
-  target: OperationScoped<WriteTarget>,
-): StatementBackend;
-export function nestedManagedWriteTarget(
-  target: WriteTarget,
-): GraphBackend | StoreTransactionBackend;
-export function nestedManagedWriteTarget(
-  target: WriteTarget,
-): GraphBackend | StoreTransactionBackend {
-  return unfencedTarget(target);
+export function nestedManagedWriteTarget(frame: WriteEntry): WriteEntry {
+  return frame;
 }
 
 /** Refuses a root fallback that would split a fused row and projection write. */

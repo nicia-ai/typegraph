@@ -9,6 +9,7 @@ import type {
 import {
   enterOperation,
   legacyTransactionOperation,
+  type Operation,
   type OperationBackend,
   type OperationScoped,
   type StatementBackend,
@@ -19,23 +20,41 @@ import {
   type StoreSetActiveVersionWithPreflight,
   storeSetActiveVersionWithPreflight,
   type StoreTransactionBackend,
+  type TransactionSession,
+  type WriteEntry,
+  type WriteScope,
 } from "../src/store/operation-scope";
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
 type EdgeCreateBackend = Parameters<typeof executeEdgeCreate>[2];
 
+/** Never called: resolves the session overload of the mint. */
+function enteredFromSession(session: TransactionSession) {
+  return enterOperation(session);
+}
+
 describe("operation-scoped statement targets", () => {
   it("refuses a raw transaction backend on the edge-create path", () => {
     expectTypeOf<TransactionBackend>().not.toExtend<EdgeCreateBackend>();
-    expectTypeOf<OperationBackend>().toExtend<EdgeCreateBackend>();
     expectTypeOf<GraphBackend>().toExtend<EdgeCreateBackend>();
   });
 
-  it("mints an operation handle from a raw transaction backend", () => {
-    expectTypeOf(enterOperation).returns.toEqualTypeOf<StatementBackend>();
-    expectTypeOf(enterOperation)
-      .parameter(0)
-      .toEqualTypeOf<GraphBackend | TransactionBackend>();
+  // A write inside a transaction carries its session, so a bare handle —
+  // even an operation-scoped one — is not an entry: only an operation
+  // entered from a session is.
+  it("refuses a bare handle where a write enters", () => {
+    expectTypeOf<OperationBackend>().not.toExtend<EdgeCreateBackend>();
+    expectTypeOf<StatementBackend>().not.toExtend<EdgeCreateBackend>();
+    expectTypeOf<Operation>().toExtend<EdgeCreateBackend>();
+    expectTypeOf<EdgeCreateBackend>().toEqualTypeOf<WriteEntry>();
+  });
+
+  it("enters an operation from a session, and passes the root through", () => {
+    expectTypeOf(enterOperation).returns.toEqualTypeOf<WriteEntry>();
+    expectTypeOf(enterOperation).parameter(0).toEqualTypeOf<WriteScope>();
+    expectTypeOf(enteredFromSession).returns.toEqualTypeOf<Operation>();
+    expectTypeOf<TransactionBackend>().not.toExtend<WriteScope>();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<WriteScope>();
   });
 });
 

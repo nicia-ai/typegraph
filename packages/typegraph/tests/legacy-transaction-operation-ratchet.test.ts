@@ -53,8 +53,8 @@ type Family =
 
 /** The table each family's conversion counts down. */
 const FAMILY_BASELINE = {
-  "node writes": 4,
-  "edge writes": 1,
+  "node writes": 0,
+  "edge writes": 0,
   "query terminals and tx.backend": 11,
   "identity and search facades": 40,
   "capture and flush": 10,
@@ -74,31 +74,12 @@ type InventoryEntry = Readonly<{ count: number; family: Family }>;
  * that owns that session.
  */
 const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
-  // --- node writes: the write executor's spine opens the transaction every
-  // managed write runs in; it becomes the real mint where the native
-  // transaction is opened or joined.
-  "src/store/operations/write-transaction.ts#runInWriteTransactionAttempt": {
-    count: 1,
-    family: "node writes",
-  },
-  "src/store/operations/write-transaction.ts#runOwnedMutationSetTransaction": {
-    count: 1,
-    family: "node writes",
-  },
-  "src/store/operations/node-operations.ts#executeNodeCreateInternal": {
-    count: 1,
-    family: "node writes",
-  },
-  "src/store/collections/node-collection.ts#upsertByIdFromRecord": {
-    count: 1,
-    family: "node writes",
-  },
-
-  // --- edge writes
-  "src/store/operations/edge-operations.ts#findCandidatesInTransaction": {
-    count: 1,
-    family: "edge writes",
-  },
+  // --- node writes and edge writes: none. Where the write executor or a
+  // node or edge write opens a transaction it opens a session for it
+  // (`openTransactionSession`), and every public node or edge write inside a
+  // transaction enters its own operation of the session the transaction
+  // context carries; see LEGACY_WRITE_ENTRY_INVENTORY for the callers outside
+  // those families that still hold no session.
 
   // --- query terminals: `executeOn` and `store.batch()` receive an outside
   // target through the public signature.
@@ -421,6 +402,53 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   },
 };
 
+/**
+ * The transitional `legacyWriteEntry` (`write-transaction.ts`): a write entry
+ * for code that holds a bare handle and no session, which joins as a binding
+ * of its own. Same counting rules as the shim. Every call wraps a shim call in
+ * the same function, and is assigned the family that shim call is: that
+ * family's conversion hands the call a session and removes both.
+ * `LEGACY_WRITE_ENTRY_FAMILY_BASELINE` is its ratchet, and may only go down.
+ */
+const LEGACY_WRITE_ENTRY = {
+  module: "src/store/operations/write-transaction.ts",
+  name: "legacyWriteEntry",
+} as const;
+
+const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
+  // An identity mutation with no transaction context: a maintenance or
+  // schema-preflight removal, an interchange or merge apply, a prune. The
+  // facade a transaction context offers passes its session instead.
+  "src/identity/service-facade.ts#runIdentityMutation": {
+    count: 1,
+    family: "identity and search facades",
+  },
+  // Startup repair and the schema-transition recompute.
+  "src/store/store.ts#rebuildIdentityClosureWithSchemaFence": {
+    count: 1,
+    family: "identity and search facades",
+  },
+  // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
+  // `target` parameter the public API report spells.
+  "src/store/store.ts#StoreImplementation.constructor": {
+    count: 1,
+    family: "merge and durable operations",
+  },
+};
+
+/** The legacy write entries each family's conversion removes. May only go down. */
+const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
+  "node writes": 0,
+  "edge writes": 0,
+  "query terminals and tx.backend": 0,
+  "identity and search facades": 2,
+  "capture and flush": 0,
+  "schema and evolution": 0,
+  "merge and durable operations": 1,
+  "provenance and interchange": 0,
+  "working copies": 0,
+} as const satisfies Record<Family, number>;
+
 /** A module inside `src/store`, so it resolves the shim like a store module. */
 const SHIM_FIXTURE = "src/store/legacy-shim-reference.fixture.ts";
 
@@ -497,6 +525,23 @@ describe("legacyTransactionOperation ratchet", () => {
     },
   );
 
+  it(
+    "every legacy write entry in src is inventoried by file, function and count",
+    { timeout: 180_000 },
+    () => {
+      const sites = legacyShimSites(scan, scan.sourceFiles, LEGACY_WRITE_ENTRY);
+      expect(sites.filter((site) => site.form !== "call")).toEqual([]);
+      expect(countBy(sites, (site) => `${site.file}#${site.function}`)).toEqual(
+        Object.fromEntries(
+          Object.entries(LEGACY_WRITE_ENTRY_INVENTORY).map(([label, entry]) => [
+            label,
+            entry.count,
+          ]),
+        ),
+      );
+    },
+  );
+
   // A consistency check, not the ratchet: see the header.
   it("the family table is the inventory's per-family sum", () => {
     const totals = Object.fromEntries(
@@ -506,6 +551,39 @@ describe("legacyTransactionOperation ratchet", () => {
       totals[entry.family] += entry.count;
     }
     expect(totals).toEqual(FAMILY_BASELINE);
+  });
+
+  // Consistency checks, not the ratchet: the legacy write entry's family table
+  // is its inventory's per-family sum, and each of its sites belongs to the
+  // family of the shim call in the same function, so the conversion that
+  // removes that shim call is the one that removes the entry.
+  it("the legacy write entry family table is its inventory's per-family sum", () => {
+    const totals = Object.fromEntries(
+      Object.keys(LEGACY_WRITE_ENTRY_FAMILY_BASELINE).map((family) => [
+        family,
+        0,
+      ]),
+    ) as Record<Family, number>;
+    for (const entry of Object.values(LEGACY_WRITE_ENTRY_INVENTORY)) {
+      totals[entry.family] += entry.count;
+    }
+    expect(totals).toEqual(LEGACY_WRITE_ENTRY_FAMILY_BASELINE);
+  });
+
+  it("each legacy write entry belongs to the family of the shim call beside it", () => {
+    const families = Object.fromEntries(
+      Object.entries(LEGACY_WRITE_ENTRY_INVENTORY).map(([label, entry]) => [
+        label,
+        entry.family,
+      ]),
+    );
+    const shimFamilies = Object.fromEntries(
+      Object.keys(LEGACY_WRITE_ENTRY_INVENTORY).map((label) => [
+        label,
+        SHIM_INVENTORY[label]?.family,
+      ]),
+    );
+    expect(shimFamilies).toEqual(families);
   });
 
   it("finds every way of naming the shim, and allows only a direct call", () => {
