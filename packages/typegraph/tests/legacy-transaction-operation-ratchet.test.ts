@@ -405,8 +405,10 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
 /**
  * The transitional `legacyWriteEntry` (`write-transaction.ts`): a write entry
  * for code that holds a bare handle and no session, which joins as a binding
- * of its own. Same counting rules as the shim. Each family's conversion hands
- * its call a session and removes the entry.
+ * of its own. Same counting rules as the shim. Every call wraps a shim call in
+ * the same function, and is assigned the family that shim call is: that
+ * family's conversion hands the call a session and removes both.
+ * `LEGACY_WRITE_ENTRY_FAMILY_BASELINE` is its ratchet, and may only go down.
  */
 const LEGACY_WRITE_ENTRY = {
   module: "src/store/operations/write-transaction.ts",
@@ -433,6 +435,19 @@ const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     family: "merge and durable operations",
   },
 };
+
+/** The legacy write entries each family's conversion removes. May only go down. */
+const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
+  "node writes": 0,
+  "edge writes": 0,
+  "query terminals and tx.backend": 0,
+  "identity and search facades": 2,
+  "capture and flush": 0,
+  "schema and evolution": 0,
+  "merge and durable operations": 1,
+  "provenance and interchange": 0,
+  "working copies": 0,
+} as const satisfies Record<Family, number>;
 
 /** A module inside `src/store`, so it resolves the shim like a store module. */
 const SHIM_FIXTURE = "src/store/legacy-shim-reference.fixture.ts";
@@ -536,6 +551,39 @@ describe("legacyTransactionOperation ratchet", () => {
       totals[entry.family] += entry.count;
     }
     expect(totals).toEqual(FAMILY_BASELINE);
+  });
+
+  // Consistency checks, not the ratchet: the legacy write entry's family table
+  // is its inventory's per-family sum, and each of its sites belongs to the
+  // family of the shim call in the same function, so the conversion that
+  // removes that shim call is the one that removes the entry.
+  it("the legacy write entry family table is its inventory's per-family sum", () => {
+    const totals = Object.fromEntries(
+      Object.keys(LEGACY_WRITE_ENTRY_FAMILY_BASELINE).map((family) => [
+        family,
+        0,
+      ]),
+    ) as Record<Family, number>;
+    for (const entry of Object.values(LEGACY_WRITE_ENTRY_INVENTORY)) {
+      totals[entry.family] += entry.count;
+    }
+    expect(totals).toEqual(LEGACY_WRITE_ENTRY_FAMILY_BASELINE);
+  });
+
+  it("each legacy write entry belongs to the family of the shim call beside it", () => {
+    const families = Object.fromEntries(
+      Object.entries(LEGACY_WRITE_ENTRY_INVENTORY).map(([label, entry]) => [
+        label,
+        entry.family,
+      ]),
+    );
+    const shimFamilies = Object.fromEntries(
+      Object.keys(LEGACY_WRITE_ENTRY_INVENTORY).map((label) => [
+        label,
+        SHIM_INVENTORY[label]?.family,
+      ]),
+    );
+    expect(shimFamilies).toEqual(families);
   });
 
   it("finds every way of naming the shim, and allows only a direct call", () => {
