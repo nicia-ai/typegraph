@@ -21,6 +21,7 @@ import {
   type OperationScoped,
   scopeWriteFrameTarget,
   type StatementBackend,
+  type WriteEntry,
 } from "../operation-scope";
 import {
   type GraphWriteLock,
@@ -43,6 +44,7 @@ import {
   type HookedWriteOperationContext,
   runHookedWriteOperation,
   runInWriteTransaction,
+  type WriteFrame,
   type WriteTransactionContext,
   type WriteTransactionMode,
   type WriteTransactionOptions,
@@ -153,13 +155,19 @@ export type OverlaidSessionMint<K extends RowWorkKind = RowWorkKind> = (
   reads: WriteTargetReadOverlay,
 ) => WriteSessionFor<K>;
 
-/** Row work: the only place a plan-driven write may read or write rows. */
+/**
+ * Row work: the only place a plan-driven write may read or write rows.
+ * `frame` is the entry the frame runs under; a whole managed write row work
+ * composes is handed it (through `nestedManagedWriteTarget`), so that write
+ * joins this frame's transaction session.
+ */
 export type WriteRowWork<K extends RowWorkKind, T> = (
   session: WriteSessionFor<K>,
   target: OperationScoped<WriteTarget>,
   overlaidSession: OverlaidSessionMint<K>,
   lock: GraphWriteLock,
   transactionMode: WriteTransactionMode,
+  frame: WriteEntry,
 ) => Promise<T>;
 
 /**
@@ -175,11 +183,12 @@ function planFrame<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
   plan: WritePlan<K>,
   rowWork: WriteRowWork<K, T>,
-) {
+): WriteFrame<T> {
   return async (
     target: StatementBackend,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
+    frame: WriteEntry,
   ): Promise<T> => {
     if (plan.requiresIdentityLock) {
       const acquireIdentityLock = requireDefined(
@@ -207,6 +216,7 @@ function planFrame<K extends RowWorkKind, T>(
       mintOverlaidSession,
       lock,
       transactionMode,
+      frame,
     );
   };
 }
@@ -239,13 +249,13 @@ function planTransactionOptions<K extends RowWorkKind, T>(
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
   plan: WritePlan<K>,
-  backend: StatementBackend,
+  entry: WriteEntry,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
   return runInWriteTransaction(
     ctx,
-    backend,
+    entry,
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
   );
@@ -264,14 +274,14 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
   ctx: HookedWritePlanContext,
   opContext: OperationHookContext,
   plan: WritePlan<K>,
-  backend: StatementBackend,
+  entry: WriteEntry,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
   return runHookedWriteOperation(
     ctx,
     opContext,
-    backend,
+    entry,
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
     options?.operationFacts,
@@ -321,6 +331,7 @@ export function runAutocommitSingleStatementWritePlan<K extends RowWorkKind, T>(
           backend,
           uncapturedGraphWriteLock(),
           "none",
+          backend,
         );
       } catch (error) {
         if (!(error instanceof AutocommitWriteRequiresTransaction)) throw error;

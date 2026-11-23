@@ -12,17 +12,26 @@
  * at a public Store member, {@link scopeWriteFrameTarget} where the write
  * executor hands row work its target, or the transitional
  * {@link legacyTransactionOperation} — so every call path into statement work
- * is visible at a mint. `tests/operation-scope-ratchet.test.ts` also scans
+ * is visible at a mint.
+ *
+ * Where a Store opens or joins a transaction it also opens a
+ * {@link TransactionSession}: the value that stands for that transaction as
+ * this binding holds it, handed down explicitly (never looked up from the
+ * object a caller happens to hold). A public node or edge write made inside
+ * the transaction enters its own {@link Operation} from that session, and the
+ * write executor reads the session's state off the operation it was handed. `tests/operation-scope-ratchet.test.ts` also scans
  * Store code for any value still typed as the engine transaction: the
  * declarations whose type the public API spells are listed there, and
  * nothing else may appear.
  *
- * The brand is a phantom: a minted value is the SAME object it was minted
- * from, and minting has no runtime effect. That is deliberate. Store state is
- * keyed by the target object's identity (`writeTransactionSessions`,
- * `heldGraphWriteLocks`, the savepoint-state registry, schema fence leases),
- * and the layers above discriminate a root from a transaction with
- * `"transaction" in target`; a derived object per operation would change both.
+ * The backend brand is a phantom: a minted backend is the SAME object it was
+ * minted from. That is deliberate. Store state not yet carried by a session is
+ * keyed by the target object's identity (`writeTransactionSessions`, the
+ * savepoint-state registry, schema fence leases), and the layers above
+ * discriminate a root from a transaction with `"transaction" in target`; a
+ * derived object per operation would change both. An {@link Operation} is
+ * therefore a separate small value that CARRIES the handle and its session,
+ * not a replacement for the handle.
  *
  * Only this module may produce an {@link OperationScoped} value. The brand key
  * is a declared-only unique symbol that is not exported, so no other module
@@ -46,6 +55,7 @@ import type {
   SqlCompilationBackend,
   TransactionBackend,
 } from "../backend/types";
+import type { GraphWriteLock } from "./recorded-capture/clock";
 
 // Declared only and never exported: the brand cannot be spelled outside this
 // module. The ratchet test asserts both properties.
@@ -168,16 +178,113 @@ export type LegacyOperationTarget<T> =
   : T extends StoreTransactionBackend ? OperationBackend
   : never;
 
+// ---------------------------------------------------------------------------
+// Sessions and operations
+// ---------------------------------------------------------------------------
+
+// Module-private runtime keys: no other module can read a session's
+// transaction, build a session or an operation from a literal, or tell an
+// operation from a root backend except through the functions below.
+const SESSION_TRANSACTION: unique symbol = Symbol("typegraph.session");
+const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
+
 /**
- * The mint at a public Store member. A root backend is returned as is; a
- * transaction backend is returned as an {@link OperationBackend}. Both are the
- * same object.
+ * One native transaction as one Store binding opened or joined it: the value
+ * every public write inside that transaction enters its {@link Operation}
+ * from. Opened by {@link openTransactionSession} where the Store opens the
+ * transaction (`store.transaction`, a write that opens its own) or joins one
+ * (an adopted, recorded or evolved transaction), and handed down from there
+ * as a value.
+ *
+ * Two Stores on one native transaction hold two sessions, one per binding:
+ * every piece of state a session carries is state about the transaction
+ * together with one Store's graph, tables and configuration, and pooling it
+ * across Stores changes outcomes (`shared-native-transaction.ts`).
+ *
+ * What it carries today is the write executor's per-binding state: the graph
+ * write locks its frames hold or are acquiring
+ * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
+ * its transaction; an operation entered from it does.
  */
-export function enterOperation(
-  backend: GraphBackend | TransactionBackend,
-): StatementBackend {
-  // eslint-disable-next-line no-restricted-syntax -- This module is the mint: the one place a backend may be asserted to the operation brand.
-  return backend as StatementBackend;
+export type TransactionSession = OperationScoped<
+  Readonly<{
+    [SESSION_TRANSACTION]: OperationBackend;
+    /**
+     * Graph write locks a still-running write frame on this session holds or
+     * is still acquiring, by graph id: owned by `write-transaction.ts`.
+     */
+    heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+  }>
+>;
+
+/**
+ * One public Store call inside a transaction: the session it belongs to and
+ * the operation-scoped handle its statements go through. Entered by
+ * {@link enterOperation}, once per public call; work the call composes
+ * (a nested write frame, a mutation set's legs) runs under the same
+ * operation rather than entering another.
+ */
+export type Operation = OperationScoped<
+  Readonly<{
+    [OPERATION_SESSION]: TransactionSession;
+    backend: OperationBackend;
+  }>
+>;
+
+/**
+ * Where a write enters the write executor: the pooled root backend itself (a
+ * root write allocates nothing), or an {@link Operation} of a transaction
+ * session.
+ */
+export type WriteEntry = GraphBackend | Operation;
+
+/**
+ * Where a Store surface's writes enter from: the root backend, or the
+ * session of the transaction the surface belongs to.
+ */
+export type WriteScope = GraphBackend | TransactionSession;
+
+/**
+ * The mint where a Store opens or joins a transaction: a new session for
+ * `transaction` as this binding holds it.
+ */
+export function openTransactionSession(
+  transaction: StoreTransactionBackend,
+): TransactionSession {
+  /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
+  return {
+    [SESSION_TRANSACTION]: transaction,
+    heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
+  } as TransactionSession;
+  /* eslint-enable no-restricted-syntax */
+}
+
+/**
+ * The mint at a public Store member: the root backend as itself, or a new
+ * {@link Operation} of the session.
+ */
+export function enterOperation(scope: TransactionSession): Operation;
+export function enterOperation(scope: WriteScope): WriteEntry;
+export function enterOperation(scope: WriteScope): WriteEntry {
+  if (!(SESSION_TRANSACTION in scope)) return scope;
+  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
+  return {
+    [OPERATION_SESSION]: scope,
+    backend: scope[SESSION_TRANSACTION],
+  } as Operation;
+  /* eslint-enable no-restricted-syntax */
+}
+
+/** The session `entry` belongs to, or `undefined` for the root backend. */
+export function writeEntrySession(
+  entry: WriteEntry,
+): TransactionSession | undefined {
+  return OPERATION_SESSION in entry ? entry[OPERATION_SESSION] : undefined;
+}
+
+/** What `entry`'s statements go through: the root, or the operation's handle. */
+export function writeEntryBackend(entry: WriteEntry): StatementBackend {
+  return OPERATION_SESSION in entry ? entry.backend : entry;
 }
 
 /**

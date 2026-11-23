@@ -105,17 +105,12 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
   "store/operations/write-transaction.ts#writeTransactionSessions": {
     keyedBy: "transaction-binding",
     reason:
-      "The managed write session of one `store.transaction` attempt, keyed by its target: state about the attempt's Store binding (its graph, revision and history configuration), not about the native transaction alone.",
+      "The managed write session of one `store.transaction` attempt, keyed by its target: state about the attempt's Store binding (its graph, revision and history configuration), not about the native transaction alone. It stays keyed by the target because graph-merge reads it (`forceWriteTransactionRevision`, `hasPendingWriteTransactionRevision`) through the transaction runtime port's `backend`, a type the public API report spells; carrying the session there is a port change.",
   },
   "store/operations/write-transaction.ts#leasedSchemaFences": {
     keyedBy: "transaction-binding",
     reason:
-      "Schema fences a reusable write session leased, keyed by the target that acquired them; a fence is about one graph on one set of physical tables.",
-  },
-  "store/operations/write-transaction.ts#heldGraphWriteLocks": {
-    keyedBy: "transaction-binding",
-    reason:
-      "Graph write locks held by the frames on one target, or on the root itself for a frame with no transaction.",
+      "Schema fences a reusable write session leased, keyed by the target that acquired them; a fence is about one graph on one set of physical tables. It stays keyed by target: the adopted history path seeds one lease on four objects of one binding (raw, capture overlay, witness wrapper, execution scope), and `lockSchemaVersionForStoreWrite` consults it from capture, identity and evolution code that holds no session yet.",
   },
   // --- keyed by a root backend ------------------------------------------
   "store/fixed-schema-working-copy.ts#FIXED_SCHEMA_BACKENDS": {
@@ -282,10 +277,10 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
  * May only decrease: lower it when a registry moves onto state the
  * transaction carries explicitly.
  */
-const TRANSACTION_BINDING_KEYED_BASELINE = 10;
+const TRANSACTION_BINDING_KEYED_BASELINE = 9;
 
 /** `"transaction" in x` probes in the Store layers. May only decrease. */
-const TRANSACTION_MEMBER_PROBE_BASELINE = 6;
+const TRANSACTION_MEMBER_PROBE_BASELINE = 5;
 
 const PRIMITIVE_FLAGS =
   ts.TypeFlags.StringLike |

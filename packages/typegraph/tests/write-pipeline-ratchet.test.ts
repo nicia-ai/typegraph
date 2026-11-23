@@ -80,7 +80,7 @@ const RATCHET = {
    * narrower `nestedManagedWriteTarget`). Each remaining escape has a contract
    * owner in `UNFENCED_TARGET_ESCAPE_INVENTORY`.
    */
-  unfencedTargetEscapes: 7,
+  unfencedTargetEscapes: 6,
 } as const;
 
 /**
@@ -106,9 +106,9 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
   },
   {
     file: "store/operations/write-session.ts",
-    count: 2,
+    count: 1,
     reason:
-      "the portable projection fallback's transaction check and the single nested managed-write re-entry owner",
+      "the portable projection fallback's transaction check (the nested managed-write re-entry seam now hands back the frame's entry and widens nothing)",
   },
 ] as const;
 
