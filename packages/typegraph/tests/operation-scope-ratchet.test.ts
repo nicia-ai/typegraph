@@ -82,7 +82,7 @@ import {
  * Exported functions that accept a raw `TransactionBackend` for
  * statement-issuing work, per family. Each may only ever DECREASE, and the
  * change that narrows a parameter lowers its family here in the same commit.
- * The mint module is excluded: `enterOperation` accepts a raw backend by
+ * The mint module is excluded: its mints accept a raw backend by
  * definition.
  *
  * What remains after Store code stopped holding the engine transaction type
@@ -96,7 +96,7 @@ const RAW_STATEMENT_TARGET_BASELINE = {
   "operations/edge": 9,
   "operations/node": 8,
   "operations/composition": 15,
-  "operations/write": 4,
+  "operations/write": 3,
   "recorded-capture": 28,
   claims: 17,
   "search-sync": 0,
@@ -111,7 +111,7 @@ const MINT_SITES = [
     function: "legacyTransactionOperation",
     route: "assertion",
   },
-  { file: MINT_MODULE, function: "enterOperation", route: "assertion" },
+  { file: MINT_MODULE, function: "openTransactionSession", route: "assertion" },
   { file: MINT_MODULE, function: "scopeWriteFrameTarget", route: "assertion" },
 ] as const;
 
@@ -159,15 +159,27 @@ import type { GraphDef } from "../core/define-graph";
 import type { EdgeCollectionConfig } from "./collections/edge-collection";
 import type * as scope from "./operation-scope";
 import {
-  enterOperation,
   type OperationBackend,
+  scopeWriteFrameTarget,
   type StatementBackend,
 } from "./operation-scope";
 import {
   type EdgeOperationContext,
-  executeEdgeCreate,
+  executeEdgeCreate as executeEdgeCreateEntry,
 } from "./operations/edge-operations";
+import { legacyWriteEntry } from "./operations/write-transaction";
 import type { CreateEdgeInput, Edge } from "./types";
+
+// The brand's consumer: a statement-issuing Store function that takes the
+// handle it is given. (An edge create itself now takes a write entry, which a
+// handle alone is not.)
+function executeEdgeCreate(
+  context: EdgeOperationContext<GraphDef>,
+  edge: CreateEdgeInput,
+  backend: StatementBackend,
+): Promise<Edge> {
+  return executeEdgeCreateEntry(context, edge, legacyWriteEntry(backend));
+}
 
 declare const raw: TransactionBackend;
 declare const ctx: EdgeOperationContext<GraphDef>;
@@ -277,12 +289,12 @@ export function forgeRenamedImport() { return executeEdgeCreate(ctx, input, raw 
   },
   {
     route: "as, ReturnType of a mint",
-    code: `export function forgeMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof enterOperation>); }`,
+    code: `export function forgeMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scopeWriteFrameTarget<TransactionBackend>>); }`,
     refusal: refusal([], ["brand-ban"], ["assertion"]),
   },
   {
     route: "as, ReturnType of a namespace-qualified mint",
-    code: `export function forgeQualifiedMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scope.enterOperation>); }`,
+    code: `export function forgeQualifiedMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scope.legacyTransactionOperation<TransactionBackend>>); }`,
     refusal: refusal([], ["brand-ban"], ["assertion"]),
   },
   {
@@ -297,7 +309,7 @@ export function forgeRenamedImport() { return executeEdgeCreate(ctx, input, raw 
   },
   {
     route: "as, indexed access into a config type",
-    code: `export function forgeIndexedAccess() { return executeEdgeCreate(ctx, input, raw as Parameters<EdgeCollectionConfig["executeCreate"]>[1]); }`,
+    code: `export function forgeIndexedAccess() { return executeEdgeCreate(ctx, input, raw as Parameters<EdgeCollectionConfig["executeFindByEndpoints"]>[5]); }`,
     refusal: refusal([], [], ["assertion"]),
   },
   {
@@ -559,7 +571,7 @@ export function forgeOpener(root: GraphBackend) {
   },
   {
     route: "a call to a mint",
-    code: `export function forgeMintCall() { return executeEdgeCreate(ctx, input, enterOperation(raw)); }`,
+    code: `export function forgeMintCall() { return executeEdgeCreate(ctx, input, scopeWriteFrameTarget(raw)); }`,
     refusal: refusal([], [], []),
     gap: "Not a forge: minting is the sanctioned route. What the brand proves is that a call path passes a mint where it can be reviewed; where mints may be called is not constrained by this ratchet.",
   },
@@ -578,7 +590,7 @@ export function forgeOpener(root: GraphBackend) {
       "an ECMAScript-private method demanding the brand, its instance hidden in unknown",
     code: `export class PrivateDemand {
   #create(backend: StatementBackend) { return executeEdgeCreate(ctx, input, backend); }
-  run() { return this.#create(enterOperation(raw)); }
+  run() { return this.#create(scopeWriteFrameTarget(raw)); }
 }
 export function forgePrivateDemand(): unknown { const opaque: unknown = new PrivateDemand(); return opaque; }`,
     refusal: refusal([], [], []),
@@ -589,7 +601,7 @@ export function forgePrivateDemand(): unknown { const opaque: unknown = new Priv
       "a TypeScript-private method demanding the brand, its instance hidden in unknown",
     code: `export class TsPrivateDemand {
   private create(backend: StatementBackend) { return executeEdgeCreate(ctx, input, backend); }
-  run() { return this.create(enterOperation(raw)); }
+  run() { return this.create(scopeWriteFrameTarget(raw)); }
 }
 export function forgeTsPrivateDemand(): unknown { const opaque: unknown = new TsPrivateDemand(); return opaque; }`,
     refusal: refusal([], [], ["consumer-flow"]),

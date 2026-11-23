@@ -1506,29 +1506,35 @@ export type LegacyShimSite = Readonly<{
  * type is found as surely as a call by name. A namespace import of the mint
  * module may only be read through a static member name: any other use hands
  * out every export at once, the shim included, and is a site of its own.
- * The mint module's own declaration is excluded.
+ * The shim module's own declaration is excluded. `transitional` names another
+ * transitional function to find the same way (default: the shim).
  */
 export function legacyShimSites(
   scan: ScanProgram,
   files: readonly string[],
+  transitional?: Readonly<{ module: string; name: string }>,
 ): readonly LegacyShimSite[] {
+  const shimOf = transitional ?? {
+    module: MINT_MODULE,
+    name: LEGACY_SHIM_NAME,
+  };
   const { checker } = scan;
-  const mint = requireSourceFile(scan, MINT_MODULE);
+  const mint = requireSourceFile(scan, shimOf.module);
   const moduleSymbol = checker.getSymbolAtLocation(mint);
   const shim =
     moduleSymbol === undefined ? undefined : (
       checker
         .getExportsOfModule(moduleSymbol)
-        .find((symbol) => symbol.name === LEGACY_SHIM_NAME)
+        .find((symbol) => symbol.name === shimOf.name)
     );
   if (moduleSymbol === undefined || shim === undefined) {
-    throw new Error(`${LEGACY_SHIM_NAME} is not exported from ${MINT_MODULE}`);
+    throw new Error(`${shimOf.name} is not exported from ${shimOf.module}`);
   }
   const shimDeclaration = shim.declarations?.find((declaration) =>
     ts.isFunctionDeclaration(declaration),
   );
   if (shimDeclaration === undefined) {
-    throw new Error(`${LEGACY_SHIM_NAME} is not a function declaration`);
+    throw new Error(`${shimOf.name} is not a function declaration`);
   }
 
   function resolved(node: ts.Node): ts.Symbol | undefined {

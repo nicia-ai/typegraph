@@ -8,8 +8,15 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
-import { legacyTransactionOperation } from "../store/operation-scope";
-import { runInWriteTransaction } from "../store/operations/write-transaction";
+import {
+  enterOperation,
+  legacyTransactionOperation,
+  type TransactionSession,
+} from "../store/operation-scope";
+import {
+  legacyWriteEntry,
+  runInWriteTransaction,
+} from "../store/operations/write-transaction";
 import {
   type IdentityTransitionNoteFunction,
   withRecordedIdentityMutationTarget,
@@ -582,6 +589,10 @@ export async function runIdentityMutation<G extends GraphDef, T>(
     markWritten: () => void,
     noteTransition: IdentityTransitionNoteFunction,
   ) => Promise<T>,
+  // The session `ctx.backend` belongs to, when the caller holds one: the
+  // mutation enters an operation of it. Without one, `ctx.backend` joins as
+  // a binding of its own (`legacyWriteEntry`).
+  session?: TransactionSession,
 ): Promise<T> {
   // Track whether the mutation actually touched a row: a successful no-op
   // (retracting an unknown id, an idempotent reassert) must not advance the
@@ -607,7 +618,9 @@ export async function runIdentityMutation<G extends GraphDef, T>(
       revisionTrackingEnabled: ctx.revisionTrackingEnabled,
       revisionSchema: ctx.schema,
     },
-    legacyTransactionOperation(ctx.backend),
+    session === undefined ?
+      legacyWriteEntry(legacyTransactionOperation(ctx.backend))
+    : enterOperation(session),
     async (target) => {
       touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
@@ -1329,6 +1342,13 @@ export async function applyRetractionAftermath<G extends GraphDef>(
 
 export function createIdentityFacade<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
+  /**
+   * The session of the transaction `ctx.backend` belongs to, for a facade a
+   * transaction context offers: each mutation enters its own operation from
+   * it, so it shares the write executor's per-session state with the node and
+   * edge writes of that transaction. Absent for the root facade.
+   */
+  session?: TransactionSession,
 ): IdentityFacade<G> {
   return {
     ...createIdentityReadFacade(ctx),
@@ -1350,6 +1370,7 @@ export function createIdentityFacade<G extends GraphDef>(
             operationInstant,
           );
         },
+        session,
       );
     },
 
@@ -1370,6 +1391,7 @@ export function createIdentityFacade<G extends GraphDef>(
             operationInstant,
           );
         },
+        session,
       );
     },
 
@@ -1397,6 +1419,7 @@ export function createIdentityFacade<G extends GraphDef>(
             nowIso(),
           );
         },
+        session,
       );
     },
 
@@ -1424,6 +1447,7 @@ export function createIdentityFacade<G extends GraphDef>(
             nowIso(),
           );
         },
+        session,
       );
     },
 
@@ -1440,6 +1464,7 @@ export function createIdentityFacade<G extends GraphDef>(
           });
           return publicAssertion<G>(ended);
         },
+        session,
       );
     },
 
@@ -1474,6 +1499,7 @@ export function createIdentityFacade<G extends GraphDef>(
           );
           return ended === undefined ? undefined : publicAssertion<G>(ended);
         },
+        session,
       );
     },
 
@@ -1505,6 +1531,7 @@ export function createIdentityFacade<G extends GraphDef>(
           );
           return ended === undefined ? undefined : publicAssertion<G>(ended);
         },
+        session,
       );
     },
 
@@ -1523,6 +1550,7 @@ export function createIdentityFacade<G extends GraphDef>(
           );
           return retracted.map((assertion) => publicAssertion<G>(assertion));
         },
+        session,
       );
     },
 
