@@ -204,29 +204,8 @@ export function registerAliasPredicateScopeIntegrationTests(
       const store = context.getStore();
       await seedPeople(store);
 
-      // The compiler renames a $exists() subquery's aliases (its start alias
-      // becomes __tg_sq_1_a0). An outer alias spelled like a generated name
-      // must not make the subquery's read of it look like a read of the
-      // subquery's own target.
-      await expectCrossAliasRefusal(
-        () =>
-          store
-            .query()
-            .from("Person", "__tg_sq_1_a0")
-            .where((expressions) =>
-              expressions.$exists((subquery) =>
-                subquery
-                  .from("Person", "b")
-                  .whereNode("b", (b) => b.id.eq(field("__tg_sq_1_a0", "id")))
-                  .project((inner) => ({ id: inner.b.id })),
-              ),
-            )
-            .project((expressions) => ({ p: expressions.__tg_sq_1_a0.name }))
-            .execute(),
-        "b",
-        "__tg_sq_1_a0",
-      );
-      // A refusal inside a subquery names the caller's aliases.
+      // The compiler renames a $exists() subquery's aliases before compiling
+      // it; a refusal inside a subquery names the caller's aliases.
       await expectCrossAliasRefusal(
         () =>
           store

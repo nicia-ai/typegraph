@@ -207,12 +207,9 @@ function compileTopPerPartition(
     sql`, `,
   );
   const ordering = compileOrder(relation.orderBy, dialect, orderedAggregates);
-  const occupiedNames = new Set(
-    // SQLite resolves even quoted identifiers without case sensitivity.
-    relation.columns.map((column) => column.outputName.toLowerCase()),
-  );
-  let rankName = "__tg_partition_rank";
-  while (occupiedNames.has(rankName)) rankName += "_";
+  // Relation keys cannot fall in the reserved `__tg` namespace (see
+  // `isReservedSqlName`), so this hidden column meets none of them.
+  const rankName = "__tg_partition_rank";
   const selectedColumns = sql.join(
     relation.columns.map(
       (column) =>

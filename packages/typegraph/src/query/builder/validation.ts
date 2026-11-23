@@ -9,6 +9,10 @@ import {
   type PredicateExpression,
   type SortDirection,
 } from "../ast";
+import {
+  isReservedSqlName,
+  reservedAliasRefusal,
+} from "../compiler/sql-name-registry";
 import type { PaginateOptions, QueryBuilderState } from "./types";
 
 /**
@@ -78,7 +82,9 @@ const SQL_RESERVED_KEYWORDS = new Set([
 ]);
 
 /**
- * Validates that an alias is a safe SQL identifier.
+ * Validates that an alias is a safe SQL identifier outside the names the
+ * library reserves: `cte_` (the prefix of every alias CTE) and `__tg` (see
+ * {@link isReservedSqlName}), in any letter case.
  *
  * @param alias - The alias to validate
  * @throws ValidationError if the alias is not a valid SQL identifier
@@ -101,6 +107,8 @@ export function validateSqlIdentifier(alias: string): void {
       },
     );
   }
+
+  if (isReservedSqlName(alias)) throw reservedAliasRefusal(alias);
 
   if (alias.toLowerCase().startsWith("cte_")) {
     throw new ValidationError(

@@ -16,7 +16,10 @@ import {
   type RelationOrder,
   type TopPerPartitionRelation,
 } from "../compiler/relations";
-import { type SqlNameUsage } from "../compiler/sql-name-registry";
+import {
+  refuseReservedOutputKeys,
+  type SqlNameUsage,
+} from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
 import {
   createFieldExpression,
@@ -618,6 +621,8 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "A relation projection requires at least one expression.",
       );
+    // Hidden ordering columns are named in the reserved namespace beside these keys.
+    refuseReservedOutputKeys(entries.map(([outputName]) => outputName));
     for (const [, expression] of entries)
       assertExpressionScope(expression, this.#scopeIdentity);
     // Grouping belongs to the new projection; all other modifiers describe its input rows.

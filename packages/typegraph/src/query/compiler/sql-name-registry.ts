@@ -31,6 +31,7 @@
  */
 import { MAX_PG_IDENTIFIER_LENGTH } from "../../constants";
 import {
+  ConfigurationError,
   SQL_IDENTIFIER_COLLISION_CODE,
   SQL_IDENTIFIER_TOO_LONG_CODE,
   ValidationError,
@@ -574,13 +575,60 @@ export function sqlNameRefusal(
 }
 
 /**
- * Whether a caller-chosen result key falls in the library's reserved `__tg_`
- * namespace, in any letter case: hidden columns the library adds (ordering,
- * relation order, batch envelopes) are named there, and SQLite compares names
- * without regard to case.
+ * The prefix of the library's reserved namespace. Every name the compiler
+ * generates beside a caller's names starts with it: a subquery's renamed
+ * aliases (`__tg_sq_<depth>_a<index>`), the relation that holds a recursive
+ * walk's rows inside a subquery, hidden ordering and envelope columns
+ * (`__tg_order_<n>`, `__tg_relation_order_<n>`, `__tg_scalar`), and
+ * selectively extracted property columns.
  */
-export function isReservedResultKey(key: string): boolean {
-  return foldAsciiCase(key).startsWith("__tg_");
+const RESERVED_SQL_NAME_PREFIX = "__tg";
+
+/**
+ * Whether a caller-chosen name falls in the library's reserved `__tg`
+ * namespace, in any letter case (SQLite compares names without regard to
+ * case, and PostgreSQL folds an unquoted name to lower case). This is the one
+ * decision every caller-name refusal applies: query aliases, `aggregate()` and
+ * `project()` keys, and relation keys.
+ */
+export function isReservedSqlName(name: string): boolean {
+  return foldAsciiCase(name).startsWith(RESERVED_SQL_NAME_PREFIX);
+}
+
+/**
+ * The refusal for a query alias in the reserved namespace. A query is refused
+ * with it before any SQL is sent, both where a builder accepts the alias and
+ * where a query AST is compiled.
+ */
+export function reservedAliasRefusal(alias: string): ValidationError {
+  return new ValidationError(
+    `Invalid alias "${alias}": aliases starting with "${RESERVED_SQL_NAME_PREFIX}" in any letter case are reserved for names the library generates`,
+    {
+      issues: [
+        {
+          path: "alias",
+          code: SQL_IDENTIFIER_COLLISION_CODE,
+          message: `"${alias}" can collide with a name the library generates`,
+        },
+      ],
+    },
+    {
+      suggestion: `Choose an alias that does not start with "${RESERVED_SQL_NAME_PREFIX}".`,
+    },
+  );
+}
+
+/**
+ * Refuses output keys a caller declares (`aggregate()`, `project()`, a
+ * relation's `project()` or `aggregate()`) that fall in the reserved
+ * namespace: hidden columns the library adds beside them are named there.
+ */
+export function refuseReservedOutputKeys(keys: readonly string[]): void {
+  const reserved = keys.find((key) => isReservedSqlName(key));
+  if (reserved !== undefined)
+    throw new ConfigurationError("Projection output name is reserved.", {
+      outputName: reserved,
+    });
 }
 
 /** Throws the typed refusal when a statement's registered names collide. */

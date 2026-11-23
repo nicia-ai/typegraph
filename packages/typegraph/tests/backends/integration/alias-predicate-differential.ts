@@ -7,9 +7,9 @@
  *
  * Every person has a distinct age, so a read of another alias that compiled
  * as the target's own column (the target compared with itself) changes the
- * rows. The outer alias is sometimes spelled like the compiler's generated
- * name for the subquery's start alias (`__tg_sq_1_a0`), so a check that ran
- * on renamed aliases would accept a foreign read as a read of the target.
+ * rows. (An outer alias spelled like the compiler's generated name for the
+ * subquery's start alias, `__tg_sq_1_a0`, is refused as a reserved alias;
+ * see `reserved-alias-prefix.ts`.)
  *
  * The statement is a two-hop chain `x -> m -> y` whose hops are fixed or
  * recursive. A recursive chain compiles each fixed stage as a separate
@@ -324,7 +324,7 @@ const literalOperand = fc
 const caseArbitrary: fc.Arbitrary<Case> = fc
   .record({
     subquery: fc.boolean(),
-    outerAlias: fc.constantFrom("p", "__tg_sq_1_a0"),
+    outerAlias: fc.constant("p"),
     shape: fc.record({ first: hopArbitrary, second: hopArbitrary }),
     target: fc.constantFrom(...LOCAL_ALIASES),
     form: fc.constantFrom<Form>("expression", "field"),
@@ -341,12 +341,7 @@ const caseArbitrary: fc.Arbitrary<Case> = fc
       testCase.form === "expression" &&
       (testCase.left.kind === "outer" || testCase.right.kind === "outer");
     // An outer reference exists only inside a subquery.
-    if (!testCase.subquery) return !readsOuter;
-    // An outer reference to an alias spelled like a generated subquery alias
-    // compiles to a relation name the subquery's own renamed alias shadows.
-    // That is the unreserved `__tg` prefix, not the alias-predicate rule;
-    // the raw-field form above still exercises the spelling against the rule.
-    return !(readsOuter && testCase.outerAlias.startsWith("__tg"));
+    return testCase.subquery || !readsOuter;
   });
 
 type Observed =

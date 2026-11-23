@@ -838,53 +838,6 @@ export function registerRelationalCompositionIntegrationTests(
       ]);
     });
 
-    it("keeps visible rank-like relation columns while choosing a hidden rank name", async () => {
-      const store = context.getStore();
-      for (const product of [
-        { name: "a-low", category: "A", price: 10 },
-        { name: "a-high", category: "A", price: 20 },
-        { name: "b-high", category: "B", price: 30 },
-      ])
-        await store.nodes.Product.create(product);
-      const ranked = store
-        .query()
-        .from("Product", "product")
-        .project((fields) => ({
-          category: fields.product.category,
-          name: fields.product.name,
-          price: fields.product.price,
-        }))
-        .asRelation()
-        .project((columns) => ({
-          category: columns.category,
-          __tg_partition_rank: columns.price,
-          __tg_partition_rank_: columns.name,
-          __TG_PARTITION_RANK__: columns.price,
-        }))
-        .topPerPartition({
-          partitionBy: (columns) => [columns.category],
-          orderBy: (columns) => [
-            { expression: columns.__tg_partition_rank, direction: "desc" },
-          ],
-          limit: 1,
-        })
-        .orderBy((columns) => columns.category);
-      expect(await ranked.execute()).toEqual([
-        {
-          category: "A",
-          __tg_partition_rank: 20,
-          __tg_partition_rank_: "a-high",
-          __TG_PARTITION_RANK__: 20,
-        },
-        {
-          category: "B",
-          __tg_partition_rank: 30,
-          __tg_partition_rank_: "b-high",
-          __TG_PARTITION_RANK__: 30,
-        },
-      ]);
-    });
-
     it("composes ranking with preparation, batching, set operands and later stages", async () => {
       const store = context.getStore();
       for (const product of [

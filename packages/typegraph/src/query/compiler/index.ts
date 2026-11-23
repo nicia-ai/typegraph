@@ -143,6 +143,7 @@ import {
   describeRelevanceOrder,
   type RelevanceSortKey,
 } from "./relevance-order";
+import { refuseReservedQueryAliases } from "./reserved-aliases";
 import {
   DEFAULT_SQL_SCHEMA,
   type RecordedReadBinding,
@@ -342,9 +343,26 @@ export function compileQueryWithSqlNames(
   graphId: string,
   options: CompileQueryOptions | SqlDialect,
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
-  // Every compile enters here; the check covers the subqueries nested in the
-  // statement while their aliases are still the caller's, before
-  // `compileExpressionSubquery` renames them.
+  // Every compile from outside the compiler enters here, with the aliases the
+  // caller wrote; the compiler's own compiles of parts of a statement (which
+  // may carry aliases it renamed into the reserved namespace) do not.
+  refuseReservedQueryAliases(ast);
+  return compileQueryPart(ast, graphId, options);
+}
+
+/**
+ * Compiles a query, or a part of one the compiler compiles as a statement of
+ * its own, without the reserved-alias check: a part of a subquery carries the
+ * aliases the compiler renamed it to.
+ */
+function compileQueryPart(
+  ast: QueryAst,
+  graphId: string,
+  options: CompileQueryOptions | SqlDialect,
+): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
+  // The check covers the subqueries nested in the statement while their
+  // aliases are still the caller's, before `compileExpressionSubquery`
+  // renames them.
   assertAliasPredicatesReadOnlyTheirTarget(ast);
   return compileQueryInExpressionContext(ast, graphId, options, {
     aliasScopes: new Map(),
@@ -435,11 +453,11 @@ function compileQueryInExpressionContext(
       {}
     : { identityRegisteredKinds: options_.identityRegisteredKinds }),
     compileQuery: (subAst, subGraphId) =>
-      compileQuery(
+      compileQueryPart(
         inheritRecordedAsOf(subAst, ast.recordedAsOf),
         subGraphId,
         propagateOptions(options_),
-      ),
+      ).compiled,
     compileExpressionSubquery(subAst) {
       if (subAst.graphId === undefined)
         throw new CompilerInvariantError(
