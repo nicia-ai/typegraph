@@ -20,6 +20,12 @@
  *    tombstoned node, so the incumbent is written by an import with
  *    `validateReferences: false`, which does not read its endpoints.
  *
+ * Two more shapes meet the pair without an incumbent on the write's own
+ * row: a batch whose rows repeat an axis, one onto live endpoints and one
+ * onto `f` (dead row first and last, every bulk form and import), and a
+ * window reopen (`clearValidTo`) of an ended edge on `f` while a live,
+ * active incumbent holds its `oneActive` axis.
+ *
  * Every Store write path runs at the root and inside `store.transaction()`
  * with the error caught and the transaction left to commit; import runs at
  * the root (it is one write transaction of its own and takes no transaction
@@ -312,25 +318,246 @@ function importRefusal(message: string): string {
   return message;
 }
 
+/**
+ * A batch whose rows repeat one axis: one row onto live endpoints, one onto
+ * the tombstoned `f`, with no incumbent. The repeat is a cardinality answer
+ * only between two rows that may both be written, so the dead row's
+ * endpoint refusal must win wherever it sits in the batch.
+ */
+type BatchScenario = Readonly<{
+  kind: OrderEdgeKind;
+  axis: "source" | "target";
+  dead: "first" | "last";
+  rows: readonly Readonly<{ from: Endpoint; to: Endpoint }>[];
+}>;
+
+function batchRows(
+  axis: "source" | "target",
+  dead: "first" | "last",
+): readonly Readonly<{ from: Endpoint; to: Endpoint }>[] {
+  const liveRow = { from: item("a"), to: item("b") };
+  const deadRow =
+    axis === "source" ?
+      { from: item("a"), to: DEAD }
+    : { from: DEAD, to: item("b") };
+  return dead === "first" ? [deadRow, liveRow] : [liveRow, deadRow];
+}
+
+const BATCH_SCENARIOS: readonly BatchScenario[] = [
+  ...SOURCE_AXIS_KINDS.map((kind) => ({ kind, axis: "source" as const })),
+  ...TARGET_AXIS_KINDS.map((kind) => ({ kind, axis: "target" as const })),
+].flatMap(({ kind, axis }) =>
+  (["first", "last"] as const).map((dead): BatchScenario => ({
+    kind,
+    axis,
+    dead,
+    rows: batchRows(axis, dead),
+  })),
+);
+
+function batchKey(scenario: BatchScenario): string {
+  return `${scenario.kind} ${scenario.axis} axis, dead row ${scenario.dead}`;
+}
+
+/** Row `index`'s id and props: distinct, so no durable identity matches. */
+function batchRow(
+  scenario: BatchScenario,
+  index: number,
+): Readonly<{
+  from: Endpoint;
+  to: Endpoint;
+  id: string;
+  props: Readonly<{ label: string }>;
+}> {
+  const row = scenario.rows[index];
+  if (row === undefined) throw new Error(`No batch row ${index}.`);
+  return { ...row, id: `row-${index}`, props: { label: `row-${index}` } };
+}
+
+function batchInputs(scenario: BatchScenario) {
+  return scenario.rows.map((_row, index) => batchRow(scenario, index));
+}
+
+/** Every bulk edge write path, as a Store surface call over a batch. */
+const BATCH_PATHS = {
+  bulkCreate: (surface, scenario) =>
+    surface
+      .getEdgeCollectionOrThrow(scenario.kind)
+      .bulkCreate(batchInputs(scenario)),
+  bulkInsert: (surface, scenario) =>
+    surface
+      .getEdgeCollectionOrThrow(scenario.kind)
+      .bulkInsert(batchInputs(scenario)),
+  bulkUpsertById: (surface, scenario) =>
+    surface
+      .getEdgeCollectionOrThrow(scenario.kind)
+      .bulkUpsertById(batchInputs(scenario)),
+  bulkGetOrCreateByEndpoints: (surface, scenario) =>
+    surface.getEdgeCollectionOrThrow(scenario.kind).bulkGetOrCreateByEndpoints(
+      batchInputs(scenario).map(({ from, to, props }) => ({
+        from,
+        to,
+        props,
+      })),
+      { matchOn: ["label"] },
+    ),
+} as const satisfies Record<
+  string,
+  (surface: OrderSurface, scenario: BatchScenario) => Promise<unknown>
+>;
+
+type BatchPath = keyof typeof BATCH_PATHS;
+
+const BATCH_PATH_NAMES = Object.keys(BATCH_PATHS).filter(
+  (name): name is BatchPath => Object.hasOwn(BATCH_PATHS, name),
+);
+
+/** A fresh graph holding live a, b, c and tombstoned `f`, no edges. */
+async function openBatchScenario(
+  context: IntegrationTestContext,
+): Promise<Readonly<{ store: OrderStore; graphId: string }>> {
+  const graphId = nextEdgeCreatePathGraphId("edge_endpoint_order_batch");
+  const store = await context.createStore(buildGraph(graphId));
+  for (const id of [...LIVE_NODE_IDS, DEAD.id]) {
+    await store.nodes.EoItem.create({}, { id });
+  }
+  await store.nodes.EoItem.delete(asNodeId<typeof EoItem>(DEAD.id));
+  return { store, graphId };
+}
+
+/**
+ * Reopening an ended edge's validity window (`clearValidTo`) puts it back
+ * into an active-only (`oneActive`) axis's population, so it probes that
+ * axis exactly as a create does. The ended edge names the tombstoned `f`,
+ * and a live, active incumbent holds the axis on `f`. Both are written by an
+ * import with `validateReferences: false`.
+ */
+type ReopenScenario = Readonly<{
+  kind: "eoSourceActive" | "eoTargetActive";
+  ended: Readonly<{ from: Endpoint; to: Endpoint }>;
+  incumbent: Readonly<{ from: Endpoint; to: Endpoint }>;
+}>;
+
+const REOPEN_SCENARIOS: readonly ReopenScenario[] = [
+  {
+    kind: "eoSourceActive",
+    ended: { from: DEAD, to: item("b") },
+    incumbent: { from: DEAD, to: item("c") },
+  },
+  {
+    kind: "eoTargetActive",
+    ended: { from: item("a"), to: DEAD },
+    incumbent: { from: item("c"), to: DEAD },
+  },
+];
+
+const ENDED_ID = "ended";
+
+/** Every edge write path that can reopen an ended edge's window. */
+const REOPEN_PATHS = {
+  update: (surface, { kind }) =>
+    surface
+      .getEdgeCollectionOrThrow(kind)
+      .update(ENDED_ID, {}, { clearValidTo: true }),
+  bulkUpsertById: (surface, { kind, ended }) =>
+    surface.getEdgeCollectionOrThrow(kind).bulkUpsertById([
+      {
+        ...ended,
+        id: ENDED_ID,
+        props: WRITE_PROPS,
+        clearValidTo: true,
+      },
+    ]),
+  getOrCreateByEndpoints: (surface, { kind, ended }) =>
+    surface
+      .getEdgeCollectionOrThrow(kind)
+      .getOrCreateByEndpoints(ended.from, ended.to, WRITE_PROPS, {
+        matchOn: ["label"],
+        ifExists: "update",
+        clearValidTo: true,
+      }),
+  bulkGetOrCreateByEndpoints: (surface, { kind, ended }) =>
+    surface
+      .getEdgeCollectionOrThrow(kind)
+      .bulkGetOrCreateByEndpoints(
+        [{ ...ended, props: WRITE_PROPS, clearValidTo: true }],
+        { matchOn: ["label"], ifExists: "update" },
+      ),
+} as const satisfies Record<
+  string,
+  (surface: OrderSurface, scenario: ReopenScenario) => Promise<unknown>
+>;
+
+type ReopenPath = keyof typeof REOPEN_PATHS;
+
+const REOPEN_PATH_NAMES = Object.keys(REOPEN_PATHS).filter(
+  (name): name is ReopenPath => Object.hasOwn(REOPEN_PATHS, name),
+);
+
+/** A fresh graph holding the ended edge and the incumbent on `f`. */
+async function openReopenScenario(
+  context: IntegrationTestContext,
+  scenario: ReopenScenario,
+): Promise<Readonly<{ store: OrderStore; graphId: string }>> {
+  const { store, graphId } = await openBatchScenario(context);
+  const result = await importGraph(
+    store,
+    {
+      formatVersion: FORMAT_VERSION,
+      exportedAt: "2026-01-01T00:00:00.000Z",
+      source: { type: "external", description: "an ended edge on f" },
+      nodes: [],
+      edges: [
+        {
+          kind: scenario.kind,
+          id: ENDED_ID,
+          ...scenario.ended,
+          properties: WRITE_PROPS,
+          validFrom: "2020-01-01T00:00:00.000Z",
+          validTo: "2021-01-01T00:00:00.000Z",
+        },
+        {
+          kind: scenario.kind,
+          id: INCUMBENT_ID,
+          ...scenario.incumbent,
+          properties: { label: "inc" },
+        },
+      ],
+    },
+    {
+      onConflict: "error",
+      onUnknownProperty: "error",
+      validateReferences: false,
+      batchSize: 100,
+      refreshStatistics: false,
+    },
+  );
+  expect(result.errors).toEqual([]);
+  expect(result.edges.created).toBe(2);
+  return { store, graphId };
+}
+
 function scenarioKey(scenario: OrderScenario): string {
   return `${scenario.kind} ${scenario.holder} ${scenario.write.from.id}->${scenario.write.to.id}`;
 }
 
-async function settleStorePath(
+/**
+ * Runs `write` at the root, or inside a transaction that also creates a
+ * sentinel node, catches the refusal and commits.
+ */
+async function settleWrite(
   store: OrderStore,
   receiver: CaseReceiver,
-  path: StorePath,
-  scenario: OrderScenario,
+  write: (surface: OrderSurface) => Promise<unknown>,
 ): Promise<Readonly<{ error: string; commit?: string; sentinel?: boolean }>> {
-  const write = STORE_PATHS[path];
   if (receiver === "root") {
-    return { error: await settle(() => write(store, scenario)) };
+    return { error: await settle(() => write(store)) };
   }
   let error = "not reached";
   const commit = await settle(() =>
     store.transaction(async (tx) => {
       await tx.nodes.EoItem.create({}, { id: SENTINEL_ID });
-      error = await settle(() => write(tx, scenario));
+      error = await settle(() => write(tx));
     }),
   );
   const sentinel =
@@ -364,11 +591,8 @@ export function registerEdgeEndpointRefusalOrderIntegrationTests(
           const { store, graphId } = await openScenario(context, scenario);
           const lane = context.getBackend();
           const before = await readEdgeCreatePathState(lane, graphId);
-          const outcome = await settleStorePath(
-            store,
-            receiver,
-            path,
-            scenario,
+          const outcome = await settleWrite(store, receiver, (surface) =>
+            STORE_PATHS[path](surface, scenario),
           );
           const after = await readEdgeCreatePathState(lane, graphId);
           expect({ ...outcome, state: after }).toEqual({
@@ -378,6 +602,111 @@ export function registerEdgeEndpointRefusalOrderIntegrationTests(
             : {}),
             state: before,
           });
+        });
+      });
+    });
+
+    describe.each(CASE_RECEIVERS)(
+      "%s, a batch repeating an axis",
+      (receiver) => {
+        describe.each(BATCH_PATH_NAMES)("%s", (path) => {
+          it.for(
+            BATCH_SCENARIOS.map(
+              (scenario) => [batchKey(scenario), scenario] as const,
+            ),
+          )("%s", async ([, scenario]) => {
+            const { store, graphId } = await openBatchScenario(context);
+            const lane = context.getBackend();
+            const before = await readEdgeCreatePathState(lane, graphId);
+            const outcome = await settleWrite(store, receiver, (surface) =>
+              BATCH_PATHS[path](surface, scenario),
+            );
+            const after = await readEdgeCreatePathState(lane, graphId);
+            expect({ ...outcome, state: after }).toEqual({
+              error: ENDPOINT,
+              ...(receiver === "transaction" ?
+                { commit: "ok", sentinel: true }
+              : {}),
+              state: before,
+            });
+          });
+        });
+      },
+    );
+
+    describe.each(CASE_RECEIVERS)(
+      "%s, reopening an ended window",
+      (receiver) => {
+        describe.each(REOPEN_PATH_NAMES)("%s", (path) => {
+          it.for(
+            REOPEN_SCENARIOS.map(
+              (scenario) => [scenario.kind, scenario] as const,
+            ),
+          )("%s", async ([, scenario]) => {
+            const { store, graphId } = await openReopenScenario(
+              context,
+              scenario,
+            );
+            const lane = context.getBackend();
+            const before = await readEdgeCreatePathState(lane, graphId);
+            const outcome = await settleWrite(store, receiver, (surface) =>
+              REOPEN_PATHS[path](surface, scenario),
+            );
+            const after = await readEdgeCreatePathState(lane, graphId);
+            expect({ ...outcome, state: after }).toEqual({
+              error: ENDPOINT,
+              ...(receiver === "transaction" ?
+                { commit: "ok", sentinel: true }
+              : {}),
+              state: before,
+            });
+          });
+        });
+      },
+    );
+
+    describe("root, a batch repeating an axis", () => {
+      // Import applies each row on its own: the dead row is refused for its
+      // endpoint and the live row is written, wherever the dead row sits.
+      describe("importGraph", () => {
+        it.for(
+          BATCH_SCENARIOS.map(
+            (scenario) => [batchKey(scenario), scenario] as const,
+          ),
+        )("%s", async ([, scenario]) => {
+          const { store } = await openBatchScenario(context);
+          const result = await importGraph(
+            store,
+            {
+              formatVersion: FORMAT_VERSION,
+              exportedAt: "2026-01-01T00:00:00.000Z",
+              source: { type: "external", description: "the batch" },
+              nodes: [],
+              edges: batchInputs(scenario).map((row) => ({
+                kind: scenario.kind,
+                id: row.id,
+                from: row.from,
+                to: row.to,
+                properties: row.props,
+              })),
+            },
+            {
+              onConflict: "error",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              batchSize: 100,
+              refreshStatistics: false,
+            },
+          );
+          const liveIndex = scenario.dead === "first" ? 1 : 0;
+          const written = await store
+            .getEdgeCollectionOrThrow(scenario.kind)
+            .getById(batchRow(scenario, liveIndex).id);
+          expect({
+            errors: result.errors.map((error) => importRefusal(error.error)),
+            created: result.edges.created,
+            liveRowWritten: written !== undefined,
+          }).toEqual({ errors: [ENDPOINT], created: 1, liveRowWritten: true });
         });
       });
     });
