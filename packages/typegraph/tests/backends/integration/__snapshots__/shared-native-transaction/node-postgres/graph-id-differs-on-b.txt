@@ -1,0 +1,127 @@
+pair graph-id-differs-on-b
+A {"graph":0,"tables":0,"history":false,"revisionTracking":false,"constraints":false}
+B {"graph":1,"tables":0,"history":false,"revisionTracking":false,"constraints":false}
+
+## caller-native
+steps: a1=ok b1=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A no receipt
+revision A: none -> none
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2] recorded 0
+rows tables-0 graph-1: live [r1b1, r1b2] recorded 0
+trace:
+  sql begin
+  sql SET LOCAL typegraph.transaction_marker = '<marker:1>'
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a1","{\"label\":\"r1a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r1b1","{\"label\":\"r1b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r1b2","{\"label\":\"r1b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r1a2","{\"label\":\"r1a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql commit
+
+## caller-native with a caller savepoint rolled back
+steps: a1=ok savepoint=ok b1=ok rollback-to=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A no receipt
+revision A: none -> none
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r2a1, r2a2] recorded 0
+rows tables-0 graph-1: live [r1b1, r1b2, r2b2] recorded 0
+trace:
+  sql begin
+  sql SET LOCAL typegraph.transaction_marker = '<marker:2>'
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a1","{\"label\":\"r2a1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r2b1","{\"label\":\"r2b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql ROLLBACK TO SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r2b2","{\"label\":\"r2b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_0"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r2a2","{\"label\":\"r2a2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql commit
+
+## store-transaction
+steps: a1=ok b1=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A receipt 2
+revision A: none -> none
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r2a1, r2a2, r3a1, r3a2] recorded 0
+rows tables-0 graph-1: live [r1b1, r1b2, r2b2, r3b1, r3b2] recorded 0
+trace:
+  sql begin
+  sql SET LOCAL typegraph.transaction_marker = '<marker:3>'
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $8 AND "tss_one_schema_versions"."version" = $9 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3a1","{\"label\":\"r3a1\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r3b1","{\"label\":\"r3b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r3b2","{\"label\":\"r3b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $8 AND "tss_one_schema_versions"."version" = $9 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r3a2","{\"label\":\"r3a2\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql commit
+
+## store-transaction with a caller savepoint rolled back
+steps: a1=ok savepoint=ok b1=ok rollback-to=ok b2=ok a2=ok
+settled: ok
+writes: A 2 B 2
+settlement: B no receipt
+settlement: A receipt 2
+revision A: none -> none
+revision B: none -> none
+rows tables-0 graph-0: live [r1a1, r1a2, r2a1, r2a2, r3a1, r3a2, r4a1, r4a2] recorded 0
+rows tables-0 graph-1: live [r1b1, r1b2, r2b2, r3b1, r3b2, r4b2] recorded 0
+trace:
+  sql begin
+  sql SET LOCAL typegraph.transaction_marker = '<marker:4>'
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $8 AND "tss_one_schema_versions"."version" = $9 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4a1","{\"label\":\"r4a1\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r4b1","{\"label\":\"r4b1\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql ROLLBACK TO SAVEPOINT tss_pair
+  sql SELECT "tss_one_schema_versions"."version" AS version FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $1 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE
+    ["tss_pair_graph_1"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_1","ScopeItem","r4b2","{\"label\":\"r4b2\"}","<timestamp>","<timestamp>","<timestamp>"]
+  sql INSERT INTO "tss_one_nodes" ("graph_id", "kind", "id", "props", "version", "valid_from", "valid_to", "created_at", "updated_at") SELECT $1, $2, $3, $4, 1, $5, NULL, $6, $7 FROM ( SELECT "tss_one_schema_versions"."version" FROM "tss_one_schema_versions" WHERE "tss_one_schema_versions"."graph_id" = $8 AND "tss_one_schema_versions"."version" = $9 AND "tss_one_schema_versions"."is_active" = TRUE FOR SHARE ) AS "schema_fence" WHERE TRUE ON CONFLICT ("graph_id", "kind", "id") DO NOTHING RETURNING *
+    ["tss_pair_graph_0","ScopeItem","r4a2","{\"label\":\"r4a2\"}","<timestamp>","<timestamp>","<timestamp>","tss_pair_graph_0",1]
+  sql SELECT current_setting('typegraph.transaction_marker', true) AS marker
+  sql commit

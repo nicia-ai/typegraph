@@ -33,6 +33,10 @@ import { afterEach, beforeEach, describe } from "vitest";
 
 import { createAdapterStoreWithSchema } from "../../src";
 import type { AdapterBackend } from "../../src/backend/types";
+import type {
+  TracedConnection,
+  TracedTableNames,
+} from "../helpers/traced-connection";
 import {
   type IntegrationStore,
   type IntegrationTestContext,
@@ -118,6 +122,10 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
   serverLaneConcurrency?: boolean;
   /** The driver the lane runs on — see {@link IntegrationLaneDriver}. */
   driver: IntegrationLaneDriver;
+  /** See {@link IntegrationTestContext.openTracedConnection}. */
+  openTracedConnection: (
+    tableNameSets: readonly TracedTableNames[],
+  ) => Promise<TracedConnection>;
 }>;
 
 /**
@@ -207,6 +215,7 @@ export function createIntegrationTestSuite<
       },
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
       driver: options.driver,
+      openTracedConnection: options.openTracedConnection,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {

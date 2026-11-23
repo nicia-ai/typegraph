@@ -80,7 +80,7 @@ export type WriteShapeDriver = (typeof WRITE_SHAPE_DRIVERS)[number];
  * decorator's own account of a command-port dispatch it answered or passed on
  * (see {@link WriteShapeRecorder.annotate}).
  */
-type WriteShapeEvent =
+export type WriteShapeEvent =
   | Readonly<{ source: "sql"; text: string; params: readonly unknown[] }>
   | Readonly<{ source: "hook" | "fault" | "exchange" | "port"; line: string }>;
 
@@ -154,7 +154,7 @@ export type WriteShapeEngine = Readonly<{
 /** A token a trace renumbers by first appearance, e.g. a mocked generated id. */
 type VolatileToken = Readonly<{ pattern: RegExp; label: string }>;
 
-type EventSink = (event: WriteShapeEvent) => void;
+export type EventSink = (event: WriteShapeEvent) => void;
 
 const ISO_TIMESTAMP_PATTERN =
   /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}(?::?\d{2})?)?/gu;
@@ -180,7 +180,7 @@ type StatementFault = Readonly<{
  * only outside a transaction: its statements run on the same database, and
  * from inside a transaction they would wait on that transaction's own locks.
  */
-type StatementFaultTrigger = (
+export type StatementFaultTrigger = (
   text: string,
   params: readonly unknown[],
   inTransaction: boolean,
@@ -571,7 +571,7 @@ function sqliteClientOf(db: object): Database.Database {
  * execution. The backend caches prepared statements by SQL text, so the
  * execution — not the preparation — is the unit a trace needs.
  */
-function recordSqliteDriver(
+export function recordSqliteDriver(
   client: Database.Database,
   sink: EventSink,
   faultTrigger: StatementFaultTrigger,
@@ -646,7 +646,7 @@ function recordSqliteStatement(
  * so that object is wrapped too; faults never fire there (see
  * {@link assertClientTransactionsAreScoped}).
  */
-function recordLibsqlClient(
+export function recordLibsqlClient(
   client: LibsqlClient,
   sink: EventSink,
   faultTrigger: StatementFaultTrigger,
@@ -824,7 +824,7 @@ function simpleQueryText(message: Uint8Array): string | undefined {
  * fault's own statements, run from inside a transaction, would wait on the
  * transaction's own lock.
  */
-function recordPgliteDriver(
+export function recordPgliteDriver(
   client: PGlite,
   sink: EventSink,
   faultTrigger: StatementFaultTrigger,
