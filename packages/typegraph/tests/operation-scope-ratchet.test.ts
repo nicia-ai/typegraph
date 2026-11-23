@@ -58,8 +58,7 @@ import { ESLint } from "eslint";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { OPERATION_BRAND_RESTRICTIONS } from "../eslint.config.mjs";
-import type {
-  BOUNDARY_MINT_MEMBERS} from "./helpers/operation-scope-scan";
+import type { BOUNDARY_MINT_MEMBERS } from "./helpers/operation-scope-scan";
 import {
   boundaryMintCalls,
   brandKeyDeclaration,
