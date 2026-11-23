@@ -65,7 +65,7 @@ const companySizes = await store
 ```
 
 Each key becomes a result column name, so a key must fit in PostgreSQL's 63-byte
-identifier limit (bytes, not characters) and must not start with the reserved `__tg_`
+identifier limit (bytes, not characters) and must not start with the reserved `__tg`
 prefix in any letter case. A longer key is refused with a `ValidationError` carrying
 the code `SQL_IDENTIFIER_TOO_LONG`, and a reserved one with a `ConfigurationError`,
 before any SQL is sent. Keys need not be identifiers otherwise: `"total count"` works.

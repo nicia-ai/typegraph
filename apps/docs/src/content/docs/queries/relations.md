@@ -77,6 +77,10 @@ Repeated relation `groupBy()` calls accumulate grouping expressions. When `aggre
 the input rows first. Order or limit the returned relation to apply those operations to the grouped
 results instead.
 
+A relation's `project()` and `aggregate()` keys must not start with the reserved `__tg` prefix in
+any letter case: the library names the hidden columns it adds beside them (ordering, ranking) there.
+Such a key is refused with a `ConfigurationError` when `project()` or `aggregate()` is called.
+
 SQL NULL still decodes to `undefined`. Ordering accepts an explicit `"first"` or `"last"` null
 position; the defaults are NULLS LAST for ascending and NULLS FIRST for descending.
 

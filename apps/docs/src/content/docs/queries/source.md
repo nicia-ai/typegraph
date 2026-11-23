@@ -112,6 +112,14 @@ store
   .to("Company", "p")  // TypeScript error: alias "p" already in use
 ```
 
+Two alias prefixes are reserved, in any letter case: `cte_`, which every alias CTE starts
+with, and `__tg`, under which the library names what it generates beside your names (a
+subquery's renamed aliases, hidden ordering columns). An alias such as `__tg_x`, `__TG_x`
+or `__Tg` is refused with a `ValidationError` carrying the code `SQL_IDENTIFIER_COLLISION`
+where you pass it — `from()`, `traverse()`, `to()`, `parts()`, `wholes()`, a
+`recursive()` depth or path alias, the same calls inside a `$exists()` or `$scalar()`
+subquery — and again when a query AST is compiled, before any SQL is sent.
+
 Each alias also becomes part of the SQL names the query compiles to (`cte_<alias>`,
 `<alias>_<column>`), which PostgreSQL clips to 63 bytes and the engines compare without
 regard to letter case. A query whose generated names would collide under those rules —
