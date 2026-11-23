@@ -1,3 +1,4 @@
+import type { StatementBackend } from "../store/operation-scope";
 import { requireDefined } from "../utils/presence";
 import type { CandidateIdentityScope } from "./candidate-identity-closure";
 /**
@@ -43,7 +44,6 @@ import type {
   NodeId,
   NodeType,
   Store,
-  TransactionBackend,
 } from "./typegraph-internal";
 import {
   batchPointReadVerdict,
@@ -357,7 +357,7 @@ export type StateDiffBaseReader = Readonly<{
  * do).
  */
 export async function enumerateAllNodes(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kind: string,
 ): Promise<readonly NodeRow[]> {
@@ -392,7 +392,7 @@ export async function enumerateAllNodes(
  * {@link enumerateAllNodes}.
  */
 export async function enumerateAllEdges(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kind: string,
 ): Promise<readonly EdgeRow[]> {
@@ -420,7 +420,7 @@ export async function enumerateAllEdges(
 
 /** Enumerate declared kinds in graph-wide pages when the backend supports it. */
 export async function enumerateGraphNodes(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kinds: readonly string[],
 ): Promise<ReadonlyMap<string, readonly NodeRow[]>> {
@@ -458,7 +458,7 @@ export async function enumerateGraphNodes(
 
 /** Edge counterpart of {@link enumerateGraphNodes}. */
 export async function enumerateGraphEdges(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kinds: readonly string[],
 ): Promise<ReadonlyMap<string, readonly EdgeRow[]>> {
@@ -524,7 +524,7 @@ function createKindBatchReader<Row>(
 const ENUMERATION_KINDS_PER_BATCH = 8;
 
 export function createGraphNodeKindReader(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kinds: readonly string[],
 ): (kind: string) => Promise<readonly NodeRow[]> {
@@ -538,7 +538,7 @@ export function createGraphNodeKindReader(
 }
 
 export function createGraphEdgeKindReader(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kinds: readonly string[],
 ): (kind: string) => Promise<readonly EdgeRow[]> {

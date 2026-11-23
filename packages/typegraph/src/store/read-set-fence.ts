@@ -12,7 +12,6 @@
 import {
   type EngineRevision,
   type GraphCommandIsolation,
-  type TransactionBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
@@ -21,6 +20,7 @@ import {
   ReadSetUnverifiableError,
   UnsupportedBackendCapabilityError,
 } from "../errors";
+import type { OperationBackend } from "./operation-scope";
 import { lockStoreWriteFence } from "./operations/write-fence-prelude";
 import {
   refuseReadOnlyTransactionWrite,
@@ -114,7 +114,7 @@ export type ReadSetFenceContext<G extends GraphDef> = Readonly<{
  */
 export async function assertReadSetUnchangedSince<G extends GraphDef>(
   ctx: ReadSetFenceContext<G>,
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
   anchor: EngineRevision,
   scopes: readonly ReadSetScope<G>[],
 ): Promise<void> {

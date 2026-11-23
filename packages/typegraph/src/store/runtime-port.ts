@@ -42,6 +42,10 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
+import type {
+  StatementBackend,
+  StoreTransactionBackend,
+} from "./operation-scope";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";
 import {
@@ -639,7 +643,7 @@ export function storeCaptureEnabled<G extends GraphDef>(
  */
 export function storeQueryBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
-  target?: GraphBackend | TransactionBackend,
+  target?: StatementBackend,
 ): GraphBackend {
   return storeRuntime(store).queryBackend(target);
 }
@@ -780,10 +784,14 @@ function requireTransactionRuntime(
   return runtime;
 }
 
-/** Returns the full backend for privileged transaction-bound internals. */
+/**
+ * Returns the transaction backend for privileged transaction-bound internals,
+ * as the Store-facing type: a caller that issues statements on it obtains an
+ * operation handle first.
+ */
 export function transactionBackend(
   transaction: TransactionRuntimePort,
-): TransactionBackend {
+): StoreTransactionBackend {
   return requireTransactionRuntime(transaction).backend;
 }
 

@@ -15,14 +15,12 @@
  * both.
  */
 import { deriveBackend } from "../../backend/derive-backend";
-import {
-  type GraphBackend,
-  type TransactionBackend,
-} from "../../backend/types";
+import { type GraphBackend } from "../../backend/types";
 import { requireDefined } from "../../utils/presence";
 import {
   type OperationScoped,
   scopeWriteFrameTarget,
+  type StatementBackend,
 } from "../operation-scope";
 import {
   type GraphWriteLock,
@@ -64,7 +62,7 @@ import {
 export type WritePlanContext = WriteTransactionContext &
   WriteSessionContext &
   Readonly<{
-    identityLock?: (target: GraphBackend | TransactionBackend) => Promise<void>;
+    identityLock?: (target: StatementBackend) => Promise<void>;
   }>;
 
 /** The hooked variant's context: the above plus the hook wrapper. */
@@ -179,7 +177,7 @@ function planFrame<K extends RowWorkKind, T>(
   rowWork: WriteRowWork<K, T>,
 ) {
   return async (
-    target: GraphBackend | TransactionBackend,
+    target: StatementBackend,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
   ): Promise<T> => {
@@ -195,9 +193,8 @@ function planFrame<K extends RowWorkKind, T>(
     // different context or a different lock. The overlaid variant is that
     // spelling applied to a decorated target — the decoration is the ONLY
     // difference between them, and the frame's own session pays for no proxy.
-    const mintSessionOver = (
-      sessionTarget: GraphBackend | TransactionBackend,
-    ): WriteSession => createWriteSession(ctx, sessionTarget, lock);
+    const mintSessionOver = (sessionTarget: StatementBackend): WriteSession =>
+      createWriteSession(ctx, sessionTarget, lock);
     const mintOverlaidSession: OverlaidSessionMint<K> = (reads) =>
       mintSessionOver(deriveBackend(target, reads)) as WriteSessionFor<K>;
     // The two handles are the SAME object: the session closes over the raw
@@ -242,7 +239,7 @@ function planTransactionOptions<K extends RowWorkKind, T>(
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
   plan: WritePlan<K>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
@@ -267,7 +264,7 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
   ctx: HookedWritePlanContext,
   opContext: OperationHookContext,
   plan: WritePlan<K>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {

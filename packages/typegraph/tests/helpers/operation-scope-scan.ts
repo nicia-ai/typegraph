@@ -30,8 +30,14 @@ const SOURCE_ROOT = path.join(PACKAGE_ROOT, "src");
 const STORE_ROOT = path.join(SOURCE_ROOT, "store");
 export const MINT_MODULE = "src/store/operation-scope.ts";
 
+/** The transitional whole-transaction shim, counted by its own ratchet. */
+const LEGACY_SHIM_NAME = "legacyTransactionOperation";
+
 /** The module-private unique symbol that keys the brand property. */
 const BRAND_KEY_NAME = "OPERATION_SCOPED";
+
+/** The module-private unique symbol that keys the Store transaction's engine phantom. */
+const ENGINE_PHANTOM_KEY_NAME = "ENGINE_TRANSACTION";
 
 function relativeToPackage(file: string): string {
   return path.relative(PACKAGE_ROOT, file).replaceAll(path.sep, "/");
@@ -212,15 +218,30 @@ export function brandKeyDeclaration(scan: ScanProgram): Readonly<{
   };
 }
 
-/** The escaped property name the brand key produces on a branded type. */
-function brandPropertyName(scan: ScanProgram): ts.__String {
+/**
+ * A phantom the mint module declares under a module-private key, which only
+ * its mints may produce: the operation brand, or the engine record a
+ * specialised `StoreTransactionBackend` carries (a privilege: the handle it
+ * mints reaches DDL).
+ */
+export type Phantom = "operation brand" | "engine record";
+
+const PHANTOMS: Readonly<
+  Record<Phantom, Readonly<{ alias: string; key: string }>>
+> = {
+  "operation brand": { alias: "OperationScoped", key: BRAND_KEY_NAME },
+  "engine record": { alias: "EngineRecord", key: ENGINE_PHANTOM_KEY_NAME },
+};
+
+/** The escaped property name a phantom's key produces on a type carrying it. */
+function phantomPropertyName(scan: ScanProgram, phantom: Phantom): ts.__String {
+  const { alias: aliasName, key: keyName } = PHANTOMS[phantom];
   const mint = requireSourceFile(scan, MINT_MODULE);
   const alias = mint.statements.find(
     (statement): statement is ts.TypeAliasDeclaration =>
-      ts.isTypeAliasDeclaration(statement) &&
-      statement.name.text === "OperationScoped",
+      ts.isTypeAliasDeclaration(statement) && statement.name.text === aliasName,
   );
-  if (alias === undefined) throw new Error("OperationScoped not found");
+  if (alias === undefined) throw new Error(`${aliasName} not found`);
   const brandType = scan.checker.getTypeFromTypeNode(alias.type);
   const brand = scan.checker
     .getPropertiesOfType(brandType)
@@ -232,11 +253,11 @@ function brandPropertyName(scan: ScanProgram): ts.__String {
             ts.isPropertySignature(declaration) &&
             ts.isComputedPropertyName(declaration.name) &&
             ts.isIdentifier(declaration.name.expression) &&
-            declaration.name.expression.text === BRAND_KEY_NAME,
+            declaration.name.expression.text === keyName,
         ) ?? false,
     );
   if (brand === undefined) {
-    throw new Error(`OperationScoped carries no ${BRAND_KEY_NAME} property`);
+    throw new Error(`${aliasName} carries no ${keyName} property`);
   }
   return brand.escapedName;
 }
@@ -253,11 +274,25 @@ type BrandAnalysis = Readonly<{
   widens: (source: ts.Type, target: ts.Type) => boolean;
   /** The signature returns the brand or hands it to a callback. */
   handsOutBrand: (signature: ts.Signature) => boolean;
+  /** A value of the type carries the brand or hands it to a callback. */
+  supplies: (type: ts.Type) => boolean;
 }>;
 
-function brandAnalysis(scan: ScanProgram): BrandAnalysis {
+/** A member declared with an ECMAScript private name (`#name`). */
+function isPrivateNamed(property: ts.Symbol): boolean {
+  return (property.declarations ?? []).some(
+    (declaration) =>
+      (ts.isMethodDeclaration(declaration) ||
+        ts.isPropertyDeclaration(declaration) ||
+        ts.isGetAccessorDeclaration(declaration) ||
+        ts.isSetAccessorDeclaration(declaration)) &&
+      ts.isPrivateIdentifier(declaration.name),
+  );
+}
+
+function brandAnalysis(scan: ScanProgram, phantom: Phantom): BrandAnalysis {
   const { checker } = scan;
-  const brandName = brandPropertyName(scan);
+  const brandName = phantomPropertyName(scan, phantom);
 
   function resolved(type: ts.Type): ts.Type {
     return (type.flags & ts.TypeFlags.Instantiable) === 0 ?
@@ -291,6 +326,12 @@ function brandAnalysis(scan: ScanProgram): BrandAnalysis {
    * connection) costs gigabytes; such a type is still searched through its
    * type arguments and signatures, so `Promise<StatementBackend>` and a
    * library callback typed `(target: StatementBackend) => void` count.
+   *
+   * An ECMAScript private member (`#name`) is not searched: no code outside
+   * its class body can read or call it, so a brand it carries or demands
+   * never reaches a reader of the type, and every use inside the body is
+   * scanned where it is written. A TypeScript `private` member is still
+   * searched — bracket access reaches it.
    */
   function structuralProperties(type: ts.Type): readonly ts.Symbol[] {
     const isMapped =
@@ -306,7 +347,9 @@ function brandAnalysis(scan: ScanProgram): BrandAnalysis {
         .startsWith(SOURCE_ROOT + path.sep),
     );
     return isMapped || declaredInSource ?
-        checker.getPropertiesOfType(type)
+        checker
+          .getPropertiesOfType(type)
+          .filter((property) => !isPrivateNamed(property))
       : [];
   }
 
@@ -507,7 +550,23 @@ function brandAnalysis(scan: ScanProgram): BrandAnalysis {
     );
   }
 
-  return { hasBrand, carries, widens, handsOutBrand };
+  /**
+   * A value of the type hands the brand to a reader: it carries it, or it is
+   * a function that hands it to a callback (an opener whose callback receives
+   * the specialised transaction).
+   */
+  function supplies(type: ts.Type): boolean {
+    const target = resolved(type);
+    if (target.isUnion()) {
+      return target.types.some((constituent) => supplies(constituent));
+    }
+    return (
+      carries(target) ||
+      signatures(target).some((signature) => handsOutBrand(signature))
+    );
+  }
+
+  return { hasBrand, carries, widens, handsOutBrand, supplies };
 }
 
 // ---------------------------------------------------------------------------
@@ -624,19 +683,46 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
 }
 
 /**
- * Every forge site in `files` (absolute paths). The mint module is scanned
- * like any other: its two assertions are the expected sites.
+ * Every site in `files` (absolute paths) that forges `phantom` — by
+ * default the operation brand; `"engine record"` finds where a specialised
+ * `StoreTransactionBackend` (or an opener handing one to its callback) is
+ * produced. The mint module is scanned like any other: its mint assertions
+ * are the expected sites.
  */
 export function forgeSites(
   scan: ScanProgram,
   files: readonly string[],
+  phantom: Phantom = "operation brand",
 ): readonly ForgeSite[] {
   const { checker } = scan;
-  const brand = brandAnalysis(scan);
+  const brand = brandAnalysis(scan, phantom);
   const sites: ForgeSite[] = [];
 
   function typeOfTypeNode(node: ts.TypeNode): ts.Type {
     return checker.getTypeFromTypeNode(node);
+  }
+
+  /**
+   * `node` is the key argument of a library `WeakMap` / `WeakSet` method.
+   * Such a collection never hands a key back — it has no iteration and no
+   * key read — so a value used only as a key cannot be read out again and
+   * re-asserted, and losing its type there loses no demand any code could
+   * meet. (A `Map` or `Set` iterates its keys, so a key there still counts.)
+   */
+  function isWeakCollectionKey(node: ts.Expression): boolean {
+    const argument = skipOuterParentheses(node);
+    const call = argument.parent;
+    if (!ts.isCallExpression(call) || call.arguments[0] !== argument) {
+      return false;
+    }
+    const declaration = checker.getResolvedSignature(call)?.getDeclaration();
+    const owner = declaration?.parent;
+    return (
+      owner !== undefined &&
+      ts.isInterfaceDeclaration(owner) &&
+      (owner.name.text === "WeakMap" || owner.name.text === "WeakSet") &&
+      scan.program.isSourceFileDefaultLibrary(owner.getSourceFile())
+    );
   }
 
   function routesAt(node: ts.Node): readonly ForgeRoute[] {
@@ -650,9 +736,9 @@ export function forgeSites(
       const operand = checker.getTypeAtLocation(innermostOperand(node));
       const context = checker.getContextualType(node);
       if (
-        (brand.carries(asserted) ||
-          (context !== undefined && brand.carries(context))) &&
-        !brand.carries(operand)
+        (brand.supplies(asserted) ||
+          (context !== undefined && brand.supplies(context))) &&
+        !brand.supplies(operand)
       ) {
         routes.push("assertion");
       }
@@ -671,7 +757,9 @@ export function forgeSites(
         if ((own.flags & ts.TypeFlags.Any) !== 0 && brand.carries(context)) {
           routes.push("any-flow");
         }
-        if (brand.widens(own, context)) routes.push("consumer-flow");
+        if (brand.widens(own, context) && !isWeakCollectionKey(node)) {
+          routes.push("consumer-flow");
+        }
       }
     }
 
@@ -688,7 +776,16 @@ export function forgeSites(
             [node.expression.expression]
           : [];
         const inputs = [...receiver, ...(node.arguments ?? [])];
+        // An argument-less construction of a library type (`new WeakMap<K,
+        // V>()`) builds an empty container: no value exists for the
+        // instantiation to have branded, and every value later put in is
+        // checked against the instantiated type where it is put.
+        const emptyLibraryConstruction =
+          ts.isNewExpression(node) &&
+          inputs.length === 0 &&
+          scan.program.isSourceFileDefaultLibrary(declaration.getSourceFile());
         if (
+          !emptyLibraryConstruction &&
           brand.handsOutBrand(resolvedSignature) &&
           (declared === undefined || !brand.handsOutBrand(declared)) &&
           !inputs.some((input) =>
@@ -730,7 +827,7 @@ export function forgeSites(
       const signature = checker.getSignatureFromDeclaration(node);
       if (
         signature !== undefined &&
-        brand.carries(signature.getReturnType()) &&
+        brand.supplies(signature.getReturnType()) &&
         !signature.parameters.some((parameter) =>
           brand.carries(checker.getTypeOfSymbol(parameter)),
         )
@@ -742,7 +839,7 @@ export function forgeSites(
     if (
       (ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) &&
       (isAmbient(node) || node.exclamationToken !== undefined) &&
-      brand.carries(checker.getTypeAtLocation(node.name))
+      brand.supplies(checker.getTypeAtLocation(node.name))
     ) {
       routes.push("unverified-binding");
     }
@@ -986,4 +1083,688 @@ export function countByFamily(
   ) as Record<StoreFamily, number>;
   for (const target of targets) counts[target.family] += 1;
   return counts;
+}
+
+// ---------------------------------------------------------------------------
+// Raw engine transactions outside the engine
+// ---------------------------------------------------------------------------
+
+/**
+ * How a raw engine transaction — a value of the public, full
+ * `TransactionBackend` type, or a subtype of it, that carries no operation
+ * brand — appears in Store-facing code.
+ */
+export type RawTransactionRoute =
+  /**
+   * A name Store code can use, declared or inferred with the raw type: a
+   * parameter of a function with a body, a variable, a destructured binding.
+   * Its uses are not scanned one by one, and the type checker refuses none
+   * of them, so no such site is ever allowed.
+   */
+  | "declaration"
+  /**
+   * A parameter of a signature with no body: an overload, a function type,
+   * an interface or type member, an ambient declaration. No code can use it;
+   * an implementation's parameter is its own declaration, scanned where it
+   * is written, and one annotated with the Store-facing type is held to it
+   * by the type checker.
+   */
+  | "signature"
+  /**
+   * A property declared with the raw type. The declaration is not a use;
+   * every read of it is, and is reported as a `"value"` unless it reaches
+   * the shim, an identity member or an identity-only position. Each such
+   * property therefore rests on this scan rather than on the type checker.
+   */
+  | "property"
+  /** An expression that produces the raw type: a call, a property read, an `await`. */
+  | "value"
+  /** An assertion that produces the raw type from an operand that is not raw. */
+  | "assertion";
+
+export type RawTransactionSite = Readonly<{
+  file: string;
+  /** The enclosing named function, method or variable, or `<module>`. */
+  function: string;
+  route: RawTransactionRoute;
+  /** 1-based line of the site, for a failure message. */
+  line: number;
+  /** The site's source text, for a failure message. */
+  text: string;
+}>;
+
+/**
+ * The modules that receive the Store-facing transaction type: every `src`
+ * module outside `src/backend` (the engine, which keeps the full type) and
+ * the mint module (which converts between the two).
+ */
+export function storeFacingModules(scan: ScanProgram): readonly string[] {
+  const backendRoot = path.join(SOURCE_ROOT, "backend") + path.sep;
+  return scan.sourceFiles.filter(
+    (file) =>
+      !file.startsWith(backendRoot) && relativeToPackage(file) !== MINT_MODULE,
+  );
+}
+
+function backendTypesExport(scan: ScanProgram, name: string): ts.Type {
+  const { checker, program } = scan;
+  const source = program.getSourceFile(
+    path.join(SOURCE_ROOT, "backend", "types.ts"),
+  );
+  const moduleSymbol =
+    source === undefined ? undefined : checker.getSymbolAtLocation(source);
+  const symbol =
+    moduleSymbol === undefined ? undefined : (
+      checker
+        .getExportsOfModule(moduleSymbol)
+        .find((candidate) => candidate.name === name)
+    );
+  if (symbol === undefined) {
+    throw new Error(`${name} not found in src/backend/types.ts`);
+  }
+  return checker.getDeclaredTypeOfSymbol(symbol);
+}
+
+function mintModuleExport(scan: ScanProgram, name: string): ts.Type {
+  const { checker } = scan;
+  const moduleSymbol = checker.getSymbolAtLocation(
+    requireSourceFile(scan, MINT_MODULE),
+  );
+  const symbol =
+    moduleSymbol === undefined ? undefined : (
+      checker
+        .getExportsOfModule(moduleSymbol)
+        .find((candidate) => candidate.name === name)
+    );
+  if (symbol === undefined)
+    throw new Error(`${name} not found in ${MINT_MODULE}`);
+  return checker.getDeclaredTypeOfSymbol(symbol);
+}
+
+/** `node` is a function-like whose parameters code can read: it has a body. */
+function hasBody(node: ts.Node): boolean {
+  return (
+    (ts.isFunctionDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node)) &&
+    node.body !== undefined
+  );
+}
+
+function isCallee(node: ts.Node): boolean {
+  const parent = node.parent;
+  return (
+    (ts.isCallExpression(parent) || ts.isNewExpression(parent)) &&
+    parent.expression === node
+  );
+}
+
+/** The name a site is reported under: its nearest named function, method or variable. */
+function enclosingName(node: ts.Node): string {
+  for (
+    let current: ts.Node = node.parent;
+    !ts.isSourceFile(current);
+    current = current.parent
+  ) {
+    if (
+      (ts.isFunctionDeclaration(current) ||
+        ts.isMethodDeclaration(current) ||
+        ts.isGetAccessorDeclaration(current) ||
+        ts.isPropertyDeclaration(current)) &&
+      current.name !== undefined
+    ) {
+      const owner =
+        ts.isClassLike(current.parent) && current.parent.name !== undefined ?
+          `${current.parent.name.text}.`
+        : "";
+      return `${owner}${current.name.getText()}`;
+    }
+    if (ts.isConstructorDeclaration(current)) {
+      return `${current.parent.name?.text ?? "<class>"}.constructor`;
+    }
+    if (
+      (ts.isVariableDeclaration(current) ||
+        ts.isTypeAliasDeclaration(current) ||
+        ts.isInterfaceDeclaration(current)) &&
+      ts.isIdentifier(current.name) &&
+      ts.isSourceFile(
+        ts.isVariableDeclaration(current) ?
+          current.parent.parent.parent
+        : current.parent,
+      )
+    ) {
+      return current.name.text;
+    }
+  }
+  return "<module>";
+}
+
+/**
+ * Every place in `files` (absolute paths) where Store-facing code holds or
+ * produces a raw engine transaction. Store code receives a transaction as
+ * `StoreTransactionBackend` (no statement member) and issues statements
+ * only through an operation handle, so a raw transaction here is a statement
+ * surface the type checker does not see: a callback parameter left to infer
+ * the engine type, a public signature that must keep it, or an assertion.
+ */
+export function rawTransactionSites(
+  scan: ScanProgram,
+  files: readonly string[],
+): readonly RawTransactionSite[] {
+  const { checker } = scan;
+  const brand = brandAnalysis(scan, "operation brand");
+  const engineTransaction = backendTypesExport(scan, "TransactionBackend");
+  const rootBackend = backendTypesExport(scan, "GraphBackend");
+  const storeFacingType = mintModuleExport(scan, "StoreTransactionBackend");
+  const storeFacingMembers: ReadonlySet<string> = new Set(
+    checker
+      .getPropertiesOfType(storeFacingType)
+      .map((property) => property.name),
+  );
+  const engineRecord = brandAnalysis(scan, "engine record");
+
+  function isRawConstituent(type: ts.Type): boolean {
+    const target =
+      (type.flags & ts.TypeFlags.Instantiable) === 0 ?
+        type
+      : (checker.getBaseConstraintOfType(type) ?? type);
+    if (
+      (target.flags &
+        (ts.TypeFlags.Any |
+          ts.TypeFlags.Unknown |
+          ts.TypeFlags.Never |
+          ts.TypeFlags.Instantiable)) !==
+      0
+    ) {
+      return false;
+    }
+    return (
+      checker.isTypeAssignableTo(target, engineTransaction) &&
+      !checker.isTypeAssignableTo(target, rootBackend) &&
+      !brand.hasBrand(target)
+    );
+  }
+
+  /**
+   * The type records an engine transaction type in a specialised
+   * `StoreTransactionBackend`'s phantom, which a mint turns back into that
+   * engine type's handle — or is an opener that hands one to its callback —
+   * so asserting INTO it forges the engine type as surely as asserting to the
+   * engine type itself.
+   */
+  function recordsEngine(type: ts.Type): boolean {
+    return engineRecord.supplies(type);
+  }
+
+  function holdsRaw(type: ts.Type): boolean {
+    const target = checker.getNonNullableType(type);
+    return target.isUnion() ?
+        target.types.some((constituent) => isRawConstituent(constituent))
+      : isRawConstituent(target);
+  }
+
+  /** `node` is the argument of a call to the transitional shim, which consumes it. */
+  function isShimArgument(node: ts.Node): boolean {
+    const argument = skipOuterParentheses(node);
+    const call = argument.parent;
+    if (
+      !ts.isCallExpression(call) ||
+      !call.arguments.includes(argument as ts.Expression)
+    ) {
+      return false;
+    }
+    const declaration = checker.getResolvedSignature(call)?.getDeclaration();
+    return (
+      declaration !== undefined &&
+      ts.isFunctionDeclaration(declaration) &&
+      declaration.name?.text === LEGACY_SHIM_NAME &&
+      relativeToPackage(declaration.getSourceFile().fileName) === MINT_MODULE
+    );
+  }
+
+  /**
+   * `node` is only the receiver of a member the Store-facing transaction type
+   * carries (`ctx.backend.dialect`, `ctx.backend.compileSql`): reading what
+   * `StoreTransactionBackend` allows is not a statement surface.
+   */
+  function readsOnlyIdentity(node: ts.Node): boolean {
+    const receiver = skipOuterParentheses(node);
+    const read = receiver.parent;
+    return (
+      ts.isPropertyAccessExpression(read) &&
+      read.expression === receiver &&
+      storeFacingMembers.has(read.name.text)
+    );
+  }
+
+  /**
+   * `node` flows straight into a position whose type has no statement member
+   * — a return typed `StoreTransactionBackend`, an identity-keyed registry's
+   * `object` key — so the raw type does not survive its arrival. A position
+   * typed as a statement fragment (`Pick<TransactionBackend, "execute">`)
+   * does not qualify: that is a statement surface by another name.
+   */
+  function narrowedOnArrival(node: ts.Node): boolean {
+    if (
+      !ts.isExpression(node) ||
+      !isFlowPosition(skipOuterParentheses(node) as ts.Expression)
+    ) {
+      return false;
+    }
+    const context = checker.getContextualType(node);
+    if (context === undefined) return false;
+    const target = checker.getNonNullableType(context);
+    if ((target.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+      return false;
+    }
+    const constituents = target.isUnion() ? target.types : [target];
+    return constituents.every(
+      (constituent) =>
+        (constituent.flags &
+          (ts.TypeFlags.Object |
+            ts.TypeFlags.NonPrimitive |
+            ts.TypeFlags.Intersection)) !==
+          0 &&
+        checker
+          .getPropertiesOfType(constituent)
+          .every(
+            (property) =>
+              !STATEMENT_MEMBER_NAMES.has(property.name) ||
+              storeFacingMembers.has(property.name),
+          ),
+    );
+  }
+
+  function routeAt(node: ts.Node): RawTransactionRoute | undefined {
+    if (
+      (ts.isParameter(node) ||
+        ts.isVariableDeclaration(node) ||
+        ts.isBindingElement(node) ||
+        ts.isPropertySignature(node) ||
+        ts.isPropertyDeclaration(node)) &&
+      holdsRaw(checker.getTypeAtLocation(node.name))
+    ) {
+      if (ts.isPropertySignature(node) || ts.isPropertyDeclaration(node)) {
+        return "property";
+      }
+      return ts.isParameter(node) && !hasBody(node.parent) ?
+          "signature"
+        : "declaration";
+    }
+    if (isAssertion(node) && !isAssertion(skipOuterParentheses(node).parent)) {
+      const operand = checker.getTypeAtLocation(innermostOperand(node));
+      const context = checker.getContextualType(node);
+      const into = [
+        checker.getTypeFromTypeNode(node.type),
+        ...(context === undefined ? [] : [context]),
+      ];
+      return (
+          into.some(
+            (target) =>
+              (holdsRaw(target) || recordsEngine(target)) &&
+              !checker.isTypeAssignableTo(operand, target),
+          )
+        ) ?
+          "assertion"
+        : undefined;
+    }
+    if (
+      (ts.isCallExpression(node) ||
+        ts.isAwaitExpression(node) ||
+        ts.isElementAccessExpression(node) ||
+        (ts.isPropertyAccessExpression(node) && !isCallee(node))) &&
+      !isShimArgument(node) &&
+      !readsOnlyIdentity(node) &&
+      !narrowedOnArrival(node) &&
+      holdsRaw(checker.getTypeAtLocation(node))
+    ) {
+      return "value";
+    }
+    return undefined;
+  }
+
+  const sites: RawTransactionSite[] = [];
+  for (const file of files) {
+    const source = scan.program.getSourceFile(file);
+    if (source === undefined) throw new Error(`${file} is not in program`);
+    const relative = relativeToPackage(file);
+    const visit = (node: ts.Node): void => {
+      const route = routeAt(node);
+      if (route !== undefined) {
+        sites.push({
+          file: relative,
+          function: enclosingName(node),
+          route,
+          line:
+            source.getLineAndCharacterOfPosition(node.getStart(source)).line +
+            1,
+          text: ((
+            ts.isParameter(node) ||
+            ts.isVariableDeclaration(node) ||
+            ts.isBindingElement(node) ||
+            ts.isPropertySignature(node) ||
+            ts.isPropertyDeclaration(node)
+          ) ?
+            node.name
+          : node
+          ).getText(source),
+        });
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return sites;
+}
+
+// ---------------------------------------------------------------------------
+// The transitional shim's call sites
+// ---------------------------------------------------------------------------
+
+/**
+ * How a shim site names the shim. Only `"call"` is an inventoried call; every
+ * other form is refused, because it is a way to reach the shim that a reader
+ * of the call sites would not see.
+ */
+type LegacyShimForm =
+  /** `legacyTransactionOperation(tx)`, or the same through a renamed import. */
+  | "call"
+  /** `scope.legacyTransactionOperation`, a namespace member, called or not. */
+  | "namespace"
+  /** `scope["legacyTransactionOperation"]`, called or not. */
+  | "element-access"
+  /** A namespace import of the mint module used as a value: `scope[key]`, `f(scope)`, `{ ...scope }`. */
+  | "namespace-value"
+  /** `export { legacyTransactionOperation … }`, or `export *` of the mint module. */
+  | "re-export"
+  /** A destructured binding, `const { legacyTransactionOperation: f } = scope`. */
+  | "alias"
+  /** A call that reaches the shim through a value rather than its name: `f(tx)` after `const f = legacyTransactionOperation`. */
+  | "indirect-call"
+  /** Any other reference: a stored value, an argument, `.call` / `.apply`. */
+  | "value";
+
+export type LegacyShimSite = Readonly<{
+  file: string;
+  /** The enclosing named function, method or variable, or `<module>`. */
+  function: string;
+  /** 1-based line of the site, for a failure message. */
+  line: number;
+  form: LegacyShimForm;
+}>;
+
+/**
+ * Every site in `files` that reaches the transitional shim
+ * `legacyTransactionOperation`. References are resolved by symbol, not by
+ * name — an identifier, a string-literal element access, an export
+ * specifier, a destructured property — and every call is resolved by the
+ * signature the checker picks, so a call through any value of the shim's
+ * type is found as surely as a call by name. A namespace import of the mint
+ * module may only be read through a static member name: any other use hands
+ * out every export at once, the shim included, and is a site of its own.
+ * The mint module's own declaration is excluded.
+ */
+export function legacyShimSites(
+  scan: ScanProgram,
+  files: readonly string[],
+): readonly LegacyShimSite[] {
+  const { checker } = scan;
+  const mint = requireSourceFile(scan, MINT_MODULE);
+  const moduleSymbol = checker.getSymbolAtLocation(mint);
+  const shim =
+    moduleSymbol === undefined ? undefined : (
+      checker
+        .getExportsOfModule(moduleSymbol)
+        .find((symbol) => symbol.name === LEGACY_SHIM_NAME)
+    );
+  if (moduleSymbol === undefined || shim === undefined) {
+    throw new Error(`${LEGACY_SHIM_NAME} is not exported from ${MINT_MODULE}`);
+  }
+  const shimDeclaration = shim.declarations?.find((declaration) =>
+    ts.isFunctionDeclaration(declaration),
+  );
+  if (shimDeclaration === undefined) {
+    throw new Error(`${LEGACY_SHIM_NAME} is not a function declaration`);
+  }
+
+  function resolved(node: ts.Node): ts.Symbol | undefined {
+    const symbol = checker.getSymbolAtLocation(node);
+    if (symbol === undefined) return undefined;
+    return (symbol.flags & ts.SymbolFlags.Alias) === 0 ?
+        symbol
+      : checker.getAliasedSymbol(symbol);
+  }
+
+  function callsShim(call: ts.CallExpression): boolean {
+    return (
+      checker.getResolvedSignature(call)?.getDeclaration() === shimDeclaration
+    );
+  }
+
+  /** `node` is the whole callee of a call, under any parentheses. */
+  function calleeOf(node: ts.Node): ts.CallExpression | undefined {
+    const outer = skipOuterParentheses(node);
+    const parent = outer.parent;
+    return ts.isCallExpression(parent) && parent.expression === outer ?
+        parent
+      : undefined;
+  }
+
+  function isMintModuleSpecifier(node: ts.Expression | undefined): boolean {
+    return node !== undefined && resolved(node) === moduleSymbol;
+  }
+
+  /** The form a reference to the shim at `node` takes, or `undefined` when `node` is not one. */
+  function referenceForm(node: ts.Node): LegacyShimForm | undefined {
+    if (ts.isIdentifier(node)) {
+      if (ts.isFunctionDeclaration(node.parent) && node.parent.name === node) {
+        return undefined;
+      }
+      if (resolved(node) !== shim) return undefined;
+      const parent = node.parent;
+      if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
+        return "namespace";
+      }
+      if (ts.isBindingElement(parent)) return "alias";
+      return calleeOf(node) === undefined ? "value" : "call";
+    }
+    if (
+      ts.isStringLiteralLike(node) &&
+      ts.isElementAccessExpression(node.parent) &&
+      node.parent.argumentExpression === node &&
+      resolved(node) === shim
+    ) {
+      return "element-access";
+    }
+    return undefined;
+  }
+
+  const sites: LegacyShimSite[] = [];
+  for (const file of files) {
+    const source = scan.program.getSourceFile(file);
+    if (source === undefined) throw new Error(`${file} is not in program`);
+    const relative = relativeToPackage(file);
+    const report = (node: ts.Node, form: LegacyShimForm): void => {
+      sites.push({
+        file: relative,
+        function: enclosingName(node),
+        line:
+          source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+        form,
+      });
+    };
+    const visit = (node: ts.Node): void => {
+      // An import binding is a declaration, not a use: a renamed one is
+      // counted wherever it is referenced, and a namespace one wherever it
+      // is used as a value.
+      if (ts.isImportDeclaration(node)) return;
+      if (ts.isExportDeclaration(node)) {
+        const fromMint = isMintModuleSpecifier(node.moduleSpecifier);
+        const clause = node.exportClause;
+        const reExportsShim =
+          clause === undefined || ts.isNamespaceExport(clause) ?
+            fromMint
+          : clause.elements.some((element) =>
+              [element.propertyName, element.name].some(
+                (name) => name !== undefined && resolved(name) === shim,
+              ),
+            );
+        if (reExportsShim) report(node, "re-export");
+        return;
+      }
+      const form = referenceForm(node);
+      if (form !== undefined) report(node, form);
+      if (
+        ts.isIdentifier(node) &&
+        resolved(node) === moduleSymbol &&
+        !(
+          ts.isPropertyAccessExpression(node.parent) &&
+          node.parent.expression === node
+        ) &&
+        !(
+          ts.isElementAccessExpression(node.parent) &&
+          node.parent.expression === node &&
+          ts.isStringLiteralLike(node.parent.argumentExpression)
+        ) &&
+        !ts.isQualifiedName(node.parent) &&
+        !ts.isTypeQueryNode(node.parent)
+      ) {
+        report(node, "namespace-value");
+      }
+      if (ts.isCallExpression(node) && callsShim(node)) {
+        // A call by the shim's own name is reported at that name; any other
+        // callee reaches it through a value.
+        let callee: ts.Expression = node.expression;
+        while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
+        const named =
+          referenceForm(callee) !== undefined ||
+          (ts.isPropertyAccessExpression(callee) &&
+            referenceForm(callee.name) !== undefined) ||
+          (ts.isElementAccessExpression(callee) &&
+            referenceForm(callee.argumentExpression) !== undefined);
+        if (!named) report(node, "indirect-call");
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return sites;
+}
+
+// ---------------------------------------------------------------------------
+// The boundary mints' arguments
+// ---------------------------------------------------------------------------
+
+/**
+ * Each boundary mint in the mint module, by the engine member it grants a
+ * specialised transaction for. Its argument must be a read of that member.
+ */
+export const BOUNDARY_MINT_MEMBERS = {
+  storeSchemaWriteTransaction: "schemaWriteTransaction",
+  storeCommitSchemaVersionWithPreflight: "commitSchemaVersionWithPreflight",
+  storeSetActiveVersionWithPreflight: "setActiveVersionWithPreflight",
+  storeAdoptSchemaWriteTransaction: "adoptSchemaWriteTransaction",
+} as const;
+
+type BoundaryMint = keyof typeof BOUNDARY_MINT_MEMBERS;
+
+export type BoundaryMintCall = Readonly<{
+  file: string;
+  /** The enclosing named function, method or variable, or `<module>`. */
+  function: string;
+  /** 1-based line of the call, for a failure message. */
+  line: number;
+  mint: BoundaryMint;
+  /**
+   * `"member-read"` when the argument reads the mint's own member, as the
+   * engine declares it, off a backend: the only argument that IS the engine
+   * member. Anything else — a function the Store wrote, a stored value, an
+   * object literal's same-named property — is `"other"`.
+   */
+  argument: "member-read" | "other";
+}>;
+
+function isBoundaryMint(name: string): name is BoundaryMint {
+  return Object.hasOwn(BOUNDARY_MINT_MEMBERS, name);
+}
+
+/**
+ * Every call in `files` to a boundary mint, found by the signature the checker
+ * resolves (so an alias or a namespace call is found too), with whether its
+ * argument is a read of the engine member the mint grants. A boundary mint
+ * re-types the engine member's callback, so it is only as trustworthy as its
+ * argument; for the preflight target, which member for member is an ordinary
+ * transaction, no type can tell the engine's member from a Store-written
+ * function that calls the callback with an ordinary transaction.
+ */
+export function boundaryMintCalls(
+  scan: ScanProgram,
+  files: readonly string[],
+): readonly BoundaryMintCall[] {
+  const { checker } = scan;
+  const typesFile = path.join(SOURCE_ROOT, "backend", "types.ts");
+
+  function mintOf(call: ts.CallExpression): BoundaryMint | undefined {
+    const declaration = checker.getResolvedSignature(call)?.getDeclaration();
+    if (
+      declaration === undefined ||
+      !ts.isFunctionDeclaration(declaration) ||
+      declaration.name === undefined ||
+      relativeToPackage(declaration.getSourceFile().fileName) !== MINT_MODULE
+    ) {
+      return undefined;
+    }
+    const name = declaration.name.text;
+    return isBoundaryMint(name) ? name : undefined;
+  }
+
+  function readsMember(argument: ts.Expression, member: string): boolean {
+    let current = argument;
+    while (ts.isParenthesizedExpression(current)) current = current.expression;
+    if (!ts.isPropertyAccessExpression(current)) return false;
+    if (current.name.text !== member) return false;
+    const declarations =
+      checker.getSymbolAtLocation(current.name)?.declarations ?? [];
+    return declarations.some(
+      (declaration) =>
+        path.resolve(declaration.getSourceFile().fileName) === typesFile,
+    );
+  }
+
+  const calls: BoundaryMintCall[] = [];
+  for (const file of files) {
+    const source = scan.program.getSourceFile(file);
+    if (source === undefined) throw new Error(`${file} is not in program`);
+    const relative = relativeToPackage(file);
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const mint = mintOf(node);
+        if (mint !== undefined) {
+          const argument = node.arguments[0];
+          calls.push({
+            file: relative,
+            function: enclosingName(node),
+            line:
+              source.getLineAndCharacterOfPosition(node.getStart(source)).line +
+              1,
+            mint,
+            argument:
+              (
+                argument !== undefined &&
+                readsMember(argument, BOUNDARY_MINT_MEMBERS[mint])
+              ) ?
+                "member-read"
+              : "other",
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return calls;
 }

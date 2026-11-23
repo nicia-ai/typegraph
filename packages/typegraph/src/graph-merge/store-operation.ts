@@ -4,7 +4,7 @@ import { z } from "zod";
 import { statementExecutionMembers } from "../backend/capabilities/bind";
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
 import { isOptimisticRetryTier } from "../backend/capabilities/retried-unit";
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import { type GraphBackend } from "../backend/types";
 import {
   assertGraphAllocationOwner,
   type GraphAllocationOwner,
@@ -16,6 +16,11 @@ import { type JsonValue } from "../core/types";
 import { storeOperationsTableName } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type StatementBackend,
+} from "../store/operation-scope";
 import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import {
@@ -198,9 +203,7 @@ function operationFailure(error: unknown): DurableOperationError {
     );
 }
 
-function requireOperationStatementMembers(
-  target: GraphBackend | TransactionBackend,
-) {
+function requireOperationStatementMembers(target: StatementBackend) {
   // This bundle inspects only executeStatement. A transaction intentionally
   // lacks the GraphBackend lifecycle ports the generic resolver's type requires.
   const verdict = statementExecutionVerdict(target as GraphBackend);
@@ -510,7 +513,9 @@ export async function operateStore<G extends GraphDef>(
       pending = undefined;
       attemptState.phase = "preflight";
       attemptState.commitBoundary = false;
-      const backend: TransactionBackend = transactionBackend(tx);
+      const backend: OperationBackend = legacyTransactionOperation(
+        transactionBackend(tx),
+      );
       requireOperationStatementMembers(backend);
       await lockStoreWriteFence(backend, {
         graphId: store.graphId,

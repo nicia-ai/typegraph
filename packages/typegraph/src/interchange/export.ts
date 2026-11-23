@@ -4,11 +4,7 @@
  * Exports nodes and edges from a store to the interchange format.
  */
 import { acquireSerializedStreamLease } from "../backend/transaction-resource";
-import {
-  type GraphBackend,
-  rowPropsToObject,
-  type TransactionBackend,
-} from "../backend/types";
+import { type GraphBackend, rowPropsToObject } from "../backend/types";
 import {
   getEdgeKinds,
   getNodeKinds,
@@ -25,6 +21,11 @@ import {
   type IdentityTransitionTransfer,
 } from "../identity/transition-log";
 import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { compareStrings } from "../utils/compare";
@@ -362,9 +363,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       backend.capabilities.execution.interactiveTransactions,
     );
   }
-  const produce = async (
-    target: GraphBackend | TransactionBackend,
-  ): Promise<void> => {
+  const produce = async (target: StatementBackend): Promise<void> => {
     await produceExportChunks(store, target, resolved, (chunk) =>
       channel.push(chunk),
     );
@@ -406,10 +405,14 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       try {
         const started =
           backend.capabilities.execution.interactiveTransactions ?
-            backend.transaction((target) => produce(target), {
-              isolationLevel: "repeatable_read",
-              accessMode: "read_only",
-            })
+            backend.transaction(
+              (target: StoreTransactionBackend) =>
+                produce(legacyTransactionOperation(target)),
+              {
+                isolationLevel: "repeatable_read",
+                accessMode: "read_only",
+              },
+            )
           : produce(backend);
         return started.then(
           () => {
@@ -564,7 +567,7 @@ function claimSnapshotExportLeaseOrRefuse(
  */
 async function graphHasIdentityTransitions<G extends GraphDef>(
   store: Store<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<boolean> {
   const probe = await storeRuntime(store).readIdentityTransitionPageAtTarget(
     backend,
@@ -575,7 +578,7 @@ async function graphHasIdentityTransitions<G extends GraphDef>(
 
 async function produceExportChunks<G extends GraphDef>(
   store: Store<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,
   emit: (chunk: GraphInterchangeChunk) => Promise<void>,
 ): Promise<void> {
@@ -729,7 +732,7 @@ function wireTransition(
 
 async function produceIdentityTransitionChunks<G extends GraphDef>(
   store: Store<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   emit: (chunk: GraphInterchangeChunk) => Promise<void>,
   batchSize: number,
 ): Promise<void> {
@@ -970,7 +973,7 @@ function createRendezvousChannel<T>(): RendezvousChannel<T> {
 // ============================================================
 
 async function* exportNodeChunks(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kind: string,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,
@@ -1031,7 +1034,7 @@ async function* exportNodeChunks(
 // ============================================================
 
 async function* exportEdgeChunks(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   kind: string,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,

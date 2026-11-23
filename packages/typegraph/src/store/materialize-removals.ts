@@ -17,7 +17,6 @@ import {
   type RecordKindRemovalParams,
   type SchemaVersionRow,
   type SchemaWriteTransactionBackend,
-  type TransactionBackend,
 } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import { ConfigurationError } from "../errors";
@@ -40,6 +39,13 @@ import {
   buildHardDeleteUniquesByConcreteKind,
 } from "./claims/removal-sql";
 import { ensureFocusedStatusTable } from "./materialize-shared";
+import {
+  legacyTransactionOperation,
+  type OperationScoped,
+  type StatementBackend,
+  storeSchemaWriteTransaction,
+  type StoreTransactionBackend,
+} from "./operation-scope";
 import { closeRecordedHardDeletedKind } from "./recorded-capture";
 
 const ENTITY_KINDS: readonly KindEntity[] = ["node", "edge"];
@@ -474,7 +480,9 @@ async function materializeOne(
   ctx: MaterializeOneContext,
 ): Promise<MaterializeRemovalsEntry> {
   const recordKindRemoval = requireDefined(ctx.backend.recordKindRemoval);
-  const schemaWriteTransaction = ctx.backend.schemaWriteTransaction;
+  const schemaWriteTransaction = storeSchemaWriteTransaction(
+    ctx.backend.schemaWriteTransaction,
+  );
   if (schemaWriteTransaction === undefined) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend that can hold the " +
@@ -485,7 +493,10 @@ async function materializeOne(
   try {
     const outcome = await schemaWriteTransaction(
       ctx.graphId,
-      async (target): Promise<"removed" | "skipped"> => {
+      async (
+        transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
+      ): Promise<"removed" | "skipped"> => {
+        const target = legacyTransactionOperation(transaction);
         const activeRow = await target.getActiveSchema(ctx.graphId);
         const activeSchema =
           activeRow === undefined ? undefined : (
@@ -563,7 +574,7 @@ async function materializeOne(
 async function closeRecordedAndDeleteLiveRows(
   ctx: MaterializeOneContext,
   row: KindRemovalRow,
-  target: SchemaWriteTransactionBackend,
+  target: OperationScoped<SchemaWriteTransactionBackend>,
 ): Promise<void> {
   // Same tolerance `clearGraph` gives the relation: a database bootstrapped
   // before edge claims existed has no such table, and reaping a removed kind's
@@ -677,7 +688,7 @@ function buildRemovedKindLiveDeleteStatements(
 }
 
 async function executeDeleteStatements(
-  target: SchemaWriteTransactionBackend,
+  target: OperationScoped<SchemaWriteTransactionBackend>,
   statements: readonly SqlFragment[],
 ): Promise<void> {
   for (const statement of statements) {
@@ -706,7 +717,7 @@ async function dropEmbeddingTableStorage(
     graphId: string;
   }>,
   row: KindRemovalRow,
-  target: SchemaWriteTransactionBackend,
+  target: OperationScoped<SchemaWriteTransactionBackend>,
 ): Promise<void> {
   const vectorStrategy = ctx.backend.vectorStrategy;
   if (vectorStrategy === undefined) return;
@@ -751,7 +762,7 @@ async function dropVectorSlotStorage(
  * kind.
  */
 async function resolveRemovedKindEmbeddingSlots(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   row: KindRemovalRow,
 ): Promise<readonly VectorSlot[]> {
   const priorVersion = row.schemaVersion - 1;
@@ -896,7 +907,9 @@ async function reclaimRemovedVectorFieldTables(
 
   const results: ReclaimedVectorFieldEntry[] = [];
   let skippedAfterLockedRecheck = false;
-  const schemaWriteTransaction = backend.schemaWriteTransaction;
+  const schemaWriteTransaction = storeSchemaWriteTransaction(
+    backend.schemaWriteTransaction,
+  );
   if (orphans.length > 0 && schemaWriteTransaction === undefined) {
     throw new ConfigurationError(
       "store.materializeRemovals() requires a backend that can hold the " +
@@ -908,7 +921,10 @@ async function reclaimRemovedVectorFieldTables(
     try {
       const reclaimed = await requireDefined(schemaWriteTransaction)(
         graphId,
-        async (target): Promise<boolean> => {
+        async (
+          transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
+        ): Promise<boolean> => {
+          const target = legacyTransactionOperation(transaction);
           const lockedActiveRow = await target.getActiveSchema(graphId);
           if (lockedActiveRow === undefined) return false;
           const lockedActiveSchema = parseSerializedSchema(

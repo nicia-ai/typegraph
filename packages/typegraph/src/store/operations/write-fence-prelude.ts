@@ -10,11 +10,9 @@ import {
   graphCommandCoordinationAcquisition,
   observesEveryEarlierFenceHolder,
 } from "../../backend/command-contract";
-import {
-  type GraphCommandIsolation,
-  type TransactionBackend,
-} from "../../backend/types";
+import { type GraphCommandIsolation } from "../../backend/types";
 import { TypeGraphError } from "../../errors";
+import type { OperationBackend } from "../operation-scope";
 import { lockRecordedGraphWrite } from "../recorded-capture";
 import { lockSchemaVersionForStoreWrite } from "./write-transaction";
 
@@ -63,7 +61,7 @@ export type StoreWriteFenceInput = Readonly<{
  * prelude throws `freshSnapshotError(isolation)`.
  */
 export async function lockStoreWriteFence(
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
   input: StoreWriteFenceInput,
 ): Promise<void> {
   try {

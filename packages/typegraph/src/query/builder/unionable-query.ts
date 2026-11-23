@@ -8,6 +8,11 @@ import {
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../../store/operation-scope";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
@@ -42,7 +47,7 @@ import {
 import { validateQueryRange } from "./validation";
 
 function executeOnBackend<T>(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   recordedAsOf: string | undefined,
   promise: Promise<T>,
   surface: string,
@@ -325,7 +330,7 @@ export class UnionableQuery<G extends GraphDef, R> {
    * when available, else a fresh literal compile via `backend.execute`.
    */
   async #fetchRows(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     ast: SetOperation,
     surface: string,
   ): Promise<readonly Record<string, unknown>[]> {
@@ -400,8 +405,9 @@ export class UnionableQuery<G extends GraphDef, R> {
    * is a shared connection is the adapter's business, not a function of
    * transaction support.
    */
+  executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly R[]>;
   async executeOn(
-    backend: GraphBackend | TransactionBackend,
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly R[]> {
     this.#refuseCheckedScope();
     const ast = this.toAst();
@@ -412,7 +418,11 @@ export class UnionableQuery<G extends GraphDef, R> {
     }
 
     return this.#mapRows(
-      await this.#fetchRows(backend, ast, "recorded-batch-query"),
+      await this.#fetchRows(
+        legacyTransactionOperation(backend),
+        ast,
+        "recorded-batch-query",
+      ),
     );
   }
 

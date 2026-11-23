@@ -4,7 +4,6 @@ import {
   type EdgeRow,
   type HardDeleteNodeParams,
   type NodeRow,
-  type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { IDENTITY_ASSERTION_COLUMNS } from "../../identity/historical-sql";
@@ -24,6 +23,7 @@ import { chunk } from "../../utils/array";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
 import { getNodeRowsByIds } from "../node-fetch";
+import type { OperationBackend } from "../operation-scope";
 import { allocateRecordedCommit } from "./clock";
 import { executeStatement } from "./guards";
 import {
@@ -88,7 +88,7 @@ export function entityKey(entity: TouchedEntity): string {
  * returns, per id, whether the row it just closed was a soft-delete tombstone.
  */
 async function closeOpenReturning(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   graphId: string,
   ids: readonly string[],
@@ -164,7 +164,7 @@ function recordedInsertsFor<
 }
 
 export async function flushNodes(
-  target: TransactionBackend,
+  target: OperationBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
@@ -197,7 +197,7 @@ export async function flushNodes(
 }
 
 export async function flushEdges(
-  target: TransactionBackend,
+  target: OperationBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
@@ -227,7 +227,7 @@ export async function flushEdges(
 }
 
 async function getIdentityAssertionRowsByIds(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   ids: readonly string[],
@@ -245,7 +245,7 @@ async function getIdentityAssertionRowsByIds(
 }
 
 export async function flushIdentityAssertions(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedIdentityAssertion[],
@@ -284,7 +284,7 @@ export async function flushIdentityAssertions(
  * pure history from the moment it exists, so this is a plain chunked INSERT.
  */
 export async function flushIdentityTransitions(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   notes: readonly IdentityTransitionNote[],
@@ -321,7 +321,7 @@ export async function flushIdentityTransitions(
 }
 
 async function closeOpenByKind(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   graphId: string,
   kind: string,
@@ -340,7 +340,7 @@ async function closeOpenByKind(
 }
 
 async function closeOpenEdgesByNodeKind(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   nodeKind: string,
@@ -359,7 +359,7 @@ async function closeOpenEdgesByNodeKind(
 }
 
 export async function closeRecordedHardDeletedKind(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   removal: Readonly<{ entity: "node" | "edge"; kind: string }>,
@@ -411,7 +411,7 @@ export async function closeRecordedHardDeletedKind(
  * `tests/backends/sqlite/edge-endpoint-delete-plan.test.ts` plans both.
  */
 export async function queryConnectedEdgeIds(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   params: HardDeleteNodeParams,
 ): Promise<readonly string[]> {

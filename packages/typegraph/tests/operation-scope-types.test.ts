@@ -1,10 +1,24 @@
 import { describe, expectTypeOf, it } from "vitest";
 
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  SchemaCommitPreflightBackend,
+  SchemaWriteTransactionBackend,
+  TransactionBackend,
+} from "../src/backend/types";
 import {
   enterOperation,
+  legacyTransactionOperation,
   type OperationBackend,
+  type OperationScoped,
   type StatementBackend,
+  type StoreCommitSchemaVersionWithPreflight,
+  storeCommitSchemaVersionWithPreflight,
+  type StoreSchemaWriteTransaction,
+  storeSchemaWriteTransaction,
+  type StoreSetActiveVersionWithPreflight,
+  storeSetActiveVersionWithPreflight,
+  type StoreTransactionBackend,
 } from "../src/store/operation-scope";
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
@@ -22,5 +36,148 @@ describe("operation-scoped statement targets", () => {
     expectTypeOf(enterOperation)
       .parameter(0)
       .toEqualTypeOf<GraphBackend | TransactionBackend>();
+  });
+});
+
+describe("the Store-facing transaction", () => {
+  it("carries identity and SQL compilation, and no statement member", () => {
+    expectTypeOf<
+      Exclude<keyof StoreTransactionBackend, symbol>
+    >().toEqualTypeOf<
+      | "dialect"
+      | "capabilities"
+      | "tableNames"
+      | "fulltextStrategy"
+      | "vectorStrategy"
+      | "fenceSql"
+      | "compileSql"
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      Pick<TransactionBackend, "execute">
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<EdgeCreateBackend>();
+  });
+
+  it("is what every engine transaction narrows to without a conversion", () => {
+    expectTypeOf<TransactionBackend>().toExtend<StoreTransactionBackend>();
+    expectTypeOf<SchemaWriteTransactionBackend>().toExtend<StoreTransactionBackend>();
+    expectTypeOf<SchemaCommitPreflightBackend>().toExtend<StoreTransactionBackend>();
+    expectTypeOf<
+      StoreTransactionBackend<SchemaWriteTransactionBackend>
+    >().toExtend<StoreTransactionBackend>();
+  });
+});
+
+describe("a specialised Store transaction", () => {
+  // The review's edit: an ordinary transaction callback annotated as the
+  // schema-write (or preflight) transaction. Neither the engine transaction
+  // nor its schema-write subtype is assignable to a specialised form, so the
+  // annotation is a type error wherever the engine hands a callback a value.
+  it("is claimed by no engine transaction, so an annotation cannot grant it", () => {
+    expectTypeOf<TransactionBackend>().not.toExtend<
+      StoreTransactionBackend<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<TransactionBackend>().not.toExtend<
+      StoreTransactionBackend<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<SchemaWriteTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<SchemaCommitPreflightBackend>().not.toExtend<
+      StoreTransactionBackend<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<SchemaCommitPreflightBackend>
+    >();
+  });
+
+  it("is claimed by no ordinary handle either", () => {
+    // Member for member, the preflight target IS an ordinary transaction:
+    // without the engine record a plain handle would satisfy it.
+    expectTypeOf<TransactionBackend>().toExtend<SchemaCommitPreflightBackend>();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<OperationScoped<SchemaWriteTransactionBackend>>().toExtend<
+      OperationScoped<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<OperationScoped<SchemaCommitPreflightBackend>>().toExtend<
+      StoreTransactionBackend<SchemaCommitPreflightBackend>
+    >();
+  });
+
+  it("is handed only to the callback of the engine member that opens it", () => {
+    expectTypeOf(storeSchemaWriteTransaction)
+      .parameter(0)
+      .toEqualTypeOf<GraphBackend["schemaWriteTransaction"]>();
+    expectTypeOf(storeSchemaWriteTransaction).returns.toEqualTypeOf<
+      StoreSchemaWriteTransaction | undefined
+    >();
+    expectTypeOf<
+      Parameters<Parameters<StoreSchemaWriteTransaction>[1]>[0]
+    >().toEqualTypeOf<StoreTransactionBackend<SchemaWriteTransactionBackend>>();
+    expectTypeOf(storeCommitSchemaVersionWithPreflight).returns.toEqualTypeOf<
+      StoreCommitSchemaVersionWithPreflight | undefined
+    >();
+    expectTypeOf<
+      Parameters<Parameters<StoreCommitSchemaVersionWithPreflight>[1]>[0]
+    >().toEqualTypeOf<StoreTransactionBackend<SchemaCommitPreflightBackend>>();
+    expectTypeOf(storeSetActiveVersionWithPreflight).returns.toEqualTypeOf<
+      StoreSetActiveVersionWithPreflight | undefined
+    >();
+    expectTypeOf<
+      Parameters<Parameters<StoreSetActiveVersionWithPreflight>[1]>[0]
+    >().toEqualTypeOf<StoreTransactionBackend<SchemaCommitPreflightBackend>>();
+  });
+
+  it("keeps the engine member's own parameters and result", () => {
+    type EngineCommit = NonNullable<
+      GraphBackend["commitSchemaVersionWithPreflight"]
+    >;
+    type EngineActivate = NonNullable<
+      GraphBackend["setActiveVersionWithPreflight"]
+    >;
+    type EngineOpen = NonNullable<GraphBackend["schemaWriteTransaction"]>;
+    expectTypeOf<
+      Parameters<StoreCommitSchemaVersionWithPreflight>[0]
+    >().toEqualTypeOf<Parameters<EngineCommit>[0]>();
+    expectTypeOf<
+      ReturnType<StoreCommitSchemaVersionWithPreflight>
+    >().toEqualTypeOf<ReturnType<EngineCommit>>();
+    expectTypeOf<
+      Parameters<StoreSetActiveVersionWithPreflight>[0]
+    >().toEqualTypeOf<Parameters<EngineActivate>[0]>();
+    expectTypeOf<
+      ReturnType<StoreSetActiveVersionWithPreflight>
+    >().toEqualTypeOf<ReturnType<EngineActivate>>();
+    expectTypeOf<Parameters<StoreSchemaWriteTransaction>[0]>().toEqualTypeOf<
+      Parameters<EngineOpen>[0]
+    >();
+    expectTypeOf<Parameters<StoreSchemaWriteTransaction>[2]>().toEqualTypeOf<
+      Parameters<EngineOpen>[2]
+    >();
+    expectTypeOf<
+      Parameters<StoreSchemaWriteTransaction>["length"]
+    >().toEqualTypeOf<Parameters<EngineOpen>["length"]>();
+  });
+
+  it("becomes a handle to its engine type only through the shim", () => {
+    expectTypeOf(
+      legacyTransactionOperation<StoreTransactionBackend>,
+    ).returns.toEqualTypeOf<OperationBackend>();
+    expectTypeOf(
+      legacyTransactionOperation<
+        StoreTransactionBackend<SchemaWriteTransactionBackend>
+      >,
+    ).returns.toEqualTypeOf<OperationScoped<SchemaWriteTransactionBackend>>();
+    expectTypeOf(
+      legacyTransactionOperation<GraphBackend | StoreTransactionBackend>,
+    ).returns.toEqualTypeOf<StatementBackend>();
+    expectTypeOf(
+      legacyTransactionOperation<GraphBackend>,
+    ).returns.toEqualTypeOf<GraphBackend>();
   });
 });

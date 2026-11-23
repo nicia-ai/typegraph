@@ -14,7 +14,6 @@ import {
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
   runOptionallyInTransaction,
-  type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
@@ -40,6 +39,11 @@ import type { CompositionViaRef } from "../../registry/composition-relation";
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../operation-scope";
 import {
   readNodeDeleteOptions,
   refuseNodeDeleteArguments,
@@ -239,7 +243,7 @@ export type NodeCreateBatchOptions = Readonly<{
 export type NodeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
@@ -249,20 +253,20 @@ export type NodeCollectionConfig = Readonly<{
     ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateNodeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Node>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   executeNodeSetUpdate: (
@@ -270,17 +274,17 @@ export type NodeCollectionConfig = Readonly<{
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly Node[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateNodeInput[],
     updates: readonly NodeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -296,7 +300,7 @@ export type NodeCollectionConfig = Readonly<{
       id: string;
       props: Record<string, unknown>;
     }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
@@ -304,38 +308,38 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     id: string,
     options: NodeReparentOptions,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<NodeReparentResult>;
   executeReparentBatch: (
     kind: string,
     items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeDeletePlan: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -343,7 +347,7 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByConstraint: (
@@ -352,26 +356,26 @@ export type NodeCollectionConfig = Readonly<{
     items: readonly NodeBulkGetOrCreateByConstraintItem<
       Record<string, unknown>
     >[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Node | undefined>;
   executeBulkFindByConstraint: (
     kind: string,
     constraintName: string,
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<(Node | undefined)[]>;
   executeBulkFindByIndex: (
     kind: string,
     indexName: string,
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeBulkFindByIndexOptions,
   ) => Promise<Node[][]>;
 }>;
@@ -940,8 +944,12 @@ export function createNodeCollection<
         existing !== undefined && coalesces(existing) ?
           await runOptionallyInTransaction(
             backend,
-            async (target): Promise<UpsertVerdict> => {
-              const confirmed = await target.getNode(graphId, kind, id);
+            async (
+              opened: GraphBackend | StoreTransactionBackend,
+            ): Promise<UpsertVerdict> => {
+              const confirmed = await legacyTransactionOperation(
+                opened,
+              ).getNode(graphId, kind, id);
               return confirmed !== undefined && coalesces(confirmed) ?
                   { verdict: "skip", row: confirmed }
                 : { verdict: "write", row: confirmed };
@@ -1091,7 +1099,7 @@ export function createNodeCollection<
       }
 
       const upsertAll = async (
-        target: GraphBackend | TransactionBackend,
+        target: StatementBackend,
       ): Promise<{ results: Node<N>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored

@@ -8,16 +8,13 @@
 import { type z } from "zod";
 
 import type { AtomicNodeProjection } from "../backend/capabilities/atomic-mutation-program";
-import {
-  type GraphBackend,
-  type NodeInsertProjection,
-  type TransactionBackend,
-} from "../backend/types";
+import { type NodeInsertProjection } from "../backend/types";
 import {
   type ResolvedEmbeddingField,
   resolveEmbeddingFields,
 } from "../core/embedding";
 import { readOwnProperty } from "../utils/object";
+import type { StatementBackend } from "./operation-scope";
 
 // ============================================================
 // Types
@@ -40,7 +37,7 @@ export type EmbeddingSyncContext = Readonly<{
   graphId: string;
   nodeKind: string;
   nodeId: string;
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
 }>;
 
 type EmbeddingProjectionDecision =
@@ -227,7 +224,7 @@ export async function syncEmbeddingsBatchForKind(
   args: Readonly<{
     graphId: string;
     nodeKind: string;
-    backend: GraphBackend | TransactionBackend;
+    backend: StatementBackend;
   }>,
   schema: z.ZodType,
   items: readonly Readonly<{
@@ -296,7 +293,7 @@ export async function syncEmbeddingsBatchForKind(
  * for the batch sync above and the batch hard delete below.
  */
 async function deleteFieldEmbeddings(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   nodeKind: string,
   field: ReturnType<typeof getEmbeddingFields>[number],
@@ -370,7 +367,7 @@ export async function deleteNodeEmbeddingsBatch(
   ctx: Readonly<{
     graphId: string;
     nodeKind: string;
-    backend: GraphBackend | TransactionBackend;
+    backend: StatementBackend;
   }>,
   schema: z.ZodType,
   nodeIds: readonly string[],

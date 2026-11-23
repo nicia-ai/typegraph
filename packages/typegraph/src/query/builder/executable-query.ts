@@ -13,6 +13,11 @@ import {
   UnsupportedPredicateError,
   ValidationError,
 } from "../../errors";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../../store/operation-scope";
 import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
@@ -543,7 +548,7 @@ export class ExecutableQuery<
   }
 
   #executeOnBackend<T>(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     promise: Promise<T>,
     surface: string,
   ): Promise<T> {
@@ -596,7 +601,7 @@ export class ExecutableQuery<
    * results.
    */
   async #fetchRows(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     ast: QueryAst,
     slot: "full" | "selective",
     surface: string,
@@ -804,9 +809,11 @@ export class ExecutableQuery<
    * after its statement has executed, and the caller re-runs the full fetch.
    * The fallback clears the fast path for this instance.
    */
+  executeOn(backend: GraphBackend | TransactionBackend): Promise<readonly R[]>;
   async executeOn(
-    backend: GraphBackend | TransactionBackend,
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly R[]> {
+    const target = legacyTransactionOperation(backend);
     const ast = this.toAst();
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
     if (this.#hasParameterReferences()) {
@@ -820,7 +827,7 @@ export class ExecutableQuery<
     ).expectedSchemaVersion;
     if (checked !== undefined) {
       const rows = await executeSchemaCheckedRead({
-        backend,
+        backend: target,
         ast,
         graphId: this.#config.graphId,
         expectedVersion: checked.value,
@@ -835,7 +842,7 @@ export class ExecutableQuery<
     }
 
     // Try optimized execution with the provided backend
-    const optimizedResult = await this.#tryOptimizedExecutionOn(backend);
+    const optimizedResult = await this.#tryOptimizedExecutionOn(target);
     if (optimizedResult !== undefined) {
       return optimizedResult;
     }
@@ -843,7 +850,7 @@ export class ExecutableQuery<
     // Fall back to full fetch (cached template + executeRaw on the provided
     // backend, or a fresh literal compile when it can't run raw SQL).
     const rows = await this.#fetchRows(
-      backend,
+      target,
       ast,
       "full",
       "recorded-batch-query",
@@ -1110,7 +1117,7 @@ export class ExecutableQuery<
    * Mirror of #tryOptimizedExecution but delegates to the given backend.
    */
   async #tryOptimizedExecutionOn(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ): Promise<readonly R[] | undefined> {
     const selectiveFields = this.#getSelectiveFieldsForExecute();
     if (selectiveFields === undefined) {

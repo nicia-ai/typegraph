@@ -1,9 +1,9 @@
-import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import {
   ConfigurationError,
   SchemaChangedError,
   ValidationError,
 } from "../../errors";
+import type { StatementBackend } from "../../store/operation-scope";
 import type { QueryAst } from "../ast";
 import { buildStandardOrderBy } from "../compiler/emitter/standard-builders";
 import {
@@ -15,7 +15,7 @@ import { sql, type SqlFragment } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 
 export type SchemaCheckedReadInput = Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   ast: QueryAst;
   graphId: string;
   expectedVersion: number | undefined;

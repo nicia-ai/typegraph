@@ -33,6 +33,10 @@ import {
   relationalIndexDdlOptions,
   vectorIndexParams,
 } from "../store/materialize-indexes";
+import {
+  legacyTransactionOperation,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import { createStore, type Store } from "../store/store";
 import type { StoreOptions } from "../store/types";
 import { sha256Hex } from "../utils/hash";
@@ -725,60 +729,63 @@ function namespaceForkResult<G extends GraphDef>(
     store,
     proof,
     abort: async () => {
-      await targetBackend.transaction(async (targetTx) => {
-        const ledger = await queryRows<LedgerRow>(
-          targetTx,
-          sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
-        );
-        if (ledger[0] === undefined) {
-          await assertEmpty(targetTx, store.graph, relationTables);
-          return;
-        }
-        const ledgerProof = proofFromLedger(ledger[0], proof.operationKey);
-        if (
-          ledger[0].graph_id !== proof.graphId ||
-          ledgerProof.sourceBase !== proof.sourceBase ||
-          ledger[0].content_digest !== proof.contentDigest ||
-          !(await matchesRecordedDigest(
+      await targetBackend.transaction(
+        async (targetTransaction: StoreTransactionBackend) => {
+          const targetTx = legacyTransactionOperation(targetTransaction);
+          const ledger = await queryRows<LedgerRow>(
             targetTx,
-            store.graph,
+            sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
+          );
+          if (ledger[0] === undefined) {
+            await assertEmpty(targetTx, store.graph, relationTables);
+            return;
+          }
+          const ledgerProof = proofFromLedger(ledger[0], proof.operationKey);
+          if (
+            ledger[0].graph_id !== proof.graphId ||
+            ledgerProof.sourceBase !== proof.sourceBase ||
+            ledger[0].content_digest !== proof.contentDigest ||
+            !(await matchesRecordedDigest(
+              targetTx,
+              store.graph,
+              relationTables,
+              proof.contentDigest,
+            ))
+          ) {
+            throw new BranchError(
+              "Namespace fork abort found a changed target namespace.",
+            );
+          }
+          for (const table of await presentRelations(
+            targetTx,
+            vectorRelations(store.graph),
+          )) {
+            await queryRows(
+              targetTx,
+              sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
+            );
+          }
+          const journal = REVISION_CHANGES_TABLE;
+          for (const table of await provisionedRelationTables(
+            targetTx,
             relationTables,
-            proof.contentDigest,
-          ))
-        ) {
-          throw new BranchError(
-            "Namespace fork abort found a changed target namespace.",
-          );
-        }
-        for (const table of await presentRelations(
-          targetTx,
-          vectorRelations(store.graph),
-        )) {
+          )) {
+            if (table === journal) continue;
+            await queryRows(
+              targetTx,
+              sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
+            );
+          }
           await queryRows(
             targetTx,
-            sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
+            sql`DELETE FROM ${sql.identifier(journal)} WHERE graph_id = ${proof.graphId}`,
           );
-        }
-        const journal = REVISION_CHANGES_TABLE;
-        for (const table of await provisionedRelationTables(
-          targetTx,
-          relationTables,
-        )) {
-          if (table === journal) continue;
           await queryRows(
             targetTx,
-            sql`DELETE FROM ${sql.identifier(table)} WHERE graph_id = ${proof.graphId}`,
+            sql`DELETE FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey}`,
           );
-        }
-        await queryRows(
-          targetTx,
-          sql`DELETE FROM ${sql.identifier(journal)} WHERE graph_id = ${proof.graphId}`,
-        );
-        await queryRows(
-          targetTx,
-          sql`DELETE FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey}`,
-        );
-      });
+        },
+      );
     },
   };
 }
@@ -793,17 +800,20 @@ async function assertIndependentDatabase(
     sourceTx,
     sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey}))`,
   );
-  await targetBackend.transaction(async (targetTx) => {
-    const aliasProbe = await queryRows<LockRow>(
-      targetTx,
-      sql`SELECT pg_try_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey})) AS acquired`,
-    );
-    if (aliasProbe[0]?.acquired !== true) {
-      throw new BranchError(
-        "Namespace fork target connects to the source database; allocate an independent database.",
+  await targetBackend.transaction(
+    async (targetTransaction: StoreTransactionBackend) => {
+      const targetTx = legacyTransactionOperation(targetTransaction);
+      const aliasProbe = await queryRows<LockRow>(
+        targetTx,
+        sql`SELECT pg_try_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey})) AS acquired`,
       );
-    }
-  });
+      if (aliasProbe[0]?.acquired !== true) {
+        throw new BranchError(
+          "Namespace fork target connects to the source database; allocate an independent database.",
+        );
+      }
+    },
+  );
 }
 
 /**
@@ -939,8 +949,12 @@ export async function forkGraphNamespace<G extends GraphDef>(
   }
   // Run the physical alias probe before creating even the operation ledger.
   await sourceBackend.transaction(
-    async (sourceTx) =>
-      assertIndependentDatabase(sourceTx, targetBackend, source.graphId),
+    async (sourceTx: StoreTransactionBackend) =>
+      assertIndependentDatabase(
+        legacyTransactionOperation(sourceTx),
+        targetBackend,
+        source.graphId,
+      ),
     { accessMode: "read_only" },
   );
   await assertForkLedgerInstalled(targetBackend);
@@ -951,7 +965,8 @@ export async function forkGraphNamespace<G extends GraphDef>(
   );
   if (existing[0] !== undefined) {
     const ledgerProof = await targetBackend.transaction(
-      async (targetTx) => {
+      async (targetTransaction: StoreTransactionBackend) => {
+        const targetTx = legacyTransactionOperation(targetTransaction);
         const locked = await queryRows<LedgerRow>(
           targetTx,
           sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${operationKey} FOR UPDATE`,
@@ -991,7 +1006,10 @@ export async function forkGraphNamespace<G extends GraphDef>(
   // repeatable-read snapshot. A write after the cut may proceed unhindered.
   const stampedBase = await computeBaseVersion(source);
   const proof = await sourceBackend.transaction(
-    async (sourceTx) => {
+    async (sourceTransaction: StoreTransactionBackend) => {
+      // Two native transactions are open at once below — this one on the
+      // source and one on the target — so each gets its own handle.
+      const sourceTx = legacyTransactionOperation(sourceTransaction);
       const isolation = await queryRows<IsolationRow>(
         sourceTx,
         sql`SHOW transaction_isolation`,
@@ -1011,69 +1029,72 @@ export async function forkGraphNamespace<G extends GraphDef>(
         "Source advanced before the namespace fork snapshot; retry with the same operation key.",
       );
       await assertIndependentDatabase(sourceTx, targetBackend, source.graphId);
-      return targetBackend.transaction(async (targetTx) => {
-        await assertEmpty(targetTx, source.graph, relationTables);
-        const copiedRows = new Map<string, readonly JsonRow[]>();
-        for (const table of relationTables) {
-          if (table === REVISION_CHANGES_TABLE) continue;
-          const rows = forkedRows(
+      return targetBackend.transaction(
+        async (targetTransaction: StoreTransactionBackend) => {
+          const targetTx = legacyTransactionOperation(targetTransaction);
+          await assertEmpty(targetTx, source.graph, relationTables);
+          const copiedRows = new Map<string, readonly JsonRow[]>();
+          for (const table of relationTables) {
+            if (table === REVISION_CHANGES_TABLE) continue;
+            const rows = forkedRows(
+              source.graph,
+              table,
+              await graphRows(sourceTx, table, source.graphId),
+            );
+            if (table === CONTRIBUTION_MATERIALIZATIONS_TABLE)
+              await assertSupportedContributions(targetTx, source.graph, rows);
+            if (table === INDEX_MATERIALIZATIONS_TABLE)
+              await assertPhysicalIndexes(targetTx, source.graph, rows);
+            copiedRows.set(table, rows);
+            await insertRows(targetTx, table, rows);
+          }
+          // The destination triggers may have journaled the copied node, edge,
+          // and identity rows. Replace those mechanical entries with the exact
+          // source journal snapshot before checking the digest.
+          await queryRows(
+            targetTx,
+            sql`DELETE FROM ${sql.identifier(REVISION_CHANGES_TABLE)} WHERE graph_id = ${source.graphId}`,
+          );
+          const sourceJournalRows = await graphRows(
+            sourceTx,
+            REVISION_CHANGES_TABLE,
+            source.graphId,
+          );
+          copiedRows.set(REVISION_CHANGES_TABLE, sourceJournalRows);
+          await insertRows(targetTx, REVISION_CHANGES_TABLE, sourceJournalRows);
+          const copiedVectors = await vectorGraphRows(
+            sourceTx,
+            vectorRelations(source.graph),
+            source.graphId,
+          );
+          for (const [table, rows] of copiedVectors) {
+            await insertRows(targetTx, table, rows);
+          }
+          const snapshotDigest = await forkContentDigest(
+            relationTables.map((table) => [table, copiedRows.get(table) ?? []]),
+            copiedVectors,
+          );
+          const targetDigest = await digestGraph(
+            targetTx,
             source.graph,
-            table,
-            await graphRows(sourceTx, table, source.graphId),
+            relationTables,
           );
-          if (table === CONTRIBUTION_MATERIALIZATIONS_TABLE)
-            await assertSupportedContributions(targetTx, source.graph, rows);
-          if (table === INDEX_MATERIALIZATIONS_TABLE)
-            await assertPhysicalIndexes(targetTx, source.graph, rows);
-          copiedRows.set(table, rows);
-          await insertRows(targetTx, table, rows);
-        }
-        // The destination triggers may have journaled the copied node, edge,
-        // and identity rows. Replace those mechanical entries with the exact
-        // source journal snapshot before checking the digest.
-        await queryRows(
-          targetTx,
-          sql`DELETE FROM ${sql.identifier(REVISION_CHANGES_TABLE)} WHERE graph_id = ${source.graphId}`,
-        );
-        const sourceJournalRows = await graphRows(
-          sourceTx,
-          REVISION_CHANGES_TABLE,
-          source.graphId,
-        );
-        copiedRows.set(REVISION_CHANGES_TABLE, sourceJournalRows);
-        await insertRows(targetTx, REVISION_CHANGES_TABLE, sourceJournalRows);
-        const copiedVectors = await vectorGraphRows(
-          sourceTx,
-          vectorRelations(source.graph),
-          source.graphId,
-        );
-        for (const [table, rows] of copiedVectors) {
-          await insertRows(targetTx, table, rows);
-        }
-        const snapshotDigest = await forkContentDigest(
-          relationTables.map((table) => [table, copiedRows.get(table) ?? []]),
-          copiedVectors,
-        );
-        const targetDigest = await digestGraph(
-          targetTx,
-          source.graph,
-          relationTables,
-        );
-        if (targetDigest !== snapshotDigest)
-          throw new BranchError(
-            "Namespace fork target validation disagrees with the source snapshot.",
+          if (targetDigest !== snapshotDigest)
+            throw new BranchError(
+              "Namespace fork target validation disagrees with the source snapshot.",
+            );
+          const copied = await queryRows<LedgerRow>(
+            targetTx,
+            sql`INSERT INTO ${sql.identifier(FORK_LEDGER)} (operation_key, graph_id, source_base, content_digest) VALUES (${operationKey}, ${source.graphId}, ${JSON.stringify(stampedBase)}, ${snapshotDigest}) RETURNING graph_id, source_base, content_digest, copied_at::text`,
           );
-        const copied = await queryRows<LedgerRow>(
-          targetTx,
-          sql`INSERT INTO ${sql.identifier(FORK_LEDGER)} (operation_key, graph_id, source_base, content_digest) VALUES (${operationKey}, ${source.graphId}, ${JSON.stringify(stampedBase)}, ${snapshotDigest}) RETURNING graph_id, source_base, content_digest, copied_at::text`,
-        );
-        const entry = copied[0];
-        if (entry === undefined)
-          throw new BranchError(
-            "Namespace fork operation ledger did not return its proof.",
-          );
-        return proofFromLedger(entry, operationKey);
-      });
+          const entry = copied[0];
+          if (entry === undefined)
+            throw new BranchError(
+              "Namespace fork operation ledger did not return its proof.",
+            );
+          return proofFromLedger(entry, operationKey);
+        },
+      );
     },
     { isolationLevel: "repeatable_read", accessMode: "read_only" },
   );

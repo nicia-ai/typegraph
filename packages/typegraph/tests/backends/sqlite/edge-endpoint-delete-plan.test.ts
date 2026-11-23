@@ -45,6 +45,7 @@ import {
   renderSqlite,
   type SqlFragment,
 } from "../../../src/query/sql-fragment";
+import { legacyTransactionOperation } from "../../../src/store/operation-scope";
 import { queryConnectedEdgeIds } from "../../../src/store/recorded-capture/flush";
 import { requireDefined } from "../../../src/utils/presence";
 
@@ -175,11 +176,15 @@ describe("edge lookups by endpoint on the SQLite delete path", () => {
           return Promise.resolve([]);
         },
       } as unknown as TransactionBackend;
-      await queryConnectedEdgeIds(recordingTarget, createSqlSchema(), {
-        graphId: "edge_endpoint_delete_plan",
-        kind: "Item",
-        id: "n7",
-      });
+      await queryConnectedEdgeIds(
+        legacyTransactionOperation(recordingTarget),
+        createSqlSchema(),
+        {
+          graphId: "edge_endpoint_delete_plan",
+          kind: "Item",
+          id: "n7",
+        },
+      );
       // Bound parameters, as the driver executes it: inlined as literals,
       // the two arms' identical graph equalities would be one expression.
       const rendered = renderSqlite(requireDefined(captured));

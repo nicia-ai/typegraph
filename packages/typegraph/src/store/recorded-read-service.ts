@@ -4,7 +4,6 @@ import {
   type GraphBackend,
   type NodeRow,
   type OptionalTransactionExecution,
-  type TransactionBackend,
   type TransactionOptions,
 } from "../backend/types";
 import {
@@ -37,6 +36,12 @@ import { chunk } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import { type GraphAllocationOwnerRead } from "./allocation-owner";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "./operation-scope";
 import { readRecordedAdjacency } from "./recorded-adjacency";
 import {
   assertRecordedAnchorOrigin,
@@ -62,7 +67,7 @@ type RecordedReadServiceParams = Readonly<{
   backend: GraphBackend;
   recordedReadBinding: RecordedReadBinding | undefined;
   revisionOriginSession: (
-    target: TransactionBackend,
+    target: StatementBackend,
     execution: OptionalTransactionExecution,
   ) => Promise<GraphAllocationOwnerRead>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
@@ -165,10 +170,10 @@ function withRelationsPrecondition<T>(
 }
 
 function recordedReadExecutionMembers(
-  backend: TransactionBackend,
+  backend: StatementBackend,
   surface: string,
-  assertOrigin?: (target: TransactionBackend) => Promise<void>,
-): Pick<TransactionBackend, "execute" | "executeRaw"> {
+  assertOrigin?: (target: StatementBackend) => Promise<void>,
+): Pick<StatementBackend, "execute" | "executeRaw"> {
   return {
     execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
       await assertOrigin?.(backend);
@@ -203,32 +208,36 @@ function recordedReadExecutionMembers(
 function createRecordedReadBackend(
   backend: GraphBackend,
   surface: string,
-  assertOrigin: (target: TransactionBackend) => Promise<void>,
-  assertSnapshotOrigin: (target: TransactionBackend) => Promise<boolean>,
+  assertOrigin: (target: StatementBackend) => Promise<void>,
+  assertSnapshotOrigin: (target: StatementBackend) => Promise<boolean>,
 ): GraphBackend {
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
     ...recordedReadExecutionMembers(backend, surface, assertOrigin),
     transaction: async <T>(
-      fn: (target: TransactionBackend) => Promise<T>,
+      fn: (target: OperationBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> => {
       await assertOrigin(backend);
-      const result = await backend.transaction(async (target) => {
-        // The owner read resolves snapshot evidence on THIS target. A confirmed
-        // snapshot covers every subsequent read until this callback ends;
-        // the root check below still rejects retirement outside that snapshot.
-        const pinned = await assertSnapshotOrigin(target);
-        const guarded = deriveBackend(
-          target,
-          recordedReadExecutionMembers(
+      const result = await backend.transaction(
+        async (transaction: StoreTransactionBackend) => {
+          const target = legacyTransactionOperation(transaction);
+          // The owner read resolves snapshot evidence on THIS target. A confirmed
+          // snapshot covers every subsequent read until this callback ends;
+          // the root check below still rejects retirement outside that snapshot.
+          const pinned = await assertSnapshotOrigin(target);
+          const guarded = deriveBackend(
             target,
-            surface,
-            pinned ? undefined : assertOrigin,
-          ),
-        );
-        return fn(guarded);
-      }, options);
+            recordedReadExecutionMembers(
+              target,
+              surface,
+              pinned ? undefined : assertOrigin,
+            ),
+          );
+          return fn(guarded);
+        },
+        options,
+      );
       await assertOrigin(backend);
       return result;
     },
@@ -419,7 +428,7 @@ export function createRecordedReadService(
   } = params;
 
   async function revisionOrigin(
-    target: TransactionBackend = backend,
+    target: StatementBackend = backend,
   ): Promise<RecordedAnchorOwner | undefined> {
     const read = await params.revisionOriginSession(target, {
       mode: "sequential",
@@ -429,7 +438,7 @@ export function createRecordedReadService(
 
   async function assertOrigin(
     coordinate: ReadCoordinate,
-    target?: TransactionBackend,
+    target?: StatementBackend,
   ): Promise<void> {
     const parts = requireRecordedRevision(coordinate);
     if (requireRecordedAnchorOwner(parts, graphId) === undefined) return;

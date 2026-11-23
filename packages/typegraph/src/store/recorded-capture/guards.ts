@@ -15,7 +15,6 @@ import {
 import { normalizeGraphCommandIsolation } from "../../backend/command-contract";
 import {
   type GraphBackend,
-  type TransactionBackend,
   type TransactionOptions,
 } from "../../backend/types";
 import {
@@ -31,6 +30,7 @@ import {
   asCompiledStatementSql,
   type CompiledStatementSql,
 } from "../../query/sql-intent";
+import type { OperationBackend } from "../operation-scope";
 export { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 
 type IsolationRow = Readonly<{ transaction_isolation: unknown }>;
@@ -131,7 +131,7 @@ export function assertRequestedRecordedIsolation(
 }
 
 export async function assertRecordedCaptureTransactionIsolation(
-  target: Pick<TransactionBackend, "dialect" | "execute" | "fenceSql">,
+  target: Pick<OperationBackend, "dialect" | "execute" | "fenceSql">,
   options?: TransactionOptions,
 ): Promise<void> {
   if (!RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK[target.dialect]) return;

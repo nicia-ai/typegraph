@@ -72,7 +72,6 @@ import {
   type SchemaWriteFenceParams,
   type SqlCompilationBackend,
   type TombstonedNodeRow,
-  type TransactionBackend,
   type UniqueConstraintBackend,
   type VectorOperationBackend,
 } from "../../backend/types";
@@ -100,9 +99,10 @@ import {
   runInsertIfAbsent,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import {
-  type OperationScoped,
-  type StatementBackend,
+import type {
+  OperationScoped,
+  StatementBackend,
+  StoreTransactionBackend,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
@@ -219,11 +219,11 @@ export function unfencedTarget(
 ): StatementBackend;
 export function unfencedTarget(
   target: WriteTarget,
-): GraphBackend | TransactionBackend;
+): GraphBackend | StoreTransactionBackend;
 export function unfencedTarget(
   target: WriteTarget,
-): GraphBackend | TransactionBackend {
-  return target as GraphBackend | TransactionBackend;
+): GraphBackend | StoreTransactionBackend {
+  return target;
 }
 
 /**
@@ -236,10 +236,10 @@ export function nestedManagedWriteTarget(
 ): StatementBackend;
 export function nestedManagedWriteTarget(
   target: WriteTarget,
-): GraphBackend | TransactionBackend;
+): GraphBackend | StoreTransactionBackend;
 export function nestedManagedWriteTarget(
   target: WriteTarget,
-): GraphBackend | TransactionBackend {
+): GraphBackend | StoreTransactionBackend {
   return unfencedTarget(target);
 }
 
@@ -535,7 +535,7 @@ type _sessionNamesAreDisjointFromTheBan = Assert<
  */
 export function createWriteSession(
   ctx: WriteSessionContext,
-  target: GraphBackend | TransactionBackend,
+  target: StatementBackend,
   lock: GraphWriteLock,
 ): WriteSession {
   const writeContext = createNodeWriteContext(

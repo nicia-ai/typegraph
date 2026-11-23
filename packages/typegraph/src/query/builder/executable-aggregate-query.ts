@@ -1,12 +1,17 @@
 /**
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
+
 import { type z } from "zod";
 
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import {
+  legacyTransactionOperation,
+  type StoreTransactionBackend,
+} from "../../store/operation-scope";
 import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -351,8 +356,11 @@ export class ExecutableAggregateQuery<
   /** Runs on a target with the same database and transaction provenance. */
   executeOn(
     backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly AggregateResult<R, Aliases>[]>;
+  executeOn(
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly AggregateResult<R, Aliases>[]> {
-    return this.asRelation().executeOn(backend);
+    return this.asRelation().executeOn(legacyTransactionOperation(backend));
   }
 
   first(): Promise<AggregateResult<R, Aliases> | undefined> {

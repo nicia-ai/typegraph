@@ -27,15 +27,14 @@ import {
   type BackendValidityEndMutation,
   type ClaimEdgeCardinalityParams,
   type EdgeRow,
-  type GraphBackend,
-  type TransactionBackend,
   type UpdateEdgeParams,
 } from "../../backend/types";
 import { claimEdgeCardinalities, purgeEdgeClaims } from "../claims/edge-claims";
+import type { StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type WriteParamsDraft } from "./write-fences";
 
-type Backend = GraphBackend | TransactionBackend;
+type Backend = StatementBackend;
 
 /**
  * The graph-scoped state the edge write steps need.

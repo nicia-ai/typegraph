@@ -1,6 +1,7 @@
 /** Which backend member one `Store.clear()` deletes its graph through. */
-import type { GraphBackend, TransactionBackend } from "../backend/types";
+import type { GraphBackend } from "../backend/types";
 import { UnsupportedBackendCapabilityError } from "../errors";
+import type { StatementBackend } from "./operation-scope";
 
 type ClearGraphCommand = GraphBackend["clearGraph"];
 
@@ -18,7 +19,7 @@ const PRESERVING_CLEAR_MEMBER =
  *   custom backend's own `clearGraph` behavior.
  */
 export function resolveClearGraphCommand(
-  target: GraphBackend | TransactionBackend,
+  target: StatementBackend,
   preserve: boolean | undefined,
 ): ClearGraphCommand {
   if (preserve === false) return target.clearGraph;

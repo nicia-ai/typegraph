@@ -9,6 +9,10 @@ import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { SavepointRecoveryFailure } from "../src/backend/session-savepoint";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
+  legacyTransactionOperation,
+  type StoreTransactionBackend,
+} from "../src/store/operation-scope";
+import {
   createRecordedBackend,
   createRecordedTransactionScope,
   forceRecordedGraphRevision,
@@ -35,7 +39,8 @@ function buildWrappers(): {
     base,
     autocommit: createRecordedBackend(base, schema),
     transactional: createRecordedTransactionScope(
-      base,
+      // Instantiated as a transaction, not inferred: the root is the stand-in.
+      legacyTransactionOperation<StoreTransactionBackend>(base),
       batchPointReadVerdict(base),
       schema,
     ).backend,
@@ -72,7 +77,7 @@ describe("recorded-capture write-surface parity", () => {
     const backend = createTestBackend();
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
@@ -91,7 +96,7 @@ describe("recorded-capture write-surface parity", () => {
 
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
@@ -129,7 +134,7 @@ describe("recorded-capture write-surface parity", () => {
 
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
@@ -180,7 +185,7 @@ describe("recorded-capture write-surface parity", () => {
         },
       });
       const scope = createRecordedTransactionScope(
-        releaseFailureTarget,
+        legacyTransactionOperation(releaseFailureTarget),
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
@@ -230,7 +235,7 @@ describe("recorded-capture write-surface parity", () => {
           },
         });
         const scope = createRecordedTransactionScope(
-          countedTarget,
+          legacyTransactionOperation(countedTarget),
           batchPointReadVerdict(backend),
           createSqlSchema(backend.tableNames),
         );

@@ -3,8 +3,8 @@ import {
   type AtomicNodeResolvedMutationSetExecutor,
   resolveAtomicMutationPrograms,
 } from "../backend/capabilities/atomic-mutation-program";
-import type { GraphBackend, TransactionBackend } from "../backend/types";
 import { DatabaseOperationError } from "../errors";
+import type { StatementBackend } from "./operation-scope";
 
 type ResolvedMutationSetExecutor =
   AtomicNodeResolvedMutationSetExecutor | AtomicEdgeMutationProgramExecutor;
@@ -49,10 +49,7 @@ export class ResolvedMutationSetMoved extends Error {
   }
 
   /** Only the exact bundled root/executor that minted the signal may retry. */
-  isOwnedBy(
-    entity: "node" | "edge",
-    backend: GraphBackend | TransactionBackend,
-  ): boolean {
+  isOwnedBy(entity: "node" | "edge", backend: StatementBackend): boolean {
     const profile = resolveAtomicMutationPrograms(backend);
     return (
       (entity === "node" ? profile?.mutateNodes : profile?.mutateEdges) ===
@@ -66,7 +63,7 @@ const RESOLVED_MUTATION_SET_ATTEMPTS = 2;
 /** Rebuilds the collection-owned partition once after authoritative movement. */
 export async function runResolvedMutationSetConverging<T>(
   entity: "node" | "edge",
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   run: () => Promise<T>,
   options?: Readonly<{ isMovement?: (error: unknown) => boolean }>,
 ): Promise<T> {

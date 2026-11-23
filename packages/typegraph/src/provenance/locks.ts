@@ -24,6 +24,7 @@
  * held lock.
  */
 import type { GraphDef } from "../core/define-graph";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import {
   transactionAcquireReadFences,
@@ -73,5 +74,8 @@ export async function acquireCapabilityReadLock<G extends GraphDef>(
   tx: TransactionContext<G>,
   graphId: string,
 ): Promise<void> {
-  await lockRecordedGraphWrite(transactionBackend(tx), graphId);
+  await lockRecordedGraphWrite(
+    legacyTransactionOperation(transactionBackend(tx)),
+    graphId,
+  );
 }

@@ -27,14 +27,12 @@ import {
 } from "../../backend/capabilities/resolve";
 import {
   type EdgeRow,
-  type GraphBackend,
   type LiveNodeRow,
   type NodePropertyExpectation,
   type NodeRow,
   type ResolvedNodeUpdateBatchEntry,
   rowPropsToObject,
   type TombstonedNodeRow,
-  type TransactionBackend,
   type UpdateNodeSetResult,
 } from "../../backend/types";
 import {
@@ -85,11 +83,12 @@ import {
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
+import type { StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
-type Backend = GraphBackend | TransactionBackend;
+type Backend = StatementBackend;
 
 /**
  * The graph-scoped state the node write steps need. `lock` is compile-time

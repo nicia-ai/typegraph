@@ -2,14 +2,15 @@
 // eslint-disable-next-line no-restricted-syntax -- preserves session/resource derivation for a callback-owned backend
 import { deriveBackend } from "../backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../backend/graph-backend-keys";
-import type { GraphBackend, TransactionBackend } from "../backend/types";
+import type { GraphBackend } from "../backend/types";
 import { TransactionClosedError } from "../errors";
 import { createDataKeyedBag } from "../utils/object";
+import type { StoreTransactionBackend } from "./operation-scope";
 import { inheritRecordedTransactionBindings } from "./recorded-capture";
 
 /** A callback-owned backend whose operations refuse execution after sealing. */
 export type ScopedExecutionBackend<
-  T extends GraphBackend | TransactionBackend,
+  T extends GraphBackend | StoreTransactionBackend,
 > = Readonly<{
   backend: T;
   seal: () => void;
@@ -28,7 +29,7 @@ const NESTED_OPERATION_PORTS = new Set<PropertyKey>([
  * even if its query or collection was built while the callback was active.
  */
 export function scopeBackendExecution<
-  T extends GraphBackend | TransactionBackend,
+  T extends GraphBackend | StoreTransactionBackend,
 >(sourceBackend: T): ScopedExecutionBackend<T> {
   let active = true;
 

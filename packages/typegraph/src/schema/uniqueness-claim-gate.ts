@@ -39,6 +39,7 @@ import {
   compareUniquenessAxisKinds,
   uniquenessClaimAxis,
 } from "../store/claims/axis";
+import type { OperationScoped } from "../store/operation-scope";
 import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
 import { type OntologySnapshot } from "./ontology-change";
@@ -190,7 +191,7 @@ function describeGate(gate: UniquenessClaimGate): string {
  *   naming every gate whose kind is populated.
  */
 export async function assertUniquenessClaimGatesOpen(
-  target: SchemaCommitPreflightBackend,
+  target: OperationScoped<SchemaCommitPreflightBackend>,
   transition: SchemaCommitTransition,
   gates: readonly UniquenessClaimGate[],
 ): Promise<void> {

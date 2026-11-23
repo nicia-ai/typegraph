@@ -17,7 +17,6 @@ import {
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
-  type TransactionBackend,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type TemporalMode } from "../../core/types";
@@ -31,7 +30,12 @@ import type { BatchableQuery } from "../../query/builder/types";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
-import { enterOperation, type StatementBackend } from "../operation-scope";
+import {
+  enterOperation,
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../operation-scope";
 import {
   assertEdgeIdentityMatches,
   type EdgeIdentity,
@@ -97,7 +101,7 @@ function narrowEdges<E extends AnyEdgeType>(edges: readonly Edge[]): Edge<E>[] {
 export type EdgeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /** Threaded endpoint-set read verdict, resolved against the graph backend. */
@@ -113,11 +117,11 @@ export type EdgeCollectionConfig = Readonly<{
   ) => Promise<Edge>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeUpdate: (
@@ -128,16 +132,16 @@ export type EdgeCollectionConfig = Readonly<{
       validTo?: string;
       clearValidTo?: true;
     },
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Edge>;
   executeUpsertUpdateBatch: (
     entries: readonly EdgeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly Edge[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateEdgeInput[],
     updates: readonly EdgeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
@@ -148,22 +152,22 @@ export type EdgeCollectionConfig = Readonly<{
   executeDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -197,7 +201,7 @@ export type EdgeCollectionConfig = Readonly<{
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -209,7 +213,7 @@ export type EdgeCollectionConfig = Readonly<{
     fromId: string,
     toKind: string,
     toId: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       props?: Record<string, unknown>;
@@ -470,7 +474,7 @@ export function createEdgeCollection<
 
   async function findEdgesFrom(
     from: NodeRef,
-    target: GraphBackend | TransactionBackend,
+    target: StatementBackend,
     options?: QueryOptions,
   ): Promise<Edge<E>[]> {
     const rows = await target.findEdgesByKind(
@@ -484,7 +488,7 @@ export function createEdgeCollection<
 
   async function findEdgesTo(
     to: NodeRef,
-    target: GraphBackend | TransactionBackend,
+    target: StatementBackend,
     options?: QueryOptions,
   ): Promise<Edge<E>[]> {
     const rows = await target.findEdgesByKind(
@@ -707,11 +711,17 @@ export function createEdgeCollection<
       from: NodeRef,
       options?: QueryOptions,
     ): BatchableQuery<Edge<E>> {
-      return { executeOn: (target) => findEdgesFrom(from, target, options) };
+      return {
+        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesFrom(from, legacyTransactionOperation(target), options),
+      };
     },
 
     batchFindTo(to: NodeRef, options?: QueryOptions): BatchableQuery<Edge<E>> {
-      return { executeOn: (target) => findEdgesTo(to, target, options) };
+      return {
+        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesTo(to, legacyTransactionOperation(target), options),
+      };
     },
 
     batchFindByEndpoints(
@@ -721,14 +731,14 @@ export function createEdgeCollection<
       temporal?: QueryOptions,
     ): BatchableQuery<Edge<E>> {
       return {
-        executeOn: async (target) => {
+        executeOn: async (target: GraphBackend | StoreTransactionBackend) => {
           const result = await config.executeFindByEndpoints(
             kind,
             from.kind,
             from.id,
             to.kind,
             to.id,
-            target,
+            legacyTransactionOperation(target),
             buildFindByEndpointsOptions(options, temporal),
           );
           return result === undefined ? [] : [narrowEdge<E>(result)];
@@ -855,7 +865,7 @@ export function createEdgeCollection<
       }
 
       const upsertAll = async (
-        target: GraphBackend | TransactionBackend,
+        target: StatementBackend,
       ): Promise<{ results: Edge<E>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
         const existingMap = await getEdgeRowsByIds(
@@ -1287,7 +1297,7 @@ export function createEdgeCollection<
       };
 
       const getOrCreateAll = async (
-        target: GraphBackend | TransactionBackend,
+        target: StatementBackend,
       ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> => {
         const results = await config.executeBulkGetOrCreateByEndpoints(
           kind,

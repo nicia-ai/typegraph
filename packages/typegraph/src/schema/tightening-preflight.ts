@@ -40,6 +40,7 @@ import {
   type ConstraintFenceViolation,
   uniquenessAxisGroupFor,
 } from "../store/claims/verify";
+import type { OperationScoped } from "../store/operation-scope";
 import { readCompositionUnattachedParts } from "../store/operations/composition-create";
 import { groupBy } from "../utils/array";
 import { compareStrings } from "../utils/compare";
@@ -185,7 +186,7 @@ function previewViolations(
  */
 async function readCompositionUnattachedPartsForEdgeKinds(
   proposedRegistry: KindRegistry,
-  target: SchemaCommitPreflightBackend,
+  target: OperationScoped<SchemaCommitPreflightBackend>,
   graphId: string,
   edgeKinds: readonly string[],
 ): Promise<readonly ConstraintFenceViolation[]> {
@@ -216,7 +217,7 @@ async function readCompositionUnattachedPartsForEdgeKinds(
  * by the audit families.
  */
 async function populatedAddedEdgeKindProbes(
-  target: SchemaCommitPreflightBackend,
+  target: OperationScoped<SchemaCommitPreflightBackend>,
   graphId: string,
   probes: AddedEdgeKindProbes,
 ): Promise<AddedEdgeKindProbes> {
@@ -415,7 +416,7 @@ function buildTighteningViolatedError(
  * atomically.
  */
 export type SchemaTighteningPreflight = Readonly<{
-  run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+  run: (target: OperationScoped<SchemaCommitPreflightBackend>) => Promise<void>;
   /**
    * Only the ontology changes that owe a data check. A `safe` or `breaking`
    * change in the same diff (`relatedTo` added alongside a `disjointWith`,
@@ -597,7 +598,9 @@ export function prepareSchemaTighteningPreflight(
     grouped.composition?.edgeKinds ?? [],
   );
 
-  const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
+  const run = async (
+    target: OperationScoped<SchemaCommitPreflightBackend>,
+  ): Promise<void> => {
     await assertUniquenessClaimGatesOpen(target, params, gates);
     const populatedAddedEdgeKinds = await populatedAddedEdgeKindProbes(
       target,

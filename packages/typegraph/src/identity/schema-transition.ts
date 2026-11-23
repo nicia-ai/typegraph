@@ -14,13 +14,20 @@ import {
   type IdentityTableNames,
   type SchemaCommitPreflightBackend,
   type SchemaWriteTransactionBackend,
-  type TransactionBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type OperationScoped,
+  type StatementBackend,
+  storeSchemaWriteTransaction,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import {
   createRecordedTransactionScope,
   graphCapturesRecordedHistory,
@@ -86,7 +93,7 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
  * `transaction` member to tell "open one" from "already inside one" apart.
  */
 export type RecomputeDerivedRelations = (
-  target: GraphBackend | TransactionBackend,
+  target: StatementBackend,
 ) => Promise<void>;
 
 /**
@@ -120,7 +127,7 @@ function identityDerivedStorageMissing(
  * same session before the existing commit preflight rebuilds the closure.
  */
 export async function inspectAdoptedIdentityStorage(
-  target: SchemaWriteTransactionBackend,
+  target: OperationScoped<SchemaWriteTransactionBackend>,
   schema: SqlSchema,
   options: Readonly<{
     graphId: string;
@@ -325,7 +332,7 @@ async function provisionDerivedRelations(
     await ports.ensureIdentityTables(tableNames, { provisionMissing: true });
     return;
   }
-  const fence = backend.schemaWriteTransaction;
+  const fence = storeSchemaWriteTransaction(backend.schemaWriteTransaction);
   const identityTableDdl = backend.identityTableDdl;
   if (fence === undefined || identityTableDdl === undefined) {
     throw identityDerivedUpgradeUnsupportedError(graphId, [
@@ -336,7 +343,10 @@ async function provisionDerivedRelations(
   await withIdentityDdlRaceRetry(async () =>
     fence(
       graphId,
-      async (target) => {
+      async (
+        transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
+      ) => {
+        const target = legacyTransactionOperation(transaction);
         await lockIdentityDdl(target);
         await executeIdentityDdl(
           (ddl) => target.executeSchemaDdl(ddl),
@@ -638,7 +648,7 @@ export function resolveSchemaCommitCapture(
  * touched. The caller flushes the returned scope once its writes are done.
  */
 async function bindSchemaCommitCapture(
-  target: TransactionBackend,
+  target: OperationBackend,
   schema: SqlSchema,
   graphId: string,
   capture: SchemaCommitCapture | undefined,
@@ -689,8 +699,8 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     /** See {@link SchemaCommitCapture}; absent means the commit captures nothing. */
     capture?: SchemaCommitCapture | undefined;
   }>,
-): (target: SchemaCommitPreflightBackend) => Promise<void> {
-  return async (target: SchemaCommitPreflightBackend) => {
+): (target: OperationScoped<SchemaCommitPreflightBackend>) => Promise<void> {
+  return async (target: OperationScoped<SchemaCommitPreflightBackend>) => {
     await provisionDerivedRelationsInCommit(
       target,
       ctx.graphId,
@@ -800,7 +810,7 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
  * (#445).
  */
 async function provisionDerivedRelationsInCommit(
-  target: SchemaCommitPreflightBackend,
+  target: OperationScoped<SchemaCommitPreflightBackend>,
   graphId: string,
   ddl: readonly string[],
 ): Promise<void> {
@@ -832,8 +842,8 @@ export function identityKindCascadePreflight(
   ctx: Readonly<{ graphId: string; schema: SqlSchema }>,
   droppedNodeKinds: readonly string[],
   capture: SchemaCommitCapture | undefined,
-): (target: TransactionBackend) => Promise<void> {
-  return async (target: TransactionBackend) => {
+): (target: OperationBackend) => Promise<void> {
+  return async (target: OperationBackend) => {
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
     const captureScope = await bindSchemaCommitCapture(

@@ -48,6 +48,7 @@ import {
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
+import { legacyTransactionOperation } from "../src/store/operation-scope";
 import {
   createRecordedTransactionScope,
   hasPendingIdentityTransitionNotes,
@@ -418,7 +419,7 @@ describe("identity transition log", () => {
 
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         schema,
       );
@@ -469,7 +470,7 @@ describe("identity transition log", () => {
 
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         schema,
       );
@@ -517,7 +518,7 @@ describe("identity transition log", () => {
 
     await backend.transaction(async (target) => {
       const scope = createRecordedTransactionScope(
-        target,
+        legacyTransactionOperation(target),
         batchPointReadVerdict(backend),
         schema,
       );

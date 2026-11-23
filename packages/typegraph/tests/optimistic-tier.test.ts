@@ -54,6 +54,7 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src/schema/graph-templates";
+import { legacyTransactionOperation } from "../src/store/operation-scope";
 import {
   requiresOptimisticRetryUnit,
   resolveWriteTransactionMode,
@@ -479,8 +480,12 @@ describe("requiresOptimisticRetryUnit — the mode gate", () => {
         // The tier is a property of the DECLARATION, unchanged inside the
         // transaction — it is the MODE that must gate the nested case.
         expect(isOptimisticRetryTier(tx)).toBe(true);
-        expect(resolveWriteTransactionMode(tx)).toBe("existing");
-        expect(requiresOptimisticRetryUnit(tx)).toBe(false);
+        expect(
+          resolveWriteTransactionMode(legacyTransactionOperation(tx)),
+        ).toBe("existing");
+        expect(
+          requiresOptimisticRetryUnit(legacyTransactionOperation(tx)),
+        ).toBe(false);
       });
     } finally {
       sqlite.close();

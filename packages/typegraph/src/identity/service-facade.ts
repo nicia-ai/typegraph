@@ -8,6 +8,7 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { runInWriteTransaction } from "../store/operations/write-transaction";
 import {
   type IdentityTransitionNoteFunction,
@@ -606,7 +607,7 @@ export async function runIdentityMutation<G extends GraphDef, T>(
       revisionTrackingEnabled: ctx.revisionTrackingEnabled,
       revisionSchema: ctx.schema,
     },
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     async (target) => {
       touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
@@ -679,7 +680,9 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
   // Ranking, kind eligibility, and page expansion all consume class_members.
   // Without MATERIALIZED, SQLite may inline its node scan into the correlated
   // eligibility check for every representative.
-  const rows = await ctx.backend.execute<CurrentIdentityClassPageRow>(
+  const rows = await legacyTransactionOperation(
+    ctx.backend,
+  ).execute<CurrentIdentityClassPageRow>(
     asCompiledRowsSql(sql`
       WITH node_snapshot AS (${nodeSource}), visible_nodes AS (
         SELECT n.kind, n.id
@@ -858,7 +861,9 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.graphId,
         coordinate,
       );
-      const rows = await ctx.backend.execute<PlainNodeRef>(
+      const rows = await legacyTransactionOperation(
+        ctx.backend,
+      ).execute<PlainNodeRef>(
         asCompiledRowsSql(sql`
           WITH node_snapshot AS (${nodeSource})
           SELECT n.kind, n.id
@@ -871,7 +876,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
       const grouped = new Map<string, Map<string, PlainNodeRef>>();
       const historical = await loadHistoricalClasses(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         seeds,
@@ -969,13 +974,13 @@ export function createIdentityReadFacade<G extends GraphDef>(
       if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
         const [firstVisible, secondVisible] = await Promise.all([
           loadCurrentVisibleMembers(
-            ctx.backend,
+            legacyTransactionOperation(ctx.backend),
             ctx.schema,
             ctx.graphId,
             first,
           ),
           loadCurrentVisibleMembers(
-            ctx.backend,
+            legacyTransactionOperation(ctx.backend),
             ctx.schema,
             ctx.graphId,
             second,
@@ -984,7 +989,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         if (firstVisible.length === 0 || secondVisible.length === 0)
           return false;
         const classes = await loadCurrentStructuralClasses(
-          ctx.backend,
+          legacyTransactionOperation(ctx.backend),
           ctx.schema,
           ctx.graphId,
           [first, second],
@@ -995,7 +1000,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         // exactly that boolean for a pair of current classes — no assertion has
         // to be named, so the ledger is not read at all.
         const separated = await isSeparated(
-          ctx.backend,
+          legacyTransactionOperation(ctx.backend),
           ctx.schema,
           ctx.graphId,
           currentClassKey(firstClass),
@@ -1009,7 +1014,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         );
       }
       const classes = await loadHistoricalClasses(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         [first, second],
@@ -1022,7 +1027,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       if (firstClass.visible.length === 0 || secondClass.visible.length === 0)
         return false;
       const different = await loadSpanningDifferentAssertion(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         firstClass.structural,
@@ -1044,7 +1049,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const members = await visibleMembersAtCoordinate(ctx, ref, activeKinds);
       if (members.length === 0) return [];
       const assertions = await loadAssertionsTouching(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         [ref],
@@ -1077,7 +1082,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         if (!containsRef(visibleMembers, second)) return;
         if (refKey(first) === refKey(second)) return [];
         const classes = await loadCurrentStructuralClassComponents(
-          ctx.backend,
+          legacyTransactionOperation(ctx.backend),
           ctx.schema,
           ctx.graphId,
           [first],
@@ -1088,7 +1093,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         foldEligibleMembers = structuralMembers;
       } else {
         const classes = await loadHistoricalClasses(
-          ctx.backend,
+          legacyTransactionOperation(ctx.backend),
           ctx.schema,
           ctx.graphId,
           [first],
@@ -1117,7 +1122,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         structuralMembers.map((member) => refKey(member)),
       );
       const classAssertions = await loadAssertionsTouching(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         structuralMembers,

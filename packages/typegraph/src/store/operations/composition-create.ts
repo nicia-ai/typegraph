@@ -48,7 +48,6 @@ import {
   isLiveNodeRowPresent,
   type NodeRow,
   rowPropsToObject,
-  type TransactionBackend,
 } from "../../backend/types";
 import {
   CompositionConfigurationError,
@@ -81,6 +80,7 @@ import {
 import { isObjectRecord } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { nodeRefKey } from "../../utils/tuple-key";
+import type { OperationBackend } from "../operation-scope";
 import {
   fenceLockOnlyDecision,
   type GraphWriteLock,
@@ -659,7 +659,7 @@ const deferredExistenceFrames = new WeakMap<object, ReadonlySet<string>>();
  * transaction, and it ends with `write`.
  */
 export async function withDeferredCompositionExistence<Output>(
-  target: TransactionBackend,
+  target: OperationBackend,
   parts: readonly CompositionNodeRef[],
   write: () => Promise<Output>,
 ): Promise<Output> {

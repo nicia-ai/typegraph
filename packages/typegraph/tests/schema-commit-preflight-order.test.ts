@@ -20,6 +20,7 @@ import {
   type SchemaCommitPreflightSteps,
 } from "../src/schema/manager";
 import { type SchemaTighteningPreflight } from "../src/schema/tightening-preflight";
+import { legacyTransactionOperation } from "../src/store/operation-scope";
 
 function recordingStep(
   calls: string[],
@@ -68,7 +69,9 @@ describe("composeSchemaCommitPreflight", () => {
       structural: recordingStep(calls, "structural"),
     });
 
-    await preflight({} as SchemaCommitPreflightBackend);
+    await preflight(
+      legacyTransactionOperation({} as SchemaCommitPreflightBackend),
+    );
 
     expect(calls).toEqual([
       "structural",
@@ -89,7 +92,9 @@ describe("composeSchemaCommitPreflight", () => {
       tightening: recordingTightening(calls, "only-step"),
       identity: undefined,
     });
-    await preflight({} as SchemaCommitPreflightBackend);
+    await preflight(
+      legacyTransactionOperation({} as SchemaCommitPreflightBackend),
+    );
     expect(calls).toEqual(["only-step"]);
   });
 
@@ -108,7 +113,9 @@ describe("composeSchemaCommitPreflight", () => {
         return Promise.resolve();
       },
     });
-    await preflight({} as SchemaCommitPreflightBackend);
+    await preflight(
+      legacyTransactionOperation({} as SchemaCommitPreflightBackend),
+    );
     expect(order).toEqual(["first-start", "first-end", "second-start"]);
   });
 });
@@ -175,7 +182,9 @@ describe("planSchemaCommitPreflight", () => {
       ),
     });
 
-    await plan?.run({} as SchemaCommitPreflightBackend);
+    await plan?.run(
+      legacyTransactionOperation({} as SchemaCommitPreflightBackend),
+    );
 
     expect(calls).toEqual(["structural", "edge-match-identity"]);
   });

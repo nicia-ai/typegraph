@@ -43,7 +43,6 @@ import {
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
-  type TransactionBackend,
 } from "../../backend/types";
 import { CompositionError, ConfigurationError } from "../../errors";
 import { compositionPopulationMembership } from "../../registry/composition-relation";
@@ -60,6 +59,7 @@ import {
 } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey, nodeRefKey } from "../../utils/tuple-key";
+import type { OperationBackend } from "../operation-scope";
 import {
   compositionRowEndpoints,
   readCompositionEdgesAtRole,
@@ -728,7 +728,7 @@ const openCompositionWindowVerdicts = new WeakMap<
  * Bound to the transaction target, and it ends with `write`.
  */
 export async function withDecidedCompositionWindows<Output>(
-  target: TransactionBackend,
+  target: OperationBackend,
   verdict: CompositionWindowVerdict,
   write: () => Promise<Output>,
 ): Promise<Output> {

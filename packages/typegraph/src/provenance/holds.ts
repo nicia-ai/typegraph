@@ -15,6 +15,7 @@ import {
   type FactNotHoldingPremise,
   type FactNotHoldingReason,
 } from "../errors";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { transactionBackend } from "../store/runtime-port";
 import { type TransactionContext } from "../store/types";
 import { compareStrings } from "../utils/compare";
@@ -89,7 +90,7 @@ async function readBelievedFacts<
   tx: TransactionContext<G>,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
   const graph = await loadSupportGraph(
-    transactionBackend(tx),
+    legacyTransactionOperation(transactionBackend(tx)),
     scope.registry,
     scope.graphId,
     scope.config,
@@ -134,7 +135,7 @@ export async function assertFactsHold<
 
   await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
   const graph = await loadSupportClosure(
-    transactionBackend(tx),
+    legacyTransactionOperation(transactionBackend(tx)),
     scope.registry,
     scope.graphId,
     scope.config,

@@ -1,4 +1,3 @@
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import {
   ConfigurationError,
@@ -9,6 +8,11 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import {
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -112,11 +116,13 @@ function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
  * has no `transaction` method to nest with, so it runs as-is.
  */
 async function runOnTransactionIfSupported(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   fn: (target: Backend) => Promise<void>,
 ): Promise<void> {
   if ("transaction" in backend) {
-    await backend.transaction(async (target) => fn(target));
+    await backend.transaction(async (target: StoreTransactionBackend) =>
+      fn(legacyTransactionOperation(target)),
+    );
     return;
   }
   await fn(backend);
@@ -131,7 +137,10 @@ async function runOnTransactionIfSupported(
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   ctx: IdentityRebuildContext<G>,
 ): Promise<void> {
-  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
+  requireAtomicIdentityBackend(
+    legacyTransactionOperation(ctx.backend),
+    ctx.graphId,
+  );
 
   async function rebuildAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -156,15 +165,19 @@ export async function rebuildIdentityClosureForContext<G extends GraphDef>(
     });
   }
 
-  await runOnTransactionIfSupported(ctx.backend, async (target) =>
-    rebuildAtTarget(target),
+  await runOnTransactionIfSupported(
+    legacyTransactionOperation(ctx.backend),
+    async (target) => rebuildAtTarget(target),
   );
 }
 
 export async function validateIdentityForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
 ): Promise<void> {
-  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
+  requireAtomicIdentityBackend(
+    legacyTransactionOperation(ctx.backend),
+    ctx.graphId,
+  );
 
   async function validateAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -193,8 +206,9 @@ export async function validateIdentityForContext<G extends GraphDef>(
     );
   }
 
-  await runOnTransactionIfSupported(ctx.backend, async (target) =>
-    validateAtTarget(target),
+  await runOnTransactionIfSupported(
+    legacyTransactionOperation(ctx.backend),
+    async (target) => validateAtTarget(target),
   );
 }
 

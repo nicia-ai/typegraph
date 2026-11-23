@@ -1,6 +1,11 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "../../store/operation-scope";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
@@ -181,10 +186,16 @@ export class ExecutableProjectionQuery<
     return this.executeOn(this.#requireBackend());
   }
   /** Runs on an explicitly supplied target, including store.batch() transactions. */
-  async executeOn(
+  executeOn(
     backend: GraphBackend | TransactionBackend,
+  ): Promise<readonly Result[]>;
+  async executeOn(
+    backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
-    const rows = await this.#fetchRows(backend, this.toAst());
+    const rows = await this.#fetchRows(
+      legacyTransactionOperation(backend),
+      this.toAst(),
+    );
     return rows.map((row) => this.#decodeRow(row));
   }
   async first(): Promise<Result | undefined> {
@@ -254,7 +265,7 @@ export class ExecutableProjectionQuery<
     };
   }
 
-  #requireBackend(): GraphBackend | TransactionBackend {
+  #requireBackend(): GraphBackend {
     if (this.#config.backend === undefined)
       throw new ConfigurationError(
         "Projection execution requires a backend; use store.query().",
@@ -269,7 +280,7 @@ export class ExecutableProjectionQuery<
   }
   #recorded<T>(
     operation: Promise<T>,
-    backend = this.#requireBackend(),
+    backend: StatementBackend = this.#requireBackend(),
   ): Promise<T> {
     return this.#state.recordedAsOf === undefined ?
         operation
@@ -279,7 +290,7 @@ export class ExecutableProjectionQuery<
         });
   }
   #fetchRows(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     ast: QueryAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {

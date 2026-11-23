@@ -15,6 +15,7 @@ import {
   computeBaseVersion,
   computeBaseVersionAtTarget,
 } from "../../src/graph-merge/base-version";
+import { legacyTransactionOperation } from "../../src/store/operation-scope";
 import {
   beginPreCommitHookAttempt,
   claimTransactionPreCommitHook,
@@ -63,7 +64,10 @@ describe.each(MODES)("$label", ({ options }) => {
     await store.nodes.Person.create({ name: "Seed" });
     const expected = await computeBaseVersion(store);
     const observed = await store.transaction(async (transaction) =>
-      computeBaseVersionAtTarget(store, transactionBackend(transaction)),
+      computeBaseVersionAtTarget(
+        store,
+        legacyTransactionOperation(transactionBackend(transaction)),
+      ),
     );
     expect(observed).toBe(expected);
   });
@@ -126,8 +130,14 @@ describe("the pre-commit hook's single firing owner", () => {
       }),
     );
     await withTarget(async (target) => {
-      await settleTransactionPreCommitHook(attempt, target);
-      await settleTransactionPreCommitHook(attempt, target);
+      await settleTransactionPreCommitHook(
+        attempt,
+        legacyTransactionOperation(target),
+      );
+      await settleTransactionPreCommitHook(
+        attempt,
+        legacyTransactionOperation(target),
+      );
     });
     expect(hookCalls).toBe(1);
   });
@@ -144,13 +154,16 @@ describe("the pre-commit hook's single firing owner", () => {
     expect(fire).toBeDefined();
     expect(claimTransactionPreCommitHook(attempt)).toBeUndefined();
     await withTarget(async (target) => {
-      await settleTransactionPreCommitHook(attempt, target);
-      expect(hookCalls).toBe(0);
-      await fire?.(target);
-      expect(hookCalls).toBe(1);
-      await expect(fire?.(target)).rejects.toBeInstanceOf(
-        CompilerInvariantError,
+      await settleTransactionPreCommitHook(
+        attempt,
+        legacyTransactionOperation(target),
       );
+      expect(hookCalls).toBe(0);
+      await fire?.(legacyTransactionOperation(target));
+      expect(hookCalls).toBe(1);
+      await expect(
+        fire?.(legacyTransactionOperation(target)),
+      ).rejects.toBeInstanceOf(CompilerInvariantError);
     });
     expect(hookCalls).toBe(1);
   });
@@ -158,7 +171,10 @@ describe("the pre-commit hook's single firing owner", () => {
   it("is a no-op for a transaction without a hook", async () => {
     await withTarget(async (target) => {
       expect(claimTransactionPreCommitHook(undefined)).toBeUndefined();
-      await settleTransactionPreCommitHook(undefined, target);
+      await settleTransactionPreCommitHook(
+        undefined,
+        legacyTransactionOperation(target),
+      );
     });
   });
 });

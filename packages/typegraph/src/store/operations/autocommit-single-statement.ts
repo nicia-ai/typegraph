@@ -11,12 +11,9 @@ import { type z } from "zod";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { supportsNodeInsertProjectionRequirements } from "../../backend/capabilities/node-insert-projections";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
-import {
-  type GraphBackend,
-  type TransactionBackend,
-} from "../../backend/types";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
+import type { StatementBackend } from "../operation-scope";
 
 /** Internal signal that a zero-row autocommit attempt needs transactional recovery. */
 export class AutocommitWriteRequiresTransaction extends Error {
@@ -27,7 +24,7 @@ export class AutocommitWriteRequiresTransaction extends Error {
 }
 
 export type NodeAutocommitSingleStatementCandidate = Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -40,7 +37,7 @@ export type NodeAutocommitSingleStatementCandidate = Readonly<{
 }>;
 
 export type EdgeAutocommitSingleStatementCandidate = Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -74,7 +71,7 @@ export type AutocommitSingleStatementCandidate =
  * root autocommit; derived wrappers intentionally do not inherit that proof.
  */
 function canUseSchemaFenceAtExecutionBoundary(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   rootAutocommitAllowed: boolean,
 ): boolean {
   if (backend.commands.session === "transaction") return true;

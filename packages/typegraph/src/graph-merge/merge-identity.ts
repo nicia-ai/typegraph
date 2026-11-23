@@ -42,6 +42,10 @@ import {
   normalizeIdentityPair,
 } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
+import type {
+  OperationBackend,
+  StatementBackend,
+} from "../store/operation-scope";
 import { nowIso } from "../utils/date";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
@@ -71,7 +75,6 @@ import type { StagingSet } from "./staging";
 import { assertTemporalIdentityClosureConsistent } from "./temporal-identity-closure";
 import {
   compareCodePoints,
-  type GraphBackend,
   type GraphDef,
   hasScopedIdentityReads,
   IdentityContradictionError,
@@ -81,7 +84,6 @@ import {
   type Store,
   storeBackend,
   storeRuntime,
-  type TransactionBackend,
   TypeGraphError,
 } from "./typegraph-internal";
 import type { DroppedItem } from "./types";
@@ -828,7 +830,7 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   seeds: readonly Readonly<{ kind: string; id: string }>[],
   liveKeys: ReadonlySet<MergeKey>,
   plannedDeletions: ReadonlySet<MergeKey>,
-  txBackend?: TransactionBackend,
+  txBackend?: OperationBackend,
 ): Promise<IdentityClassSnapshot> {
   const classes = await storeRuntime(target).structuralIdentityClasses(
     seeds,
@@ -866,7 +868,7 @@ export type LedgerAssertion = Readonly<{
 async function relevantLedgerAssertions<G extends GraphDef>(
   target: Store<G>,
   memberKeys: ReadonlySet<MergeKey>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<readonly LedgerAssertion[]> {
   const runtime = storeRuntime(target);
   if (hasScopedIdentityReads(runtime)) {
@@ -1043,7 +1045,7 @@ export function assertOneIdOneTruth(
  */
 export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
   target: Store<G>,
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
   plan: Pick<IdentityPlanSlice, "identityAssertions" | "identityRetractions">,
 ): Promise<void> {
   const plannedIds = [
@@ -1154,7 +1156,7 @@ export function affectedIdentityClassSeeds(
  */
 export async function assertMergedIdentityClassesConsistent<G extends GraphDef>(
   target: Store<G>,
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
   plan: IdentityPlanSlice,
 ): Promise<void> {
   await storeRuntime(target).assertIdentityClassesConsistentAtTarget(
@@ -1290,7 +1292,7 @@ function asIdentityMergeConflict(
  */
 export async function assertIdentityPeersStable<G extends GraphDef>(
   target: Store<G>,
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
   probe: IdentityPeerProbe | undefined,
   plan: IdentityPlanSlice,
 ): Promise<void> {
