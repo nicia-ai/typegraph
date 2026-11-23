@@ -10,13 +10,28 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { count, createStore, expr } from "../../../src";
+import { backendDerivationRoot } from "../../../src/backend/derive-backend";
 import {
   ConfigurationError,
   SQL_IDENTIFIER_COLLISION_CODE,
   ValidationError,
 } from "../../../src/errors";
+import {
+  ExecutableAggregateQuery,
+  ExecutableProjectionQuery,
+  ExecutableRelationQuery,
+  QueryBuilder,
+} from "../../../src/query";
 import type { QueryAst, SetOperation } from "../../../src/query/ast";
+import { buildCompileOptions } from "../../../src/query/builder/compile-options";
+import type { RelationDefinition } from "../../../src/query/builder/relation";
+import type {
+  QueryBuilderConfig,
+  QueryBuilderState,
+} from "../../../src/query/builder/types";
 import { compileQuery, compileSetOperation } from "../../../src/query/compiler";
+import type { DatabaseExpression } from "../../../src/query/expressions";
+import { schemaIntrospectorFor } from "../../../src/query/schema-introspector";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import {
@@ -170,6 +185,276 @@ function standardAst(store: IntegrationStore, alias: string): QueryAst {
     .from("Person", alias)
     .select((row) => ({ name: requireDefined(row[alias]).name }))
     .toAst();
+}
+
+/** The configuration a query builder is constructed with, built here instead of by a store. */
+function standaloneQueryConfig(store: IntegrationStore): QueryBuilderConfig {
+  return {
+    graphId: store.graphId,
+    registry: store.registry,
+    schemaIntrospector: schemaIntrospectorFor(store.registry),
+    defaultTraversalExpansion: "inverse",
+    defaultExpansion: "subclasses",
+    identityEnabled: false,
+    identitySameIdAcrossKinds: "fold",
+    backend: store.backend,
+    dialect: store.backend.dialect,
+  };
+}
+
+/** A query builder state with no source, as a store's builder starts. */
+const INITIAL_STATE: QueryBuilderState = {
+  startAlias: "",
+  currentAlias: "",
+  startKinds: [],
+  startRequestedKinds: [],
+  startExpansion: "exact",
+  traversals: [],
+  predicates: [],
+  projection: [],
+  orderBy: [],
+  aggregateOrderBy: [],
+  limit: undefined,
+  offset: undefined,
+  temporalMode: "current",
+  asOf: undefined,
+  recordedAsOf: undefined,
+  groupBy: undefined,
+  having: undefined,
+  fusion: undefined,
+  dynamicNodeAliases: new Set(),
+  dynamicEdgeAliases: new Set(),
+};
+
+/**
+ * The state behind a query AST, with every output key renamed by `rename`:
+ * what a caller hands a public query constructor instead of declaring the
+ * keys through `project()` or `aggregate()`.
+ */
+function stateFromAst(
+  ast: QueryAst,
+  rename: (outputName: string) => string,
+): QueryBuilderState {
+  return {
+    ...INITIAL_STATE,
+    startAlias: ast.start.alias,
+    currentAlias: ast.start.alias,
+    startKinds: ast.start.kinds,
+    startRequestedKinds: ast.start.kinds,
+    startExpansion: ast.start.expansion,
+    traversals: ast.traversals,
+    projection: ast.projection.fields.map((field) => ({
+      ...field,
+      outputName: rename(field.outputName),
+    })),
+    orderBy: ast.orderBy ?? [],
+    groupBy: ast.groupBy,
+  };
+}
+
+/**
+ * A query over Person rows handed straight to a public query constructor
+ * with its one output key named `key`, past the `project()` and
+ * `aggregate()` key checks.
+ */
+const RAW_STATE_QUERIES: readonly Readonly<{
+  name: string;
+  build: (
+    store: IntegrationStore,
+    key: string,
+  ) => Readonly<{
+    execute: () => Promise<readonly unknown[]>;
+  }>;
+}>[] = [
+  {
+    name: "ExecutableProjectionQuery",
+    build: (store, key) => {
+      const config = standaloneQueryConfig(store);
+      const projection = new QueryBuilder<typeof integrationTestGraph>(
+        config,
+        INITIAL_STATE,
+      )
+        .from("Person", "p")
+        .project((fields) => ({ name: fields.p.name }));
+      const name = requireDefined(projection.getExpressionProjection()[0]);
+      return new ExecutableProjectionQuery(
+        config,
+        stateFromAst(
+          projection.orderBy((fields) => fields.p.name).toAst(),
+          () => key,
+        ),
+        { [key]: name.expression },
+        () => ({}),
+      );
+    },
+  },
+  {
+    name: "ExecutableAggregateQuery",
+    build: (store, key) => {
+      const config = standaloneQueryConfig(store);
+      const ast = new QueryBuilder<typeof integrationTestGraph>(
+        config,
+        INITIAL_STATE,
+      )
+        .from("Person", "p")
+        .aggregate({ total: count("p") })
+        .toAst();
+      return new ExecutableAggregateQuery(
+        config,
+        stateFromAst(ast, () => key),
+        { [key]: count("p") },
+      );
+    },
+  },
+];
+
+type RawRelationFields = Readonly<Record<string, DatabaseExpression>>;
+type RawRelationDefinition = RelationDefinition<
+  RawRelationFields,
+  Record<string, unknown>
+>;
+type RawRelation = ExecutableRelationQuery<
+  RawRelationFields,
+  Record<string, unknown>
+>;
+
+/**
+ * Decodes a Product relation row: the category and the price under
+ * `priceKey`, without the hidden ordering columns beside them (PostgreSQL
+ * returns the raw numeric price as text).
+ */
+function decodeProductRow(
+  row: Record<string, unknown>,
+  priceKey: string,
+): Record<string, unknown> {
+  return { category: row["category"], [priceKey]: Number(row[priceKey]) };
+}
+
+/**
+ * A relation over Product rows whose definition is handed straight to the
+ * public `ExecutableRelationQuery` constructor, past every builder check: a
+ * source query projecting `category` and `price`, passed through `change`
+ * before construction.
+ */
+function relationFromDefinition(
+  store: IntegrationStore,
+  change: (definition: RawRelationDefinition) => RawRelationDefinition,
+): RawRelation {
+  const backend = store.backend;
+  const config = standaloneQueryConfig(store);
+  const query = store
+    .query()
+    .from("Product", "product")
+    .project((fields) => ({
+      category: fields.product.category,
+      price: fields.product.price,
+    }))
+    .toAst();
+  return new ExecutableRelationQuery(
+    change({
+      ast: {
+        kind: "source",
+        query,
+        graphId: store.graphId,
+        options: buildCompileOptions(config),
+      },
+      columns: [
+        { outputName: "category", valueType: "string", nullable: false },
+        { outputName: "price", valueType: "number", nullable: false },
+      ],
+      fields: {},
+      config,
+      provenance: {
+        graphId: store.graphId,
+        executionTarget: backendDerivationRoot(backend),
+        recordedAsOf: undefined,
+        checked: false,
+        temporalCoordinate: JSON.stringify(query.temporalMode),
+      },
+      decodeRow: (row) => decodeProductRow(row, "price"),
+    }),
+  );
+}
+
+/** Adds an output key that no relation column names to a raw relation definition's source query. */
+function addHiddenSourceKey(
+  definition: RawRelationDefinition,
+  key: string,
+): RawRelationDefinition {
+  if (definition.ast.kind !== "source") throw new Error("expected a source");
+  const { query } = definition.ast;
+  const price = requireDefined(query.projection.fields[1]);
+  return {
+    ...definition,
+    ast: {
+      ...definition.ast,
+      query: {
+        ...query,
+        projection: {
+          ...query.projection,
+          fields: [...query.projection.fields, { ...price, outputName: key }],
+        },
+      },
+    },
+  };
+}
+
+/** Renames the `price` column of a raw relation definition everywhere it is named. */
+function renamePriceColumn(
+  definition: RawRelationDefinition,
+  priceKey: string,
+): RawRelationDefinition {
+  if (definition.ast.kind !== "source") throw new Error("expected a source");
+  const { query } = definition.ast;
+  return {
+    ...definition,
+    ast: {
+      ...definition.ast,
+      query: {
+        ...query,
+        projection: {
+          ...query.projection,
+          fields: query.projection.fields.map((projected) =>
+            projected.outputName === "price" ?
+              { ...projected, outputName: priceKey }
+            : projected,
+          ),
+        },
+      },
+    },
+    columns: definition.columns.map((column) =>
+      column.outputName === "price" ?
+        { ...column, outputName: priceKey }
+      : column,
+    ),
+    decodeRow: (row) => decodeProductRow(row, priceKey),
+  };
+}
+
+/** The highest-priced row of each category. */
+function topPricePerCategory(
+  relation: RawRelation,
+  priceKey: string,
+): RawRelation {
+  return relation
+    .topPerPartition({
+      partitionBy: (columns) => [requireDefined(columns["category"])],
+      orderBy: (columns) => [
+        { expression: requireDefined(columns[priceKey]), direction: "desc" },
+      ],
+      limit: 1,
+    })
+    .orderBy((columns) => requireDefined(columns["category"]));
+}
+
+/** Two categories of products; the highest price is 20 in A and 30 in B. */
+async function createProducts(store: IntegrationStore): Promise<void> {
+  for (const product of [
+    { name: "a-low", category: "A", price: 10 },
+    { name: "a-high", category: "A", price: 20 },
+    { name: "b-high", category: "B", price: 30 },
+  ])
+    await store.nodes.Product.create(product);
 }
 
 export function registerReservedAliasPrefixIntegrationTests(
@@ -440,6 +725,28 @@ export function registerReservedAliasPrefixIntegrationTests(
         });
       }
 
+      it("refuses a malformed alias in the reserved namespace with the same refusal from the builder and the compiler", async () => {
+        const store = context.getStore();
+        for (const alias of [
+          "__tg-bad",
+          "__TG bad",
+          `__tg_${"x".repeat(70)}`,
+        ]) {
+          const fromBuilder = await captureRefusal(() =>
+            store.query().from("Person", alias),
+          );
+          const fromCompiler = await captureRefusal(() =>
+            compileQuery(
+              renameAlias(standardAst(store, "p"), "p", alias),
+              store.graphId,
+              store.backend.dialect,
+            ),
+          );
+          expect(fromBuilder).toEqual(aliasRefusal(alias));
+          expect(fromCompiler).toEqual(aliasRefusal(alias));
+        }
+      });
+
       it("does not refuse the aliases the compiler renames a subquery's recursive stages to", async () => {
         const store = context.getStore();
         await store.nodes.Person.create({ name: "Alice", age: 10 });
@@ -465,6 +772,141 @@ export function registerReservedAliasPrefixIntegrationTests(
           .execute();
         expect(rows).toEqual([]);
       });
+    });
+
+    describe("where a relation definition is compiled", () => {
+      it("refuses a visible column spelled like the hidden partition rank instead of returning the wrong rows", async () => {
+        const store = context.getStore();
+        await createProducts(store);
+
+        // The same definition under an ordinary column name ranks correctly.
+        const control = relationFromDefinition(store, (definition) =>
+          renamePriceColumn(definition, "rank"),
+        );
+        expect(await topPricePerCategory(control, "rank").execute()).toEqual([
+          { category: "A", rank: 20 },
+          { category: "B", rank: 30 },
+        ]);
+
+        // A definition handed to the public constructor skips the builder's
+        // key checks. Named like the rank column topPerPartition() adds, the
+        // visible column met it: SQLite returned no rows and PostgreSQL
+        // refused an ambiguous column.
+        const reserved = relationFromDefinition(store, (definition) =>
+          renamePriceColumn(definition, "__tg_partition_rank"),
+        );
+        expect(
+          await captureRefusal(() =>
+            topPricePerCategory(reserved, "__tg_partition_rank").execute(),
+          ),
+        ).toEqual(OUTPUT_KEY_REFUSAL);
+      });
+
+      const terminals: readonly Readonly<{
+        name: string;
+        run: (relation: RawRelation) => unknown;
+      }>[] = [
+        { name: "execute()", run: (relation) => relation.execute() },
+        { name: "compile()", run: (relation) => relation.compile() },
+        { name: "prepare()", run: (relation) => relation.prepare() },
+        { name: "count()", run: (relation) => relation.count() },
+        { name: "exists()", run: (relation) => relation.exists() },
+      ];
+
+      for (const { name, run } of terminals) {
+        it(`refuses a reserved visible column in any letter case at ${name}`, async () => {
+          const store = context.getStore();
+          expect(
+            await captureRefusal(() =>
+              run(
+                relationFromDefinition(store, (definition) =>
+                  renamePriceColumn(definition, "rank"),
+                ),
+              ),
+            ),
+          ).toBe(undefined);
+          for (const key of RESERVED_SPELLINGS) {
+            expect(
+              await captureRefusal(() =>
+                run(
+                  relationFromDefinition(store, (definition) =>
+                    renamePriceColumn(definition, key),
+                  ),
+                ),
+              ),
+            ).toEqual(OUTPUT_KEY_REFUSAL);
+          }
+        });
+      }
+
+      it("refuses a reserved output key of a source query that no relation column names", async () => {
+        const store = context.getStore();
+        await createProducts(store);
+        expect(
+          await relationFromDefinition(store, (definition) =>
+            addHiddenSourceKey(definition, "spare"),
+          )
+            .orderBy((columns) => requireDefined(columns["price"]))
+            .execute(),
+        ).toEqual([
+          { category: "A", price: 10 },
+          { category: "A", price: 20 },
+          { category: "B", price: 30 },
+        ]);
+        for (const key of [...RESERVED_SPELLINGS, "__tg_partition_rank"]) {
+          expect(
+            await captureRefusal(() =>
+              relationFromDefinition(store, (definition) =>
+                addHiddenSourceKey(definition, key),
+              ).execute(),
+            ),
+          ).toEqual(OUTPUT_KEY_REFUSAL);
+        }
+      });
+
+      it("refuses a reserved key in a set operand's source", async () => {
+        const store = context.getStore();
+        const left = relationFromDefinition(store, (definition) => definition);
+        expect(
+          await captureRefusal(() =>
+            left
+              .union(
+                relationFromDefinition(store, (definition) =>
+                  addHiddenSourceKey(definition, "spare"),
+                ),
+              )
+              .execute(),
+          ),
+        ).toBe(undefined);
+        expect(
+          await captureRefusal(() =>
+            left
+              .union(
+                relationFromDefinition(store, (definition) =>
+                  addHiddenSourceKey(definition, "__tg_x"),
+                ),
+              )
+              .execute(),
+          ),
+        ).toEqual(OUTPUT_KEY_REFUSAL);
+      });
+    });
+
+    describe("where a query state is handed to a public constructor", () => {
+      for (const { name, build } of RAW_STATE_QUERIES) {
+        it(`refuses a reserved ${name} output key in any letter case`, async () => {
+          const store = context.getStore();
+          await store.nodes.Person.create({ name: "Alice", age: 10 });
+          expect(
+            await captureRefusal(() => build(store, "label").execute()),
+          ).toBe(undefined);
+          for (const key of [...RESERVED_SPELLINGS, "__tg_order_0"]) {
+            expect(
+              await captureRefusal(() => build(store, key).execute()),
+            ).toEqual(OUTPUT_KEY_REFUSAL);
+          }
+        });
+      }
     });
 
     describe("where an output key is declared", () => {
