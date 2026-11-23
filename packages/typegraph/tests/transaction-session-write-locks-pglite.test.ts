@@ -120,6 +120,9 @@ describe("a transaction's held graph write locks", () => {
     expect(graphLockAcquisitions(recorded.statements)).toHaveLength(1);
   });
 
+  // Two transactions on two connections, overlapping, are pinned on a server:
+  // `tests/backends/postgres/transaction-session-write-locks.test.ts`. Here,
+  // on one serial connection, this only pins one acquisition per transaction.
   it("are taken once by each write that opens its own transaction", async () => {
     const { store, statements, reset } = await revisionTrackedStore(graph);
     reset();
