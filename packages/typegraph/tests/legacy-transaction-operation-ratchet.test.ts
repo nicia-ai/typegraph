@@ -16,10 +16,16 @@
  * destructured alias and a call through a stored value are all found. Only a
  * direct call by name (renamed or not) is allowed, and each is pinned to the
  * inventory below by file and enclosing function. Adding a call fails.
- * Each entry names the family whose conversion removes it;
- * `FAMILY_BASELINE` is the table those conversions count down. A conversion
- * that removes calls lowers its entries and its family here in the same
- * change.
+ *
+ * THE RATCHET is `FAMILY_BASELINE`: per family, the number of shim calls
+ * that family's conversion removes. A baseline may only go DOWN. A change
+ * that removes calls lowers its inventory entries and its family's baseline
+ * in the same commit. A change that raises a baseline must state why in the
+ * pull request that does it (and in a comment on the inventory entry); no
+ * mechanism here compares against the base branch, so the raised number in
+ * the diff is what a reviewer sees. The family-total test below is a
+ * consistency check between the inventory and the table, not the ratchet: it
+ * passes whenever both are raised together.
  */
 import path from "node:path";
 
@@ -491,7 +497,8 @@ describe("legacyTransactionOperation ratchet", () => {
     },
   );
 
-  it("the family table is the inventory's sum, and only decreases", () => {
+  // A consistency check, not the ratchet: see the header.
+  it("the family table is the inventory's per-family sum", () => {
     const totals = Object.fromEntries(
       Object.keys(FAMILY_BASELINE).map((family) => [family, 0]),
     ) as Record<Family, number>;
