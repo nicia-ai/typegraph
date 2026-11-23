@@ -841,6 +841,26 @@ person?.email; // string | undefined
 }))
 ```
 
+### TS1479 importing TypeGraph from a CommonJS file
+
+**Cause:** The file compiles to CommonJS and `tsconfig.json` sets `module` (or
+`moduleResolution`) to `node16`. That setting models Node 16, where a CommonJS
+file cannot `require` an ES module, so TypeScript rejects the import. TypeGraph
+requires Node 22 or later, where it can.
+
+**Solution:** Use `nodenext`, which matches the runtimes TypeGraph supports:
+
+```json
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext"
+  }
+}
+```
+
+ES module consumers and `moduleResolution: "bundler"` are unaffected.
+
 ## Still Having Issues?
 
 1. **Check the [Limitations](/limitations)** page for known constraints
