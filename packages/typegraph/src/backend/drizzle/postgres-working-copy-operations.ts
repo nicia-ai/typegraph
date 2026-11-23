@@ -64,6 +64,7 @@ import {
 } from "../../graph-merge/typegraph-internal";
 import { asBaseVersion } from "../../graph-merge/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { legacyTransactionOperation } from "../../store/operation-scope";
 import {
   lockRecordedGraphWrite,
   withTransactionPreCommitHook,
@@ -333,7 +334,10 @@ async function coordinatesAt<G extends GraphDef>(
   store: Store<G>,
   target: TransactionBackend,
 ): Promise<DurableBranchCoordinates> {
-  const base = await computeBaseVersionAtTarget(store, target);
+  const base = await computeBaseVersionAtTarget(
+    store,
+    legacyTransactionOperation(target),
+  );
   const lineage = resolveLineage(store);
   return lineage === undefined ?
       { base }
@@ -397,7 +401,9 @@ async function operateInAllocation<G extends GraphDef>(
   // reads then only ever read it. It holds no allocation lock yet, so a destroy
   // that already committed surfaces here as a missing relation.
   if (store.revisionTrackingEnabled) {
-    await readUnlocked(() => store.allocationOwner().then((owner) => owner.origin));
+    await readUnlocked(() =>
+      store.allocationOwner().then((owner) => owner.origin),
+    );
   }
 
   // One entry per run of the transaction below, so a retried run can never
@@ -421,7 +427,7 @@ async function operateInAllocation<G extends GraphDef>(
   const run = async (transaction: TransactionContext<G>): Promise<void> => {
     const attempt: OperationAttempt = { before: undefined, outcome: undefined };
     attempts.push(attempt);
-    const target = transactionBackend(transaction);
+    const target = legacyTransactionOperation(transactionBackend(transaction));
     await allocation.lockSealed(target, expectedOrigin);
     const existing = await readEvidence(
       target,
@@ -555,7 +561,13 @@ export function createPostgresOperationCapability<G extends GraphDef>(
       return withAllocation(descriptor, descriptorVersion, expectedOrigin, {
         withEvidence: ({ session, evidenceRelation }) =>
           readUnlocked(() =>
-            scanEvidence(session, evidenceRelation, after, afterSequence, limit),
+            scanEvidence(
+              session,
+              evidenceRelation,
+              after,
+              afterSequence,
+              limit,
+            ),
           ),
         withoutEvidence: () => scanPage([], after, false),
       });

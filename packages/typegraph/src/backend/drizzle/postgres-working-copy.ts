@@ -52,6 +52,7 @@ import type {
 } from "../../query/dialect/vector-strategy";
 import { sql } from "../../query/sql-fragment";
 import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
+import { legacyTransactionOperation } from "../../store/operation-scope";
 import {
   createStore,
   createStoreWithSchema,
@@ -1584,7 +1585,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           async (lockedTransaction) => {
             const comparison = await compareBaseVersionAtTarget(
               source,
-              lockedTransaction,
+              legacyTransactionOperation(lockedTransaction),
               base,
             );
             if (!comparison.matches) {

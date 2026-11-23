@@ -1,10 +1,17 @@
 import { describe, expectTypeOf, it } from "vitest";
 
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  SchemaWriteTransactionBackend,
+  TransactionBackend,
+} from "../src/backend/types";
 import {
   enterOperation,
+  legacyTransactionOperation,
   type OperationBackend,
+  type OperationScoped,
   type StatementBackend,
+  type StoreTransactionBackend,
 } from "../src/store/operation-scope";
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
@@ -22,5 +29,52 @@ describe("operation-scoped statement targets", () => {
     expectTypeOf(enterOperation)
       .parameter(0)
       .toEqualTypeOf<GraphBackend | TransactionBackend>();
+  });
+});
+
+describe("the Store-facing transaction", () => {
+  it("carries identity and SQL compilation, and no statement member", () => {
+    expectTypeOf<
+      Exclude<keyof StoreTransactionBackend, symbol>
+    >().toEqualTypeOf<
+      | "dialect"
+      | "capabilities"
+      | "tableNames"
+      | "fulltextStrategy"
+      | "vectorStrategy"
+      | "fenceSql"
+      | "compileSql"
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      Pick<TransactionBackend, "execute">
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<EdgeCreateBackend>();
+  });
+
+  it("is what every engine transaction narrows to without a conversion", () => {
+    expectTypeOf<TransactionBackend>().toExtend<StoreTransactionBackend>();
+    expectTypeOf<SchemaWriteTransactionBackend>().toExtend<
+      StoreTransactionBackend<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<
+      StoreTransactionBackend<SchemaWriteTransactionBackend>
+    >().toExtend<StoreTransactionBackend>();
+  });
+
+  it("becomes a handle to its engine type only through the shim", () => {
+    expectTypeOf(
+      legacyTransactionOperation<StoreTransactionBackend>,
+    ).returns.toEqualTypeOf<OperationBackend>();
+    expectTypeOf(
+      legacyTransactionOperation<
+        StoreTransactionBackend<SchemaWriteTransactionBackend>
+      >,
+    ).returns.toEqualTypeOf<OperationScoped<SchemaWriteTransactionBackend>>();
+    expectTypeOf(
+      legacyTransactionOperation<GraphBackend | StoreTransactionBackend>,
+    ).returns.toEqualTypeOf<StatementBackend>();
+    expectTypeOf(
+      legacyTransactionOperation<GraphBackend>,
+    ).returns.toEqualTypeOf<GraphBackend>();
   });
 });

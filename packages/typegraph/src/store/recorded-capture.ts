@@ -37,7 +37,6 @@ import {
   type InternalTransactionOptions,
   type NodeRow,
   type SchemaWriteFenceParams,
-  type TransactionBackend,
 } from "../backend/types";
 import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { type IdentityTarget } from "../identity/sql-target";
@@ -59,6 +58,12 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "./insert-dispatch";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "./operation-scope";
 import {
   allocateRecordedCommit,
   createRecordedGraphLockMemo,
@@ -194,7 +199,7 @@ type RecordedCaptureSession = Readonly<{
   checkpoint: () => RecordedCaptureCheckpoint;
   restore: (checkpoint: RecordedCaptureCheckpoint) => void;
   flush: (
-    target: TransactionBackend,
+    target: OperationBackend,
     batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
     schema: SqlSchema,
     ownsWriteLock: boolean,
@@ -239,7 +244,7 @@ const TRANSACTION_PRE_COMMIT_HOOK = Symbol(
  * commit will publish. A throw rolls the whole transaction back.
  */
 export type TransactionPreCommitHook = (
-  target: TransactionBackend,
+  target: OperationBackend,
 ) => Promise<void>;
 
 /**
@@ -278,7 +283,7 @@ function readPreCommitHookSlot(
 
 async function firePreCommitHook(
   slot: PreCommitHookSlot,
-  target: TransactionBackend,
+  target: OperationBackend,
 ): Promise<void> {
   if (slot.state === "fired") {
     throw new CompilerInvariantError(
@@ -313,7 +318,7 @@ export function beginPreCommitHookAttempt(
  */
 export function claimTransactionPreCommitHook(
   options: InternalTransactionOptions | undefined,
-): ((target: TransactionBackend) => Promise<void>) | undefined {
+): ((target: OperationBackend) => Promise<void>) | undefined {
   const slot = readPreCommitHookSlot(options);
   if (slot?.state !== "pending") return undefined;
   slot.state = "claimed";
@@ -329,7 +334,7 @@ export function claimTransactionPreCommitHook(
  */
 export async function settleTransactionPreCommitHook(
   options: InternalTransactionOptions | undefined,
-  target: TransactionBackend,
+  target: OperationBackend,
 ): Promise<void> {
   const slot = readPreCommitHookSlot(options);
   if (slot?.state === "pending") await firePreCommitHook(slot, target);
@@ -377,7 +382,7 @@ export function withTransactionPreCommitHook(
 }
 
 export type RecordedTransactionScope = Readonly<{
-  backend: TransactionBackend;
+  backend: OperationBackend;
   flush: () => Promise<RecordedFlushInstants>;
 }>;
 
@@ -526,7 +531,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
     },
 
     async flush(
-      target: TransactionBackend,
+      target: OperationBackend,
       batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
       schema: SqlSchema,
       ownsWriteLock: boolean,
@@ -638,7 +643,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
  * through the shared savepoint-state registry and it takes no advisory lock.
  */
 type RecordedTransactionBinding = Readonly<{
-  target: TransactionBackend;
+  target: OperationBackend;
   assertOpen: () => void;
   sink: WriteTouchSink;
   capture?: Readonly<{
@@ -648,7 +653,7 @@ type RecordedTransactionBinding = Readonly<{
 }>;
 
 type TransactionControlTarget = Readonly<
-  Pick<TransactionBackend, "executeStatement">
+  Pick<OperationBackend, "executeStatement">
 >;
 
 const recordedTransactionBindings = new WeakMap<
@@ -660,8 +665,8 @@ const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
 
 /** Carries capture/control state through a lifetime-guarded backend decoration. */
 export function inheritRecordedTransactionBindings(
-  source: TransactionBackend,
-  derived: TransactionBackend,
+  source: StoreTransactionBackend,
+  derived: StoreTransactionBackend,
   assertScopeOpen: () => void,
 ): void {
   if (!isBackendDerivedFrom(derived, source)) {
@@ -753,9 +758,9 @@ export async function runRecordedTransactionSavepoint<T>(
 }
 
 /** Internal fence/control statements bypass row capture but retain its lifetime guard. */
-export function recordedTransactionControlTarget(
-  backend: TransactionBackend,
-): TransactionBackend {
+export function recordedTransactionControlTarget<T extends StatementBackend>(
+  backend: T,
+): T | OperationBackend {
   const binding = recordedTransactionBindings.get(backend);
   binding?.assertOpen();
   return binding?.target ?? backend;
@@ -763,7 +768,7 @@ export function recordedTransactionControlTarget(
 
 /** Pending capture is not yet visible in the durable revision clock. */
 export function hasPendingRecordedGraphWrites(
-  backend: TransactionBackend,
+  backend: OperationBackend,
   graphId: string,
 ): boolean {
   recordedTransactionBindings.get(backend)?.assertOpen();
@@ -796,7 +801,7 @@ export function hasPendingIdentityTransitionNotes(
 
 /** Forces one revision allocation when this capture transaction flushes. */
 export function forceRecordedGraphRevision(
-  backend: TransactionBackend,
+  backend: OperationBackend,
   graphId: string,
 ): boolean {
   recordedTransactionBindings.get(backend)?.assertOpen();
@@ -925,8 +930,8 @@ export async function withRecordedIdentityDecision<T>(
  * this binding's `capture` stays absent.
  */
 export function registerRecordedIdentityMutationWitness(
-  overlay: TransactionBackend,
-  target: TransactionBackend,
+  overlay: OperationBackend,
+  target: OperationBackend,
   sink: WriteTouchSink,
 ): void {
   const binding: RecordedTransactionBinding = {
@@ -946,9 +951,9 @@ export function registerRecordedIdentityMutationWitness(
  * heterogeneous CTE cannot pass through per-method write overlays.
  */
 export async function withRecordedNodeMutationTarget(
-  target: TransactionBackend,
+  target: OperationBackend,
   graphId: string,
-  run: (target: TransactionBackend) => Promise<readonly NodeRow[]>,
+  run: (target: OperationBackend) => Promise<readonly NodeRow[]>,
 ): Promise<readonly NodeRow[]> {
   const binding = recordedTransactionBindings.get(target);
   if (binding === undefined) return run(target);
@@ -968,10 +973,10 @@ export async function withRecordedNodeMutationTarget(
 }
 
 function createRecordedTransactionBackend(
-  target: TransactionBackend,
+  target: OperationBackend,
   session: RecordedCaptureSession,
   schema: SqlSchema,
-): TransactionBackend {
+): OperationBackend {
   // One advisory-lock round trip per graph per transaction: the memo is
   // shared with the returned overlay (see registerRecordedGraphLockMemo),
   // so external lock paths handed this backend dedupe against the same
@@ -1056,13 +1061,13 @@ function createRecordedTransactionBackend(
  * yet implemented".
  */
 export function transactionOwnsSqliteWriteLock(
-  target: TransactionBackend,
+  target: OperationBackend,
 ): boolean {
   return target.dialect === "sqlite";
 }
 
 export function createRecordedTransactionScope(
-  target: TransactionBackend,
+  target: OperationBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema?: SqlSchema,
   // True only when the enclosing transaction already holds a SQLite write lock
@@ -1099,11 +1104,12 @@ async function runCapturedAutocommit<T>(
   backend: GraphBackend,
   schema: SqlSchema | undefined,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
-  fn: (target: TransactionBackend) => Promise<T>,
+  fn: (target: OperationBackend) => Promise<T>,
   options?: InternalTransactionOptions,
 ): Promise<T> {
   assertRequestedRecordedIsolation(backend, options);
-  return backend.transaction(async (target) => {
+  return backend.transaction(async (transaction: StoreTransactionBackend) => {
+    const target = legacyTransactionOperation(transaction);
     await assertRecordedCaptureTransactionIsolation(target);
     // The bundled transaction opened BEGIN IMMEDIATE, so the write lock is held.
     const scope = createRecordedTransactionScope(
@@ -1128,7 +1134,7 @@ export function createRecordedBackend(
   // write below and the multi-statement `transaction` override further down.
   const batchPointRead = batchPointReadVerdict(backend);
   const capture = <T>(
-    fn: (target: TransactionBackend) => Promise<T>,
+    fn: (target: OperationBackend) => Promise<T>,
   ): Promise<T> => runCapturedAutocommit(backend, schema, batchPointRead, fn);
 
   const projectedBackend = projectGraphBackend(backend);
@@ -1420,21 +1426,28 @@ export function createRecordedBackend(
       const firePreCommitHook = claimTransactionPreCommitHook(options);
       const backendOptions = stripRecordedFlushOptions(options);
       assertRequestedRecordedIsolation(backend, backendOptions);
-      return backend.transaction(async (target) => {
-        await assertRecordedCaptureTransactionIsolation(target, backendOptions);
-        const readOnly = backendOptions?.accessMode === "read_only";
-        const scope = createRecordedTransactionScope(
-          target,
-          batchPointRead,
-          schema,
-          !readOnly,
-        );
-        const result = await fn(scope.backend);
-        const instants = await scope.flush();
-        observer?.(instants);
-        await firePreCommitHook?.(target);
-        return result;
-      }, backendOptions);
+      return backend.transaction(
+        async (transaction: StoreTransactionBackend) => {
+          const target = legacyTransactionOperation(transaction);
+          await assertRecordedCaptureTransactionIsolation(
+            target,
+            backendOptions,
+          );
+          const readOnly = backendOptions?.accessMode === "read_only";
+          const scope = createRecordedTransactionScope(
+            target,
+            batchPointRead,
+            schema,
+            !readOnly,
+          );
+          const result = await fn(scope.backend);
+          const instants = await scope.flush();
+          observer?.(instants);
+          await firePreCommitHook?.(target);
+          return result;
+        },
+        backendOptions,
+      );
     },
   });
 }

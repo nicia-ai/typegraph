@@ -11,12 +11,12 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type ResolvedNodeUpdateBatchParams,
-  type TransactionBackend,
   type UpdateEdgeParams,
   type UpdateNodeParams,
   type UpdateNodeSetParams,
 } from "../../backend/types";
 import { type Assert, type Equal } from "../../utils/type-assert";
+import type { OperationBackend } from "../operation-scope";
 
 /**
  * The graph-entity write surface that recorded-time capture must wrap. Both
@@ -135,5 +135,5 @@ type _captureSurfaceIsComplete = Assert<
 // route writes past capture.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
 type _txBackendOmitsTransaction = Assert<
-  Equal<Extract<keyof TransactionBackend, "transaction">, never>
+  Equal<Extract<keyof OperationBackend, "transaction">, never>
 >;

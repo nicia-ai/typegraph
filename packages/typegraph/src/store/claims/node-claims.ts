@@ -20,10 +20,8 @@ import {
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
 import {
-  type GraphBackend,
   type InsertUniqueParams,
   type NodeInsertClaim,
-  type TransactionBackend,
   type UniqueConstraintBackend,
   type UniqueRow,
 } from "../../backend/types";
@@ -38,6 +36,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import { isPostgresFailedTransactionError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import type { StatementBackend } from "../operation-scope";
 import {
   constraintFenceRefusal,
   markWriteTransactionAborted,
@@ -64,7 +63,7 @@ import {
 export type UniquenessContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   /** The threaded `uniqueSidecarBatch` verdict — never re-resolved here. */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 }>;
@@ -337,7 +336,7 @@ async function issuingClaims(
  */
 function claimFenceRefusal(
   ctx: Readonly<{ graphId: string }>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   entries: readonly NodeClaimEntry[],
 ): ConfigurationError | undefined {
   const gating = entries.find((entry) => entry.placement === "pre-insert");
@@ -861,7 +860,7 @@ async function claimGroupThenWrite<T>(
 async function withNodeCreateClaimsIssuedBy<T>(
   ctx: NodeClaimContext,
   items: readonly NodeClaimItem[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   issue: ClaimIssuer,
   gatedInsert: () => Promise<T>,
 ): Promise<T> {
@@ -904,7 +903,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
 export function withNodeCreateClaims<T>(
   ctx: NodeClaimContext,
   item: NodeClaimItem,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   gatedInsert: () => Promise<T>,
 ): Promise<T> {
   return withNodeCreateClaimsIssuedBy(
@@ -923,7 +922,7 @@ export function withNodeCreateClaims<T>(
 export function withNodeCreateClaimsBatch<T>(
   ctx: NodeClaimContext,
   items: readonly NodeClaimItem[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   gatedInsert: () => Promise<T>,
 ): Promise<T> {
   return withNodeCreateClaimsIssuedBy(

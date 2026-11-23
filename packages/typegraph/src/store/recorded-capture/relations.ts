@@ -2,7 +2,6 @@ import {
   type EdgeRow,
   type NodeRow,
   rowPropsToJsonText,
-  type TransactionBackend,
 } from "../../backend/types";
 import { RECORDED_MAX_REVISION } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
@@ -12,6 +11,7 @@ import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { generateId } from "../../utils/id";
+import type { OperationBackend } from "../operation-scope";
 import { executeStatement } from "./guards";
 
 export type RecordedOperation = "create" | "update" | "delete";
@@ -32,7 +32,7 @@ export type RecordedOperation = "create" | "update" | "delete";
  * the transition log's own refusal under that ownership.
  */
 export async function graphCapturesRecordedHistory(
-  session: Pick<TransactionBackend, "execute">,
+  session: Pick<OperationBackend, "execute">,
   schema: SqlSchema,
   graphId: string,
 ): Promise<boolean> {
@@ -145,7 +145,7 @@ const RECORDED_IDENTITY_ASSERTION_COLUMN_LIST = sql.raw(
 const RECORDED_BIND_PARAM_BUDGET = 900;
 
 export function recordedBindParamBudget(
-  target: Pick<TransactionBackend, "capabilities">,
+  target: Pick<OperationBackend, "capabilities">,
 ): number {
   const budget =
     target.capabilities.maxBindParameters ?? RECORDED_BIND_PARAM_BUDGET;
@@ -167,7 +167,7 @@ export function recordedBindParamBudget(
  * divided by the per-row column count.
  */
 function recordedChunkSize(
-  target: Pick<TransactionBackend, "capabilities">,
+  target: Pick<OperationBackend, "capabilities">,
   columnCount: number,
 ): number {
   const budget = recordedBindParamBudget(target);
@@ -297,7 +297,7 @@ function recordedValuesTuple<Row, Column extends string>(
 }
 
 async function insertRecordedRows<Row, Column extends string>(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   columnList: SqlFragment,
   columns: readonly Column[],
@@ -324,28 +324,28 @@ async function insertRecordedRows<Row, Column extends string>(
   );
 }
 
-export function recordedNodeChunkSize(target: TransactionBackend): number {
+export function recordedNodeChunkSize(target: OperationBackend): number {
   return recordedChunkSize(target, RECORDED_NODE_COLUMNS.length);
 }
 
-export function recordedEdgeChunkSize(target: TransactionBackend): number {
+export function recordedEdgeChunkSize(target: OperationBackend): number {
   return recordedChunkSize(target, RECORDED_EDGE_COLUMNS.length);
 }
 
 export function recordedIdentityAssertionChunkSize(
-  target: TransactionBackend,
+  target: OperationBackend,
 ): number {
   return recordedChunkSize(target, RECORDED_IDENTITY_ASSERTION_COLUMNS.length);
 }
 
 export function recordedIdentityTransitionChunkSize(
-  target: TransactionBackend,
+  target: OperationBackend,
 ): number {
   return recordedChunkSize(target, IDENTITY_TRANSITION_COLUMN_NAMES.length);
 }
 
 export function insertRecordedNodeRows(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   inserts: readonly RecordedInsert<NodeRow>[],
   recordedRevision: number,
@@ -362,7 +362,7 @@ export function insertRecordedNodeRows(
 }
 
 export function insertRecordedEdgeRows(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   inserts: readonly RecordedInsert<EdgeRow>[],
   recordedRevision: number,
@@ -379,7 +379,7 @@ export function insertRecordedEdgeRows(
 }
 
 export function insertRecordedIdentityAssertionRows(
-  target: TransactionBackend,
+  target: OperationBackend,
   table: SqlFragment,
   inserts: readonly RecordedInsert<IdentityAssertionStorageRow>[],
   recordedRevision: number,

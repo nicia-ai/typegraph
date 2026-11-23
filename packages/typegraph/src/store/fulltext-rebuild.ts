@@ -17,7 +17,6 @@ import {
   type NodeRow,
   rowPropsToObject,
   runOptionallyInTransaction,
-  type TransactionBackend,
 } from "../backend/types";
 import {
   ConfigurationError,
@@ -30,6 +29,12 @@ import {
   computeFulltextContent,
   getSearchableFields,
 } from "./fulltext-sync";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "./operation-scope";
 
 /**
  * Default page size. Fits under SQLite's ~32766 placeholder limit with
@@ -91,7 +96,7 @@ type RebuildContext = Readonly<{
 }>;
 
 /** Anything the rebuild can read nodes from and write fulltext rows to. */
-type FulltextRebuildTarget = GraphBackend | TransactionBackend;
+type FulltextRebuildTarget = StatementBackend;
 
 /**
  * How the rebuild frames its writes. The paging, content computation, and
@@ -160,7 +165,12 @@ export async function rebuildFulltextIndex(
   return runFulltextRebuild(
     {
       read: backend,
-      runPage: (write) => runOptionallyInTransaction(backend, write),
+      runPage: (write) =>
+        runOptionallyInTransaction(
+          backend,
+          (target: GraphBackend | StoreTransactionBackend) =>
+            write(legacyTransactionOperation(target)),
+        ),
     },
     ctx,
     nodeKind,
@@ -181,7 +191,7 @@ export async function rebuildFulltextIndex(
  */
 export async function repopulateFulltextInTransaction(
   ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
-  target: TransactionBackend,
+  target: OperationBackend,
   options: RebuildFulltextOptions = {},
 ): Promise<RebuildFulltextResult> {
   return runFulltextRebuild(

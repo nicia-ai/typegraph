@@ -1,12 +1,11 @@
 import {
   type EdgeRow,
-  type GraphBackend,
   type InsertEdgeParams,
   type InsertNodeParams,
   type NodeRow,
-  type TransactionBackend,
 } from "../backend/types";
 import { requireDefined } from "../utils/presence";
+import type { StatementBackend } from "./operation-scope";
 
 export type InsertDispatch<Params, Row> = Readonly<{
   one: (params: Params) => Promise<Row>;
@@ -17,7 +16,7 @@ export type InsertDispatch<Params, Row> = Readonly<{
     ((params: readonly Params[]) => Promise<readonly Row[]>) | undefined;
 }>;
 
-type InsertBackend = GraphBackend | TransactionBackend;
+type InsertBackend = StatementBackend;
 
 export function nodeInsertDispatch(
   backend: InsertBackend,

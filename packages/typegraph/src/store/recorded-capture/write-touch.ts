@@ -44,7 +44,6 @@ import {
   type InsertNodeParams,
   type NodeRow,
   type SchemaWriteFenceParams,
-  type TransactionBackend,
 } from "../../backend/types";
 import { type IdentityAssertionStorageRow } from "../../identity/storage-types";
 import { requireDefined } from "../../utils/presence";
@@ -56,6 +55,7 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
+import type { OperationBackend } from "../operation-scope";
 import { registerSavepointState } from "../savepoint-state";
 import type {
   RECORDED_OPTIONAL_WRITE_METHODS,
@@ -150,7 +150,7 @@ function edgeRowIdentityKey(row: EdgeIdentityRow): EdgeIdentityKey {
 
 /** The member set {@link buildRecordedWriteMembers} returns. */
 export type RecordedWriteMembersOverlay = Pick<
-  TransactionBackend,
+  OperationBackend,
   | "insertNode"
   | "updateNode"
   | "deleteNode"
@@ -162,7 +162,7 @@ export type RecordedWriteMembersOverlay = Pick<
 > &
   Partial<
     Pick<
-      TransactionBackend,
+      OperationBackend,
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
@@ -206,7 +206,7 @@ type _writeTouchOverlayMatchesChecklist = Assert<
  * function, `sink`, and `hooks`.
  */
 export function buildRecordedWriteMembers(
-  target: TransactionBackend,
+  target: OperationBackend,
   sink: WriteTouchSink,
   hooks: WriteMemberHooks = {},
 ): RecordedWriteMembersOverlay {
@@ -554,7 +554,7 @@ export function buildRecordedWriteMembers(
  * method, so it cannot join that function's returned object literal.
  */
 export function buildRecordedCommandsPort(
-  target: TransactionBackend,
+  target: OperationBackend,
   sink: WriteTouchSink,
   hooks: WriteMemberHooks = {},
 ): GraphCommandPort {
@@ -628,7 +628,7 @@ export function buildRecordedCommandsPort(
  * routed through a member this witness can see.
  */
 export function createMutationWitness(): Readonly<{
-  wrap: (target: TransactionBackend) => TransactionBackend;
+  wrap: (target: OperationBackend) => OperationBackend;
   readonly mutated: boolean;
   /** The sink `wrap` installs, for `registerRecordedIdentityMutationWitness`
    * to register against the same wrapped target so an identity assertion
@@ -654,7 +654,7 @@ export function createMutationWitness(): Readonly<{
     };
   };
   return {
-    wrap(target: TransactionBackend): TransactionBackend {
+    wrap(target: OperationBackend): OperationBackend {
       registerSavepointState(target, checkpoint);
       return deriveBackend(target, {
         ...buildRecordedWriteMembers(target, sink),

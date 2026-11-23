@@ -1,6 +1,6 @@
-import type { GraphBackend, TransactionBackend } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import { ConfigurationError, ValidationError } from "../errors";
+import type { StatementBackend } from "./operation-scope";
 
 export type ValidityEndMutationInput = Readonly<{
   validTo?: string;
@@ -42,7 +42,7 @@ export function validityEndAfterMutation(
  * invoking a backend that has not promised to apply the new state.
  */
 export function assertClearValidToSupported(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   entityType: KindEntity,
 ): void {
   if (backend.capabilities.clearValidTo === true) return;

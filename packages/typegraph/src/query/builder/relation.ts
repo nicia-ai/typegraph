@@ -4,6 +4,10 @@ import {
   ConfigurationError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+} from "../../store/operation-scope";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { QueryAst, SortDirection } from "../ast";
@@ -884,7 +888,7 @@ export class ExecutableRelationQuery<
   }
 
   #compileForBackend(
-    backend: GraphBackend | TransactionBackend | undefined,
+    backend: StatementBackend | undefined,
     relation: RelationAst,
     usage: SqlNameUsage,
   ) {
@@ -976,7 +980,10 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "A relation cannot execute on a different database or transaction target.",
       );
-    const rows = await this.#fetchRows(backend, this.#materialize());
+    const rows = await this.#fetchRows(
+      legacyTransactionOperation(backend),
+      this.#materialize(),
+    );
     return rows.map((row) => this.#definition.decodeRow(row));
   }
 
@@ -1181,7 +1188,7 @@ export class ExecutableRelationQuery<
     };
   }
 
-  #requireBackend(): GraphBackend | TransactionBackend {
+  #requireBackend(): GraphBackend {
     if (this.#definition.config.backend === undefined)
       throw new ConfigurationError(
         "Relation execution requires a backend; use store.query().",
@@ -1215,7 +1222,7 @@ export class ExecutableRelationQuery<
    * every binding set and receives a fresh current-time instant per call.
    */
   async #fetchRows(
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     relation: RelationAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
@@ -1270,8 +1277,7 @@ export class ExecutableRelationQuery<
   }
 
   #assertWindowFunctionsSupported(
-    backend: GraphBackend | TransactionBackend | undefined = this.#definition
-      .config.backend,
+    backend: StatementBackend | undefined = this.#definition.config.backend,
     relation = this.#materialize(),
   ): void {
     if (

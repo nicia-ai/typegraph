@@ -2,7 +2,6 @@ import {
   type GraphBackend,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
-  type TransactionBackend,
 } from "../../backend/types";
 import {
   CompilerInvariantError,
@@ -38,6 +37,11 @@ import {
   type PostgresTemporaryTableUnavailableSqlState,
   postgresTemporaryTableUnavailableSqlState,
 } from "../../utils/sql-errors";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type StoreTransactionBackend,
+} from "../operation-scope";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
 import type { PathNode, TraversalDirection } from "./types";
@@ -81,10 +85,10 @@ export type NodeExpansion = Readonly<{
 }>;
 
 type TemporaryStatementBackend = QueryBackend &
-  Pick<TransactionBackend, "executeTemporaryStatement"> &
+  Pick<OperationBackend, "executeTemporaryStatement"> &
   Readonly<{
     executeTemporaryStatement: NonNullable<
-      TransactionBackend["executeTemporaryStatement"]
+      OperationBackend["executeTemporaryStatement"]
     >;
   }>;
 
@@ -345,7 +349,8 @@ export async function withInlineIterativeGraphOperation<T>(
 ): Promise<T> {
   if (ctx.backend.capabilities.execution.interactiveTransactions) {
     return ctx.backend.transaction(
-      async (backend) => run(createOperation(ctx, options, backend)),
+      async (backend: StoreTransactionBackend) =>
+        run(createOperation(ctx, options, legacyTransactionOperation(backend))),
       {
         isolationLevel: "repeatable_read",
         accessMode: "read_only",
@@ -387,10 +392,18 @@ export async function runIterativeGraphOperation<
   // before the callback started is that refusal and nothing else.
   const rounds = { started: false };
   try {
-    return await ctx.backend.transaction(async (backend) => {
-      rounds.started = true;
-      return runWorkingTableRounds(ctx, options, plan, backend);
-    }, transactionOptions);
+    return await ctx.backend.transaction(
+      async (backend: StoreTransactionBackend) => {
+        rounds.started = true;
+        return runWorkingTableRounds(
+          ctx,
+          options,
+          plan,
+          legacyTransactionOperation(backend),
+        );
+      },
+      transactionOptions,
+    );
   } catch (error) {
     if (rounds.started || ctx.backend.dialect !== "postgres") throw error;
     const sqlState = postgresReadWriteRefusedSqlState(error);
@@ -438,7 +451,7 @@ async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
   ctx: AlgorithmContext,
   options: InternalTraversalOptions,
   plan: IterativeGraphPlan<State, Result>,
-  backend: TransactionBackend,
+  backend: OperationBackend,
 ): Promise<Result> {
   const temporaryBackend = requireTemporaryStatements(backend);
   const runId = generateId();
@@ -907,7 +920,7 @@ function chunkValues<T>(
 function createOperation(
   ctx: AlgorithmContext,
   options: InternalTraversalOptions,
-  backend: QueryBackend | TransactionBackend,
+  backend: QueryBackend | OperationBackend,
 ): IterativeGraphOperation {
   const temporal = resolveTemporalOptions(ctx, options);
   const currentTimestamp = currentReadInstant();
@@ -1037,7 +1050,7 @@ export function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
 }
 
 function requireTemporaryStatements(
-  backend: TransactionBackend,
+  backend: OperationBackend,
 ): TemporaryStatementBackend {
   if (backend.executeTemporaryStatement === undefined) {
     throw new ConfigurationError(

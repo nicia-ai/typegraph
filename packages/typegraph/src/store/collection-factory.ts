@@ -9,7 +9,6 @@ import {
   type ENDPOINT_SET_READ,
 } from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type TemporalMode } from "../core/types";
 import { KindNotFoundError } from "../errors";
@@ -28,7 +27,7 @@ import {
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
-import { type StatementBackend } from "./operation-scope";
+import type { StatementBackend } from "./operation-scope";
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
@@ -65,20 +64,20 @@ export type NodeOperations = Readonly<{
     ((rowCount: number) => Promise<void>) | undefined;
   executeCreate: (
     input: CreateNodeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Node>;
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   executeNodeSetUpdate: (
@@ -86,17 +85,17 @@ export type NodeOperations = Readonly<{
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly Node[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateNodeInput[],
     updates: readonly NodeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -112,7 +111,7 @@ export type NodeOperations = Readonly<{
       id: string;
       props: Record<string, unknown>;
     }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
@@ -126,38 +125,38 @@ export type NodeOperations = Readonly<{
     kind: string,
     id: string,
     options: NodeReparentOptions,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<NodeReparentResult>;
   executeReparentBatch: (
     kind: string,
     items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeDeletePlan: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -165,7 +164,7 @@ export type NodeOperations = Readonly<{
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByConstraint: (
@@ -174,26 +173,26 @@ export type NodeOperations = Readonly<{
     items: readonly NodeBulkGetOrCreateByConstraintItem<
       Record<string, unknown>
     >[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Node | undefined>;
   executeBulkFindByConstraint: (
     kind: string,
     constraintName: string,
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<(Node | undefined)[]>;
   executeBulkFindByIndex: (
     kind: string,
     indexName: string,
     items: readonly Readonly<{ props: Record<string, unknown> }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: NodeBulkFindByIndexOptions,
   ) => Promise<Node[][]>;
 }>;
@@ -214,12 +213,12 @@ export type EdgeOperations = Readonly<{
   ) => Promise<Edge>;
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeUpdate: (
     input: {
@@ -235,16 +234,16 @@ export type EdgeOperations = Readonly<{
       validTo?: string;
       clearValidTo?: true;
     },
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<Edge>;
   executeUpsertUpdateBatch: (
     entries: readonly EdgeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<readonly Edge[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateEdgeInput[],
     updates: readonly EdgeUpsertUpdateBatchEntry[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
@@ -259,22 +258,22 @@ export type EdgeOperations = Readonly<{
   executeDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
   ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -308,7 +307,7 @@ export type EdgeOperations = Readonly<{
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -320,7 +319,7 @@ export type EdgeOperations = Readonly<{
     fromId: string,
     toKind: string,
     toId: string,
-    backend: GraphBackend | TransactionBackend,
+    backend: StatementBackend,
     options?: Readonly<{
       matchOn?: readonly string[];
       props?: Record<string, unknown>;
@@ -338,7 +337,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   graph: G,
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: NodeOperations,
 ): GraphNodeCollections<G> {
@@ -381,7 +380,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   graph: G,
   graphId: string,
   registry: KindRegistry,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>,
   operations: EdgeOperations,

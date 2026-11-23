@@ -9,6 +9,7 @@ import {
   mergeCallbackIsolationError,
   MergePlanCapabilityError,
 } from "../../src/graph-merge/errors";
+import { legacyTransactionOperation } from "../../src/store/operation-scope";
 import { lockStoreWriteFence } from "../../src/store/operations/write-fence-prelude";
 
 const EXECUTION_CAPABILITIES = {
@@ -48,7 +49,7 @@ async function mutateAfterFreshFence(
   backend: TransactionBackend,
   witness: { mutated: boolean },
 ): Promise<void> {
-  await lockStoreWriteFence(backend, {
+  await lockStoreWriteFence(legacyTransactionOperation(backend), {
     graphId: "fresh-snapshot-fence",
     schemaVersion: 1,
     graphLock: "required",

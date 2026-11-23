@@ -8,6 +8,7 @@ import {
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
   transactionBackend,
@@ -229,7 +230,7 @@ export async function runTransition<
   }
 
   return store.transaction(async (tx) => {
-    const backend = transactionBackend(tx);
+    const backend = legacyTransactionOperation(transactionBackend(tx));
     // Serialize the whole read-compute-write transition per graph BEFORE the
     // first read. `store.transaction` itself takes no lock (write operations
     // acquire it at their own boundaries), but a transition's support

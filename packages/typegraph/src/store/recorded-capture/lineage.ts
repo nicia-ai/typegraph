@@ -174,7 +174,6 @@ import {
   type LineageDelta,
   type LineageMembers,
   type LineageSession,
-  type TransactionBackend,
 } from "../../backend/types";
 import { type GraphAllocationOwner } from "../../core/allocation-owner";
 import { type GraphDef } from "../../core/define-graph";
@@ -205,6 +204,7 @@ import {
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { groupBy } from "../../utils/array";
 import { compareCodePoints } from "../../utils/compare";
+import type { OperationBackend } from "../operation-scope";
 import { type ReadSetDelta } from "../read-set";
 import {
   type STORE_RUNTIME,
@@ -515,7 +515,7 @@ export type ReadSetRegion = Readonly<{ index: number }> &
  * dialect orders keys by code point.
  */
 export type ReadSetSession = LineageSession &
-  Pick<TransactionBackend, "capabilities" | "dialect">;
+  Pick<OperationBackend, "capabilities" | "dialect">;
 
 /**
  * The most keys a read-set refusal reports per changed scope, for its nodes

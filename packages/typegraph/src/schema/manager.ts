@@ -21,7 +21,6 @@ import {
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
   type SetActiveVersionParams,
-  type TransactionBackend,
 } from "../backend/types";
 import {
   getEdgeKinds,
@@ -52,6 +51,12 @@ import {
   type SqlSchema,
 } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+  type OperationScoped,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import { freezeDeep } from "../utils/object";
 import { isMissingTableError } from "../utils/sql-errors";
 import { canonicalEqual } from "./canonical";
@@ -960,10 +965,11 @@ function atomicPreflightUnsupportedError(
 
 /** One step of a composed schema-commit preflight; `undefined` drops out. */
 type SchemaCommitPreflightStep =
-  ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined;
+  | ((target: OperationScoped<SchemaCommitPreflightBackend>) => Promise<void>)
+  | undefined;
 
 type SchemaCommitPreflightFunction = (
-  target: SchemaCommitPreflightBackend,
+  target: OperationScoped<SchemaCommitPreflightBackend>,
 ) => Promise<void>;
 
 /**
@@ -1071,7 +1077,9 @@ export function composeSchemaCommitPreflight(
   const defined = ordered.filter(
     (step): step is SchemaCommitPreflightFunction => step !== undefined,
   );
-  return async (target: SchemaCommitPreflightBackend): Promise<void> => {
+  return async (
+    target: OperationScoped<SchemaCommitPreflightBackend>,
+  ): Promise<void> => {
     for (const step of defined) await step(target);
   };
 }
@@ -1208,7 +1216,15 @@ async function initializeSchemaImpl<G extends GraphDef>(
           commit,
           edgeIdentityKinds,
         )
-      : commitWithPreflight(commit, edgeMatchIdentityPreflight.run);
+      : commitWithPreflight(
+          commit,
+          (
+            transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
+          ) =>
+            edgeMatchIdentityPreflight.run(
+              legacyTransactionOperation(transaction),
+            ),
+        );
   }
 
   const commitWithPreflight = requireCommitWithPreflight(
@@ -1242,10 +1258,16 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // writer really did commit in between, the retry surfaces `StaleVersionError`
   // instead of silently succeeding.
   return withIdentityDdlRaceRetry(() =>
-    commitWithPreflight(commit, async (transactionBackend) => {
-      await edgeMatchIdentityPreflight?.run(transactionBackend);
-      await preflight(transactionBackend);
-    }),
+    commitWithPreflight(
+      commit,
+      async (
+        transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
+      ) => {
+        const transactionBackend = legacyTransactionOperation(transaction);
+        await edgeMatchIdentityPreflight?.run(transactionBackend);
+        await preflight(transactionBackend);
+      },
+    ),
   );
 }
 
@@ -1621,7 +1643,7 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
     probeBeforeCascade: boolean;
   }>,
 ): Promise<
-  ((transactionBackend: TransactionBackend) => Promise<void>) | undefined
+  ((transactionBackend: OperationBackend) => Promise<void>) | undefined
 > {
   if (options.droppedNodeKinds.length === 0) return undefined;
   const schema =
@@ -1665,7 +1687,9 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     historyEnabled?: boolean;
   }>,
 ): Promise<
-  (transactionBackend: SchemaCommitPreflightBackend) => Promise<void>
+  (
+    transactionBackend: OperationScoped<SchemaCommitPreflightBackend>,
+  ) => Promise<void>
 > {
   // Brand-validate before any DDL or commit: a schema-shaped plain object
   // from an untyped caller can expose custom names to provisioning while its
@@ -1718,7 +1742,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
  * {@link commitDroppedKindsOnlyWhenEmpty}'s backend-side probe.
  */
 async function assertDroppedKindsEmpty(
-  backend: TransactionBackend,
+  backend: OperationBackend,
   graphId: string,
   currentVersion: number,
   dropped: readonly DroppedKind[],
@@ -1943,7 +1967,13 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
     currentVersion,
     previous,
   );
-  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, plan.run));
+  return withIdentityDdlRaceRetry(() =>
+    commitWithPreflight(
+      commit,
+      (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
+        plan.run(legacyTransactionOperation(transaction)),
+    ),
+  );
 }
 
 /**
@@ -2015,7 +2045,11 @@ export async function rollbackSchema(
   }
   const setActiveWithPreflight = backend.setActiveVersionWithPreflight;
   if (setActiveWithPreflight === undefined) throw preflight.unsupportedError;
-  await setActiveWithPreflight(params, preflight.run);
+  await setActiveWithPreflight(
+    params,
+    (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
+      preflight.run(legacyTransactionOperation(transaction)),
+  );
 }
 
 /**
@@ -2043,7 +2077,9 @@ function prepareRollbackPreflight(
   target: Readonly<{ version: number; schemaDoc: string }>,
 ):
   | Readonly<{
-      run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+      run: (
+        target: OperationScoped<SchemaCommitPreflightBackend>,
+      ) => Promise<void>;
       /**
        * What a backend without `setActiveVersionWithPreflight` is refused
        * with. When the identity refusal is owed, that refusal itself: it

@@ -13,10 +13,8 @@ import { type z } from "zod";
 
 import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
-  type GraphBackend,
   type NodeFulltextSync,
   type NodeInsertProjection,
-  type TransactionBackend,
 } from "../backend/types";
 import {
   DEFAULT_SEARCHABLE_LANGUAGE,
@@ -28,6 +26,7 @@ import {
   UnsupportedBackendCapabilityError,
 } from "../errors";
 import { readOwnProperty } from "../utils/object";
+import type { StatementBackend } from "./operation-scope";
 
 export { getSearchableFields } from "../core/searchable";
 
@@ -35,7 +34,7 @@ export type FulltextSyncContext = Readonly<{
   graphId: string;
   nodeKind: string;
   nodeId: string;
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
 }>;
 
 const FIELD_SEPARATOR = "\n";
@@ -55,7 +54,7 @@ const FIELD_SEPARATOR = "\n";
  * without duplicating its error shape.
  */
 export function refuseFulltextUnavailable(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   nodeKind: string,
 ): never {
   throw new UnsupportedBackendCapabilityError(
@@ -80,7 +79,7 @@ export function refuseFulltextUnavailable(
 export function assertFulltextMember<T>(
   member: T | undefined,
   memberName: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): asserts member is T {
   if (member !== undefined) return;
   throw new ConfigurationError(
@@ -221,7 +220,7 @@ export async function syncFulltextBatchForKind(
   args: Readonly<{
     graphId: string;
     nodeKind: string;
-    backend: GraphBackend | TransactionBackend;
+    backend: StatementBackend;
   }>,
   schema: z.ZodType,
   items: readonly Readonly<{

@@ -254,18 +254,22 @@ const DETERMINISM_RESTRICTIONS = [
 
 const OPERATION_BRAND_MESSAGE =
   "Do not assert a value to OperationScoped / OperationBackend / " +
-  "StatementBackend (by name, alias, namespace, import type or typeof a " +
-  "mint), and do not narrow to one with a type predicate. A raw transaction backend reaches a statement-issuing " +
-  "Store function only through a mint in src/store/operation-scope.ts " +
-  "(enterOperation at a public Store member, scopeWriteFrameTarget in the " +
-  "write executor); an assertion anywhere else forges the brand and hides a " +
-  "call path the type exists to expose. Call a mint instead. " +
+  "StatementBackend / LegacyOperationTarget / StoreTransactionBackend (by " +
+  "name, alias, namespace, import type or typeof a mint), and do not narrow " +
+  "to one with a type predicate. A raw transaction backend reaches a " +
+  "statement-issuing Store function only through a mint in " +
+  "src/store/operation-scope.ts (enterOperation at a public Store member, " +
+  "scopeWriteFrameTarget in the write executor, the transitional " +
+  "legacyTransactionOperation); an assertion anywhere else forges the brand, " +
+  "or the engine type a StoreTransactionBackend records, and hides a call " +
+  "path the type exists to expose. Call a mint instead. " +
   "tests/operation-scope-ratchet.test.ts pins every forge site, found by " +
-  "type, to the two mints.";
+  "type, to the mints.";
 
 const OPERATION_BRAND_TYPE_NAMES =
-  "/^(OperationScoped|OperationBackend|StatementBackend)$/";
-const OPERATION_MINT_NAMES = "/^(enterOperation|scopeWriteFrameTarget)$/";
+  "/^(OperationScoped|OperationBackend|StatementBackend|LegacyOperationTarget|StoreTransactionBackend)$/";
+const OPERATION_MINT_NAMES =
+  "/^(enterOperation|scopeWriteFrameTarget|legacyTransactionOperation)$/";
 const OPERATION_BRAND_CONTEXT =
   ":matches(TSAsExpression, TSTypeAssertion, TSTypePredicate)";
 

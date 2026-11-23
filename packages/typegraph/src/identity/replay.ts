@@ -28,6 +28,7 @@ import {
   ValidationError,
 } from "../errors";
 import { readGraphAllocationOwner } from "../store/allocation-owner";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
@@ -477,7 +478,7 @@ async function currentClassMembers<G extends GraphDef>(
   ref: PlainNodeRef,
 ): Promise<readonly PlainNodeRef[]> {
   const classes = await loadCurrentStructuralClasses(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
     [ref],
@@ -509,7 +510,7 @@ async function everConnectedReferences<G extends GraphDef>(
   let frontier: readonly PlainNodeRef[] = [ref];
   while (frontier.length > 0) {
     const neighbours = await readIdentityEvidenceNeighbours(
-      ctx.backend,
+      legacyTransactionOperation(ctx.backend),
       ctx.schema,
       ctx.graphId,
       frontier,
@@ -578,7 +579,7 @@ async function uncapturedClassMembers<G extends GraphDef>(
 ): Promise<number> {
   if (members.length < 2) return 0;
   const recorded = await readEverRecordedReferences(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
     members,
@@ -610,7 +611,7 @@ async function unattributedRestoredTransitions<G extends GraphDef>(
   discovered: readonly IdentityTransitionRow[],
 ): Promise<number> {
   const restored = await countRestoredIdentityTransitions(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
   );
@@ -685,7 +686,7 @@ async function walkClassLineage<G extends GraphDef>(
     let after: IdentityTransitionCursor | undefined;
     for (;;) {
       const page = await readIdentityTransitions(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         {
@@ -768,7 +769,7 @@ async function reconstructAt<G extends GraphDef>(
   reading: IdentityReading = currentReading(ctx),
 ): Promise<HistoricalClass> {
   const classes = await loadHistoricalClasses(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
     [seed],
@@ -1226,7 +1227,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
   const limit = resolveLimit(options?.limit);
   const seed = registeredPlainRef(ctx, ref);
   const owner = await readGraphAllocationOwner(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
   );
@@ -1268,7 +1269,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
     owner,
   );
   const retention = await readIdentityTransitionRetention(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
   );
@@ -1293,7 +1294,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
       unattributedRestored,
       uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.graphId,
       ),
     },

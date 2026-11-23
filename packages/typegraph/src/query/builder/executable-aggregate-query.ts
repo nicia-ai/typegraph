@@ -1,6 +1,7 @@
 /**
  * ExecutableAggregateQuery - A query with aggregate functions that can be executed.
  */
+
 import { type z } from "zod";
 
 import { backendDerivationRoot } from "../../backend/derive-backend";

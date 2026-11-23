@@ -6,7 +6,6 @@ import {
 import {
   type GraphBackend,
   type OptionalTransactionExecution,
-  type TransactionBackend,
 } from "../backend/types";
 import {
   assertGraphAllocationOwner,
@@ -15,6 +14,11 @@ import {
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { generateId } from "../utils/id";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+  type StoreTransactionBackend,
+} from "./operation-scope";
 import { lockSchemaVersionForStoreWrite } from "./operations/write-transaction";
 import { recordedAnchorOwner } from "./recorded-anchor-origin";
 import {
@@ -31,7 +35,7 @@ export type GraphAllocationOwnerRead = Readonly<{
 }>;
 
 export async function readGraphAllocationOwnerSession(
-  target: TransactionBackend,
+  target: StatementBackend,
   schema: SqlSchema,
   graphId: string,
   execution: OptionalTransactionExecution,
@@ -80,7 +84,8 @@ export async function rotateGraphAllocationOwner(
     runRetriedUnit(
       { target: backend, operation: "rotateGraphAllocationOwner", attempts: 3 },
       () =>
-        backend.transaction(async (target) => {
+        backend.transaction(async (transaction: StoreTransactionBackend) => {
+          const target = legacyTransactionOperation(transaction);
           await lockSchemaVersionForStoreWrite(
             { graphId, schemaVersion },
             target,

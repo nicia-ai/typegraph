@@ -19,11 +19,7 @@ import {
   supportsAtomicNodeClaimFamily,
   supportsAtomicNodeProjections,
 } from "../../backend/capabilities/atomic-mutation-program";
-import {
-  type GraphBackend,
-  supportsAtomicBatch,
-  type TransactionBackend,
-} from "../../backend/types";
+import { supportsAtomicBatch } from "../../backend/types";
 import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
@@ -33,6 +29,7 @@ import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
 import { edgeKindFenceReason } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
+import type { StatementBackend } from "../operation-scope";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
 import { compositionEdgeHasRequiredExistencePart } from "./composition-create";
 import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
@@ -68,7 +65,7 @@ function nodeCreateOwesCompositionEdge(
 }
 
 type CommonAtomicMutationEligibility = Readonly<{
-  backend: GraphBackend | TransactionBackend;
+  backend: StatementBackend;
   graph: GraphDef;
   registry: KindRegistry;
   schemaVersion: number | undefined;
@@ -106,7 +103,7 @@ function atomicNodeProjectionFamilies(
 export async function assertAtomicDeleteSchemaFenceMatched(
   matched: boolean,
   ctx: Readonly<{ graphId: string; schemaVersion: number | undefined }>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   entity: "node" | "edge",
 ): Promise<void> {
   if (matched) return;

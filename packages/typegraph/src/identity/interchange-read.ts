@@ -3,6 +3,7 @@ import { ConfigurationError } from "../errors";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { identityReferenceKey } from "./reference";
@@ -281,9 +282,14 @@ export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
   mode: "state" | "archival",
   options?: IdentityInterchangeReadOptions,
 ): Promise<readonly IdentityTransferAssertion[]> {
-  const page = await readIdentityAssertionPageAtTarget(ctx, ctx.backend, mode, {
-    ...options,
-    limit: 2_147_483_647,
-  });
+  const page = await readIdentityAssertionPageAtTarget(
+    ctx,
+    legacyTransactionOperation(ctx.backend),
+    mode,
+    {
+      ...options,
+      limit: 2_147_483_647,
+    },
+  );
   return page.assertions;
 }

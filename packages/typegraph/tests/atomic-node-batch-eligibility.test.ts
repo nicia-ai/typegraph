@@ -30,6 +30,7 @@ import { disjointWith, partOf, subClassOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
+import { legacyTransactionOperation } from "../src/store/operation-scope";
 import {
   assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
@@ -457,7 +458,7 @@ describe("atomic node batch eligibility", () => {
       await backend.transaction((transactionBackend) => {
         expect(
           resolveAtomicNodeBatchExecutor({
-            backend: transactionBackend,
+            backend: legacyTransactionOperation(transactionBackend),
             graph,
             registry: buildKindRegistry(graph),
             inputs: [input],

@@ -94,7 +94,6 @@ import {
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
   type TombstonedNodeRow,
-  type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
 import { checkDisjointness, uniqueConstraintKey } from "../../constraints";
@@ -211,6 +210,10 @@ import {
   resolveNodeFulltextProjection,
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
+import {
+  legacyTransactionOperation,
+  type StatementBackend,
+} from "../operation-scope";
 import { collectRecordedIdentityTransitionNotes } from "../recorded-capture";
 import {
   type GraphWriteLock,
@@ -2757,7 +2760,7 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   items: readonly Readonly<{ id: string; props: Record<string, unknown> }>[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<ResolvedMutationSetAttempt<readonly Node[]>> {
   if (items.length === 0) return appliedResolvedMutationSet([]);
   const program = resolveAtomicNodeReplacementBatchProgram({
@@ -2897,7 +2900,7 @@ async function runAtomicNodeClaimDiagnosticGroups<T>(
 
 async function diagnoseAtomicNodeIdentity<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   preparedCreates: readonly NodeCreatePrepared[],
 ): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
   const boundGetNodes = bindExtraIfReachable(
@@ -2958,7 +2961,7 @@ async function diagnoseAtomicNodeIdentity<G extends GraphDef>(
 
 async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   preparedCreates: readonly NodeCreatePrepared[],
 ): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
   const boundGetNodes = bindExtraIfReachable(
@@ -3029,7 +3032,7 @@ async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
 
 async function diagnoseAtomicNodeUniqueness<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   preparedCreates: readonly NodeCreatePrepared[],
 ): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
   const boundCheckUniqueBatch = bindExtraIfReachable(
@@ -3125,7 +3128,7 @@ async function diagnoseAtomicNodeUniqueness<G extends GraphDef>(
  */
 async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   preparedCreates: readonly NodeCreatePrepared[],
   operation: "create" | "replace",
 ): Promise<never> {
@@ -3685,7 +3688,7 @@ async function insertPreparedCompositionEdge<G extends GraphDef>(
 function resolveBatchCompositionWorks<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): readonly (CompositionCreateWork | undefined)[] {
   return inputs.map((input) =>
     resolveCompositionCreate(ctx.registry, input, backend),
@@ -4509,7 +4512,7 @@ async function applyCompositionAttachmentsUnderFence<G extends GraphDef>(
  */
 async function applyExistingPartOfPostcondition<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   concreteKind: string,
   concreteId: string,
   request: CompositionAttachmentRequest,
@@ -4545,7 +4548,7 @@ async function applyExistingPartOfPostcondition<G extends GraphDef>(
  */
 async function existingPartOfPostconditionHeld<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   concreteKind: string,
   concreteId: string,
   request: CompositionAttachmentRequest,
@@ -4689,7 +4692,7 @@ type GetOrCreateResult = Readonly<{ node: Node; action: GetOrCreateAction }>;
  */
 async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   match: ExistingGetOrCreateMatch,
 ): Promise<GetOrCreateResult> {
   const { existing, validatedProps, leg } = match;
@@ -4733,7 +4736,7 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
  */
 async function applyExistingGetOrCreateLeg<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   match: ExistingGetOrCreateMatch,
 ): Promise<GetOrCreateResult> {
   const { existing, leg } = match;
@@ -4765,7 +4768,7 @@ async function partitionExistingGetOrCreateLegs<
   M extends ExistingGetOrCreateMatch,
 >(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   matches: readonly M[],
 ): Promise<Readonly<{ owed: readonly M[]; held: readonly M[] }>> {
   const owed: M[] = [];
@@ -4860,7 +4863,7 @@ function getOrCreateBatchDecidesBeforeWriting(
  */
 async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   batch: Readonly<{
     owed: readonly ExistingGetOrCreateMatch[];
     creates: readonly CreateNodeInput[];
@@ -5215,7 +5218,7 @@ export async function executeNodeReparent<G extends GraphDef>(
   kind: string,
   id: string,
   options: NodeReparentOptions,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
 ): Promise<NodeReparentResult> {
   const [result] = await reparentParts(
@@ -5242,7 +5245,7 @@ export async function executeNodeReparentBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
 ): Promise<readonly NodeReparentResult[]> {
   return reparentParts(ctx, kind, items, backend, disposition, {
@@ -5276,7 +5279,7 @@ async function reparentParts<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   disposition: Readonly<{ onIncumbent: CompositionIncumbentDisposition }>,
   surface: ReparentSurface,
 ): Promise<readonly NodeReparentResult[]> {
@@ -5399,7 +5402,7 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
   kind: string,
   id: string,
   request: CompositionAttachmentRequest,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<AttachmentApplyResult> {
   await assertLiveNodeRow(backend, ctx.graphId, kind, id);
 
@@ -5437,7 +5440,7 @@ async function runCompositionAttachmentWritePlan<G extends GraphDef>(
 async function executeNodeCreateInternal<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: Readonly<{ returnRow?: boolean }> & NodeCreateInternalOptions,
 ): Promise<Node | undefined> {
   const kind = input.kind;
@@ -5514,7 +5517,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     // factory-owned origin at the actual write receiver before letting that
     // receiver carry the schema fence; otherwise a wrapper that dropped the
     // ordinary diagnostic fence could silently write a verified store.
-    const targetBackend = unfencedTarget(target);
+    const targetBackend = legacyTransactionOperation(unfencedTarget(target));
     // A composition create declines EVERY fused single-statement
     // shape (schema-fence fusion, projection fusion) — none has a slot for
     // the second row this write also owes, and a fused command is an
@@ -5816,7 +5819,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 export async function executeNodeCreate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: NodeCreateInternalOptions,
 ): Promise<Node> {
   const result = await executeNodeCreateInternal(ctx, input, backend, {
@@ -5835,7 +5838,7 @@ export async function executeNodeCreate<G extends GraphDef>(
 export async function executeNodeCreateNoReturn<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: CreateNodeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   await executeNodeCreateInternal(ctx, input, backend, { returnRow: false });
 }
@@ -5849,7 +5852,7 @@ export async function executeNodeCreateNoReturn<G extends GraphDef>(
 export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   if (inputs.length === 0) return;
 
@@ -5994,7 +5997,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 export async function executeNodeCreateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: NodeCreateBatchOptions,
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
@@ -6258,7 +6261,7 @@ async function writeNodeRowMovingWindowEnd<G extends GraphDef, T>(
 function resolveAtomicNodeUpdateExecutor<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): AtomicNodeResolvedUpdateBatchExecutor | undefined {
   const first = entries[0];
   if (first === undefined) return;
@@ -6291,7 +6294,7 @@ function resolveAtomicNodeUpdateExecutor<G extends GraphDef>(
 export async function executeNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: Readonly<{ clearDeleted?: boolean }>,
 ): Promise<Node> {
   // The capability refusal is taken on the backend the CALLER handed in, before
@@ -6490,7 +6493,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
   inputPatch: Record<string, unknown>,
   candidateIds: CompiledSelectSql,
   candidateIdColumn: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   request: NodeSetUpdateRequest,
 ): Promise<Readonly<{ affectedCount: number }>> {
   const operation = request.operation;
@@ -6686,7 +6689,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
 export async function executeNodeUpsertUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: Readonly<{
     clearDeleted?: boolean;
     /**
@@ -6809,7 +6812,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   creates: readonly CreateNodeInput[],
   updates: readonly NodeUpsertUpdateBatchEntry[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<
   ResolvedMutationSetAttempt<
     Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -6924,7 +6927,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
 export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<readonly Node[]> {
   if (entries.length === 0) return [];
   for (const entry of entries) {
@@ -7062,7 +7065,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
 async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   atomicExecutor: AtomicNodeResolvedUpdateBatchExecutor,
 ): Promise<readonly Node[]> {
   const maxAttempts = atomicResolvedUpdateAttemptBudget(
@@ -7230,7 +7233,7 @@ export async function executeNodeDelete<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   request: NodeDeleteRequest = {},
 ): Promise<void> {
   const { policy, expect } = request;
@@ -7387,7 +7390,7 @@ export async function executeNodeDeletePlan<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<NodeDeletePlan | undefined> {
   if (ctx.readOnlyTransaction) {
     refuseReadOnlyTransactionWrite(
@@ -7468,7 +7471,7 @@ export async function executeNodeRevive<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (gate === undefined || !isTombstonedNodeRow(gate)) return;
@@ -7497,7 +7500,7 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   ids: readonly string[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<ReadonlyMap<string, readonly BackendEdgeRow[]> | undefined> {
   const setRead = backend.findEdgesByHeterogeneousEndpointSet;
   if (setRead === undefined) return;
@@ -7566,7 +7569,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   ids: readonly string[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   const atomicExecutor = resolveAtomicNodeDeleteBatchExecutor({
     backend,
@@ -7671,7 +7674,7 @@ async function executeAtomicNodeDeletes<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   ids: readonly string[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   atomicExecutor: AtomicNodeDeleteBatchExecutor,
 ): Promise<number> {
   try {
@@ -7738,7 +7741,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   id: string,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   policy?: NodeDeletePolicy,
 ): Promise<void> {
   // Gate outside hooks and transaction so an absent node neither fires hooks
@@ -7848,7 +7851,7 @@ export async function executeNodeHardDeleteBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   ids: readonly string[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<void> {
   const statedIds = [...new Set(ids)];
   // Gate outside the frame, as single hardDelete gates each id: a batch that
@@ -8089,7 +8092,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
   kind: string,
   constraintName: string,
   props: Record<string, unknown>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: NodeGetOrCreateByConstraintOptions,
 ): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>> {
   const ifExists = options?.ifExists ?? "return";
@@ -8185,7 +8188,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   kind: string,
   constraintName: string,
   props: Record<string, unknown>,
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<Node | undefined> {
   const registration = getNodeRegistration(ctx.graph, kind);
   const nodeKind = registration.type;
@@ -8274,7 +8277,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
   kind: string,
   constraintName: string,
   items: readonly Readonly<{ props: Record<string, unknown> }>[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
 ): Promise<(Node | undefined)[]> {
   if (items.length === 0) return [];
 
@@ -8499,7 +8502,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
   kind: string,
   indexName: string,
   items: readonly Readonly<{ props: Record<string, unknown> }>[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: NodeBulkFindByIndexOptions,
 ): Promise<Node[][]> {
   if (items.length === 0) return [];
@@ -8706,7 +8709,7 @@ function capMatchesPerGroup(
 
 /** Hydrates live nodes by id via the backend's normalized node reads. */
 async function hydrateNodesById(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   kind: string,
@@ -8740,7 +8743,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   items: readonly NodeBulkGetOrCreateByConstraintItem<
     Record<string, unknown>
   >[],
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   options?: NodeBulkGetOrCreateByConstraintOptions,
 ): Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]> {
   if (items.length === 0) return [];
@@ -8789,7 +8792,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       attempt(target, progress),
     );
   async function attempt(
-    target: GraphBackend | TransactionBackend,
+    target: StatementBackend,
     progress: { wrote: boolean },
   ): Promise<Result[]> {
     // Step 2: Batch-check existing keys

@@ -45,6 +45,10 @@
  * the real store surface.
  */
 
+import type {
+  OperationBackend,
+  StatementBackend,
+} from "../store/operation-scope";
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import {
@@ -59,7 +63,6 @@ import type {
   LineageDelta,
   SchemaVersionRow,
   Store,
-  TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
@@ -215,7 +218,7 @@ const CONTENT_FINGERPRINT_BYTES = 16;
  * the store genuinely holds no current assertions.
  */
 export async function computeContentComponent<G extends GraphDef>(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   graph: G,
   identityAssertions: readonly IdentityTransferAssertion[],
@@ -346,7 +349,7 @@ function mintRevisionOrigin<G extends GraphDef>(
  */
 export async function computeBaseVersionAtTarget<G extends GraphDef>(
   store: Store<G>,
-  target: TransactionBackend,
+  target: OperationBackend,
 ): Promise<BaseVersion> {
   return computeBaseVersionOn(store, target, targetAnchorReads(store, target));
 }
@@ -372,7 +375,7 @@ type TargetAnchorReads = RevisionAnchorReads &
  */
 function targetAnchorReads<G extends GraphDef>(
   store: Store<G>,
-  target: TransactionBackend,
+  target: OperationBackend,
 ): TargetAnchorReads {
   return {
     mintOrigin: () =>
@@ -406,7 +409,7 @@ async function readLiveSchemaHalf<G extends GraphDef>(
  */
 async function readLiveContentComponent<G extends GraphDef>(
   store: Store<G>,
-  target: GraphBackend | TransactionBackend,
+  target: StatementBackend,
 ): Promise<string> {
   return computeContentComponent(
     target,
@@ -425,7 +428,7 @@ async function readLiveContentComponent<G extends GraphDef>(
  */
 async function computeBaseVersionOn<G extends GraphDef>(
   store: Store<G>,
-  target: GraphBackend | TransactionBackend,
+  target: StatementBackend,
   reads: RevisionAnchorReads,
 ): Promise<BaseVersion> {
   // The document hash is deliberately version-blind, and the revision
@@ -519,7 +522,7 @@ export type BaseVersionTargetComparison =
  */
 export async function compareBaseVersionAtTarget<G extends GraphDef>(
   store: Store<G>,
-  target: TransactionBackend,
+  target: OperationBackend,
   expected: BaseVersion,
 ): Promise<BaseVersionTargetComparison> {
   const { activeVersion, schemaComponent } = await readLiveSchemaHalf(

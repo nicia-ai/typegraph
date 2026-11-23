@@ -2,16 +2,16 @@
  * THE RATCHET for operation-scoped statement targets
  * (`src/store/operation-scope.ts`).
  *
- * Two invariants:
+ * Three invariants:
  *
- * 1. **The brand is produced only by the two mints.** The brand key is a
+ * 1. **The brand is produced only by the mints.** The brand key is a
  *    module-private, declared-only unique symbol, so a route that would have
  *    to spell the key (an object literal, a computed property, `satisfies`,
  *    module augmentation) is a type error by construction. TypeScript cannot
  *    refuse an assertion to a subtype, though, so every other route is found
  *    by `forgeSites` (`tests/helpers/operation-scope-scan.ts`): a
  *    checker-backed scan that recognizes the brand by its property, not by a
- *    type name. It must find exactly the two mint assertions in `src`.
+ *    type name. It must find exactly the mint assertions in `src`.
  *    ESLint's `OPERATION_BRAND_RESTRICTIONS` is a fast-feedback backstop for
  *    the spellings a selector can see.
  *
@@ -23,6 +23,16 @@
  *    exposes a backend member outside the `identity` class. Each count is
  *    pinned exactly: a family that gains a raw parameter fails, and a change
  *    that narrows one lowers the baseline in the same commit.
+ *
+ * 3. **Store code does not hold the engine's transaction type.** Outside
+ *    `src/backend`, a transaction is received as `StoreTransactionBackend`
+ *    (no statement member) and statements go through an operation handle.
+ *    `rawTransactionSites` finds every place Store code still declares,
+ *    produces or asserts the engine `TransactionBackend` (or asserts into the
+ *    engine type a `StoreTransactionBackend` records). The only ones allowed
+ *    are the declarations a public API report spells, listed with their
+ *    reason in `RAW_TRANSACTION_DECLARATIONS`; each one's value reaches
+ *    statement work only through the shim.
  *
  * The forge-route table below is the systematic enumeration: every route,
  * the layer that refuses it (type system, lint, scan), or the reason it is an
@@ -47,7 +57,10 @@ import {
   MINT_MODULE,
   PACKAGE_ROOT,
   rawStatementTargets,
+  type RawTransactionRoute,
+  rawTransactionSites,
   type ScanProgram,
+  storeFacingModules,
   type StoreFamily,
   storeModules,
 } from "./helpers/operation-scope-scan";
@@ -58,21 +71,33 @@ import {
  * change that narrows a parameter lowers its family here in the same commit.
  * The mint module is excluded: `enterOperation` accepts a raw backend by
  * definition.
+ *
+ * What remains after Store code stopped holding the engine transaction type
+ * (254 before that change) are parameters typed as a statement FRAGMENT —
+ * `IdentityTarget`, `WriteTarget`, a `Pick<…>` of the backend — to which a
+ * raw transaction is structurally assignable. Store code can no longer
+ * produce a raw transaction to pass them (invariant 3); narrowing each to the
+ * handle is the family conversions' work.
  */
 const RAW_STATEMENT_TARGET_BASELINE = {
-  "operations/edge": 27,
-  "operations/node": 41,
-  "operations/composition": 16,
-  "operations/write": 36,
-  "recorded-capture": 51,
-  claims: 25,
-  "search-sync": 10,
-  collections: 4,
-  store: 44,
+  "operations/edge": 9,
+  "operations/node": 8,
+  "operations/composition": 15,
+  "operations/write": 4,
+  "recorded-capture": 28,
+  claims: 17,
+  "search-sync": 0,
+  collections: 0,
+  store: 36,
 } as const satisfies Record<StoreFamily, number>;
 
 /** The forge sites `src` may contain: one assertion per mint. */
 const MINT_SITES = [
+  {
+    file: MINT_MODULE,
+    function: "legacyTransactionOperation",
+    route: "assertion",
+  },
   { file: MINT_MODULE, function: "enterOperation", route: "assertion" },
   { file: MINT_MODULE, function: "scopeWriteFrameTarget", route: "assertion" },
 ] as const;
@@ -126,6 +151,12 @@ function withValue<T>(
   use: (value: T) => Promise<Edge>,
 ): Promise<Edge> {
   return use(value as T);
+}
+class Holder<T> {
+  value: T | undefined;
+  constructor() {
+    this.value = undefined;
+  }
 }
 `;
 
@@ -493,6 +524,44 @@ export function forgeOverload(backend: TransactionBackend): GraphBackend | Trans
     refusal: refusal([], [], []),
     gap: "A value is flagged entering an opaque type only when the brand demand is at most one member deep. Every store instance holds brand-demanding operations two members deep and is legitimately keyed into WeakMaps and asserted to its public flavor, so a deeper search would flag those instead of forges. Reaching the demand again needs a second assertion from unknown that names the full member path.",
   },
+  {
+    route:
+      "an ECMAScript-private method demanding the brand, its instance hidden in unknown",
+    code: `export class PrivateDemand {
+  #create(backend: StatementBackend) { return executeEdgeCreate(ctx, input, backend); }
+  run() { return this.#create(enterOperation(raw)); }
+}
+export function forgePrivateDemand(): unknown { const opaque: unknown = new PrivateDemand(); return opaque; }`,
+    refusal: refusal([], [], []),
+    gap: "Not a forge: a #private member cannot be read or called outside its class body, so hiding the instance loses no demand any outside code could meet; every call inside the body is scanned where it is written.",
+  },
+  {
+    route:
+      "a TypeScript-private method demanding the brand, its instance hidden in unknown",
+    code: `export class TsPrivateDemand {
+  private create(backend: StatementBackend) { return executeEdgeCreate(ctx, input, backend); }
+  run() { return this.create(enterOperation(raw)); }
+}
+export function forgeTsPrivateDemand(): unknown { const opaque: unknown = new TsPrivateDemand(); return opaque; }`,
+    refusal: refusal([], [], ["consumer-flow"]),
+  },
+  {
+    route: "an empty library collection instantiated to the brand",
+    code: `export function forgeEmptyCollection() { return new Map<string, StatementBackend>(); }`,
+    refusal: refusal([], [], []),
+    gap: "Not a forge: an argument-less construction of a library container holds no value for the instantiation to have branded, and every value later put in is checked against the instantiated type where it is put.",
+  },
+  {
+    route: "a library collection seeded with a raw transaction",
+    code: `export function forgeSeededCollection() { return new Set<StatementBackend>([raw]); }`,
+    refusal: refusal([2769], [], ["generic-instantiation"]),
+  },
+  {
+    route:
+      "an argument-less construction of a src generic instantiated to the brand",
+    code: `export function forgeHolder() { return new Holder<StatementBackend>(); }`,
+    refusal: refusal([], [], ["generic-instantiation"]),
+  },
 ];
 
 function routeLine(index: number): string {
@@ -613,6 +682,192 @@ const RAW_TARGET_FIXTURE_COUNTED = [
 ] as const;
 
 // ---------------------------------------------------------------------------
+// Raw engine transactions in Store code
+// ---------------------------------------------------------------------------
+
+/**
+ * The declarations outside `src/backend` still typed as the engine
+ * transaction, by `file#declaring type or function`. Each is spelled by a
+ * public API report, which this change keeps byte-identical; the value each
+ * carries reaches statement work only through the shim (or, for
+ * `ExecutableAggregateQuery.executeOn`, by delegating to the relation's
+ * `executeOn`, which shims).
+ */
+const RAW_TRANSACTION_DECLARATIONS: Readonly<
+  Record<string, Readonly<{ sites: number; reason: string }>>
+> = {
+  "src/store/runtime-port.ts#StoreRuntime": {
+    sites: 14,
+    reason:
+      "The Store runtime port's member signatures appear in the store, graph-merge, identity and other reports. Their implementations in store.ts annotate the narrowed type, so the raw type exists only in the port's declaration.",
+  },
+  "src/store/types.ts#TransactionRuntime": {
+    sites: 1,
+    reason:
+      "`TransactionRuntime.backend` appears in the store reports. Its one reader, `transactionBackend()`, returns `StoreTransactionBackend`.",
+  },
+  "src/identity/service-types.ts#IdentityServiceContext": {
+    sites: 1,
+    reason:
+      "`IdentityServiceContext.backend` appears in the reports through the runtime port's `identityContext`. Every statement-issuing read of it goes through the shim.",
+  },
+  "src/query/builder/types.ts#BatchableQuery": {
+    sites: 1,
+    reason:
+      "The public `BatchableQuery.executeOn` signature. Its implementations annotate the narrowed type.",
+  },
+  "src/query/builder/executable-query.ts#ExecutableQuery.executeOn": {
+    sites: 1,
+    reason: "The public `executeOn` signature; the body shims once.",
+  },
+  "src/query/builder/executable-projection-query.ts#ExecutableProjectionQuery.executeOn":
+    {
+      sites: 1,
+      reason: "The public `executeOn` signature; the body shims once.",
+    },
+  "src/query/builder/relation.ts#ExecutableRelationQuery.executeOn": {
+    sites: 1,
+    reason: "The public `executeOn` signature; the body shims once.",
+  },
+  "src/query/builder/unionable-query.ts#UnionableQuery.executeOn": {
+    sites: 1,
+    reason: "The public `executeOn` signature; the body shims once.",
+  },
+  "src/query/builder/executable-aggregate-query.ts#ExecutableAggregateQuery.executeOn":
+    {
+      sites: 1,
+      reason:
+        "The public `executeOn` signature; it passes the value unchanged to `ExecutableRelationQuery.executeOn`.",
+    },
+};
+
+/** A path inside `src/store`, so the fixture resolves imports like a store module. */
+const RAW_TRANSACTION_FIXTURE = "src/store/raw-transaction-routes.fixture.ts";
+
+const RAW_TRANSACTION_PREAMBLE = `
+import type {
+  GraphBackend,
+  SchemaWriteTransactionBackend,
+  TransactionBackend,
+} from "../backend/types";
+import {
+  legacyTransactionOperation,
+  type StoreTransactionBackend,
+} from "./operation-scope";
+
+declare const root: GraphBackend;
+declare const narrowed: StoreTransactionBackend;
+declare function engineTransaction(): ReturnType<() => TransactionBackend>;
+function keyOnly(key: object): void {
+  void key;
+}
+`;
+
+type RawTransactionCase = Readonly<{
+  route: string;
+  code: string;
+  /** Diagnostic codes the case's code draws. */
+  typeErrors: readonly number[];
+  /** What `rawTransactionSites` reports for the case. */
+  scan: readonly RawTransactionRoute[];
+  /** Set only on a case that is allowed: why it is not a raw transaction. */
+  allowed?: string;
+}>;
+
+const RAW_TRANSACTION_CASES: readonly RawTransactionCase[] = [
+  {
+    route: "a statement on the Store-facing transaction",
+    code: `export async function statementOnNarrowed() { await narrowed.getNode("graph", "Kind", "id"); }`,
+    typeErrors: [2339],
+    scan: [],
+  },
+  {
+    route: "a transaction callback left to infer the engine type",
+    code: `export function inferredCallback() { return root.transaction(async (tx) => tx.getNode("graph", "Kind", "id")); }`,
+    typeErrors: [],
+    scan: ["declaration"],
+  },
+  {
+    route: "a transaction callback that receives the Store-facing type",
+    code: `export function narrowedCallback() { return root.transaction(async (tx: StoreTransactionBackend) => legacyTransactionOperation(tx).getNode("graph", "Kind", "id")); }`,
+    typeErrors: [],
+    scan: [],
+    allowed:
+      "The callback narrows the transaction where it is opened, and its statement goes through the shim.",
+  },
+  {
+    route: "a call producing the engine type",
+    code: `export async function producedValue() { await engineTransaction().getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["value"],
+  },
+  {
+    route: "the engine type handed straight to the shim",
+    code: `export async function shimmedValue() { await legacyTransactionOperation(engineTransaction()).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: [],
+    allowed:
+      "The shim consumes the value; what it returns is the counted handle.",
+  },
+  {
+    route: "the engine type narrowed on arrival into an identity-only position",
+    code: `export function keyedValue() { keyOnly(engineTransaction()); }`,
+    typeErrors: [],
+    scan: [],
+    allowed:
+      "The position exposes no statement member, so the raw type does not survive its arrival.",
+  },
+  {
+    route: "the engine type read only for its identity",
+    code: `export function identityRead() { return engineTransaction().dialect; }`,
+    typeErrors: [],
+    scan: [],
+    allowed: "`dialect` is a member the Store-facing type carries.",
+  },
+  {
+    route: "an assertion to the engine type",
+    code: `export async function assertedEngine() { await (narrowed as TransactionBackend).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: "an assertion through unknown to the engine type",
+    code: `export async function assertedThroughUnknown() { await (narrowed as unknown as TransactionBackend).getNode("graph", "Kind", "id"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+  {
+    route: "as never into an engine-typed parameter",
+    code: `export function assertedNever() { const engineOnly = (tx: TransactionBackend) => tx.dialect; return engineOnly(narrowed as never); }`,
+    typeErrors: [],
+    scan: ["assertion", "declaration"],
+  },
+  {
+    route: "an assertion forging the engine type a Store transaction records",
+    code: `export async function forgedRecord() { await legacyTransactionOperation(narrowed as StoreTransactionBackend<SchemaWriteTransactionBackend>).executeSchemaDdl("SELECT 1"); }`,
+    typeErrors: [],
+    scan: ["assertion"],
+  },
+];
+
+const RAW_TRANSACTION_SOURCE = [
+  RAW_TRANSACTION_PREAMBLE,
+  ...RAW_TRANSACTION_CASES.map(
+    (rawCase, index) => `${routeLine(index)}\n${rawCase.code}\n`,
+  ),
+].join("\n");
+
+/** The case index of each 1-based raw-transaction fixture line; preamble lines map to -1. */
+function rawCaseIndexOfLine(line: number): number {
+  const lines = RAW_TRANSACTION_SOURCE.split("\n");
+  for (let current = line - 1; current >= 0; current -= 1) {
+    const match = /^\/\/ route (\d+)$/.exec(lines[current] ?? "");
+    if (match?.[1] !== undefined) return Number(match[1]);
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
 // Lint
 // ---------------------------------------------------------------------------
 
@@ -665,6 +920,7 @@ describe("operation-scope ratchet", () => {
     scan = createScanProgram({
       [FORGE_FIXTURE]: FORGE_SOURCE,
       [RAW_TARGET_FIXTURE]: RAW_TARGET_SOURCE,
+      [RAW_TRANSACTION_FIXTURE]: RAW_TRANSACTION_SOURCE,
     });
   }, 180_000);
 
@@ -770,7 +1026,7 @@ describe("operation-scope ratchet", () => {
     },
   );
 
-  it("src forges the brand only at the two mints", { timeout: 180_000 }, () => {
+  it("src forges the brand only at the mints", { timeout: 180_000 }, () => {
     expect(
       forgeSites(scan, scan.sourceFiles).map((site) => ({
         file: site.file,
@@ -811,5 +1067,77 @@ describe("operation-scope ratchet", () => {
     expect(new Set(fixture.map((target) => target.family))).toEqual(
       new Set(["operations/edge"]),
     );
+  });
+
+  it(
+    "Store code holds the engine transaction type only where a public API report spells it",
+    { timeout: 180_000 },
+    () => {
+      const sites = rawTransactionSites(scan, storeFacingModules(scan));
+      expect(
+        sites
+          .filter((site) => site.route !== "declaration")
+          .map(
+            (site) => `${site.file}:${site.line} ${site.route} ${site.text}`,
+          ),
+      ).toEqual([]);
+      const counts: Record<string, number> = {};
+      for (const site of sites) {
+        const label = `${site.file}#${site.function}`;
+        counts[label] = (counts[label] ?? 0) + 1;
+      }
+      expect(counts).toEqual(
+        Object.fromEntries(
+          Object.entries(RAW_TRANSACTION_DECLARATIONS).map(([label, entry]) => [
+            label,
+            entry.sites,
+          ]),
+        ),
+      );
+    },
+  );
+
+  it("every raw-transaction route is reported, refused by the type checker, or a stated allowance", () => {
+    const fixturePath = path.join(PACKAGE_ROOT, RAW_TRANSACTION_FIXTURE);
+    const typeErrors = errorDiagnostics(scan, RAW_TRANSACTION_FIXTURE);
+    const sites = rawTransactionSites(scan, [fixturePath]);
+
+    // The preamble compiles and scans clean, so every hit belongs to a case.
+    expect({
+      typeErrors: typeErrors.filter(([line]) => rawCaseIndexOfLine(line) < 0),
+      scan: sites.filter((site) => rawCaseIndexOfLine(site.line) < 0),
+    }).toEqual({ typeErrors: [], scan: [] });
+
+    expect(
+      RAW_TRANSACTION_CASES.map((rawCase, index) => ({
+        route: rawCase.route,
+        typeErrors: [
+          ...new Set(
+            typeErrors
+              .filter(([line]) => rawCaseIndexOfLine(line) === index)
+              .map(([, code]) => code),
+          ),
+        ].toSorted((left, right) => left - right),
+        scan: sortedUnique(
+          sites
+            .filter((site) => rawCaseIndexOfLine(site.line) === index)
+            .map((site) => site.route),
+        ),
+      })),
+    ).toEqual(
+      RAW_TRANSACTION_CASES.map((rawCase) => ({
+        route: rawCase.route,
+        typeErrors: rawCase.typeErrors.toSorted((left, right) => left - right),
+        scan: sortedUnique(rawCase.scan),
+      })),
+    );
+
+    for (const rawCase of RAW_TRANSACTION_CASES) {
+      const refused = rawCase.typeErrors.length > 0 || rawCase.scan.length > 0;
+      expect({ route: rawCase.route, refused }).toEqual({
+        route: rawCase.route,
+        refused: rawCase.allowed === undefined,
+      });
+    }
   });
 });

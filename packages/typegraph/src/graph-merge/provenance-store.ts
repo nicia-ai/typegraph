@@ -136,6 +136,11 @@
 
 import { z } from "zod";
 
+import type { SchemaWriteTransactionBackend } from "../backend/types";
+import {
+  legacyTransactionOperation,
+  type StoreTransactionBackend,
+} from "../store/operation-scope";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
@@ -370,27 +375,34 @@ async function claimSidecarOwnership(
   if (fence === undefined) {
     throw provenanceClaimUnfenced(graph.id, targetGraphId);
   }
-  return fence(graph.id, async (tx) => {
-    // Before the re-inspection, not after it: the drain is only worth anything
-    // if no row can land between the read it authorizes and this transaction's
-    // commit.
-    await drainUnfencedRowWriters(tx);
-    const verdict = await inspectSidecarGraphId(tx, graph, targetGraphId);
-    // `owned`: a concurrent opener claimed the id first. Nothing to write, and
-    // its marker is the same durable claim this one would have made.
-    if (verdict.state === "refuse" || verdict.state === "owned") return verdict;
-    await tx.insertNode({
-      graphId: graph.id,
-      kind: PROVENANCE_OWNER_KIND,
-      id: PROVENANCE_OWNER_ID,
-      props: {
-        owner: PROVENANCE_OWNER,
-        version: PROVENANCE_OWNER_VERSION,
-        targetGraphId,
-      },
-    });
-    return verdict;
-  });
+  return fence(
+    graph.id,
+    async (
+      transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
+    ) => {
+      const tx = legacyTransactionOperation(transaction);
+      // Before the re-inspection, not after it: the drain is only worth anything
+      // if no row can land between the read it authorizes and this transaction's
+      // commit.
+      await drainUnfencedRowWriters(tx);
+      const verdict = await inspectSidecarGraphId(tx, graph, targetGraphId);
+      // `owned`: a concurrent opener claimed the id first. Nothing to write, and
+      // its marker is the same durable claim this one would have made.
+      if (verdict.state === "refuse" || verdict.state === "owned")
+        return verdict;
+      await tx.insertNode({
+        graphId: graph.id,
+        kind: PROVENANCE_OWNER_KIND,
+        id: PROVENANCE_OWNER_ID,
+        props: {
+          owner: PROVENANCE_OWNER,
+          version: PROVENANCE_OWNER_VERSION,
+          targetGraphId,
+        },
+      });
+      return verdict;
+    },
+  );
 }
 
 /**

@@ -1,7 +1,10 @@
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
 import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
-import type { TransactionBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
+import {
+  legacyTransactionOperation,
+  type OperationBackend,
+} from "../store/operation-scope";
 import {
   ensureEngineSerializedWriterSlot,
   hasPendingWriteTransactionRevision,
@@ -18,7 +21,7 @@ import { MergePlanCapabilityError } from "./errors";
 /** A plan's durable revision cannot fence changes still awaiting capture flush. */
 export async function assertMergeTransactionPristine<G extends GraphDef>(
   target: Store<G>,
-  txBackend: TransactionBackend,
+  txBackend: OperationBackend,
 ): Promise<void> {
   if (
     hasPendingRecordedGraphWrites(txBackend, target.graphId) ||
@@ -77,7 +80,7 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
     );
   }
   return runRecordedTransactionSavepoint(
-    transactionBackend(tx),
+    legacyTransactionOperation(transactionBackend(tx)),
     statements,
     ADOPTED_MERGE_APPLY_SAVEPOINT,
     async () => ({ action: "release", value: await apply() }),

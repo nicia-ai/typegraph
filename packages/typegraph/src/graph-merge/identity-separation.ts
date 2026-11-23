@@ -39,6 +39,7 @@
  */
 import { identityReferenceKey } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
+import { legacyTransactionOperation } from "../store/operation-scope";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { entityRef } from "./evidence";
@@ -196,7 +197,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // assertion" as proof that an empty relation is correct. A store that does
   // hold one still reaches the refusal below.
   const ledgerSeparatesNothing = await separationFactsEmpty(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
     ctx.registry,
@@ -213,7 +214,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
     ref: entityRef(key),
   }));
   const targetClasses = await loadCurrentStructuralClasses(
-    ctx.backend,
+    legacyTransactionOperation(ctx.backend),
     ctx.schema,
     ctx.graphId,
     resolvedEntries.map(({ ref }) => ref),
@@ -266,7 +267,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   );
   if (targetPairs.length > 0) {
     const verdicts = await bulkIsSeparated(
-      ctx.backend,
+      legacyTransactionOperation(ctx.backend),
       ctx.schema,
       ctx.graphId,
       targetPairs.map(({ first, second }) => ({ first, second })),
@@ -277,7 +278,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
       if (separatedClassPairs.has(targetPair.pairKey)) continue;
       separatedClassPairs.add(targetPair.pairKey);
       const witness = await loadSpanningDifferentAssertion(
-        ctx.backend,
+        legacyTransactionOperation(ctx.backend),
         ctx.schema,
         ctx.graphId,
         membersByTargetClassKey.get(targetPair.first) ?? [],

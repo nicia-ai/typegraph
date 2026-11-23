@@ -1,6 +1,6 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
-import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
+import type { StatementBackend } from "../../store/operation-scope";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import {
@@ -57,7 +57,7 @@ type BatchEnvelopeRow = Readonly<{
 export async function executeOneStatementBatch<
   const Queries extends readonly EmbeddableOneStatementRead<unknown>[],
 >(
-  backend: GraphBackend | TransactionBackend,
+  backend: StatementBackend,
   graphId: string,
   queries: Queries,
   options: BatchOnceOptions = {},
