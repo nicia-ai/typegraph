@@ -58,7 +58,7 @@ const FAMILY_BASELINE = {
   "query terminals and tx.backend": 0,
   "identity and search facades": 0,
   "capture and flush": 0,
-  "schema and evolution": 12,
+  "schema and evolution": 0,
   "merge and durable operations": 31,
   "provenance and interchange": 0,
   "working copies": 0,
@@ -107,42 +107,15 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // (`openBoundTransactionSession`), and hand `#buildTransactionContext`
   // that session; their own statements go through one operation of it.
 
-  // --- schema and evolution: the schema-write and commit-preflight channel,
-  // session-level work.
-  "src/schema/manager.ts#initializeSchemaImpl": {
-    count: 2,
-    family: "schema and evolution",
-  },
-  "src/schema/manager.ts#commitNewSchemaVersionWithPreflight": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/schema/manager.ts#rollbackSchema": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/identity/schema-transition.ts#provisionDerivedRelations": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/store/materialize-removals.ts#materializeOne": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/store/materialize-removals.ts#reclaimRemovedVectorFieldTables": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/store/store.ts#StoreImplementation.identitySchemaPreflight": {
-    count: 1,
-    family: "schema and evolution",
-  },
-  "src/store/store.ts#StoreImplementation.removeIdentityKindsInSchemaPreflight":
-    { count: 1, family: "schema and evolution" },
-  "src/store/store.ts#StoreImplementation.#applyEvolvedTransaction": {
-    count: 3,
-    family: "schema and evolution",
-  },
+  // --- schema and evolution: none. Where an engine member opens a
+  // schema-write or schema-commit transaction and hands the Store its
+  // callback (a schema commit's or a reactivation's preflight, the derived
+  // identity upgrade, a removal's or a vector field's reclamation), the
+  // callback opens the session for that transaction and enters the one
+  // operation its work runs under; `withEvolvedTransaction` does the same
+  // where it adopts the caller's transaction. A composed preflight step
+  // (`identitySchemaPreflight`, `removeIdentityKindsInSchemaPreflight`)
+  // takes the handle of the operation it runs under.
 
   // --- merge and durable operations, including the Store runtime port the
   // merge drives (its members' types are spelled by the public API report).
@@ -220,20 +193,6 @@ const LEGACY_WRITE_ENTRY = {
 } as const;
 
 const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
-  // RAISED from 0 by the identity and search facades conversion, which
-  // moved these two here from `runIdentityMutation` and
-  // `rebuildIdentityClosureWithSchemaFence`: an identity mutation and the
-  // closure recompute now take their write entry from their caller, and these
-  // two callers hold a bare handle and no session (the kind-removal cascade
-  // the schema-commit preflight runs, and the derived-relation fence that
-  // hands the recompute port its transaction). That family's conversion
-  // opens a session where those transactions open and removes both.
-  "src/store/store.ts#StoreImplementation.removeIdentityKindsInSchemaPreflight":
-    { count: 1, family: "schema and evolution" },
-  "src/identity/schema-transition.ts#provisionDerivedRelations": {
-    count: 1,
-    family: "schema and evolution",
-  },
   // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
   // `target` parameter the public API report spells.
   "src/store/store.ts#StoreImplementation.constructor": {
@@ -249,7 +208,7 @@ const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
   "query terminals and tx.backend": 0,
   "identity and search facades": 0,
   "capture and flush": 0,
-  "schema and evolution": 2,
+  "schema and evolution": 0,
   "merge and durable operations": 1,
   "provenance and interchange": 0,
   "working copies": 0,

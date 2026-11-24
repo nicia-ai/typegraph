@@ -45,6 +45,7 @@
  * mints below. ESLint's `OPERATION_BRAND_RESTRICTIONS` reports the
  * spellings a selector can see before the test runs.
  */
+import { isBackendDerivedFrom } from "../backend/derive-backend";
 import type {
   AdapterBackend,
   AdoptedSchemaWriteTransaction,
@@ -462,6 +463,29 @@ export function enterTransactionOperation(
   return enterOperation(
     runtime[RUNTIME_SESSION] ?? openTransactionSession(runtime.backend),
   );
+}
+
+/**
+ * The mint where an operation's own work decorates its handle (recorded
+ * capture's overlay over a schema-commit preflight's transaction): the same
+ * call's operation, of the same session, whose statements go through
+ * `decorated`. Refuses a `decorated` that is not derived from the operation's
+ * handle through `src/backend/derive-backend.ts`, since its statements would
+ * be attributed to a session that does not hold their transaction.
+ */
+export function decorateOperation<Engine extends TransactionBackend>(
+  operation: Operation<Engine>,
+  decorated: OperationBackend,
+): Operation {
+  if (!isBackendDerivedFrom(decorated, operation.backend)) {
+    throw new TypeError(
+      "An operation's handle can only be replaced by a derivation of it.",
+    );
+  }
+  const session: TransactionSession = operation[OPERATION_SESSION];
+  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
+  return { [OPERATION_SESSION]: session, backend: decorated } as Operation;
+  /* eslint-enable no-restricted-syntax */
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */
