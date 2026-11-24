@@ -13,7 +13,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { param as parameter } from "../../../src";
+import { count, param as parameter } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { GraphBackend } from "../../../src/backend/types";
 import * as operationScope from "../../../src/store/operation-scope";
@@ -123,6 +123,16 @@ export function registerReadOperationRoutingIntegrationTests(
             .from("Person", "p")
             .orderBy("p", "name")
             .project((ctx) => ({ name: ctx.p.name }));
+          const headcount = tx
+            .query()
+            .from("Person", "p")
+            .aggregate({ people: count("p") });
+          const peopleNamed = tx
+            .query()
+            .from("Person", "p")
+            .whereNode("p", (p) => p.name.eq(parameter("name")))
+            .aggregate({ people: count("p") })
+            .prepare();
           const everyone = ["Alice", "Bob", "Carol", "Dave", "Erin"];
 
           const reads: readonly (readonly [
@@ -170,6 +180,26 @@ export function registerReadOperationRoutingIntegrationTests(
                   .execute()
                   .then((rows) => rows.map((row) => row.name)),
               everyone,
+              "hooked",
+            ],
+            [
+              "aggregate execute",
+              () => headcount.execute(),
+              [{ people: 5 }],
+              "hooked",
+            ],
+            ["aggregate count", () => headcount.count(), 1, "hooked"],
+            ["aggregate exists", () => headcount.exists(), true, "hooked"],
+            [
+              "prepared aggregate",
+              () => peopleNamed.execute({ name: "Bob" }),
+              [{ people: 1 }],
+              "hooked",
+            ],
+            [
+              "prepared aggregate, bound",
+              () => peopleNamed.bind({ name: "Dave" }).execute(),
+              [{ people: 1 }],
               "hooked",
             ],
             [

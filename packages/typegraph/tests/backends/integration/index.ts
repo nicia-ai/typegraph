@@ -103,6 +103,7 @@ export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
 export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";
+export { registerReadEntryPointIntegrationTests } from "./read-entry-points";
 export { registerReadOnlyTransactionWritesIntegrationTests } from "./read-only-transaction-writes";
 export { registerReadOperationRoutingIntegrationTests } from "./read-operation-routing";
 export { registerReadSetFenceIntegrationTests } from "./read-set-fence";

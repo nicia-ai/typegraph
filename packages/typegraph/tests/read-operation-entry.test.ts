@@ -418,10 +418,28 @@ describe("a read enters its operation at execution", () => {
         expect(sessions[1]).toBeDefined();
         expect(sessions[0]).not.toBe(sessions[1]);
 
-        // A relation-backed read refuses a target outside its provenance
-        // before it enters anything.
+        // A relation-backed read runs in a transaction its own backend
+        // opened, entering it the same way: once, as a binding of its own.
         clearMints();
-        await expect(aggregate.executeOn(engineTransaction)).rejects.toThrow(
+        expect(await aggregate.executeOn(engineTransaction)).toEqual([
+          { people: 3 },
+        ]);
+        const [aggregateEntry, ...extraEntries] = targetEntries();
+        expect(extraEntries).toEqual([]);
+        expect(
+          operationEntrySession(requireDefined(aggregateEntry)),
+        ).toBeDefined();
+        expect(operationEntrySession(requireDefined(aggregateEntry))).not.toBe(
+          sessions[1],
+        );
+
+        // One built on another database refuses before it enters anything.
+        const foreign = createStore(graph, createTestBackend())
+          .query()
+          .from("Person", "p")
+          .aggregate({ people: count("p") });
+        clearMints();
+        await expect(foreign.executeOn(engineTransaction)).rejects.toThrow(
           "A relation cannot execute on a different database or transaction target.",
         );
         expect(enterTargetOperationSpy).not.toHaveBeenCalled();
@@ -449,18 +467,23 @@ describe("a read enters its operation at execution", () => {
 
     it("store.batch() opens the session of the transaction it opens, and each item joins through executeOn", async () => {
       clearMints();
-      const [people, knowsFromAlice] = await store.batch(
+      const [people, knowsFromAlice, aggregated] = await store.batch(
         peopleQuery(store),
         store.edges.knows.batchFindFrom(alice),
+        store
+          .query()
+          .from("Person", "p")
+          .aggregate({ people: count("p") }),
       );
       expect(people).toHaveLength(2);
       expect(knowsFromAlice).toHaveLength(1);
+      expect(aggregated).toEqual([{ people: 2 }]);
       // The batch's own entry, then one per item.
       const sessions = targetEntries().map((entry) =>
         operationEntrySession(entry),
       );
-      expect(sessions).toHaveLength(3);
-      expect(new Set(sessions).size).toBe(3);
+      expect(sessions).toHaveLength(4);
+      expect(new Set(sessions).size).toBe(4);
       for (const session of sessions) expect(session).toBeDefined();
     });
   });
