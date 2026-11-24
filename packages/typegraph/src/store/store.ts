@@ -381,6 +381,7 @@ import {
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
+  transactionRuntimeSession,
   type TransactionSession,
 } from "./operation-scope";
 import {
@@ -2158,6 +2159,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(this.#baseBackend),
+      this.#baseBackend,
       mode,
       options,
     );
@@ -2169,8 +2171,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     mode: "state" | "archival" = "state",
   ): Promise<readonly IdentityTransferAssertion[]> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionsForInterchange(
-      this.#identityContext(this.#identityTargetBackend(transaction)),
+      this.#identityContext(target),
+      target,
       mode,
     );
   }
@@ -5704,7 +5708,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         maybeRefreshStatisticsAfterBulk: undefined,
       };
       return {
+        // The session travels with the runtime, so a privileged internal handed
+        // this context (provenance, a working copy's durable operation) enters
+        // its own statements' operation from it.
         runtime: {
+          ...transactionRuntimeSession(session),
           backend: txBackend,
           deleteNodeWithPolicy: (work, policy) =>
             executeNodeDelete(

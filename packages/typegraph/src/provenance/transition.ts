@@ -8,10 +8,9 @@ import {
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
-import { legacyTransactionOperation } from "../store/operation-scope";
+import { enterTransactionOperation } from "../store/operation-scope";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
-  transactionBackend,
   transactionDeleteNodeWithPolicy,
   transactionReviveNode,
 } from "../store/runtime-port";
@@ -230,13 +229,16 @@ export async function runTransition<
   }
 
   return store.transaction(async (tx) => {
-    const backend = legacyTransactionOperation(transactionBackend(tx));
     // Serialize the whole read-compute-write transition per graph BEFORE the
     // first read. `store.transaction` itself takes no lock (write operations
     // acquire it at their own boundaries), but a transition's support
     // snapshot must not race a concurrent transition or history write, so
     // the capability's write locks are acquired explicitly up front.
     await acquireCapabilityWriteLocks(tx, "provenance retraction transition");
+    // The transition's own reads go through one operation of the session
+    // `store.transaction` opened; the writes it makes through `tx` enter
+    // their own.
+    const { backend } = enterTransactionOperation(tx);
     const rows = await Promise.all(
       uniqueSources.map((source) =>
         backend.getNode(store.graphId, source.kind, source.id),
