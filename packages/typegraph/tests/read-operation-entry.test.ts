@@ -24,9 +24,11 @@ import {
   defineNode,
   field,
   param as parameter,
+  partOf,
 } from "../src";
 import { projectBackendWithout } from "../src/backend/derive-backend";
 import type { GraphBackend } from "../src/backend/types";
+import * as preparedQueryModule from "../src/query/builder/prepared-query";
 import type * as OperationScopeModule from "../src/store/operation-scope";
 import {
   enterOperation,
@@ -38,6 +40,7 @@ import {
   type TransactionSession,
 } from "../src/store/operation-scope";
 import { TRANSACTION_RUNTIME } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 vi.mock("../src/store/operation-scope", async (importOriginal) => {
@@ -86,6 +89,25 @@ function openedSessions(): readonly TransactionSession[] {
   });
 }
 
+/**
+ * Asserts that, since the last clear, `enterOperation` ran `times` times and
+ * every call entered from `session` itself: the same object, not an equal
+ * one. A fresh session over the same transaction deep-equals the real one.
+ */
+function expectEnteredFrom(
+  label: string,
+  session: TransactionSession,
+  times: number,
+): void {
+  const scopes = enteredScopes();
+  expect({ at: label, entered: scopes.length }).toEqual({
+    at: label,
+    entered: times,
+  });
+  // `toBe`, never a deep comparison: a fresh session deep-equals this one.
+  for (const scope of scopes) expect(scope).toBe(session);
+}
+
 function clearMints(): void {
   enterOperationSpy.mockClear();
   enterTargetOperationSpy.mockClear();
@@ -118,6 +140,7 @@ describe("a read enters its operation at execution", () => {
   let backend: GraphBackend;
   let store: GraphStore;
   let alice: Readonly<{ kind: "Person"; id: string }>;
+  let aliceNode: Awaited<ReturnType<GraphStore["nodes"]["Person"]["create"]>>;
 
   beforeEach(async () => {
     backend = createTestBackend();
@@ -126,6 +149,7 @@ describe("a read enters its operation at execution", () => {
     const bob = await store.nodes.Person.create({ name: "Bob", age: 40 });
     await store.edges.knows.create(created, bob);
     alice = { kind: "Person", id: created.id };
+    aliceNode = created;
     clearMints();
   });
 
@@ -229,10 +253,7 @@ describe("a read enters its operation at execution", () => {
       for (const [label, run] of terminals) {
         clearMints();
         await run();
-        expect({ at: label, entered: enteredScopes() }).toEqual({
-          at: label,
-          entered: [session],
-        });
+        expectEnteredFrom(label, session, 1);
         expect({ at: label, targets: targetEntries() }).toEqual({
           at: label,
           targets: [],
@@ -244,7 +265,7 @@ describe("a read enters its operation at execution", () => {
       clearMints();
       await byName.execute({ name: "Alice" });
       await byName.execute({ name: "Bob" });
-      expect(enteredScopes()).toEqual([session, session]);
+      expectEnteredFrom("prepared query, twice", session, 2);
     });
   });
 
@@ -278,10 +299,7 @@ describe("a read enters its operation at execution", () => {
       for (const [label, read] of reads) {
         clearMints();
         await read();
-        expect({ at: label, entered: enteredScopes() }).toEqual({
-          at: label,
-          entered: [session],
-        });
+        expectEnteredFrom(label, session, 1);
       }
     });
   });
@@ -311,13 +329,13 @@ describe("a read enters its operation at execution", () => {
       // Whether the ended transaction still answers is the driver's business;
       // the operation is entered before any statement either way.
       await run().catch((error: unknown) => error);
-      expect(enteredScopes()).toEqual([builtIn]);
+      expectEnteredFrom("inside another transaction", builtIn, 1);
       expect(enteredScopes()).not.toContain(current);
     });
 
     clearMints();
     await run().catch((error: unknown) => error);
-    expect(enteredScopes()).toEqual([builtIn]);
+    expectEnteredFrom("after it ended", builtIn, 1);
   });
 
   it("a root read enters nothing and opens no session", async () => {
@@ -470,10 +488,368 @@ describe("a read enters its operation at execution", () => {
         at: label,
         opened: 1,
       });
-      expect({ at: label, entered: enteredScopes() }).toEqual({
-        at: label,
-        entered: opened,
-      });
+      expectEnteredFrom(label, requireDefined(opened[0]), 1);
     }
+  });
+
+  it("batchOnce, neighbors, countNeighbors, subgraph, describe and validateStore inside a transaction each enter one operation of its session per call", async () => {
+    await store.transaction(async (tx) => {
+      const session = await sessionOf(() =>
+        tx.nodes.Person.create({ name: "Carol", age: 50 }),
+      );
+      const reads: readonly (readonly [string, () => Promise<unknown>])[] = [
+        [
+          "batchOnce",
+          () =>
+            tx.batchOnce((read) => [
+              read.neighbors(aliceNode, { edges: ["knows"] }),
+              read.countNeighbors(aliceNode, { edges: ["knows"] }),
+              read.subgraph(aliceNode, { edges: ["knows"], maxDepth: 2 }),
+              tx
+                .query()
+                .from("Person", "p")
+                .select((ctx) => ({ name: ctx.p.name })),
+            ]),
+        ],
+        ["neighbors", () => tx.neighbors(aliceNode, { edges: ["knows"] })],
+        [
+          "countNeighbors",
+          () => tx.countNeighbors(aliceNode, { edges: ["knows"] }),
+        ],
+        [
+          "subgraph",
+          () => tx.subgraph(aliceNode, { edges: ["knows"], maxDepth: 2 }),
+        ],
+        ["describe", () => tx.describe()],
+        [
+          "validateStore",
+          () => tx.validateStore({ entity: "node", kind: "Person" }),
+        ],
+      ];
+      const observed: unknown[] = [];
+      for (const [label, read] of reads) {
+        clearMints();
+        await read();
+        const scopes = enteredScopes();
+        observed.push({
+          at: label,
+          entered: scopes.length,
+          // Identity, not equality: a fresh session over the same
+          // transaction deep-equals this one.
+          ofThisSession: scopes.every((scope) => scope === session),
+          targets: targetEntries().length,
+        });
+      }
+      expect(observed).toEqual(
+        reads.map(([label]) => ({
+          at: label,
+          entered: 1,
+          ofThisSession: true,
+          targets: 0,
+        })),
+      );
+    });
+  });
+
+  it("a refusal that needs no statement happens before any operation is entered, on every terminal", async () => {
+    const otherBackend = createTestBackend();
+    await store.transaction(async (tx) => {
+      const unbound = tx
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq(parameter("name")))
+        .orderBy("p", "name")
+        .select((ctx) => ({ name: ctx.p.name }));
+      const unboundProjection = tx
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq(parameter("name")))
+        .project((ctx) => ({ name: ctx.p.name }));
+      const unboundRelation = unboundProjection.asRelation();
+      const unboundAggregate = tx
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.name.eq(parameter("name")))
+        .groupBy("p", "name")
+        .aggregate({ name: field("p", "name"), people: count("p") });
+      const unboundUnion = unbound.unionAll(
+        tx
+          .query()
+          .from("Person", "p")
+          .orderBy("p", "name")
+          .select((ctx) => ({ name: ctx.p.name })),
+      );
+      const people = tx
+        .query()
+        .from("Person", "p")
+        .orderBy("p", "name")
+        .select((ctx) => ({ name: ctx.p.name }));
+      const prepared = unbound.prepare();
+      const preparedProjection = unboundProjection.prepare();
+      const preparedRelation = unboundRelation.prepare();
+      const refusals: readonly (readonly [string, () => Promise<unknown>])[] = [
+        ["query execute", () => unbound.execute()],
+        ["query first", () => unbound.first()],
+        ["query count", () => unbound.count()],
+        ["query exists", () => unbound.exists()],
+        ["query paginate", () => unbound.paginate({ first: 10 })],
+        ["query paginate, bad limit", () => people.paginate({ first: -1 })],
+        [
+          "query stream",
+          async () => {
+            for await (const row of unbound.stream({ batchSize: 10 })) void row;
+          },
+        ],
+        [
+          "query stream, bad batch size",
+          async () => {
+            for await (const row of people.stream({ batchSize: -1 })) void row;
+          },
+        ],
+        ["query executeOn", () => unbound.executeOn(backend)],
+        ["prepared query, missing binding", () => prepared.execute({})],
+        ["projection execute", () => unboundProjection.execute()],
+        ["projection first", () => unboundProjection.first()],
+        ["projection count", () => unboundProjection.count()],
+        ["projection exists", () => unboundProjection.exists()],
+        ["projection executeOn", () => unboundProjection.executeOn(backend)],
+        [
+          "prepared projection, missing binding",
+          () => preparedProjection.execute({}),
+        ],
+        ["relation execute", () => unboundRelation.execute()],
+        ["relation first", () => unboundRelation.first()],
+        ["relation count", () => unboundRelation.count()],
+        ["relation exists", () => unboundRelation.exists()],
+        ["relation executeOn", () => unboundRelation.executeOn(backend)],
+        [
+          "relation executeOn, foreign target",
+          () =>
+            tx
+              .query()
+              .from("Person", "p")
+              .project((ctx) => ({ name: ctx.p.name }))
+              .asRelation()
+              .executeOn(otherBackend),
+        ],
+        [
+          "prepared relation, missing binding",
+          () => preparedRelation.execute({}),
+        ],
+        ["aggregate execute", () => unboundAggregate.execute()],
+        ["aggregate first", () => unboundAggregate.first()],
+        ["aggregate count", () => unboundAggregate.count()],
+        ["aggregate executeOn", () => unboundAggregate.executeOn(backend)],
+        ["union execute", () => unboundUnion.execute()],
+        ["union executeOn", () => unboundUnion.executeOn(backend)],
+        [
+          "batchOnce, bad option",
+          () =>
+            tx.batchOnce(() => [people], {
+              shareSubgraphs: "yes" as unknown as boolean,
+            }),
+        ],
+        ["batchOnce, unbound query", () => tx.batchOnce(() => [unbound])],
+        [
+          "neighbors, bad limit",
+          () => tx.neighbors(aliceNode, { edges: ["knows"], limit: -1 }),
+        ],
+        [
+          "subgraph, bad depth",
+          () => tx.subgraph(aliceNode, { edges: ["knows"], maxDepth: -1 }),
+        ],
+        [
+          "validateStore, unknown kind",
+          () => tx.validateStore({ entity: "node", kind: "Nobody" }),
+        ],
+        [
+          "validateStore, bad page size",
+          () =>
+            tx.validateStore({ entity: "node", kind: "Person", pageSize: 0 }),
+        ],
+      ];
+      const observed: unknown[] = [];
+      for (const [label, refuse] of refusals) {
+        clearMints();
+        // A synchronous throw counts as a refusal too.
+        const outcome = await Promise.resolve()
+          .then(refuse)
+          .then(
+            () => "resolved",
+            (error: unknown) => error,
+          );
+        observed.push({
+          at: label,
+          refused: outcome instanceof Error,
+          entered: enterOperationSpy.mock.calls.length,
+          targets: enterTargetOperationSpy.mock.calls.length,
+          sessions: openTransactionSessionSpy.mock.calls.length,
+        });
+      }
+      expect(observed).toEqual(
+        refusals.map(([label]) => ({
+          at: label,
+          refused: true,
+          entered: 0,
+          targets: 0,
+          sessions: 0,
+        })),
+      );
+    });
+  });
+
+  it("a stream enters one operation per page: each page is its own statement, and other calls interleave between pages", async () => {
+    await store.transaction(async (tx) => {
+      const session = await sessionOf(() =>
+        tx.nodes.Person.create({ name: "Carol", age: 50 }),
+      );
+      await tx.nodes.Person.create({ name: "Dave", age: 60 });
+      await tx.nodes.Person.create({ name: "Erin", age: 70 });
+      const people = tx
+        .query()
+        .from("Person", "p")
+        .orderBy("p", "name")
+        .select((ctx) => ({ name: ctx.p.name }));
+
+      clearMints();
+      const streamed: string[] = [];
+      // The calls the loop body makes between pages; each enters its own.
+      let interleaved = 0;
+      for await (const row of people.stream({ batchSize: 2 })) {
+        streamed.push(row.name);
+        // Five rows in pages of two: a call between the pages, and one
+        // after the last page's rows.
+        if (streamed.length % 2 === 0) {
+          await tx
+            .query()
+            .from("Person", "p")
+            .select((ctx) => ctx.p.id)
+            .count();
+          interleaved += 1;
+        }
+      }
+      expect(streamed).toEqual(["Alice", "Bob", "Carol", "Dave", "Erin"]);
+      expect(interleaved).toBe(2);
+      // Three pages and two interleaved calls: five operations, all of this
+      // transaction's session, none held across the awaits between pages.
+      expectEnteredFrom("three pages", session, 3 + interleaved);
+    });
+  });
+
+  it("a prepared query is fixed at construction: changing the configuration it was built from changes nothing", async () => {
+    const otherBackend = createTestBackend();
+    const otherStore = createStore(graph, otherBackend);
+    await otherStore.nodes.Person.create({ name: "Zed", age: 99 });
+    // The configurations the Store hands the constructor, recorded as the
+    // real class receives them.
+    const { PreparedQuery } = preparedQueryModule;
+    const configs: preparedQueryModule.PreparedQueryConfig<unknown>[] = [];
+    const constructed = vi
+      .spyOn(preparedQueryModule, "PreparedQuery")
+      .mockImplementation(
+        class RecordingPreparedQuery<R> extends PreparedQuery<R> {
+          constructor(config: preparedQueryModule.PreparedQueryConfig<R>) {
+            configs.push(config);
+            super(config);
+          }
+        },
+      );
+    try {
+      store
+        .query()
+        .from("Person", "p")
+        .whereNode("p", (p) => p.age.gte(parameter("age")))
+        .orderBy("p", "name")
+        .select((ctx) => ({ name: ctx.p.name }))
+        .prepare();
+      const config = requireDefined(configs[0]);
+      // A caller that builds its own prepared query from a configuration
+      // object it keeps, and later reuses that object for another database.
+      const reused: {
+        -readonly [Key in keyof typeof config]: (typeof config)[Key];
+      } = { ...config };
+      const fixed = new PreparedQuery(reused);
+      reused.backend = otherBackend;
+      expect(await fixed.execute({ age: 0 })).toEqual([
+        { name: "Alice" },
+        { name: "Bob" },
+      ]);
+
+      // Inside a transaction the configuration also carries the session's
+      // operation source; replacing it afterwards leaves the session the
+      // query was prepared in.
+      await store.transaction(async (tx) => {
+        const session = await sessionOf(() =>
+          tx.nodes.Person.create({ name: "Carol", age: 50 }),
+        );
+        configs.length = 0;
+        tx.query()
+          .from("Person", "p")
+          .whereNode("p", (p) => p.age.gte(parameter("age")))
+          .orderBy("p", "name")
+          .select((ctx) => ({ name: ctx.p.name }))
+          .prepare();
+        const txConfig = requireDefined(configs[0]);
+        const carried: Record<PropertyKey, unknown> = { ...txConfig };
+        const sourceKeys = Object.getOwnPropertySymbols(carried);
+        expect(sourceKeys).toHaveLength(1);
+        const fixedInTx = new PreparedQuery(carried as typeof txConfig);
+        let replacedEntered = 0;
+        for (const key of sourceKeys)
+          carried[key] = () => {
+            replacedEntered += 1;
+            return otherBackend;
+          };
+        carried["backend"] = otherBackend;
+        clearMints();
+        expect(await fixedInTx.execute({ age: 0 })).toEqual([
+          { name: "Alice" },
+          { name: "Bob" },
+          { name: "Carol" },
+        ]);
+        expect(replacedEntered).toBe(0);
+        expectEnteredFrom("prepared in the transaction", session, 1);
+      });
+    } finally {
+      constructed.mockRestore();
+    }
+  });
+
+  it("a composition subgraph inside a transaction runs its closure walk and fetches under the one operation it enters", async () => {
+    const Album = defineNode("Album", {
+      schema: z.object({ title: z.string() }),
+    });
+    const Track = defineNode("Track", {
+      schema: z.object({ title: z.string() }),
+    });
+    const trackOf = defineEdge("trackOf");
+    const albums = defineGraph({
+      id: "read_operation_entry_composition",
+      nodes: { Album: { type: Album }, Track: { type: Track } },
+      edges: {
+        trackOf: {
+          type: trackOf,
+          from: [Track],
+          to: [Album],
+          cardinality: "one",
+        },
+      },
+      ontology: [partOf(Track, Album, { via: trackOf })],
+    });
+    const albumStore = createStore(albums, createTestBackend());
+    const album = await albumStore.nodes.Album.create({ title: "A" });
+    const track = await albumStore.nodes.Track.create({ title: "T" });
+    await albumStore.edges.trackOf.create(track, album);
+    await albumStore.transaction(async (tx) => {
+      const session = await sessionOf(() =>
+        tx.nodes.Track.create({ title: "U" }),
+      );
+      clearMints();
+      const unit = await tx.subgraph(album, { edges: [], composition: true });
+      expect(new Set(unit.nodes.map((node) => node.id))).toEqual(
+        new Set([album.id, track.id]),
+      );
+      expectEnteredFrom("composition subgraph", session, 1);
+    });
   });
 });
