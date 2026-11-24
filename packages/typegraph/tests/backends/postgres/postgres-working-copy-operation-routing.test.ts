@@ -6,10 +6,11 @@
  * holds, so these cases make it distinguishable, as `read-operation-routing`
  * does: `enterOperation` is wrapped so each operation carries its own
  * recording derivation of the transaction. A branch's clone must send its
- * snapshot lock, its copies and its source-version check through the one
- * operation of the session of the source transaction it opens; a durable
- * operation must read its evidence through an operation of the session its
- * own host write enters from (by identity).
+ * snapshot lock, its copies and its source-version check (recorded as the
+ * call itself, with the handle it was given) through the one operation of the
+ * session of the source transaction it opens; a durable operation must read
+ * its evidence through an operation of the session its own host write enters
+ * from (by identity).
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -23,6 +24,7 @@ import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgr
 import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
 import type { GraphBackend } from "../../../src/backend/types";
 import { branchDurable, operateDurableBranch } from "../../../src/graph-merge";
+import * as baseVersion from "../../../src/graph-merge/base-version";
 import { unwrap } from "../../../src/graph-merge/result";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { renderPostgres } from "../../../src/query/sql-fragment";
@@ -49,10 +51,21 @@ type RoutedStatement = Readonly<{
   sql: string;
 }>;
 
+/**
+ * One source-version check (`compareBaseVersionAtTarget`): the operation
+ * whose handle it was given (`undefined` for any other target), and how many
+ * statements had gone through a recording handle when it began.
+ */
+type VersionCheck = Readonly<{
+  operation: number | undefined;
+  afterStatements: number;
+}>;
+
 type Recording = Readonly<{
   statements: RoutedStatement[];
   /** The session each operation was entered from, by operation number. */
   entered: operationScope.TransactionSession[];
+  versionChecks: VersionCheck[];
   restore: () => void;
 }>;
 
@@ -65,7 +78,10 @@ type Recording = Readonly<{
 function routeOperationsThroughRecordingHandles(): Recording {
   const statements: RoutedStatement[] = [];
   const entered: operationScope.TransactionSession[] = [];
+  const versionChecks: VersionCheck[] = [];
+  const operationOfHandle = new Map<object, number>();
   const enterOperation = operationScope.enterOperation;
+  const compareBaseVersionAtTarget = baseVersion.compareBaseVersionAtTarget;
   const enterTransactionOperation = operationScope.enterTransactionOperation;
   function recordingEntry(
     entry: operationScope.OperationEntry,
@@ -88,6 +104,7 @@ function routeOperationsThroughRecordingHandles(): Recording {
         return transaction.execute<Row>(query);
       },
     });
+    operationOfHandle.set(handle, operation);
     const routed: object = { ...entry, backend: handle };
     return routed as operationScope.OperationEntry;
   }
@@ -105,10 +122,22 @@ function routeOperationsThroughRecordingHandles(): Recording {
             enterTransactionOperation(transaction),
           ) as operationScope.Operation,
       ),
+    // The version check reads through members the handle does not record
+    // (`getActiveSchema`), so the check itself is recorded with its target.
+    vi
+      .spyOn(baseVersion, "compareBaseVersionAtTarget")
+      .mockImplementation((store, target, expected) => {
+        versionChecks.push({
+          operation: operationOfHandle.get(target),
+          afterStatements: statements.length,
+        });
+        return compareBaseVersionAtTarget(store, target, expected);
+      }),
   ];
   return {
     statements,
     entered,
+    versionChecks,
     restore: () => {
       for (const spy of spies) spy.mockRestore();
     },
@@ -161,6 +190,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       if (recording !== undefined) {
         recording.statements.length = 0;
         recording.entered.length = 0;
+        recording.versionChecks.length = 0;
       }
       const created = unwrap(
         await branchDurable(source, manager.durable, {
@@ -183,20 +213,29 @@ describe.runIf(process.env["POSTGRES_URL"])(
             /^INSERT INTO .* SELECT /.test(statement.sql),
           );
           const [lock] = locks;
+          const lockAt =
+            lock === undefined ? -1 : recording.statements.indexOf(lock);
+          const firstCopyAt = recording.statements.findIndex((statement) =>
+            copies.includes(statement),
+          );
           expect({
             locks: locks.length,
             copied: copies.length > 0,
-            // The lock, every copy and the source-version check before them
-            // share the clone's one operation.
+            // The lock and every copy share the clone's one operation.
             oneOperation: [...locks, ...copies].every(
               (statement) => statement.operation === lock?.operation,
             ),
-            versionCheckedThere: recording.statements.some(
-              (statement) =>
-                statement.operation === lock?.operation &&
-                !statement.sql.includes("IN SHARE MODE") &&
-                !statement.sql.startsWith("INSERT INTO "),
-            ),
+            // The source-version check runs once under the lock, before
+            // copying begins, through that same operation's handle.
+            versionChecksUnderTheLock: recording.versionChecks
+              .filter(
+                (check) =>
+                  check.afterStatements > lockAt &&
+                  check.afterStatements <= firstCopyAt,
+              )
+              .map((check) => ({
+                throughTheLocksOperation: check.operation === lock?.operation,
+              })),
             // That session is the clone's own: it entered nothing else.
             enteredFromItsSession:
               lock === undefined ? 0 : (
@@ -208,7 +247,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
             locks: 1,
             copied: true,
             oneOperation: true,
-            versionCheckedThere: true,
+            versionChecksUnderTheLock: [{ throughTheLocksOperation: true }],
             enteredFromItsSession: 1,
           });
         } finally {

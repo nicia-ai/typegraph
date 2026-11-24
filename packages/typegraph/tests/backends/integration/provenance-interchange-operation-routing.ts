@@ -16,11 +16,17 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../../../src";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../../../src/backend/advisory-lock-namespaces";
+import {
+  resolveWriteFencePlan,
+  type WriteFenceTarget,
+} from "../../../src/backend/capabilities/write-fence";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { GraphBackend } from "../../../src/backend/types";
 import { openProvenanceStore } from "../../../src/graph-merge";
 import { exportGraphStream } from "../../../src/interchange";
 import { createRetractionCapability } from "../../../src/provenance";
+import { renderSql, type SqlFragment } from "../../../src/query/sql-fragment";
 import * as operationScope from "../../../src/store/operation-scope";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -32,6 +38,8 @@ type RoutedCall = Readonly<{
   member: string;
   /** The `kind` the call names, for the members that take one. */
   kind: string | undefined;
+  /** The statement an `execute` call sent. */
+  statement: SqlFragment | undefined;
 }>;
 
 /** The `kind` a recorded call names: a positional kind or a `{ kind }` query. */
@@ -84,7 +92,14 @@ function routeOperationsThroughRecordingHandles(): Recording {
       call: (...args: Arguments) => Result,
     ): (...args: Arguments) => Result {
       return (...args) => {
-        calls.push({ session, operation, member, kind: kindOf(member, args) });
+        calls.push({
+          session,
+          operation,
+          member,
+          kind: kindOf(member, args),
+          statement:
+            member === "execute" ? (args[0] as SqlFragment) : undefined,
+        });
         return call.apply(transaction, args);
       };
     }
@@ -140,6 +155,25 @@ function routeOperationsThroughRecordingHandles(): Recording {
 function clear(recording: Recording): void {
   recording.calls.length = 0;
   recording.entered.length = 0;
+}
+
+/**
+ * The graph lock statement a read of the believed set takes on `backend`,
+ * rendered, or `undefined` when its write-fence plan takes no keyed lock.
+ */
+function keyedGraphLockSql(
+  backend: WriteFenceTarget,
+  graphId: string,
+): string | undefined {
+  const plan = resolveWriteFencePlan(backend);
+  if (plan.kind !== "lock" && plan.kind !== "row") return undefined;
+  return renderSql(
+    plan.sql.acquireKeyedWithIsolation(
+      RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+      graphId,
+    ),
+    backend.dialect,
+  ).sql;
 }
 
 /** The distinct sessions the recorded operations were entered from. */
@@ -265,22 +299,41 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
     });
 
     it("holding() reads through one operation of the session of the transaction it opens", async () => {
-      const { provenance } = await seededProvenance(context);
+      const { store, provenance } = await seededProvenance(context);
+      // The lock is matched by its statement: a lock sent some other way is
+      // simply not recorded, so "every recorded call" cannot see it.
+      const lockSql = keyedGraphLockSql(store.backend, store.graphId);
       const recording = routeOperationsThroughRecordingHandles();
       try {
         clear(recording);
         const believed = await provenance.holding();
+        const supportOperations = new Set(
+          callsNaming(recording, SUPPORT_EDGE_KINDS).map(
+            (call) => call.operation,
+          ),
+        );
         expect({
           believed: believed.map((fact) => fact.id),
           operations: recording.entered.length,
-          supportReads: callsNaming(recording, SUPPORT_EDGE_KINDS).length > 0,
+          supportOperations: [...supportOperations],
+          // On a backend whose plan takes a keyed lock, the graph lock went
+          // through the operation the support reads went through.
+          graphLocks: recording.calls
+            .filter(
+              (call) =>
+                call.statement !== undefined &&
+                renderSql(call.statement, store.backend.dialect).sql ===
+                  lockSql,
+            )
+            .map((call) => call.operation),
           throughTheOperation: recording.calls.every(
             (call) => call.operation === 0,
           ),
         }).toEqual({
           believed: ["fact"],
           operations: 1,
-          supportReads: true,
+          supportOperations: [0],
+          graphLocks: lockSql === undefined ? [] : [0],
           throughTheOperation: true,
         });
       } finally {
