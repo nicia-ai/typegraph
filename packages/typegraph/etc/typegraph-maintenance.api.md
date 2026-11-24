@@ -1986,6 +1986,7 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     targetCardinality?: TargetCardinality;
     matchIdentity?: EdgeMatchIdentity<E>;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -2612,6 +2613,7 @@ type ExtensionEdgeDef = Readonly<{
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public

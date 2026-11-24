@@ -151,3 +151,19 @@ export function assertEdgeIntegrityOptions(
     );
   }
 }
+
+/**
+ * The registration without an `endpointExistence` key. An explicit
+ * `endpointExistence: undefined` states nothing, as an explicit `undefined`
+ * does for every sibling option, so {@link assertEdgeIntegrityOptions}
+ * accepts it; the key itself is dropped here so it never reaches the graph's
+ * registration and everything derived from it.
+ */
+export function withoutRemovedEdgeOptionKeys<
+  R extends Readonly<{ endpointExistence?: unknown }>,
+>(registration: R): R {
+  if (!Object.hasOwn(registration, "endpointExistence")) return registration;
+  const { endpointExistence: _undefinedEndpointExistence, ...rest } =
+    registration;
+  return rest as R;
+}

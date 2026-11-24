@@ -426,6 +426,14 @@ export type EdgeRegistration<
    * cardinality does not.
    */
   acyclic?: boolean;
+  /**
+   * Removed: `endpointExistence` was never read by any edge write, and
+   * `defineGraph` refuses a registration that states it. Declared `never`
+   * rather than left undeclared because `defineGraph` infers its edges
+   * generically: an inferred argument gets no excess-property check, so an
+   * undeclared key would type-check there and fail only at runtime.
+   */
+  endpointExistence?: never;
 }>;
 
 /**

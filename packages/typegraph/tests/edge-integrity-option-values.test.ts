@@ -17,12 +17,14 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type Store,
 } from "../src";
 import type { EdgeRegistration } from "../src/core";
 import {
   CARDINALITY_VALUES,
   TARGET_CARDINALITY_VALUES,
 } from "../src/core/edge-integrity-options";
+import { defineGraphExtension } from "../src/graph-extension";
 import { serializeSchema } from "../src/schema";
 import { parseSerializedSchema } from "../src/schema/manager";
 import type { SerializedEdgeDef } from "../src/schema/types";
@@ -108,7 +110,10 @@ describe("edge integrity option values", () => {
   });
 
   it("has no endpointExistence in the registration, serialized or introspected edge types", () => {
-    expectTypeOf<EdgeRegistration>().not.toHaveProperty("endpointExistence");
+    // Declared only as a `never` tombstone, so no value can be stated.
+    expectTypeOf<
+      NonNullable<EdgeRegistration["endpointExistence"]>
+    >().toBeNever();
     expectTypeOf<SerializedEdgeDef>().not.toHaveProperty("endpointExistence");
     expectTypeOf<EdgeIntrospection>().not.toHaveProperty("endpointExistence");
 
@@ -126,6 +131,117 @@ describe("edge integrity option values", () => {
         edges: { linksTo: registration },
       }),
     ).toThrow(ConfigurationError);
+  });
+
+  // Each public entry point that accepts an edge declaration. A generic
+  // parameter (`defineGraph`'s `const TEdges`, `defineGraphExtension`'s
+  // `const T`) infers the literal it is given, extra keys included, and an
+  // inferred argument gets no excess-property check: only assignability to
+  // the constraint is checked. So a removed property is refused there only if
+  // the declared type itself rules the key out.
+  it("refuses endpointExistence at compile time at every entry point that accepts an edge declaration", () => {
+    expect(() =>
+      defineGraph({
+        id: "edge_integrity_option_values_inline",
+        nodes: { Item: { type: Item } },
+        edges: {
+          linksTo: {
+            type: linksTo,
+            from: [Item],
+            to: [Item],
+            // @ts-expect-error -- the option was removed from EdgeRegistration
+            endpointExistence: "ever",
+          },
+        },
+      }),
+    ).toThrow(ConfigurationError);
+
+    const inferredRegistration = {
+      type: linksTo,
+      from: [Item],
+      to: [Item],
+      endpointExistence: "currentlyValid",
+    } as const;
+    expect(() =>
+      defineGraph({
+        id: "edge_integrity_option_values_inferred",
+        nodes: { Item: { type: Item } },
+        // @ts-expect-error -- the option was removed from EdgeRegistration
+        edges: { linksTo: inferredRegistration },
+      }),
+    ).toThrow(ConfigurationError);
+
+    expect(() =>
+      defineGraphExtension({
+        edges: {
+          // @ts-expect-error -- an extension edge has no endpointExistence
+          linksTo: { from: ["Item"], to: ["Item"], endpointExistence: "ever" },
+        },
+      }),
+    ).toThrow(/endpointExistence/);
+
+    const inferredExtension = {
+      edges: {
+        linksTo: { from: ["Item"], to: ["Item"], endpointExistence: "ever" },
+      },
+    } as const;
+    function evolveWith(store: Store<ReturnType<typeof graphDeclaring>>) {
+      // @ts-expect-error -- an extension edge has no endpointExistence
+      return store.evolve(inferredExtension);
+    }
+    expect(evolveWith).toBeTypeOf("function");
+  });
+
+  // `cardinality: undefined` and its siblings state nothing; so does an
+  // explicit `endpointExistence: undefined`, and its key must not survive
+  // anywhere the graph's registrations are read from.
+  it.each([
+    { form: "target list", targets: {} },
+    { form: "target map", targets: { to: { Item: [Item] } } },
+  ])(
+    "reads an explicit endpointExistence: undefined as unstated, and drops the key ($form)",
+    async ({ targets }) => {
+      const graph = graphDeclaring({
+        ...targets,
+        endpointExistence: undefined,
+      });
+      const registration = graph.edges.linksTo as Readonly<
+        Record<string, unknown>
+      >;
+      const [store] = await createStoreWithSchema(graph, createTestBackend());
+      const introspected = store
+        .introspect()
+        .edges.find((edge) => edge.name === "linksTo");
+
+      expect(Object.keys(registration)).not.toContain("endpointExistence");
+      expect(introspected).toBeDefined();
+      expect(Object.keys(introspected ?? {})).not.toContain(
+        "endpointExistence",
+      );
+      expect(serializeSchema(graph, 1).edges).toEqual(
+        serializeSchema(graphDeclaring(targets), 1).edges,
+      );
+    },
+  );
+
+  it("reports no endpointExistence in store.introspect() for any edge", async () => {
+    for (const statement of [
+      {},
+      { cardinality: "one" },
+      { targetCardinality: "one" },
+      { acyclic: true },
+    ]) {
+      const [store] = await createStoreWithSchema(
+        graphDeclaring(statement),
+        createTestBackend(),
+      );
+      const edges = store.introspect().edges;
+
+      expect(edges.map((edge) => edge.name)).toEqual(["linksTo"]);
+      for (const edge of edges) {
+        expect(Object.keys(edge)).not.toContain("endpointExistence");
+      }
+    }
   });
 
   it("serializes the fixed endpointExistence field for every edge, whatever else is declared", () => {
