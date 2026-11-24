@@ -353,8 +353,8 @@ export class ExecutableAggregateQuery<
   }
 
   /**
-   * Runs on the backend this query was built on or a transaction that backend
-   * opened, as its relation's `executeOn` does; refuses any other target.
+   * Runs on the target it is given, as its relation's `executeOn` does. The
+   * target is not checked against the database this query was built on.
    */
   executeOn(
     backend: GraphBackend | TransactionBackend,

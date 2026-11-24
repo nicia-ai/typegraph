@@ -29,7 +29,6 @@ import {
   runWithSerializedQueue,
   type SerializedExecutionQueue,
 } from "../../serialized-execution-queue";
-import { withTransactionOrigin } from "../../transaction-origin";
 import { auditBackendResource } from "../../transaction-resource";
 import type {
   AdapterBackend,
@@ -48,11 +47,7 @@ import { createIdentityMembers } from "./members/identity-members";
 import { createIndexMaterializationMembers } from "./members/index-materialization-members";
 import { createKindRemovalMembers } from "./members/kind-removal-members";
 import { createSchemaVersionMembers } from "./members/schema-version-members";
-import type {
-  EngineAssemblyContext,
-  EngineLateMembers,
-  SqlEngineProfile,
-} from "./profile";
+import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
 /**
  * `provisioning`-class members excluded from the caller-serialized queue
@@ -677,7 +672,7 @@ export function createSqlBackend<TTx>(
     // over a capabilities object of its own.
     capabilities,
     schemaProvisioning: profile.schemaProvisioning,
-    ...recordTransactionOrigins(late.transactions, () => ctx.self()),
+    ...late.transactions,
     ...late.rawSql,
     lockSchemaVersionForWrite: requireDefined(
       operations.lockSchemaVersionForWrite,
@@ -805,35 +800,4 @@ export function createSqlBackend<TTx>(
 
 function assertNothingBeforeTransactionRefusal(): Promise<void> {
   return Promise.resolve();
-}
-
-/**
- * `transactions` with each transaction it hands out recorded as opened on
- * `origin()` (`../../transaction-origin`), before the caller receives it:
- * the backend this call assembles, so a read built on that backend runs in
- * its transactions and in no other database's.
- */
-function recordTransactionOrigins<TTx>(
-  transactions: EngineLateMembers<TTx>["transactions"],
-  origin: () => object,
-): EngineLateMembers<TTx>["transactions"] {
-  return {
-    ...transactions,
-    transaction: (fn, options) =>
-      transactions.transaction(
-        (transaction) => fn(withTransactionOrigin(transaction, origin())),
-        options,
-      ),
-    transactionWithNative: (fn, options) =>
-      transactions.transactionWithNative(
-        (transaction, nativeTransaction) =>
-          fn(withTransactionOrigin(transaction, origin()), nativeTransaction),
-        options,
-      ),
-    adoptTransaction: (externalTransaction) =>
-      withTransactionOrigin(
-        transactions.adoptTransaction(externalTransaction),
-        origin(),
-      ),
-  };
 }

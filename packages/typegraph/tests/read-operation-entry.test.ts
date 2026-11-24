@@ -433,16 +433,21 @@ describe("a read enters its operation at execution", () => {
           sessions[1],
         );
 
-        // One built on another database refuses before it enters anything.
+        // One built on another database runs on the target it is handed,
+        // as a select does, entering it once as a binding of its own.
         const foreign = createStore(graph, createTestBackend())
           .query()
           .from("Person", "p")
           .aggregate({ people: count("p") });
         clearMints();
-        await expect(foreign.executeOn(engineTransaction)).rejects.toThrow(
-          "A relation cannot execute on a different database or transaction target.",
-        );
-        expect(enterTargetOperationSpy).not.toHaveBeenCalled();
+        expect(await foreign.executeOn(engineTransaction)).toEqual([
+          { people: 3 },
+        ]);
+        const [foreignEntry, ...foreignExtraEntries] = targetEntries();
+        expect(foreignExtraEntries).toEqual([]);
+        expect(
+          operationEntrySession(requireDefined(foreignEntry)),
+        ).toBeDefined();
       });
     });
 
@@ -575,7 +580,6 @@ describe("a read enters its operation at execution", () => {
   });
 
   it("a refusal that needs no statement happens before any operation is entered, on every terminal", async () => {
-    const otherBackend = createTestBackend();
     await store.transaction(async (tx) => {
       const unbound = tx
         .query()
@@ -645,16 +649,6 @@ describe("a read enters its operation at execution", () => {
         ["relation count", () => unboundRelation.count()],
         ["relation exists", () => unboundRelation.exists()],
         ["relation executeOn", () => unboundRelation.executeOn(backend)],
-        [
-          "relation executeOn, foreign target",
-          () =>
-            tx
-              .query()
-              .from("Person", "p")
-              .project((ctx) => ({ name: ctx.p.name }))
-              .asRelation()
-              .executeOn(otherBackend),
-        ],
         [
           "prepared relation, missing binding",
           () => preparedRelation.execute({}),

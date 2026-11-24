@@ -3900,10 +3900,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * // companies: readonly { id: string; name: string }[]
    * ```
    *
-   * A relation-backed read (a relation, or an aggregate) runs on the backend
-   * it was built on or in a transaction that backend opened, so it runs in the
-   * transaction this batch opens; one built on a different database is
-   * refused before its statement.
+   * Each query runs through its `executeOn()` in the transaction this batch
+   * opens. The target is not checked against the database a query was built
+   * on.
    *
    * @param queries - Two or more executable queries (from `.select()`,
    *   `.project()`, `.aggregate()`, relations, or set operations)

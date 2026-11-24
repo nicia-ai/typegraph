@@ -1,23 +1,25 @@
 /**
- * Every read terminal runs through every entry point that accepts it.
+ * Every read terminal runs through every entry point that accepts it, with
+ * the outcome a node select has there.
  *
  * An entry point that accepts a read by type and then refuses it at run time
- * is a contract the caller cannot see. These cases run each read terminal —
- * node and edge selects, projections, relations, aggregates, set operations,
- * prepared forms, and the scalar, paging and streaming forms — through each
- * entry point: `execute()`, `store.batch()`, `store.batchOnce()`,
- * `executeOn()` with the root backend, with a transaction the caller opened
- * on the engine, and with a Store transaction's own backend, and, built
- * inside `store.transaction()`, through `execute()`, `tx.batchOnce()` and
- * `executeOn()`. Each cell must return what `execute()` on the root returns.
+ * is a contract the caller cannot see. These cases run each read terminal
+ * (node and edge selects, projections, relations, aggregates, set
+ * operations, prepared forms, and the scalar, paging and streaming forms)
+ * through each entry point. Each cell has ONE expected outcome, shared by
+ * every terminal in its row: the select family's.
  *
- * The one refusal that stays is the one the target check exists for: a
- * relation-backed read built against a different database, or a read built
- * inside a transaction carried out of it, is refused before any statement.
+ * `executeOn(target)` runs on the target it is handed. Nothing checks that
+ * the target belongs to the database the read was built on, for any
+ * terminal, so a read handed another database's target, or a transaction of
+ * another database adopted by this backend, returns that database's rows.
+ * The refusals that remain are the ones every terminal shares:
+ * `tx.batchOnce()` embeds a read only in the context it was built in, and a
+ * transaction that has ended behaves as its driver makes it behave.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { count, createStore, param as parameter } from "../../../src";
+import { count, createStoreWithSchema, param as parameter } from "../../../src";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -42,11 +44,19 @@ type TargetableRead = Readonly<{
   compileOneStatementBatchItem?: unknown;
 }>;
 
+/** One entry point: how to run a read there, and whose rows it returns. */
+type Cell = Readonly<{
+  run: (read: TargetableRead, name: string) => Promise<unknown>;
+  /** The database whose `execute()` result the cell returns. */
+  rows: "this database" | "other database";
+  /** Whether the read in this cell is built on the other database. */
+  builtOn?: "other database";
+  /** Present when the cell applies only to reads `batchOnce()` embeds. */
+  embedsOnly?: true;
+}>;
+
 const BATCH_ONCE_REBIND_REFUSAL =
   "store.batchOnce() cannot rebind a read to a different database or transaction target.";
-
-const TARGET_REFUSAL =
-  "A relation cannot execute on a different database or transaction target.";
 
 /** The reads every entry point is offered, built from one scope. */
 function targetableReads(
@@ -86,7 +96,7 @@ function targetableReads(
         scope
           .query()
           .from("Person", "p")
-          .whereNode("p", (p) => p.name.eq("Bo"))
+          .whereNode("p", (p) => p.name.eq("Cy"))
           .select((ctx) => ctx.p.name),
       ),
     "prepared aggregate, bound": scope
@@ -156,14 +166,92 @@ async function observe(
         "ok"
       : `returned ${JSON.stringify(result)}`;
   } catch (error) {
-    return `refuses: ${error instanceof Error ? error.message : String(error)}`;
+    return error instanceof Error ?
+        `refuses: ${error.name}: ${error.message}`
+      : `refuses: ${String(error)}`;
   }
 }
 
+/** This database: Ada knows Bo. */
 async function seed(store: IntegrationStore): Promise<void> {
   const ada = await store.nodes.Person.create({ name: "Ada" });
   const bo = await store.nodes.Person.create({ name: "Bo" });
   await store.edges.knows.create(ada, bo, { since: "2020" });
+}
+
+/** The other database: different rows, so whose rows came back is visible. */
+async function seedOther(
+  store: Awaited<ReturnType<typeof createStoreWithSchema>>[0],
+): Promise<void> {
+  const typed = store as unknown as IntegrationStore;
+  const cy = await typed.nodes.Person.create({ name: "Cy" });
+  const di = await typed.nodes.Person.create({ name: "Di" });
+  const ed = await typed.nodes.Person.create({ name: "Ed" });
+  await typed.edges.knows.create(cy, di, { since: "2021" });
+  await typed.edges.knows.create(di, ed, { since: "2022" });
+}
+
+/** A transaction handle kept past the callback that received it. */
+async function retainedHandle<T>(
+  open: (keep: (handle: T) => void) => Promise<unknown>,
+): Promise<T> {
+  const kept: T[] = [];
+  await open((handle) => kept.push(handle));
+  return requireDefined(kept[0]);
+}
+
+/**
+ * A transaction backend that `createSqlBackend` did not build: a caller's
+ * own object over the transaction's members. The library knows nothing
+ * about its identity.
+ */
+function callerBuiltTransaction(
+  transaction: TransactionBackend,
+): TransactionBackend {
+  return new Proxy(transaction, {});
+}
+
+/**
+ * What a read does on a transaction that has ended, as the error class and
+ * its cause rather than the statement text, which differs per terminal.
+ */
+async function observeEnded(
+  run: () => Promise<unknown>,
+  expected: unknown,
+): Promise<string> {
+  try {
+    const result = await run();
+    return JSON.stringify(result) === JSON.stringify(expected) ?
+        "ok"
+      : `returned ${JSON.stringify(result)}`;
+  } catch (error) {
+    if (!(error instanceof Error)) return `refuses: ${String(error)}`;
+    const cause = error.cause;
+    return cause instanceof Error ?
+        `refuses: ${error.name}, cause ${cause.name}: ${cause.message}`
+      : `refuses: ${error.name}`;
+  }
+}
+
+/**
+ * What a select does on a transaction that has ended, per driver: the
+ * shared expectation of every terminal in that cell.
+ */
+function endedTransactionOutcome(context: IntegrationTestContext): string {
+  switch (context.driver) {
+    // The handle reads through the connection it was opened on.
+    case "better-sqlite3": {
+      return "ok";
+    }
+    case "libsql": {
+      return "refuses: Error, cause LibsqlError: TRANSACTION_CLOSED: The transaction is closed";
+    }
+    case "pglite":
+    case "node-postgres":
+    case "postgres-js": {
+      return "refuses: TransactionClosedError";
+    }
+  }
 }
 
 export function registerReadEntryPointIntegrationTests(
@@ -174,48 +262,147 @@ export function registerReadEntryPointIntegrationTests(
       await seed(context.getStore());
     });
 
-    it("a read built on the Store returns execute()'s result through every entry point", async () => {
+    it("a read built on the Store has the select's outcome on every target it is handed", async () => {
       const store = context.getStore();
       const backend = context.getBackend();
       const embeds = store.backend.capabilities.windowFunctions;
+      const otherBackend = await context.createIsolatedBackend();
+      const [otherStore] = await createStoreWithSchema(
+        integrationTestGraph,
+        otherBackend,
+      );
+      await seedOther(otherStore);
       const reads = targetableReads(store);
+      const otherReads = targetableReads(otherStore);
+      const schemaWriteTransaction = backend.schemaWriteTransaction;
+
+      const cells: Readonly<Record<string, Cell>> = {
+        "store.batch": {
+          run: (read) =>
+            store
+              .batch(read as BatchableQuery, read as BatchableQuery)
+              .then(([first]) => first),
+          rows: "this database",
+        },
+        "executeOn(root)": {
+          run: (read) => read.executeOn(backend),
+          rows: "this database",
+        },
+        "executeOn(engine transaction)": {
+          run: (read) =>
+            backend.transaction((transaction) => read.executeOn(transaction)),
+          rows: "this database",
+        },
+        "executeOn(Store transaction)": {
+          run: (read) =>
+            store.transaction((tx) =>
+              read.executeOn(tx[TRANSACTION_RUNTIME].backend),
+            ),
+          rows: "this database",
+        },
+        ...(schemaWriteTransaction !== undefined && {
+          "executeOn(schema-write transaction)": {
+            run: (read) =>
+              schemaWriteTransaction(integrationTestGraph.id, (transaction) =>
+                read.executeOn(transaction),
+              ),
+            rows: "this database",
+          },
+        }),
+        "executeOn(caller-built transaction backend)": {
+          run: (read) =>
+            backend.transaction((transaction) =>
+              read.executeOn(callerBuiltTransaction(transaction)),
+            ),
+          rows: "this database",
+        },
+        "store.batchOnce": {
+          run: (read) =>
+            store
+              .batchOnce(() => [read as never])
+              .then(([first]: readonly unknown[]) => first),
+          rows: "this database",
+          embedsOnly: true,
+        },
+        // The caller owns the target: another database's is not detected.
+        "executeOn(other database)": {
+          run: (read) => read.executeOn(otherBackend),
+          rows: "other database",
+        },
+        "executeOn(other database's transaction)": {
+          run: (read) =>
+            otherBackend.transaction((transaction) =>
+              read.executeOn(transaction),
+            ),
+          rows: "other database",
+        },
+        "executeOn(other database's transaction, adopted here)": {
+          run: (read) =>
+            otherBackend.transactionWithNative((_transaction, native) =>
+              read.executeOn(backend.adoptTransaction(native as never)),
+            ),
+          rows: "other database",
+        },
+        "store.batch, built on the other database": {
+          run: (_read, name) => {
+            const read = requireDefined(otherReads[name]);
+            return store
+              .batch(read as BatchableQuery, read as BatchableQuery)
+              .then(([first]) => first);
+          },
+          rows: "this database",
+          builtOn: "other database",
+        },
+        "executeOn(root), built on the other database": {
+          run: (_read, name) =>
+            requireDefined(otherReads[name]).executeOn(backend),
+          rows: "this database",
+          builtOn: "other database",
+        },
+      };
 
       const observed: Record<string, Record<string, string>> = {};
       const expected: Record<string, Record<string, string>> = {};
       for (const [name, read] of Object.entries(reads)) {
-        const result = await read.execute();
-        const cells: Record<string, () => Promise<unknown>> = {
-          "store.batch": () =>
-            store
-              .batch(read as BatchableQuery, read as BatchableQuery)
-              .then(([first]) => first),
-          "executeOn(root)": () => read.executeOn(backend),
-          "executeOn(engine transaction)": () =>
-            backend.transaction((transaction) => read.executeOn(transaction)),
-          "executeOn(Store transaction)": () =>
-            store.transaction((tx) =>
-              read.executeOn(tx[TRANSACTION_RUNTIME].backend),
-            ),
-          ...(embeds &&
-            read.compileOneStatementBatchItem !== undefined && {
-              "store.batchOnce": () =>
-                store
-                  .batchOnce(() => [read as never])
-                  .then(([first]: readonly unknown[]) => first),
-            }),
+        const results = {
+          "this database": await read.execute(),
+          "other database": await requireDefined(otherReads[name]).execute(),
         };
         observed[name] = {};
         expected[name] = {};
-        for (const [entry, run] of Object.entries(cells)) {
-          observed[name][entry] = await observe(run, result);
+        for (const [entry, cell] of Object.entries(cells)) {
+          if (
+            cell.embedsOnly === true &&
+            (!embeds || read.compileOneStatementBatchItem === undefined)
+          )
+            continue;
+          observed[name][entry] = await observe(
+            () => cell.run(read, name),
+            results[cell.rows],
+          );
           expected[name][entry] = "ok";
         }
+        // A transaction handle used after its callback returned.
+        const ended = await retainedHandle<TransactionBackend>((keep) =>
+          backend.transaction((transaction) => {
+            keep(transaction);
+            return Promise.resolve();
+          }),
+        );
+        observed[name]["executeOn(engine transaction, after its callback)"] =
+          await observeEnded(
+            () => read.executeOn(ended),
+            results["this database"],
+          );
+        expected[name]["executeOn(engine transaction, after its callback)"] =
+          endedTransactionOutcome(context);
       }
       expect(observed).toEqual(expected);
     });
 
-    it("a read built inside store.transaction() returns the root execute()'s result through every entry point", async () => {
+    it("a read built inside store.transaction() has the select's outcome in it and after it ends", async () => {
       const store = context.getStore();
+      const backend = context.getBackend();
       const embeds = store.backend.capabilities.windowFunctions;
       const rootResults = new Map<string, unknown>();
       const storeReads = targetableReads(store);
@@ -226,8 +413,15 @@ export function registerReadEntryPointIntegrationTests(
 
       const observed: Record<string, Record<string, string>> = {};
       const expected: Record<string, Record<string, string>> = {};
+      const kept: {
+        reads?: Readonly<Record<string, TargetableRead>>;
+        terminals?: Readonly<Record<string, () => Promise<unknown>>>;
+      } = {};
       await store.transaction(async (tx) => {
-        for (const [name, read] of Object.entries(targetableReads(tx))) {
+        const reads = targetableReads(tx);
+        kept.reads = reads;
+        kept.terminals = terminalReads(tx);
+        for (const [name, read] of Object.entries(reads)) {
           const result = rootResults.get(name);
           const cells: Record<string, () => Promise<unknown>> = {
             execute: () => read.execute(),
@@ -259,7 +453,7 @@ export function registerReadEntryPointIntegrationTests(
               undefined,
             );
             requireDefined(expected[name])["tx.batchOnce, built on the Store"] =
-              `refuses: ${BATCH_ONCE_REBIND_REFUSAL}`;
+              `refuses: ConfigurationError: ${BATCH_ONCE_REBIND_REFUSAL}`;
           }
         for (const [name, run] of Object.entries(terminalReads(tx))) {
           observed[name] = {
@@ -268,99 +462,40 @@ export function registerReadEntryPointIntegrationTests(
           expected[name] = { execute: "ok" };
         }
       });
-      expect(observed).toEqual(expected);
-    });
 
-    it("a relation-backed read built against a different database is refused before any statement", async () => {
-      const store = context.getStore();
-      const backend = context.getBackend();
-      const otherBackend = await context.createIsolatedBackend();
-      // Building a query sends nothing, so the other database needs no tables.
-      const otherStore = createStore(integrationTestGraph, otherBackend);
-      const foreign: Readonly<Record<string, TargetableRead>> = {
-        aggregate: otherStore
-          .query()
-          .from("Person", "p")
-          .aggregate({ people: count("p") }),
-        relation: otherStore
-          .query()
-          .from("Person", "p")
-          .project((ctx) => ({ name: ctx.p.name }))
-          .asRelation(),
-      };
-      const own = store
-        .query()
-        .from("Person", "p")
-        .aggregate({ people: count("p") });
-      const statements: string[] = [];
-      const hooked = await context.createStore(integrationTestGraph, {
-        hooks: {
-          onQueryStart: (event) => {
-            statements.push(event.sql);
-          },
-        },
-      });
-
-      const observed: Record<string, string> = {};
-      for (const [name, read] of Object.entries(foreign)) {
-        observed[`foreign ${name} executeOn(root)`] = await observe(
+      // After the transaction ends: its own execute() meets the closed
+      // transaction as its driver makes it, and a target handed to it runs.
+      for (const [name, read] of Object.entries(requireDefined(kept.reads))) {
+        const result = rootResults.get(name);
+        const cells = requireDefined(observed[name]);
+        const expectedCells = requireDefined(expected[name]);
+        cells["execute, after it ends"] = await observeEnded(
+          () => read.execute(),
+          result,
+        );
+        expectedCells["execute, after it ends"] =
+          endedTransactionOutcome(context);
+        cells["executeOn(root), after it ends"] = await observe(
           () => read.executeOn(backend),
-          undefined,
+          result,
         );
-        observed[`foreign ${name} executeOn(engine transaction)`] =
-          await observe(
-            () =>
-              backend.transaction((transaction) => read.executeOn(transaction)),
-            undefined,
-          );
-        observed[`foreign ${name} in store.batch`] = await observe(
-          () => hooked.batch(read as BatchableQuery, read as BatchableQuery),
-          undefined,
+        expectedCells["executeOn(root), after it ends"] = "ok";
+        cells["executeOn(engine transaction), after it ends"] = await observe(
+          () =>
+            backend.transaction((transaction) => read.executeOn(transaction)),
+          result,
         );
+        expectedCells["executeOn(engine transaction), after it ends"] = "ok";
       }
-      observed["own aggregate executeOn(other engine transaction)"] =
-        await observe(
-          () =>
-            otherBackend.transaction((transaction) =>
-              own.executeOn(transaction),
-            ),
-          undefined,
-        );
-      // A read built inside a transaction does not run outside it.
-      let escaped: TargetableRead | undefined;
-      await store.transaction((tx) => {
-        escaped = tx
-          .query()
-          .from("Person", "p")
-          .aggregate({ people: count("p") });
-        return Promise.resolve();
-      });
-      const escapedRead = escaped;
-      if (escapedRead === undefined) throw new Error("no escaped read");
-      observed["transaction aggregate executeOn(root)"] = await observe(
-        () => escapedRead.executeOn(backend),
-        undefined,
-      );
-      observed["transaction aggregate executeOn(engine transaction)"] =
-        await observe(
-          () =>
-            backend.transaction((transaction) =>
-              escapedRead.executeOn(transaction),
-            ),
-          undefined,
-        );
-
-      expect(observed).toEqual(
-        Object.fromEntries(
-          Object.keys(observed).map((cell) => [
-            cell,
-            `refuses: ${TARGET_REFUSAL}`,
-          ]),
-        ),
-      );
-      // The hooked batch opened its transaction and refused before the
-      // first read's statement.
-      expect(statements).toEqual([]);
+      for (const [name, run] of Object.entries(
+        requireDefined(kept.terminals),
+      )) {
+        requireDefined(observed[name])["execute, after it ends"] =
+          await observeEnded(run, rootResults.get(name));
+        requireDefined(expected[name])["execute, after it ends"] =
+          endedTransactionOutcome(context);
+      }
+      expect(observed).toEqual(expected);
     });
   });
 }
