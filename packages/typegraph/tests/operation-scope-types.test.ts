@@ -48,11 +48,22 @@ type NarrowedTransactionBackend = TransactionBackend &
  */
 function fabricateSpecialisations(
   transaction: StoreTransactionBackend,
+  engineTransaction: TransactionBackend,
   session: TransactionSession,
 ) {
+  // The first review's second edit: `never` names no engine type, and a
+  // session of it would be assignable to every specialised session.
+  const schemaWrite: TransactionSession<SchemaWriteTransactionBackend> =
+    // @ts-expect-error -- `never` is a specialisation, not the ordinary transaction
+    openTransactionSession<never>(transaction);
   return [
+    schemaWrite,
     // @ts-expect-error -- the pooled backend's `transaction` is not this transaction's
     openTransactionSession<GraphBackend>(transaction),
+    // @ts-expect-error -- nor is it a raw engine transaction's, an adopted one's included
+    openTransactionSession<GraphBackend>(engineTransaction),
+    // @ts-expect-error -- `never` grants nothing over a raw engine transaction either
+    openTransactionSession<never>(engineTransaction),
     // @ts-expect-error -- a narrowed member is a specialisation too
     openTransactionSession<NarrowedTransactionBackend>(transaction),
     // @ts-expect-error -- only its boundary mint grants the schema-write transaction
@@ -166,6 +177,12 @@ describe("a specialised Store transaction", () => {
     >();
     expectTypeOf<StoreTransactionBackend>().not.toExtend<
       StoreTransactionBackend<NarrowedTransactionBackend>
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<never>
+    >();
+    expectTypeOf<TransactionBackend>().not.toExtend<
+      StoreTransactionBackend<never>
     >();
     expectTypeOf<OperationBackend>().not.toExtend<
       OperationScoped<GraphBackend>
