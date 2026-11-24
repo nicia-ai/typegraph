@@ -26,9 +26,7 @@ import {
 import { IdentityReplayError, ValidationError } from "../src/errors";
 import {
   IDENTITY_REPLAY_MAX_LIMIT,
-  identityReplay,
   identityReplayWalkIncompleteError,
-  identityTransitionsOf,
 } from "../src/identity/replay";
 import { pruneIdentityTransitionsForContext } from "../src/identity/transition-log";
 import type {
@@ -40,6 +38,11 @@ import { exportGraph, importGraph } from "../src/interchange";
 import { storeRuntime } from "../src/store/runtime-port";
 import { nowIso } from "../src/utils/date";
 import { requireDefined } from "../src/utils/presence";
+import {
+  replayAt,
+  rootIdentityCallContext,
+  transitionsOfAt,
+} from "./helpers/identity-call";
 import { truncatedBeforeOf } from "./identity-history-completeness";
 import { createTestBackend } from "./test-utils";
 
@@ -71,12 +74,12 @@ describe("identity replay", () => {
       createTestBackend(),
       { history: false },
     );
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
+    await expect(replayAt(ctx, { kind: "Person", id: "a" })).rejects.toThrow(
+      IdentityReplayError,
+    );
     await expect(
-      identityReplay(ctx, { kind: "Person", id: "a" }),
-    ).rejects.toThrow(IdentityReplayError);
-    await expect(
-      identityReplay(ctx, { kind: "Person", id: "a" }),
+      replayAt(ctx, { kind: "Person", id: "a" }),
     ).rejects.toMatchObject({
       message: "replay requires the store to be opened with history: true.",
       details: {
@@ -86,7 +89,7 @@ describe("identity replay", () => {
     });
     // The prune shares the refusal, under its own name rather than replay's.
     await expect(
-      pruneIdentityTransitionsForContext(ctx, {
+      pruneIdentityTransitionsForContext(ctx, storeRuntime(store).backend, {
         beforeRecorded: createRecordedInstant(1, nowIso()),
       }),
     ).rejects.toMatchObject({
@@ -101,9 +104,9 @@ describe("identity replay", () => {
 
   it("rejects a limit above IDENTITY_REPLAY_MAX_LIMIT", async () => {
     const store = await buildAbcStore();
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
     await expect(
-      identityReplay(
+      replayAt(
         ctx,
         { kind: "Person", id: "a" },
         {
@@ -126,25 +129,23 @@ describe("identity replay", () => {
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
     await store.identity.assertSame(a, b);
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
 
     for (const limit of [0, -1, 0.5, 1.5]) {
-      await expect(identityTransitionsOf(ctx, a, { limit })).rejects.toThrow(
+      await expect(transitionsOfAt(ctx, a, { limit })).rejects.toThrow(
         ValidationError,
       );
-      await expect(identityReplay(ctx, a, { limit })).rejects.toThrow(
+      await expect(replayAt(ctx, a, { limit })).rejects.toThrow(
         ValidationError,
       );
     }
-    await expect(
-      identityTransitionsOf(ctx, a, { limit: 0 }),
-    ).rejects.toMatchObject({
+    await expect(transitionsOfAt(ctx, a, { limit: 0 })).rejects.toMatchObject({
       details: { issues: [{ path: "limit", message: "Got 0." }] },
     });
 
     // The smallest ACCEPTED page still moves: one boundary, and a cursor
     // pointing past it.
-    const page = await identityTransitionsOf(ctx, a, { limit: 1 });
+    const page = await transitionsOfAt(ctx, a, { limit: 1 });
     expect(page.transitions.length).toBeGreaterThan(0);
   });
 
@@ -163,8 +164,8 @@ describe("identity replay", () => {
     await store.identity.retractAssertion(same1.assertion.id);
     await store.identity.assertSame(a, b);
 
-    const ctx = storeRuntime(store).identityContext();
-    const replay = await identityReplay(ctx, a);
+    const ctx = rootIdentityCallContext(store);
+    const replay = await replayAt(ctx, a);
 
     // The exact cause sequence, not merely "contains" — merge (assert a-b),
     // merge (assert b-c, absorbing a transitively), split (retract a-b, in
@@ -218,9 +219,9 @@ describe("identity replay", () => {
     const b = { kind: "Person" as const, id: "b" };
     await store.identity.assertSame(a, b);
 
-    const ctx = storeRuntime(store).identityContext();
-    const { transitions } = await identityTransitionsOf(ctx, a);
-    const replay = await identityReplay(ctx, a);
+    const ctx = rootIdentityCallContext(store);
+    const { transitions } = await transitionsOfAt(ctx, a);
+    const replay = await replayAt(ctx, a);
     expect(replay.steps.map((step) => step.transition.transitionId)).toEqual(
       transitions.map((transition) => transition.transitionId),
     );
@@ -253,14 +254,14 @@ describe("identity replay", () => {
     // the walk from `b` now seeds on `a`.
     await store.identity.assertSame(a, b);
 
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
     const firstMergeRevision = recordedInstantRevision(throughFirstMerge);
 
-    const { transitions: windowed } = await identityTransitionsOf(ctx, b, {
+    const { transitions: windowed } = await transitionsOfAt(ctx, b, {
       toRecorded: throughFirstMerge,
     });
     expect(windowed.length).toBeGreaterThan(0);
-    const windowedReplay = await identityReplay(ctx, b, {
+    const windowedReplay = await replayAt(ctx, b, {
       toRecorded: throughFirstMerge,
     });
     expect(windowedReplay.steps.length).toBeGreaterThan(0);
@@ -272,7 +273,7 @@ describe("identity replay", () => {
         recordedInstantRevision(asRecordedInstant(transition.recorded)),
       ).toBeLessThanOrEqual(firstMergeRevision);
     }
-    const { transitions: unbounded } = await identityTransitionsOf(ctx, b);
+    const { transitions: unbounded } = await transitionsOfAt(ctx, b);
     expect(unbounded.length).toBeGreaterThan(windowed.length);
   });
 
@@ -290,9 +291,9 @@ describe("identity replay", () => {
     await store.identity.retractAssertion(same1.assertion.id);
     await store.identity.assertSame(a, b);
 
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
     const { transitions: whole, nextCursor: wholeNextCursor } =
-      await identityTransitionsOf(ctx, a);
+      await transitionsOfAt(ctx, a);
     expect(wholeNextCursor).toBeUndefined();
     const wholeBoundaries = new Set(
       whole.map((transition) => transition.recorded),
@@ -302,7 +303,7 @@ describe("identity replay", () => {
     const paged: string[] = [];
     let cursor: TransitionPageCursor | undefined;
     for (let page = 0; page <= wholeBoundaries.size; page += 1) {
-      const result = await identityTransitionsOf(ctx, a, {
+      const result = await transitionsOfAt(ctx, a, {
         limit: 1,
         ...(cursor === undefined ? {} : { cursor }),
       });
@@ -322,8 +323,8 @@ describe("identity replay", () => {
 
     // `replay` pages on the identical boundaries — the two must agree about
     // where a page ended, or an audit view pairing them would drift.
-    const firstReplayPage = await identityReplay(ctx, a, { limit: 1 });
-    const firstTransitionPage = await identityTransitionsOf(ctx, a, {
+    const firstReplayPage = await replayAt(ctx, a, { limit: 1 });
+    const firstTransitionPage = await transitionsOfAt(ctx, a, {
       limit: 1,
     });
     expect(firstReplayPage.nextCursor).toBe(firstTransitionPage.nextCursor);
@@ -356,8 +357,8 @@ describe("identity replay", () => {
     // discoverability the exhaustive-diff design relies on (transition-log.ts).
     await store.identity.retractAssertion(same1.assertion.id);
 
-    const ctx = storeRuntime(store).identityContext();
-    const before = await identityReplay(ctx, a);
+    const ctx = rootIdentityCallContext(store);
+    const before = await replayAt(ctx, a);
     expect(before.steps.length).toBeGreaterThanOrEqual(3);
 
     // Hand-corrupt every transition row's class_kind/class_id to name `a`
@@ -374,7 +375,7 @@ describe("identity replay", () => {
       drizzleSql`UPDATE typegraph_identity_transitions SET class_kind = 'Person', class_id = 'a'`,
     );
 
-    const after = await identityReplay(ctx, a);
+    const after = await replayAt(ctx, a);
     expect(after.steps.length).toBe(before.steps.length);
     for (const [index, step] of after.steps.entries()) {
       const originalStep = before.steps[index];
@@ -397,7 +398,7 @@ describe("identity replay", () => {
     const a = { kind: "Person" as const, id: "a" };
     const b = { kind: "Person" as const, id: "b" };
     await store.identity.assertSame(a, b);
-    const ctx = storeRuntime(store).identityContext();
+    const ctx = rootIdentityCallContext(store);
     const beforePruneRecorded = await store.recordedNow();
     if (beforePruneRecorded === undefined) {
       throw new Error("expected a recorded instant");
@@ -410,7 +411,7 @@ describe("identity replay", () => {
     if (watermarkRecorded === undefined) {
       throw new Error("expected a recorded instant");
     }
-    await pruneIdentityTransitionsForContext(ctx, {
+    await pruneIdentityTransitionsForContext(ctx, storeRuntime(store).backend, {
       beforeRecorded: watermarkRecorded,
     });
 
@@ -418,17 +419,17 @@ describe("identity replay", () => {
     // is named as the instant the prune was made at — the prune's own wall
     // clock is a coordinate no commit carried — so it reads back as a window
     // bound that leaves the page whole.
-    const partial = await identityReplay(ctx, a);
+    const partial = await replayAt(ctx, a);
     console.info("pruned replay completeness", partial.completeness);
     expect(truncatedBeforeOf(partial)).toBe(watermarkRecorded);
-    const fromCut = await identityReplay(ctx, a, {
+    const fromCut = await replayAt(ctx, a, {
       fromRecorded: requireDefined(truncatedBeforeOf(partial)),
     });
     expect(fromCut.completeness).toEqual({ status: "complete" });
 
     // Bounded entirely below the watermark: refused, naming the same cut.
     await expect(
-      identityReplay(ctx, a, {
+      replayAt(ctx, a, {
         fromRecorded: beforePruneRecorded,
         toRecorded: beforePruneRecorded,
       }),
@@ -445,7 +446,7 @@ describe("identity replay", () => {
     // `toRecorded`), `requestedFrom` must be ABSENT — never fabricated from
     // `toRecorded`, which is the caller's range END, not its start.
     await expect(
-      identityReplay(ctx, a, { toRecorded: beforePruneRecorded }),
+      replayAt(ctx, a, { toRecorded: beforePruneRecorded }),
     ).rejects.toSatisfy((error: unknown) => {
       if (!(error instanceof IdentityReplayError)) return false;
       if (error.details.code !== "IDENTITY_REPLAY_HISTORY_TRUNCATED") {

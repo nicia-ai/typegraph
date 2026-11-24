@@ -138,7 +138,8 @@ import { z } from "zod";
 
 import type { SchemaWriteTransactionBackend } from "../backend/types";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
@@ -381,7 +382,11 @@ async function claimSidecarOwnership(
     async (
       transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
     ) => {
-      const tx = legacyTransactionOperation(transaction);
+      // The claim opened this transaction: its session opens here, and the
+      // claim is its one operation.
+      const tx = enterOperation(
+        openTransactionSession<SchemaWriteTransactionBackend>(transaction),
+      ).backend;
       // Before the re-inspection, not after it: the drain is only worth anything
       // if no row can land between the read it authorizes and this transaction's
       // commit.

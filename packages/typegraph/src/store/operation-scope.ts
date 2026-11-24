@@ -19,13 +19,7 @@
  * this binding holds it, handed down explicitly (never looked up from the
  * object a caller happens to hold). A public node or edge write made inside
  * the transaction enters its own {@link Operation} from that session, and the
- * write executor reads the session's state off the operation it was handed.
- * Where an engine member opens a schema-write or schema-commit transaction
- * and hands the Store its callback, or the Store adopts a caller's
- * transaction to evolve its schema, the session is opened there, over that
- * transaction, and the schema work runs under one operation of it; a
- * composed preflight step takes that operation's handle rather than entering
- * another. `tests/operation-scope-ratchet.test.ts` also scans
+ * write executor reads the session's state off the operation it was handed. `tests/operation-scope-ratchet.test.ts` also scans
  * Store code for any value still typed as the engine transaction: the
  * declarations whose type the public API spells are listed there, and
  * nothing else may appear.
@@ -62,6 +56,7 @@ import type {
   TransactionBackend,
 } from "../backend/types";
 import type { GraphWriteLock } from "./recorded-capture/clock";
+import { TRANSACTION_RUNTIME } from "./types";
 
 // Declared only and never exported: the brand cannot be spelled outside this
 // module. The ratchet test asserts both properties.
@@ -109,7 +104,7 @@ export type StatementBackend = GraphBackend | OperationBackend;
  * ({@link SchemaWriteTransactionBackend}) or the schema-commit preflight
  * target ({@link SchemaCommitPreflightBackend}). A mint hands back a handle to
  * THAT type, so a specialisation is a privilege: it reaches DDL. It is
- * therefore recorded in a REQUIRED phantom ({@link EngineRecordOf}) under a
+ * therefore recorded in a REQUIRED phantom ({@link EngineEvidence}) under a
  * module-private key that no value has and no other module can spell. No
  * engine transaction is assignable to a specialised form, so annotating an
  * ordinary transaction callback with one is a type error. The only callbacks
@@ -122,7 +117,7 @@ export type StatementBackend = GraphBackend | OperationBackend;
  */
 export type StoreTransactionBackend<
   Engine extends TransactionBackend = TransactionBackend,
-> = Readonly<BackendIdentity & SqlCompilationBackend & EngineRecordOf<Engine>>;
+> = Readonly<BackendIdentity & SqlCompilationBackend & EngineEvidence<Engine>>;
 
 /**
  * The phantom a specialised {@link StoreTransactionBackend}, or a handle to a
@@ -146,6 +141,25 @@ type EngineRecordOf<T> =
       unknown
     : EngineRecord<T>
   : unknown;
+
+/**
+ * The {@link EngineRecord} a Store transaction must carry to be named as
+ * `Engine`: none for the plain {@link TransactionBackend} alone, and one for
+ * every other engine type — one with a member the plain transaction lacks,
+ * one that only narrows a member, and the pooled root's type, whose
+ * `transaction` member no transaction has. Every session and operation
+ * specialisation is opened from a Store transaction of its engine type
+ * ({@link openTransactionSession}), so an engine type exempt here could be
+ * named onto an ordinary transaction through that mint's type argument.
+ * Stricter than {@link EngineRecordOf}, which describes a handle, where the
+ * root (or a root-or-handle union) is honestly what the value is.
+ */
+type EngineEvidence<Engine extends TransactionBackend> =
+  [TransactionBackend] extends [Engine] ?
+    [Exclude<keyof Engine, keyof TransactionBackend>] extends [never] ?
+      unknown
+    : EngineRecord<Engine>
+  : EngineRecord<Engine>;
 
 /**
  * TRANSITIONAL: the handle for Store code not yet converted to mint one
@@ -211,15 +225,6 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  * write locks its frames hold or are acquiring
  * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
  * its transaction; an operation entered from it does.
- *
- * `Engine` is the engine transaction the session was opened over. A session
- * opened over a specialised Store transaction (the schema-write transaction
- * or schema-commit preflight target an engine member hands its callback, an
- * adopted schema-write transaction) keeps that specialisation, so an
- * operation entered from it hands out a handle that still reaches the
- * specialised members. Only a specialised {@link StoreTransactionBackend}
- * opens a specialised session, and only this module's boundary mints hand one
- * out, so the privilege is not widened.
  */
 export type TransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
@@ -266,9 +271,13 @@ export type EntryScope = GraphBackend | TransactionSession;
 
 /**
  * The mint where a Store opens or joins a transaction: a new session for
- * `transaction` as this binding holds it. A specialised Store transaction
- * opens a session of that specialisation; any other transaction, the plain
- * one.
+ * `transaction` as this binding holds it.
+ *
+ * `Engine` names a specialised engine transaction (the schema-write
+ * transaction, say) when `transaction` is the Store form of one; the
+ * session's operations then hand out a handle to that type. Only the boundary
+ * mints below produce such a Store form, so naming the specialisation here
+ * grants nothing the caller did not already hold.
  */
 export function openTransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
@@ -283,7 +292,7 @@ export function openTransactionSession<
 
 /**
  * The mint at a public Store member: the root backend as itself, or a new
- * {@link Operation} of the session, of the session's specialisation.
+ * {@link Operation} of the session.
  */
 export function enterOperation<Engine extends TransactionBackend>(
   scope: TransactionSession<Engine>,
@@ -317,6 +326,78 @@ export function enterTargetOperation(
   return "transaction" in target ? target : (
       enterOperation(openTransactionSession(target))
     );
+}
+
+// ---------------------------------------------------------------------------
+// The session a transaction context carries
+// ---------------------------------------------------------------------------
+
+// Module-private: only `transactionRuntimeSession` puts a session on a
+// transaction context's runtime, and only `enterTransactionOperation` reads
+// one back.
+const RUNTIME_SESSION: unique symbol = Symbol("typegraph.runtimeSession");
+
+/**
+ * THE refusal of a transaction context that carries no runtime port: a
+ * context this copy of TypeGraph cannot read at all.
+ */
+export function requireTransactionRuntime<Runtime>(
+  transaction: Readonly<{ [TRANSACTION_RUNTIME]?: Runtime }>,
+): Runtime {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined) {
+    throw new TypeError(
+      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
+    );
+  }
+  return runtime;
+}
+
+/**
+ * What a transaction context's runtime carries for its session, spread into
+ * the runtime where the context is built: `session`, under a module-private
+ * key. The runtime's public type names one `backend` and is spelled by the
+ * API report, so the session travels beside it the way a query's operation
+ * source travels beside its configuration; nothing is looked up from the
+ * object.
+ */
+export function transactionRuntimeSession(
+  session: TransactionSession,
+): Readonly<{ [RUNTIME_SESSION]: TransactionSession }> {
+  return { [RUNTIME_SESSION]: session };
+}
+
+/**
+ * A transaction context as {@link enterTransactionOperation} reads it: its
+ * runtime's transaction, in the Store form, and the session the runtime
+ * carries when this module's carrier put one there.
+ */
+type SessionCarryingContext = Readonly<{
+  [TRANSACTION_RUNTIME]?: Readonly<{
+    backend: StoreTransactionBackend;
+    [RUNTIME_SESSION]?: TransactionSession;
+  }>;
+}>;
+
+/**
+ * The mint where a privileged internal holding a transaction context
+ * (provenance, a working copy's durable operation) enters: a new
+ * {@link Operation} of the session the context's runtime carries. Enter it
+ * once per public call, after the call's refusals, and hand it to everything
+ * the call itself sends; a collection or runtime member the call invokes
+ * enters its own.
+ *
+ * A runtime without a session is not one this copy of TypeGraph built: its
+ * transaction joins as a binding of its own, as a transaction arriving
+ * through {@link enterTargetOperation} does.
+ */
+export function enterTransactionOperation(
+  transaction: SessionCarryingContext,
+): Operation {
+  const runtime = requireTransactionRuntime(transaction);
+  return enterOperation(
+    runtime[RUNTIME_SESSION] ?? openTransactionSession(runtime.backend),
+  );
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */

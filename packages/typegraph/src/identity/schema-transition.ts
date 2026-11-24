@@ -24,11 +24,12 @@ import {
   enterOperation,
   openTransactionSession,
   type OperationBackend,
+  type OperationEntry,
   type OperationScoped,
-  type StatementBackend,
   storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
+import { legacyWriteEntry } from "../store/operations/write-transaction";
 import {
   createRecordedTransactionScope,
   graphCapturesRecordedHistory,
@@ -89,12 +90,13 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
  * transaction when the CREATE has to be published with the fill, the top-level
  * backend when the relation already exists and only its rows are owed.
  *
- * The full backend union rather than {@link IdentityTarget}: the rebuild opens
- * its own write frame on whatever it is handed, so it needs the top-level
- * `transaction` member to tell "open one" from "already inside one" apart.
+ * A write entry rather than {@link IdentityTarget}: the rebuild opens its own
+ * write frame on whatever it is handed, so it needs the pooled root to tell
+ * "open one" from "already inside one" apart, and the session of a
+ * transaction it is handed.
  */
 export type RecomputeDerivedRelations = (
-  target: StatementBackend,
+  entry: OperationEntry,
 ) => Promise<void>;
 
 /**
@@ -355,7 +357,10 @@ async function provisionDerivedRelations(
           (ddl) => target.executeSchemaDdl(ddl),
           identityTableDdl(tableNames),
         );
-        await ports.recompute(target);
+        // A bare handle and no session yet: the recompute joins this
+        // transaction as a binding of its own until this family's conversion
+        // opens a session where the fence's transaction opens.
+        await ports.recompute(legacyWriteEntry(target));
       },
       ownSchemaDdl(),
     ),
