@@ -343,9 +343,12 @@ export function runsEngineNativeScenarios(
 /**
  * A scripted engine-native profile over its own in-process PostgreSQL: the
  * lane's backend cannot be rebuilt with engine-owned recorded time.
+ * `revisionNow` replaces the scripted pending-revision read.
  */
 export async function createEngineNativeBackend(
   client: PGlite,
+  revisionNow: EngineRecordedTimeMembers["revisionNow"] = () =>
+    Promise.resolve(ENGINE_REVISION),
 ): Promise<AdapterBackend<unknown>> {
   await client.exec(generateVectorlessPostgresMigrationSQL());
   const profile = buildPostgresEngineProfile(drizzle(client), {
@@ -353,7 +356,7 @@ export async function createEngineNativeBackend(
   });
   const recordedTime: EngineRecordedTimeMembers = {
     source: (table) => sql.raw(`__engine_native_${table}__`),
-    revisionNow: () => Promise.resolve(ENGINE_REVISION),
+    revisionNow,
   };
   attachEngineNativeRecordedTime(profile.provisioning, recordedTime, {
     revision: () => Promise.resolve("engine-budget-r0" as EngineRevision),

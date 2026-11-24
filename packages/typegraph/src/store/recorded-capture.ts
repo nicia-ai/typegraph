@@ -112,6 +112,7 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  registeredRecordedGraphLockMemo,
   resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
@@ -385,12 +386,10 @@ export function withTransactionPreCommitHook(
 export type RecordedTransactionScope = Readonly<{
   backend: OperationBackend;
   /**
-   * Flushes capture through `target`: the operation the flush runs as, when
-   * the caller built the scope over its session's transaction rather than
-   * over that operation's handle. Defaults to the target the scope was
-   * built over.
+   * Flushes capture through the flush target bound when the scope was
+   * created (see {@link createRecordedTransactionScope}).
    */
-  flush: (target?: OperationBackend) => Promise<RecordedFlushInstants>;
+  flush: () => Promise<RecordedFlushInstants>;
 }>;
 
 function recordedCaptureSealedError(
@@ -1082,7 +1081,19 @@ export function createRecordedTransactionScope(
   // redundant seed-UPSERT. Defaults to false so an adopted (possibly deferred)
   // external transaction still seeds the lock — the safe choice.
   ownsWriteLock = false,
+  // What the flush's statements go through: `target` itself, or an operation
+  // handle of the transaction `target` is (the caller built the surface over
+  // its session's holding but flushes as its own operation). Anything else is
+  // refused here, before any statement, so a scope can never write history
+  // into a transaction other than the one whose writes it captured.
+  flushTarget: OperationBackend = target,
 ): RecordedTransactionScope {
+  if (flushTarget !== target && !isBackendDerivedFrom(flushTarget, target)) {
+    throw new ConfigurationError(
+      "A recorded-time capture scope's flush target is not of the transaction whose writes it captures.",
+      { surface: "capture-flush" },
+    );
+  }
   // Fail fast — before any write runs in the adopted/opened transaction — if
   // the transaction target cannot execute the statements capture flush needs,
   // rather than throwing mid-flush after the live write has already happened.
@@ -1095,9 +1106,7 @@ export function createRecordedTransactionScope(
   const resolvedSchema = schema ?? requireRecordedSchema(target);
   return {
     backend: createRecordedTransactionBackend(target, session, resolvedSchema),
-    async flush(
-      flushTarget: OperationBackend = target,
-    ): Promise<RecordedFlushInstants> {
+    async flush(): Promise<RecordedFlushInstants> {
       // By flush time the live write has committed within this transaction, so a
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.

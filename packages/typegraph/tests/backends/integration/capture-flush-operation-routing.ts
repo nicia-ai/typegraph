@@ -18,6 +18,7 @@
  * what the session hands out, and each statement is attributed to the
  * session of the operation whose handle carried it.
  */
+import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -27,18 +28,29 @@ import {
   defineGraph,
   defineNode,
 } from "../../../src";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../../../src/backend/advisory-lock-namespaces";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { GraphBackend } from "../../../src/backend/types";
+import { isSqlFragment, sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import * as operationScope from "../../../src/store/operation-scope";
+import * as writeTransaction from "../../../src/store/operations/write-transaction";
+import { withTransactionPreCommitHook } from "../../../src/store/recorded-capture";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
+import {
+  createEngineNativeBackend,
+  runsEngineNativeScenarios,
+} from "./transaction-statement-budget";
 
 /** One statement member call through an operation's handle. */
 type RoutedCall = Readonly<{
   session: operationScope.TransactionSession;
   member: string;
   phase: string;
+  /** The statement's SQL text and parameters, when the member carries one. */
+  text: string;
 }>;
 
 /** The statement members a recording handle records. */
@@ -50,11 +62,14 @@ const RECORDED_MEMBERS = [
   "updateNode",
   "getNode",
   "getActiveSchema",
+  "lockSchemaVersionForWrite",
 ] as const;
 
 type Routing = Readonly<{
   /** Every session an operation was entered from, in order of first entry. */
   sessions: operationScope.TransactionSession[];
+  /** The handle every operation entered handed out, in order of entry. */
+  handles: object[];
   /** The session of every operation entered, in order. */
   entered: operationScope.TransactionSession[];
   calls: RoutedCall[];
@@ -69,6 +84,7 @@ type Routing = Readonly<{
  */
 function routeOperations(): Routing {
   const sessions: operationScope.TransactionSession[] = [];
+  const handles: object[] = [];
   const entered: operationScope.TransactionSession[] = [];
   const calls: RoutedCall[] = [];
   let phase = "setup";
@@ -89,7 +105,12 @@ function routeOperations(): Routing {
       const call: unknown = transaction[member];
       if (typeof call !== "function") continue;
       overrides[member] = (...args: unknown[]): unknown => {
-        calls.push({ session, member, phase });
+        calls.push({
+          session,
+          member,
+          phase,
+          text: statementText(transaction, args),
+        });
         return Reflect.apply(call, transaction, args) as unknown;
       };
     }
@@ -97,6 +118,7 @@ function routeOperations(): Routing {
       transaction,
       overrides as Partial<GraphBackend>,
     );
+    handles.push(handle);
     const routed: object = { ...entry, backend: handle };
     return routed as operationScope.OperationEntry;
   }
@@ -105,6 +127,7 @@ function routeOperations(): Routing {
     .mockImplementation(recordingEnter);
   return {
     sessions,
+    handles,
     entered,
     calls,
     enter: (next) => {
@@ -117,14 +140,67 @@ function routeOperations(): Routing {
 }
 
 /**
- * The sessions (by order of first entry) whose operations carried a call in
- * `phase`, ascending.
+ * A statement member call's SQL text and parameters: a raw string as given, a
+ * query as the transaction compiles it, and nothing for a typed member.
  */
-function sessionsRouted(routing: Routing, phase: string): readonly number[] {
-  const calls = routing.calls.filter((call) => call.phase === phase);
+function statementText(
+  transaction: GraphBackend,
+  args: readonly unknown[],
+): string {
+  const [statement, params] = args;
+  if (typeof statement === "string") {
+    return `${statement} ${JSON.stringify(params ?? [])}`;
+  }
+  if (!isSqlFragment(statement) || transaction.compileSql === undefined) {
+    return "";
+  }
+  const compiled = transaction.compileSql(statement);
+  return `${compiled.sql} ${JSON.stringify(compiled.params)}`;
+}
+
+/** The recorded graph write lock's statement: its advisory key namespace. */
+function isGraphWriteLock(call: RoutedCall): boolean {
+  return call.text.includes(RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE);
+}
+
+/** The recorded-capture isolation check: an isolation read and no lock. */
+function isIsolationCheck(call: RoutedCall): boolean {
+  return call.text.includes("transaction_isolation") && !isGraphWriteLock(call);
+}
+
+/** The schema-version lock a schema-managed write takes. */
+function isSchemaLock(call: RoutedCall): boolean {
+  return call.member === "lockSchemaVersionForWrite";
+}
+
+/** A capture flush statement: one that writes a recorded node version. */
+function isRecordedNodeWrite(call: RoutedCall): boolean {
+  return /insert into\s+\S*recorded_nodes/i.test(call.text);
+}
+
+/**
+ * The sessions (by order of first entry) whose operations carried a call in
+ * `phase` (and, given `matching`, one it matches), ascending.
+ */
+function sessionsRouted(
+  routing: Routing,
+  phase: string,
+  matching: (call: RoutedCall) => boolean = () => true,
+): readonly number[] {
+  const calls = routing.calls.filter(
+    (call) => call.phase === phase && matching(call),
+  );
   return [
     ...new Set(calls.map((call) => routing.sessions.indexOf(call.session))),
   ].toSorted((left, right) => left - right);
+}
+
+const PRE_COMMIT_MARKER = "routed-pre-commit";
+const ENGINE_INSTANT_MARKER = "routed-engine-instant";
+
+/** A statement that carries `marker`, so its route can be picked out. */
+function markerStatement(marker: string) {
+  return asCompiledRowsSql(sql`SELECT ${marker} AS marker`);
 }
 
 const RoutedItem = defineNode("RoutedItem", {
@@ -164,11 +240,19 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           writesOfTheStoreSession: writes.map(
             (session) => session === routing.sessions[1],
           ),
+          // The overlay's isolation check, on PostgreSQL.
+          isolation: sessionsRouted(routing, "setup", isIsolationCheck),
           callback: sessionsRouted(routing, "callback"),
           flush: sessionsRouted(routing, "after callback"),
+          flushWrites: sessionsRouted(
+            routing,
+            "after callback",
+            isRecordedNodeWrite,
+          ),
           recorded: outcome.receipt.recorded !== undefined,
         }).toEqual({
           sessions: 2,
+          isolation: store.backend.dialect === "postgres" ? [0] : [],
           writesOfTheStoreSession: writes.map(() => true),
           // The write goes through its operation of the Store session, whose
           // surface the Store bound over the transaction the overlay's
@@ -177,6 +261,7 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           // The capture flush, once the callback settled, goes through the
           // overlay's own operation and nothing else.
           flush: [0],
+          flushWrites: [0],
           recorded: true,
         });
         expect(writes.length).toBeGreaterThan(0);
@@ -210,19 +295,41 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           writesOfTheSession: writes.map(
             (session) => session === routing.sessions[0],
           ),
-          // The isolation check and the schema and graph locks: statements
-          // on PostgreSQL, the writer slot on SQLite.
+          // The isolation check and the graph lock (statements on PostgreSQL,
+          // the writer slot on SQLite) and the schema lock.
           before: sessionsRouted(routing, "before callback"),
+          // The isolation check, on PostgreSQL, and the schema lock.
+          isolation: sessionsRouted(
+            routing,
+            "before callback",
+            isIsolationCheck,
+          ),
+          schemaLock: sessionsRouted(routing, "before callback", isSchemaLock),
+          // The recorded graph lock's own statement, on PostgreSQL.
+          graphLock: sessionsRouted(
+            routing,
+            "before callback",
+            isGraphWriteLock,
+          ),
           callback: sessionsRouted(routing, "callback"),
           // The capture flush.
           flush: sessionsRouted(routing, "after callback"),
+          flushWrites: sessionsRouted(
+            routing,
+            "after callback",
+            isRecordedNodeWrite,
+          ),
           recorded: outcome.receipt.recorded !== undefined,
         }).toEqual({
           sessions: 1,
           writesOfTheSession: writes.map(() => true),
-          before: backend.dialect === "postgres" ? [0] : [],
+          before: [0],
+          isolation: backend.dialect === "postgres" ? [0] : [],
+          schemaLock: [0],
+          graphLock: backend.dialect === "postgres" ? [0] : [],
           callback: [0],
           flush: [0],
+          flushWrites: [0],
           recorded: true,
         });
         expect(writes.length).toBeGreaterThan(0);
@@ -275,10 +382,20 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           sessions: routing.sessions.length,
           operations: routing.entered.length,
           write: sessionsRouted(routing, "write"),
+          isolation: sessionsRouted(routing, "write", isIsolationCheck),
+          // The flush's own statements, not only the write's.
+          flushWrites: sessionsRouted(routing, "write", isRecordedNodeWrite),
           members: [
             ...new Set(routing.calls.map((call) => call.member)),
           ].includes("insertNode"),
-        }).toEqual({ sessions: 1, operations: 1, write: [0], members: true });
+        }).toEqual({
+          sessions: 1,
+          operations: 1,
+          write: [0],
+          isolation: store.backend.dialect === "postgres" ? [0] : [],
+          flushWrites: [0],
+          members: true,
+        });
       } finally {
         routing.restore();
       }
@@ -360,6 +477,152 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         }).toEqual({ found: true, sessions: 3, everySessionRouted: true });
       } finally {
         routing.restore();
+      }
+    });
+
+    it("a store-owned transaction runs its pre-commit hook through the first operation of the session that issues it", async () => {
+      const backend = context.getBackend();
+      const [plain] = await createAdapterStoreWithSchema(
+        routedGraph("capture_routing_precommit"),
+        backend,
+      );
+      const history = await context.createHistoryStore(
+        routedGraph("capture_routing_precommit_history"),
+      );
+      const observed: unknown[] = [];
+      for (const [label, store] of [
+        ["plain", plain],
+        ["history", history],
+      ] as const) {
+        const routing = routeOperations();
+        try {
+          const options = withTransactionPreCommitHook(
+            undefined,
+            async (target) => {
+              routing.enter("pre-commit");
+              await target.execute(markerStatement(PRE_COMMIT_MARKER));
+              routing.enter("after pre-commit");
+            },
+          );
+          await store.transaction(async (tx) => {
+            await tx.nodes.RoutedItem.create({ label });
+          }, options);
+          observed.push({
+            at: label,
+            hook: sessionsRouted(routing, "pre-commit", (call) =>
+              call.text.includes(PRE_COMMIT_MARKER),
+            ),
+          });
+        } finally {
+          routing.restore();
+        }
+      }
+      // A plain Store's attempt settles the hook itself; the history Store's
+      // capture overlay claims it and fires it after its flush. Each goes
+      // through the first operation of the session that issues it.
+      expect(observed).toEqual([
+        { at: "plain", hook: [0] },
+        { at: "history", hook: [0] },
+      ]);
+    });
+
+    it("a store-owned transaction's write session issues its own statements through the first operation of its session", async () => {
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(
+        routedGraph("capture_routing_revision"),
+        backend,
+        { revisionTracking: true },
+      );
+      const routing = routeOperations();
+      // The write session keys on the surface's identity, which the routing
+      // handles do not share, so its end-of-callback revision advance cannot
+      // be observed through them here: the opener it is handed is checked
+      // instead, and `tests/write-transaction-session-opener.test.ts` shows
+      // that its own statements go through that opener.
+      const withWriteTransactionSession =
+        writeTransaction.withWriteTransactionSession;
+      const openers: unknown[] = [];
+      const spy = vi
+        .spyOn(writeTransaction, "withWriteTransactionSession")
+        .mockImplementation((target, opener, ...rest) => {
+          openers.push(opener);
+          return withWriteTransactionSession(target, opener, ...rest);
+        });
+      try {
+        await store.transaction(async (tx) => {
+          await tx.nodes.RoutedItem.create({ label: "tracked" });
+        });
+        expect({
+          sessions: routing.sessions.length,
+          openerIsTheFirstOperation: openers.map(
+            (opener) => opener === routing.handles[0],
+          ),
+        }).toEqual({ sessions: 1, openerIsTheFirstOperation: [true] });
+      } finally {
+        spy.mockRestore();
+        routing.restore();
+      }
+    });
+
+    it("an engine-native transaction reads its pending instant through the first operation of its session", async (ctx) => {
+      if (!runsEngineNativeScenarios(context)) ctx.skip();
+      const engine = await PGlite.create();
+      try {
+        const backend = await createEngineNativeBackend(
+          engine,
+          async (session) => {
+            await session.execute(markerStatement(ENGINE_INSTANT_MARKER));
+            return {
+              revision: "engine-routing-r1",
+              recordedAt: "2026-01-01T00:00:00.000Z",
+            };
+          },
+        );
+        const [store] = await createAdapterStoreWithSchema(
+          routedGraph("capture_routing_engine_native"),
+          backend,
+          { history: true },
+        );
+        const observed: unknown[] = [];
+        for (const [label, run] of [
+          [
+            "store-owned",
+            () =>
+              store.transactionWithReceipt(async (tx) => {
+                await tx.nodes.RoutedItem.create({ label: "owned" });
+              }),
+          ],
+          [
+            "adopted",
+            () =>
+              backend.transactionWithNative((_tx, native) =>
+                store.withRecordedTransaction(native, async (tx) => {
+                  await tx.nodes.RoutedItem.create({ label: "adopted" });
+                }),
+              ),
+          ],
+        ] as const) {
+          const routing = routeOperations();
+          try {
+            routing.enter("transaction");
+            const outcome = await run();
+            observed.push({
+              at: label,
+              recorded: outcome.receipt.recorded !== undefined,
+              instant: sessionsRouted(routing, "transaction", (call) =>
+                call.text.includes(ENGINE_INSTANT_MARKER),
+              ),
+            });
+          } finally {
+            routing.restore();
+          }
+        }
+        expect(observed).toEqual([
+          { at: "store-owned", recorded: true, instant: [0] },
+          { at: "adopted", recorded: true, instant: [0] },
+        ]);
+      } finally {
+        await engine.close();
       }
     });
   });

@@ -470,6 +470,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  registeredRecordedGraphLockMemo,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   resolveLineage,
@@ -5112,8 +5113,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // operation of it; the surface every later operation hands out is the
     // capture, witness and execution-lifetime decoration built over the
     // transaction the session holds. The recorded graph lock is taken
-    // through that capture surface while it is bound, as before: the
-    // surface's graph-lock memo keys on it.
+    // through the same operation, into the capture surface's graph-lock memo.
     const {
       session,
       binding: {
@@ -5140,12 +5140,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // A uniform `flush → RecordedFlushInstants` shape on both branches
       // keeps the outcome-building path identical; the non-history branch has
       // no recorded rows to close, so it flushes to an empty instant map.
+      // The capture surface decorates the session's holding; its flush is
+      // bound here to this operation.
       const scope =
         this.#captureEnabled ?
           createRecordedTransactionScope(
             held,
             this.#batchPointRead,
             this.#sqlSchema(),
+            false,
+            txBackend,
           )
         : {
             backend: held,
@@ -5153,7 +5157,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
           };
       if (this.#captureEnabled) {
-        await lockRecordedGraphWrite(scope.backend, this.graphId);
+        // Through this operation, into the capture surface's own lock memo,
+        // so the surface's writes find the graph lock already held.
+        await lockRecordedGraphWrite(
+          txBackend,
+          this.graphId,
+          registeredRecordedGraphLockMemo(scope.backend),
+        );
       }
       // See the matching comment at the other engine-native receipt site
       // (`runAttempt` above): the witness observes real per-member mutations
@@ -5236,7 +5246,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const recordedByGraph =
         mutationWitness?.mutated === true ?
           await this.#engineRecordedFlushInstants(txBackend)
-        : await scope.flush(txBackend);
+        : await scope.flush();
       return transactionOutcome(
         result,
         receiptRecorder,
