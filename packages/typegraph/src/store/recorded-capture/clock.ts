@@ -264,6 +264,16 @@ export function memoizeAcquiredRecordedGraphWriteLock(
   memo.set(graphId, Promise.resolve(acquisition));
 }
 
+/**
+ * The single-flight memo registered for `backend`, so a lock taken through a
+ * different statement target of the same transaction shares it.
+ */
+export function registeredRecordedGraphLockMemo(
+  backend: object,
+): RecordedGraphLockMemo | undefined {
+  return recordedGraphLockMemos.get(backend);
+}
+
 export function registerRecordedGraphLockMemo(
   backend: object,
   memo: RecordedGraphLockMemo,

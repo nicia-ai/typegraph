@@ -31,6 +31,7 @@ import {
   enterOperation,
   enterTransactionOperation,
   type EntryScope,
+  openBoundTransactionSession,
   openTransactionSession,
   operationEntrySession,
   type TransactionSession,
@@ -47,12 +48,14 @@ vi.mock("../src/store/operation-scope", async (importOriginal) => {
     enterOperation: vi.fn(actual.enterOperation),
     enterTransactionOperation: vi.fn(actual.enterTransactionOperation),
     openTransactionSession: vi.fn(actual.openTransactionSession),
+    openBoundTransactionSession: vi.fn(actual.openBoundTransactionSession),
   };
 });
 
 const enterOperationSpy = vi.mocked(enterOperation);
 const enterTransactionOperationSpy = vi.mocked(enterTransactionOperation);
 const openTransactionSessionSpy = vi.mocked(openTransactionSession);
+const openBoundTransactionSessionSpy = vi.mocked(openBoundTransactionSession);
 
 const Source = defineNode("Source", {
   schema: z.object({
@@ -111,10 +114,27 @@ function openedSessions(): readonly TransactionSession[] {
   });
 }
 
+/**
+ * The session each `openBoundTransactionSession` call since the last clear
+ * opened: where `store.transaction` opens its session over the transaction
+ * whose writes go through a surface it binds. It opens that session inside
+ * the mint module, where the `openTransactionSession` spy cannot see.
+ */
+async function boundSessions(): Promise<readonly TransactionSession[]> {
+  return Promise.all(
+    openBoundTransactionSessionSpy.mock.results.map(async (result) => {
+      if (result.type !== "return") throw new Error("mint threw");
+      const { session } = await result.value;
+      return session;
+    }),
+  );
+}
+
 function clearMints(): void {
   enterOperationSpy.mockClear();
   enterTransactionOperationSpy.mockClear();
   openTransactionSessionSpy.mockClear();
+  openBoundTransactionSessionSpy.mockClear();
 }
 
 /** The session a transaction's own writes enter their operations from. */
@@ -188,22 +208,49 @@ describe("a transaction-bound internal enters an operation of its transaction's 
     const { store, provenance } = await seeded();
     const source = { kind: "Source" as const, id: "source" };
 
+    // A history store's backend is the recorded capture overlay: it opens
+    // the native transaction and a session of its own for its isolation
+    // check, flush and pre-commit hook, and runs them as one operation of it.
+    // `store.transaction` opens the Store's one session over the surface the
+    // overlay hands it, and enters every other operation from it.
+    function entered(session: TransactionSession | undefined): number {
+      return enteredScopes().filter((scope) => scope === session).length;
+    }
+
     clearMints();
     await provenance.holding();
-    const [holdingSession] = openedSessions();
+    const [holdingOverlay] = openedSessions();
+    const [holdingSession] = await boundSessions();
     expect(openedSessions()).toHaveLength(1);
-    // The lock and the read share the one operation.
-    expect(enteredScopes()).toHaveLength(1);
-    expect(enteredScopes()[0]).toBe(holdingSession);
+    expect(await boundSessions()).toHaveLength(1);
+    // The overlay's operation; then the transaction's opener and its
+    // context, and holding()'s one operation, which the lock and the read
+    // share.
+    expect({
+      overlay: entered(holdingOverlay),
+      session: entered(holdingSession),
+      holding: enterTransactionOperationSpy.mock.results.map((result) =>
+        result.type === "return" ?
+          operationEntrySession(result.value)
+        : undefined,
+      ),
+      all: enteredScopes().length,
+    }).toEqual({ overlay: 1, session: 3, holding: [holdingSession], all: 4 });
 
     clearMints();
     await provenance.retract(source);
-    const [retractSession] = openedSessions();
+    const [retractOverlay] = openedSessions();
+    const [retractSession] = await boundSessions();
     expect(openedSessions()).toHaveLength(1);
-    // The fences, the transition's reads, the source update and the fact's
-    // close: one operation each, all of the transaction's session.
-    expect(enteredScopes()).toHaveLength(4);
-    for (const scope of enteredScopes()) expect(scope).toBe(retractSession);
+    expect(await boundSessions()).toHaveLength(1);
+    // The overlay's operation; then the transaction's opener and its
+    // context, the fences, the transition's reads, the source update and the
+    // fact's close: one operation each, all of the transaction's session.
+    expect({
+      overlay: entered(retractOverlay),
+      session: entered(retractSession),
+      all: enteredScopes().length,
+    }).toEqual({ overlay: 1, session: 6, all: 7 });
     expect(store.graphId).toBe(graph.id);
   });
 

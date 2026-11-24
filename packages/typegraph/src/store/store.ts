@@ -371,6 +371,7 @@ import {
   enterTargetOperation,
   type EntryScope,
   legacyTransactionOperation,
+  openBoundTransactionSession,
   openTransactionSession,
   type Operation,
   type OperationBackend,
@@ -473,6 +474,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  registeredRecordedGraphLockMemo,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   resolveLineage,
@@ -4718,9 +4720,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
       try {
         const run = async (
-          txBackend: OperationBackend,
+          transaction: StoreTransactionBackend,
           nativeTransaction: TNativeTransaction | undefined,
         ): Promise<T> => {
+          // This attempt opened the transaction, so its session opens here,
+          // once. The statements the attempt issues itself (the pre-commit
+          // hook, the engine instant read) go through one operation of it;
+          // every later operation hands out `writeTarget`, built over the
+          // transaction the session holds.
+          //
           // A receipt was requested AND this store is engine-native: wrap the
           // committing session so every write member this transaction body
           // calls is observed at the point it either changed a row or did
@@ -4737,26 +4745,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // maps below key on object identity, so leasing and wrapping must
           // share the identical target or a write issued through the wrapper
           // resolves a session/lease the raw `txBackend` registered under.
-          const mutationWitness =
-            this.#engineNativeHistory && receiptRequested ?
-              createMutationWitness()
-            : undefined;
-          const writeTarget =
-            mutationWitness === undefined ? txBackend : (
-              mutationWitness.wrap(txBackend)
-            );
-          if (mutationWitness !== undefined) {
-            // Identity assertions run through a wholly separate seam
-            // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
-            // does not cover — register the witness's sink against both
-            // object identities `writeTarget` can be reached through, the
-            // same binding capture uses for its own session-backed sink.
-            registerRecordedIdentityMutationWitness(
-              writeTarget,
-              txBackend,
-              mutationWitness.sink,
-            );
-          }
+          const {
+            session,
+            binding: { txBackend, mutationWitness, writeTarget },
+          } = await openBoundTransactionSession(transaction, (opened, held) => {
+            const txBackend = enterOperation(opened).backend;
+            const mutationWitness =
+              this.#engineNativeHistory && receiptRequested ?
+                createMutationWitness()
+              : undefined;
+            const writeTarget =
+              mutationWitness === undefined ? held : mutationWitness.wrap(held);
+            if (mutationWitness !== undefined) {
+              // Identity assertions run through a wholly separate seam
+              // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+              // does not cover — register the witness's sink against both
+              // object identities `writeTarget` can be reached through, the
+              // same binding capture uses for its own session-backed sink.
+              registerRecordedIdentityMutationWitness(
+                writeTarget,
+                held,
+                mutationWitness.sink,
+              );
+            }
+            return {
+              statements: writeTarget,
+              binding: { txBackend, mutationWitness, writeTarget },
+            };
+          });
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
           const runBulkHooks = this.#createBufferedBulkHookRunner(
             pending,
@@ -4765,7 +4781,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           const invokeTransaction = (): Promise<T> =>
             runInTransactionContext(
               this.#buildTransactionContext(
-                writeTarget,
+                session,
                 nativeTransaction,
                 runHooks,
                 receiptRecorder,
@@ -4784,6 +4800,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             );
           const output = await withWriteTransactionSession(
             writeTarget,
+            txBackend,
             {
               graphId: this.graphId,
               schemaVersion: this.#schemaMetadata.schemaVersion,
@@ -4822,13 +4839,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const result =
           this.#captureEnabled || this.#adapterBackend === undefined ?
             await this.#backend.transaction(
-              (txBackend: StoreTransactionBackend) =>
-                run(legacyTransactionOperation(txBackend), undefined),
+              (txBackend: StoreTransactionBackend) => run(txBackend, undefined),
               transactionOptions,
             )
           : await this.#adapterBackend.transactionWithNative(
               (txBackend: StoreTransactionBackend, nativeTransaction) =>
-                run(legacyTransactionOperation(txBackend), nativeTransaction),
+                run(txBackend, nativeTransaction),
               deferNativeHandle(transactionOptions),
             );
         // The COMMIT above already succeeded: flushing `onOperationEnd` is
@@ -4979,8 +4995,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // The caller already owns the boundary, so `externalTx` *is* the
     // bound handle — surface it as `tx.sql` for symmetry with the
     // graph-owned `transaction()` path.
+    // The Store joins the caller's transaction here: its session opens here.
     return this.#buildTransactionContext(
-      legacyTransactionOperation(adopt(externalTx)),
+      openTransactionSession(adopt(externalTx)),
       externalTx,
     );
   }
@@ -5079,16 +5096,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     return withAdoptedTransactionScope(externalTx, () =>
-      this.#runAdoptedRecordedTransaction(
-        legacyTransactionOperation(adopt(externalTx)),
-        externalTx,
-        fn,
-      ),
+      this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
     );
   }
 
   async #runAdoptedRecordedTransaction<T>(
-    txBackend: OperationBackend,
+    transaction: StoreTransactionBackend,
     externalTx: TNativeTransaction,
     fn:
       | ((
@@ -5099,66 +5112,110 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ) => Promise<T>),
     originalStore?: StoreImplementation<G, TNativeTransaction>,
   ): Promise<TransactionOutcome<T>> {
-    if (this.#captureEnabled) {
-      await assertRecordedCaptureTransactionIsolation(txBackend);
-      await lockSchemaVersionForStoreWrite(
-        {
-          graphId: this.graphId,
-          schemaVersion: this.#schemaMetadata.schemaVersion,
-        },
+    // The Store joins the caller's transaction here, so its session opens
+    // here, once. The statements this method issues itself (the isolation
+    // check and schema lock before capture, the flush or engine instant
+    // read after the callback) go through one
+    // operation of it; the surface every later operation hands out is the
+    // capture, witness and execution-lifetime decoration built over the
+    // transaction the session holds. The recorded graph lock is taken
+    // through the same operation, into the capture surface's graph-lock memo.
+    const {
+      session,
+      binding: {
         txBackend,
-      );
-    }
-    // A uniform `flush → RecordedFlushInstants` shape on both branches keeps the
-    // outcome-building path identical; the non-history branch has no recorded
-    // rows to close, so it flushes to an empty instant map.
-    const scope =
-      this.#captureEnabled ?
-        createRecordedTransactionScope(
-          txBackend,
-          this.#batchPointRead,
-          this.#sqlSchema(),
-        )
-      : {
-          backend: txBackend,
-          flush: (): Promise<RecordedFlushInstants> =>
-            Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
-        };
-    if (this.#captureEnabled) {
-      await lockRecordedGraphWrite(scope.backend, this.graphId);
-    }
-    const receiptRecorder = createTransactionReceiptRecorder();
-    // See the matching comment at the other engine-native receipt site
-    // (`runAttempt` above): the witness observes real per-member mutations
-    // on the adopted session, not write intents, so a delete of a missing
-    // row or a coalesced no-op upsert through this context leaves
-    // `receipt.recorded` undefined.
-    const mutationWitness =
-      this.#engineNativeHistory ? createMutationWitness() : undefined;
-    const writeTarget =
-      mutationWitness === undefined ?
-        scope.backend
-      : mutationWitness.wrap(scope.backend);
-    if (mutationWitness !== undefined) {
-      // Same registration as the other engine-native receipt site: identity
-      // assertions bypass `wrap`'s overlay entirely, so the witness's sink
-      // needs its own binding to see one.
-      registerRecordedIdentityMutationWitness(
+        held,
+        scope,
+        mutationWitness,
         writeTarget,
-        scope.backend,
-        mutationWitness.sink,
-      );
-    }
+        executionScope,
+        contextBackend,
+      },
+    } = await openBoundTransactionSession(transaction, async (opened, held) => {
+      const txBackend = enterOperation(opened).backend;
+      if (this.#captureEnabled) {
+        await assertRecordedCaptureTransactionIsolation(txBackend);
+        await lockSchemaVersionForStoreWrite(
+          {
+            graphId: this.graphId,
+            schemaVersion: this.#schemaMetadata.schemaVersion,
+          },
+          txBackend,
+        );
+      }
+      // A uniform `flush → RecordedFlushInstants` shape on both branches
+      // keeps the outcome-building path identical; the non-history branch has
+      // no recorded rows to close, so it flushes to an empty instant map.
+      // The capture surface decorates the session's holding; its flush is
+      // bound here to this operation.
+      const scope =
+        this.#captureEnabled ?
+          createRecordedTransactionScope(
+            held,
+            this.#batchPointRead,
+            this.#sqlSchema(),
+            false,
+            txBackend,
+          )
+        : {
+            backend: held,
+            flush: (): Promise<RecordedFlushInstants> =>
+              Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
+          };
+      if (this.#captureEnabled) {
+        // Through this operation, into the capture surface's own lock memo,
+        // so the surface's writes find the graph lock already held.
+        await lockRecordedGraphWrite(
+          txBackend,
+          this.graphId,
+          registeredRecordedGraphLockMemo(scope.backend),
+        );
+      }
+      // See the matching comment at the other engine-native receipt site
+      // (`runAttempt` above): the witness observes real per-member mutations
+      // on the adopted session, not write intents, so a delete of a missing
+      // row or a coalesced no-op upsert through this context leaves
+      // `receipt.recorded` undefined.
+      const mutationWitness =
+        this.#engineNativeHistory ? createMutationWitness() : undefined;
+      const writeTarget =
+        mutationWitness === undefined ?
+          scope.backend
+        : mutationWitness.wrap(scope.backend);
+      if (mutationWitness !== undefined) {
+        // Same registration as the other engine-native receipt site: identity
+        // assertions bypass `wrap`'s overlay entirely, so the witness's sink
+        // needs its own binding to see one.
+        registerRecordedIdentityMutationWitness(
+          writeTarget,
+          scope.backend,
+          mutationWitness.sink,
+        );
+      }
+      const executionScope =
+        originalStore === undefined ? undefined : (
+          scopeBackendExecution(writeTarget)
+        );
+      const contextBackend = executionScope?.backend ?? writeTarget;
+      return {
+        statements: contextBackend,
+        binding: {
+          txBackend,
+          held,
+          scope,
+          mutationWitness,
+          writeTarget,
+          executionScope,
+          contextBackend,
+        },
+      };
+    });
+    const receiptRecorder = createTransactionReceiptRecorder();
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const executionScope =
-      originalStore === undefined ? undefined : (
-        scopeBackendExecution(writeTarget)
-      );
-    const contextBackend = executionScope?.backend ?? writeTarget;
     const context = this.#buildTransactionContext(
-      contextBackend,
+      session,
       externalTx,
       undefined,
       receiptRecorder,
@@ -5220,7 +5277,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             graphId: this.graphId,
             schemaVersion: this.#schemaMetadata.schemaVersion,
           },
-          [txBackend, scope.backend, writeTarget, contextBackend],
+          [held, scope.backend, writeTarget, contextBackend],
           finish,
         )
       : finish();
@@ -5572,15 +5629,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * is disabled, `sql` is the raw Drizzle handle bound to the same transaction
    * (#140); when history capture is enabled it is replaced with a fail-loud
    * guard because raw graph writes would bypass recorded-time capture.
+   *
+   * `session` is the one the caller opened where it opened or joined the
+   * native transaction (store-owned, adopted, recorded, evolved): the session
+   * every public write and read this context offers enters its operation
+   * from, `tx.measure` scopes and hooks re-entering through a captured `tx`
+   * included.
    */
   #buildTransactionContext(
-    txBackend: OperationBackend,
+    session: TransactionSession,
     sql?: TNativeTransaction,
-    runHooks: OperationHookRunner = this.#immediateHookRunner(txBackend),
+    bufferedHooks?: OperationHookRunner,
     receiptRecorder?: TransactionReceiptRecorder,
-    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(
-      txBackend,
-    ),
+    bufferedBulkHooks?: BulkOperationHookRunner,
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
@@ -5588,15 +5649,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     readOnly = false,
     measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
+    // The context's own operation of the session: what the parts of this
+    // context that do not yet enter an operation per call (the transaction
+    // runtime port, the identity facade's context, the read-set fence, the
+    // read fences, the immediate hook runners) hold for the life of the
+    // transaction.
+    const txBackend = enterOperation(session).backend;
+    const runHooks = bufferedHooks ?? this.#immediateHookRunner(txBackend);
+    const runBulkHooks =
+      bufferedBulkHooks ?? this.#immediateBulkHookRunner(txBackend);
     if (receiptRecorder !== undefined) {
       registerSavepointState(txBackend, receiptRecorder.checkpoint);
     }
-    // Every kind of transaction (store-owned, adopted, recorded, evolved)
-    // reaches its context through this one builder, right where it opened or
-    // joined the native transaction: the session every public write this
-    // context offers enters its operation from, `tx.measure` scopes and hooks
-    // re-entering through a captured `tx` included.
-    const session = openTransactionSession(txBackend);
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
@@ -6062,8 +6126,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
 
     await (this.#baseBackend.capabilities.execution.interactiveTransactions ?
+      // `clear` opened this transaction: its session opens here, and the
+      // clear runs as one operation of it.
       this.#baseBackend.transaction(async (tx: StoreTransactionBackend) =>
-        doClear(legacyTransactionOperation(tx)),
+        doClear(enterOperation(openTransactionSession(tx)).backend),
       )
     : doClear(this.#baseBackend));
 
