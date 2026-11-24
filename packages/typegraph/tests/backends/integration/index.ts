@@ -118,6 +118,7 @@ export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-cla
 export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerReleasedClaimLookupIntegrationTests } from "./released-claim-lookup";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
+export { registerRemovedEndpointExistenceIntegrationTests } from "./removed-endpoint-existence";
 export { registerReservedAliasPrefixIntegrationTests } from "./reserved-alias-prefix";
 export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
