@@ -158,11 +158,13 @@ export {
   uncapturedGraphWriteLock,
 } from "../store/recorded-capture/clock";
 export {
+  enterTransactionOperation,
   hasScopedIdentityReads,
   storeBackend,
   storeCaptureEnabled,
   storeQueryBackend,
   storeRuntime,
+  storeStatementPort,
   transactionAssertWritable,
   transactionBackend,
   type TransactionDeleteNodeWithPolicy,

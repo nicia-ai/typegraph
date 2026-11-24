@@ -59,7 +59,7 @@ const FAMILY_BASELINE = {
   "identity and search facades": 40,
   "capture and flush": 10,
   "schema and evolution": 12,
-  "merge and durable operations": 31,
+  "merge and durable operations": 0,
   "provenance and interchange": 7,
   "working copies": 3,
 } as const satisfies Record<Family, number>;
@@ -271,57 +271,15 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     family: "schema and evolution",
   },
 
-  // --- merge and durable operations, including the Store runtime port the
-  // merge drives (its members' types are spelled by the public API report).
-  "src/graph-merge/merge.ts#commitPlan": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#loadPlannedIdentityHistory": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#applyValidatedMergePlanInTransaction": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#applyMergePlanInTransaction": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#commitIncrementalPlan": {
-    count: 5,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/adopted-transaction.ts#withAdoptedMergeApplySavepoint": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/identity-separation.ts#captureIdentitySeparationFacts": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/store-operation.ts#operateStore": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  // Two native transactions at once (source and target): one handle each.
-  "src/graph-merge/namespace-fork.ts#forkGraphNamespace": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/namespace-fork.ts#namespaceForkResult": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/namespace-fork.ts#assertIndependentDatabase": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/store/store.ts#StoreImplementation.constructor": {
-    count: 7,
-    family: "merge and durable operations",
-  },
+  // --- merge and durable operations: none. Merge apply and a durable Store
+  // operation enter one operation of the session the transaction context's
+  // runtime carries (`enterTransactionOperation`); the namespace fork opens a
+  // session where it opens each of its native transactions; the identity
+  // separation and planned-history reads run on the root. The Store runtime
+  // port's members that take a statement target have a statement port
+  // (`storeStatementPort`) a handle passes through unminted; their public
+  // forms, whose types the API reports spell, enter a transaction target as a
+  // binding of its own (`enterTargetOperation`).
 
   // --- provenance and interchange
   "src/graph-merge/provenance-store.ts#claimSidecarOwnership": {
@@ -393,12 +351,6 @@ const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     count: 1,
     family: "identity and search facades",
   },
-  // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
-  // `target` parameter the public API report spells.
-  "src/store/store.ts#StoreImplementation.constructor": {
-    count: 1,
-    family: "merge and durable operations",
-  },
 };
 
 /** The legacy write entries each family's conversion removes. May only go down. */
@@ -409,7 +361,7 @@ const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
   "identity and search facades": 2,
   "capture and flush": 0,
   "schema and evolution": 0,
-  "merge and durable operations": 1,
+  "merge and durable operations": 0,
   "provenance and interchange": 0,
   "working copies": 0,
 } as const satisfies Record<Family, number>;

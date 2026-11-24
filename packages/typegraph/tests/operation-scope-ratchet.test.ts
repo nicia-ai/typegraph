@@ -101,7 +101,14 @@ const RAW_STATEMENT_TARGET_BASELINE = {
   claims: 17,
   "search-sync": 0,
   collections: 0,
-  store: 36,
+  // RAISED 36 -> 37 by the merge and durable operations conversion:
+  // `enterTransactionOperation` (`runtime-port.ts`) reads a transaction
+  // context's runtime port, as `transactionBackend` does, to enter an
+  // operation of the session it carries. It replaces
+  // `legacyTransactionOperation(transactionBackend(tx))`; when the last
+  // caller of `transactionBackend` converts to it, that export goes and this
+  // returns to 36.
+  store: 37,
 } as const satisfies Record<StoreFamily, number>;
 
 /** The forge sites `src` may contain: one assertion per mint. */

@@ -498,6 +498,9 @@ import {
   runInTransactionContext,
   STORE_RUNTIME,
   type StoreRuntime,
+  type StoreStatementPort,
+  withStoreStatementPort,
+  withTransactionOperation,
 } from "./runtime-port";
 import {
   publishSavepointEffect,
@@ -651,6 +654,20 @@ const ROW_MAPPER_CONFIGS = {
 
 function rowMapperConfigFor(backend: StatementBackend) {
   return ROW_MAPPER_CONFIGS[backend.dialect];
+}
+
+/**
+ * An optional statement target handed to a public Store runtime member, whose
+ * type carries no session: the root as itself, a transaction as the first
+ * operation of a new session (`enterTargetOperation`), or `undefined` for the
+ * member's own default.
+ */
+function outsideStatementTarget(
+  target: GraphBackend | StoreTransactionBackend | undefined,
+): StatementBackend | undefined {
+  return target === undefined ? undefined : (
+      operationEntryBackend(enterTargetOperation(target))
+    );
 }
 
 // ============================================================
@@ -1708,7 +1725,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
-    this[STORE_RUNTIME] = {
+    const statementPort = this.#createStatementPort();
+    const runtime: StoreRuntime<G> = {
       backend: this.#backend,
       evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
@@ -1720,9 +1738,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
       queryBackend: (target?: GraphBackend | StoreTransactionBackend) =>
-        this.#createHookedQueryBackend(
-          legacyTransactionOperation(target ?? this[STORE_RUNTIME].backend),
-        ),
+        statementPort.queryBackend(outsideStatementTarget(target)),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
         this.recordedNodeGetById(kind, id, coordinate),
@@ -1759,95 +1775,40 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#createNodeOperationContext(),
           work.kind,
           work.id,
-          legacyWriteEntry(legacyTransactionOperation(target)),
+          enterTargetOperation(target),
           { policy },
         ),
       applyResolvedNodeUniqueness: async (
         transaction: StoreTransactionBackend,
         writes,
         apply,
-      ) => {
-        const target = legacyTransactionOperation(transaction);
-        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
-        if (
-          upserts.every((upsert) => upsert.constraints.length === 0) &&
-          releases.length === 0
-        ) {
-          // Nothing is cleared, so nothing needs rebuilding, so the write set
-          // owes no set-wide preflight either. A kind with no uniqueness
-          // declaration may still owe DISJOINTNESS claims, and those are taken
-          // and released by the individual writes inside `apply()` exactly as
-          // they are outside a merge — this branch is what keeps that true.
-          return apply();
-        }
-        // The per-graph write lock, before any claim or sidecar work: the
-        // rebuild below writes claim rows, and the lock is what the claim
-        // discipline requires ahead of them. It is reentrant and memoized per
-        // transaction, so a merge that already took it pays no round trip.
-        const lock = await lockRecordedGraphWrite(target, this.graphId);
-        return applyResolvedNodeClaims(
-          {
-            graphId: this.graphId,
-            registry: this.#registry,
-            lock,
-            claimsVerdict: this.#claimsVerdict,
-            uniqueSidecarBatch: this.#uniqueSidecarBatch,
-          },
-          target,
-          upserts,
-          releases,
+      ) =>
+        statementPort.applyResolvedNodeUniqueness(
+          enterOperation(openTransactionSession(transaction)).backend,
+          writes,
           apply,
-        );
-      },
+        ),
       liveNodesSharingIds: async (
         ids,
         target?: GraphBackend | StoreTransactionBackend,
-      ) => {
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
-        const liveKindsById = await liveNodeKindsSharingIds(
-          this.#identityContext(backend),
-          backend,
-          ids,
-        );
-        const peers: Readonly<{ kind: string; id: string }>[] = [];
-        for (const [id, kinds] of liveKindsById) {
-          for (const kind of kinds) peers.push({ kind, id });
-        }
-        return peers;
-      },
+      ) =>
+        statementPort.liveNodesSharingIds(ids, outsideStatementTarget(target)),
       identityAssertionRowsByIds: async (
         ids,
         target?: GraphBackend | StoreTransactionBackend,
-      ) => {
-        // An identity-disabled graph has no assertions table to read from.
-        if (this.#graph.identity === undefined) return new Map();
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
-        const ctx = this.#identityContext(backend);
-        const rows = await loadAssertionsByIds(
-          backend,
-          ctx.schema,
-          this.graphId,
+      ) =>
+        statementPort.identityAssertionRowsByIds(
           ids,
-        );
-        return new Map(
-          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
-        );
-      },
+          outsideStatementTarget(target),
+        ),
       structuralIdentityClasses: async (
         references,
         target?: GraphBackend | StoreTransactionBackend,
-      ) => {
-        // An identity-disabled graph has no closure table to read from.
-        if (this.#graph.identity === undefined) return new Map();
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
-        const ctx = this.#identityContext(backend);
-        return loadCurrentStructuralClasses(
-          backend,
-          ctx.schema,
-          this.graphId,
+      ) =>
+        statementPort.structuralIdentityClasses(
           references,
-        );
-      },
+          outsideStatementTarget(target),
+        ),
       readCurrentIdentityAssertions: (mode, options) =>
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (
@@ -1867,21 +1828,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       interchangeIdentityAssertionsByIdsAtTarget: async (
-        transactionTarget: GraphBackend | StoreTransactionBackend,
+        target: GraphBackend | StoreTransactionBackend,
         ids,
         mode,
         options,
-      ) => {
-        if (this.#graph.identity === undefined || ids.length === 0) return [];
-        const target = legacyTransactionOperation(transactionTarget);
-        return readIdentityAssertionsByIdsAtTarget(
-          this.#identityContext(target),
-          target,
+      ) =>
+        statementPort.interchangeIdentityAssertionsByIdsAtTarget(
+          operationEntryBackend(enterTargetOperation(target)),
           ids,
           mode,
           options,
-        );
-      },
+        ),
       readIdentityAssertionPageAtTarget: (
         target: GraphBackend | StoreTransactionBackend,
         mode,
@@ -1923,11 +1880,118 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         seeds,
       ) => this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
+    this[STORE_RUNTIME] = withStoreStatementPort(runtime, statementPort);
     Object.defineProperty(this, STORE_RUNTIME, {
       configurable: false,
       enumerable: false,
       writable: false,
     });
+  }
+
+  /**
+   * The Store runtime members that take a statement target, as Store code
+   * calls them with one that has passed through an operation mint (see
+   * {@link StoreStatementPort}): each runs its statements on the target it is
+   * handed. The runtime's public members of the same names delegate here.
+   */
+  #createStatementPort(): StoreStatementPort &
+    Required<
+      Pick<StoreStatementPort, "interchangeIdentityAssertionsByIdsAtTarget">
+    > {
+    return {
+      // The query path's own construction, not a second spelling of it: a
+      // caller that could only rebuild this object could not observe the one
+      // the queries actually run on.
+      queryBackend: (target?: StatementBackend) =>
+        this.#createHookedQueryBackend(target ?? this[STORE_RUNTIME].backend),
+      applyResolvedNodeUniqueness: async (target, writes, apply) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
+        if (
+          upserts.every((upsert) => upsert.constraints.length === 0) &&
+          releases.length === 0
+        ) {
+          // Nothing is cleared, so nothing needs rebuilding, so the write set
+          // owes no set-wide preflight either. A kind with no uniqueness
+          // declaration may still owe DISJOINTNESS claims, and those are taken
+          // and released by the individual writes inside `apply()` exactly as
+          // they are outside a merge — this branch is what keeps that true.
+          return apply();
+        }
+        // The per-graph write lock, before any claim or sidecar work: the
+        // rebuild below writes claim rows, and the lock is what the claim
+        // discipline requires ahead of them. It is reentrant and memoized per
+        // transaction, so a merge that already took it pays no round trip.
+        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        return applyResolvedNodeClaims(
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            lock,
+            claimsVerdict: this.#claimsVerdict,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
+          },
+          target,
+          upserts,
+          releases,
+          apply,
+        );
+      },
+      liveNodesSharingIds: async (ids, target) => {
+        const backend = target ?? this.#baseBackend;
+        const liveKindsById = await liveNodeKindsSharingIds(
+          this.#identityContext(backend),
+          backend,
+          ids,
+        );
+        const peers: Readonly<{ kind: string; id: string }>[] = [];
+        for (const [id, kinds] of liveKindsById) {
+          for (const kind of kinds) peers.push({ kind, id });
+        }
+        return peers;
+      },
+      identityAssertionRowsByIds: async (ids, target) => {
+        // An identity-disabled graph has no assertions table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        const rows = await loadAssertionsByIds(
+          backend,
+          ctx.schema,
+          this.graphId,
+          ids,
+        );
+        return new Map(
+          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
+        );
+      },
+      structuralIdentityClasses: async (references, target) => {
+        // An identity-disabled graph has no closure table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = target ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        return loadCurrentStructuralClasses(
+          backend,
+          ctx.schema,
+          this.graphId,
+          references,
+        );
+      },
+      interchangeIdentityAssertionsByIdsAtTarget: async (
+        target,
+        ids,
+        mode,
+        options,
+      ) => {
+        if (this.#graph.identity === undefined || ids.length === 0) return [];
+        return readIdentityAssertionsByIdsAtTarget(
+          this.#identityContext(target),
+          target,
+          ids,
+          mode,
+          options,
+        );
+      },
+    };
   }
 
   // === Accessors ===
@@ -5637,7 +5701,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           ),
         maybeRefreshStatisticsAfterBulk: undefined,
       };
-      return {
+      const surface: TransactionWriteSurface<G> = {
         runtime: {
           backend: txBackend,
           deleteNodeWithPolicy: (work, policy) =>
@@ -5711,6 +5775,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               session,
             ),
           }),
+      };
+      // Privileged internals that issue statements on this transaction
+      // directly (merge apply, a durable Store operation) enter their
+      // operation of this session through the runtime.
+      return {
+        ...surface,
+        runtime: withTransactionOperation(
+          surface.runtime,
+          () => enterOperation(session).backend,
+        ),
       };
     };
 

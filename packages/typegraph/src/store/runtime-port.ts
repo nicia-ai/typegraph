@@ -42,9 +42,12 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
-import type {
-  StatementBackend,
-  StoreTransactionBackend,
+import {
+  enterOperation,
+  openTransactionSession,
+  type OperationBackend,
+  type StatementBackend,
+  type StoreTransactionBackend,
 } from "./operation-scope";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";
@@ -600,6 +603,97 @@ export function hasScopedIdentityReads<G extends GraphDef>(
   );
 }
 
+/**
+ * The members of {@link StoreRuntime} whose public type takes the statement
+ * target as a bare backend (`GraphBackend | TransactionBackend`), as Store
+ * code calls them with a target that has passed through an operation mint:
+ * the root backend, or the handle of an operation the caller entered. A
+ * caller already inside an operation of its transaction's session hands that
+ * operation's handle down and the member runs its statements on it; nothing
+ * is minted for it and no other session is opened.
+ *
+ * The public members stay as they are (the API reports spell them): a
+ * transaction arriving through one of them carries no session, so it enters
+ * as a binding of its own (`enterTargetOperation`), as `executeOn` does.
+ */
+export type StoreStatementPort = Readonly<{
+  queryBackend: (target?: StatementBackend) => GraphBackend;
+  applyResolvedNodeUniqueness: <Output>(
+    target: OperationBackend,
+    writes: Parameters<
+      StoreRuntime<GraphDef>["applyResolvedNodeUniqueness"]
+    >[1],
+    apply: () => Promise<Output>,
+  ) => Promise<Output>;
+  liveNodesSharingIds: (
+    ids: readonly string[],
+    target?: StatementBackend,
+  ) => ReturnType<StoreRuntime<GraphDef>["liveNodesSharingIds"]>;
+  identityAssertionRowsByIds: (
+    ids: readonly string[],
+    target?: StatementBackend,
+  ) => ReturnType<StoreRuntime<GraphDef>["identityAssertionRowsByIds"]>;
+  structuralIdentityClasses: (
+    references: readonly Readonly<{ kind: string; id: string }>[],
+    target?: StatementBackend,
+  ) => ReturnType<StoreRuntime<GraphDef>["structuralIdentityClasses"]>;
+  interchangeIdentityAssertionsByIdsAtTarget?: (
+    target: StatementBackend,
+    ids: readonly string[],
+    mode: "state" | "archival",
+    options?: Readonly<{ includeDeleted?: boolean }>,
+  ) => ReturnType<
+    NonNullable<
+      StoreRuntime<GraphDef>["interchangeIdentityAssertionsByIdsAtTarget"]
+    >
+  >;
+}>;
+
+// Process-wide, like `STORE_RUNTIME` itself, so an ESM and a CJS copy of the
+// package reach each other's port. Not part of the `StoreRuntime` type.
+const STORE_STATEMENT_PORT: unique symbol = typeGraphGlobalSymbol(
+  "store-statement-port-v1",
+);
+
+type CarriesStoreStatementPort = Readonly<{
+  [STORE_STATEMENT_PORT]: StoreStatementPort;
+}>;
+
+function carriesStoreStatementPort(
+  runtime: object,
+): runtime is CarriesStoreStatementPort {
+  return STORE_STATEMENT_PORT in runtime;
+}
+
+/**
+ * `runtime` carrying `port`. Built once, where the Store builds its runtime,
+ * before anything holds the runtime object.
+ */
+export function withStoreStatementPort<G extends GraphDef>(
+  runtime: StoreRuntime<G>,
+  port: StoreStatementPort,
+): StoreRuntime<G> {
+  const carrying: StoreRuntime<G> & CarriesStoreStatementPort = {
+    ...runtime,
+    [STORE_STATEMENT_PORT]: port,
+  };
+  return carrying;
+}
+
+/**
+ * {@link StoreStatementPort} of `store`. A runtime port authored by a version
+ * that predates it answers with its public members, which accept every target
+ * the statement port does.
+ */
+export function storeStatementPort<G extends GraphDef>(
+  store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
+): StoreStatementPort {
+  const runtime = storeRuntime(store);
+  return carriesStoreStatementPort(runtime) ?
+      runtime[STORE_STATEMENT_PORT]
+    : runtime;
+}
+
 export function storeRuntime<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): StoreRuntime<G> {
@@ -772,16 +866,73 @@ export async function runInTransactionContext<
   }
 }
 
+/** The refusal for a context that carries no runtime port. */
+function missingTransactionRuntime(): TypeError {
+  return new TypeError(
+    "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
+  );
+}
+
 function requireTransactionRuntime(
   transaction: TransactionRuntimePort,
 ): TransactionRuntime {
   const runtime = transaction[TRANSACTION_RUNTIME];
-  if (runtime === undefined) {
-    throw new TypeError(
-      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
-    );
-  }
+  if (runtime === undefined) throw missingTransactionRuntime();
   return runtime;
+}
+
+// Process-wide, like `TRANSACTION_RUNTIME` itself. Not part of the
+// `TransactionRuntime` type, whose shape the API reports spell.
+const TRANSACTION_OPERATION: unique symbol = typeGraphGlobalSymbol(
+  "transaction-operation-v1",
+);
+
+/**
+ * What {@link enterTransactionOperation} reads off a context's runtime: the
+ * transaction as Store code holds it, and the entry into its session when the
+ * runtime carries one.
+ */
+type TransactionOperationPort = Readonly<{
+  [TRANSACTION_RUNTIME]?: Readonly<{
+    backend: StoreTransactionBackend;
+    [TRANSACTION_OPERATION]?: () => OperationBackend;
+  }>;
+}>;
+
+/**
+ * `runtime` carrying `enter`: a function, closed over the session of the
+ * transaction the runtime belongs to, that enters one operation of that
+ * session and returns its handle. Built once, where the Store builds the
+ * runtime, before anything holds the runtime object.
+ */
+export function withTransactionOperation<Runtime extends object>(
+  runtime: Runtime,
+  enter: () => OperationBackend,
+): Runtime {
+  return { ...runtime, [TRANSACTION_OPERATION]: enter };
+}
+
+/**
+ * Enters one operation of the session of the transaction `transaction`
+ * belongs to and returns its handle: for privileged transaction-bound
+ * internals that issue statements on the transaction directly (merge apply,
+ * a durable Store operation). Call it once per public call, after the call's
+ * refusals, and hand the handle to everything the call runs.
+ *
+ * The session is the one the context's runtime carries, as a value; nothing
+ * is looked up from the object. A context whose runtime carries none (built
+ * by a version that predates sessions) holds no session to join, so its
+ * transaction enters as a binding of its own, as an outside target does.
+ */
+export function enterTransactionOperation(
+  transaction: TransactionOperationPort,
+): OperationBackend {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined) throw missingTransactionRuntime();
+  const enter = runtime[TRANSACTION_OPERATION];
+  return enter === undefined ?
+      enterOperation(openTransactionSession(runtime.backend)).backend
+    : enter();
 }
 
 /**
